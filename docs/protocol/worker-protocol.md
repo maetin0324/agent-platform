@@ -3,6 +3,10 @@
 - 状態: Draft（Phase 0 初版、Phase 10 で v2 に拡張）。規範は `docs/DESIGN.md` §5.3 と [ADR-0003](../adr/0003-worker-protocol.md)、
   v2 の追加分は [ADR-0016](../adr/0016-roles-and-delegation.md)（役割と委譲、実装メモ M3/M4/M8/M9）
 - JSON Schema: 正は隣の `worker-protocol.schema.json`（Phase 3 で `task-worker::protocol` の Rust 型から `schemars` で生成。`task-worker` のテスト `committed_schema_matches_generated` が一致を検証し、`UPDATE_SCHEMA=1 cargo test -p task-worker` で再生成する）。本文書 §7 の手書きスキーマは説明用の抜粋
+- **Phase 60a（ADR-0048 D2）**: `progress` 行に `kind` / `tool` / `summary` / `detail` / `truncated` /
+  `error` を追加（§4.1）。`Event::WorkerProgress` にも同じ 6 つが載る。**追加のみ**なので
+  `PROTOCOL_VERSION` は **4 のまま**（従来の `{"type":"progress","msg":…}` だけのワーカーはそのまま動き、
+  同じ run の中で混在してよい）。Console（ADR-0048 D1）はこの形だけを見て、アダプタの差を知らない
 - **Phase 53（ADR-0044 D2）**: ワーカー → celeris に `comment` メッセージ（§4.7）、`run.context` に
   `comments` / `interrupt` / `comments_enabled`（§3.1）を追加。**どちらも追加のみ**なので
   `PROTOCOL_VERSION` は **4 のまま**（この行を出さない・このフィールドを読まないワーカーはそのまま動く。
@@ -173,13 +177,37 @@ Phase 53（ADR-0044 D2）: `context.comments` か `context.interrupt` がある�
 
 ```json
 {"type":"progress","msg":"running cargo test"}
+{"type":"progress","msg":"tool_use: Bash {\"command\":\"cargo test --workspace\"}","kind":"tool_use","tool":"Bash","summary":"cargo test --workspace","detail":"{\"command\":\"cargo test --workspace\"}"}
 ```
 
-| フィールド | 型 | 必須 |
-|---|---|---|
-| `msg` | string | ✓ |
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `msg` | string | ✓ | 人が読む 1 行。**従来どおり**（この行だけのワーカーはそのまま動く） |
+| `kind` | string | – | **Phase 60a（ADR-0048 D2）**。`tool_use` / `tool_result` / `text` / `thinking` / `status` のどれか。知らない語は**その行ごと**読み捨てになるので、迷ったら付けない |
+| `tool` | string | – | `tool_use` / `tool_result` のときの道具の名前（`Bash` / `Read` …） |
+| `summary` | string | – | 折り畳んだ Console の見出しに出る 1 行（`tool_use` は入力の要約、`tool_result` は出力の先頭、`text` / `thinking` は本文の先頭） |
+| `detail` | string | – | 本文（**4 KiB まで**。超えたら切って `truncated: true`）。`thinking` には付けない |
+| `truncated` | bool | – | `detail` を切った（既定 `false`） |
+| `error` | bool | – | `tool_result` が失敗だった（既定 `false`） |
 
-`WorkerProgress{run_id, msg}` として記録される。無出力タイムアウトのカウンタをリセットする。
+`WorkerProgress{run_id, msg, kind?, tool?, summary?, detail?, truncated?, error?}` として記録される
+（`docs/api/v1/event.schema.json`。**追加のみ**なので導入前のイベントもそのまま読める）。無出力タイムアウトの
+カウンタをリセットする。
+
+**`PROTOCOL_VERSION` は 4 のまま**（追加のみ。この 6 つを出さないワーカーも、読まない celeris も従来どおり動く）。
+
+**アダプタごとの写像**（ここだけがアダプタ固有。ADR-0048 D2）:
+
+| アダプタ | 出どころ | `kind` |
+|---|---|---|
+| `claude-code` | stream-json の `assistant.content[]` | `tool_use`（`tool` + 入力の 1 行要約: `Bash` はコマンド、`Read`/`Write`/`Edit` はパス、`Grep`/`Glob` は模様、他は入力の先頭 120 文字）、`text`（1 メッセージ分の本文をまとめて 1 件）、`thinking`（要約だけ） |
+| `claude-code` | stream-json の `user.content[].tool_result` | `tool_result`（先頭 200 文字、`is_error` → `error`） |
+| `codex` | `item.*`（`command_execution` / `mcp_tool_call` / `web_search` / `file_change` / `patch_apply`） | 開始・更新は `tool_use`、`item.completed` は `tool_result`（`exit_code != 0` → `error`） |
+| `codex` | `item.*`（`agent_message` / `reasoning`） | `text` / `thinking` |
+| `codex` | それ以外の `item.*`（`todo_list` など） | `status` |
+| `acp` | `session/update` の `tool_call` / `tool_call_update` | `tool_use`（`completed` / `failed` は `tool_result`） |
+| `acp` | `agent_message_chunk` / `agent_thought_chunk` | `text` / `thinking`（細切れは改行か 400 文字で束ねてから 1 件） |
+| `paperqa` / `local-deep-research` / `fake` | 節目の行 | `status` だけ |
 
 ### 4.2 `artifact`（任意回）
 
@@ -471,7 +499,12 @@ celeris 側の扱い（ADR-0016 D2, 実装メモ M2/M6/M7）:
       "oneOf": [
         {
           "type": "object", "required": ["type", "msg"],
-          "properties": {"type": {"const": "progress"}, "msg": {"type": "string"}}
+          "properties": {
+            "type": {"const": "progress"}, "msg": {"type": "string"},
+            "kind": {"enum": ["tool_use", "tool_result", "text", "thinking", "status"]},
+            "tool": {"type": "string"}, "summary": {"type": "string"},
+            "detail": {"type": "string"}, "truncated": {"type": "boolean"}, "error": {"type": "boolean"}
+          }
         },
         {
           "type": "object", "required": ["type", "body"],

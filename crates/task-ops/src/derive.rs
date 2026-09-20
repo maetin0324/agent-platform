@@ -249,7 +249,7 @@ mod tests {
                     answer: "a1".into(),
                 },
             ),
-            (1, Event::WorkerProgress { run_id: "r".into(), msg: "noise".into() }),
+            (1, Event::worker_progress("r", "noise")),
             (
                 2,
                 Event::Answered {
@@ -306,17 +306,11 @@ mod tests {
             (0, transitioned("worker_done")),
             (
                 1,
-                Event::WorkerProgress {
-                    run_id: "r".into(),
-                    msg: format!("{REVIEWER_REQUEUED_PREFIX}throttled"),
-                },
+                Event::worker_progress("r", format!("{REVIEWER_REQUEUED_PREFIX}throttled")),
             ),
             (
                 2,
-                Event::WorkerProgress {
-                    run_id: "r".into(),
-                    msg: format!("{REVIEWER_REQUEUED_PREFIX}auth failed"),
-                },
+                Event::worker_progress("r", format!("{REVIEWER_REQUEUED_PREFIX}auth failed")),
             ),
         ];
         assert_eq!(consecutive_reviewer_requeues(&events), 2);
@@ -326,7 +320,7 @@ mod tests {
     fn consecutive_reviewer_requeues_ignores_unrelated_progress() {
         let events: Vec<(u64, Event)> = vec![
             (0, transitioned("worker_done")),
-            (1, Event::WorkerProgress { run_id: "r".into(), msg: "unrelated".into() }),
+            (1, Event::worker_progress("r", "unrelated")),
         ];
         assert_eq!(consecutive_reviewer_requeues(&events), 0);
     }

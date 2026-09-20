@@ -11,6 +11,8 @@ pub mod approval;
 /// ADR-0043 D5（Phase 54）: 変更の取り込み（差分・merge・PR・衝突タスク）の足回り。
 pub mod changes;
 pub mod comment;
+/// ADR-0048 D1/D2（Phase 60a）: Console の一本の流れを組み立てる決定的な部品。
+pub mod console;
 pub mod conversation;
 pub mod daemon;
 pub mod delegate;

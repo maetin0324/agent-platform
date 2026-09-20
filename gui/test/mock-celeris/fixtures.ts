@@ -2,6 +2,9 @@ import type {
   ChangeDiffView,
   ChangesView,
   CommentResult,
+  ConsoleBlock,
+  ConsolePage,
+  ConsoleProgress,
   DocPage,
   DocPageResult,
   DocsInitResult,
@@ -570,5 +573,107 @@ export function docsInitResult(overrides: Partial<DocsInitResult> = {}): DocsIni
     created: true,
     path: "/home/celeris/workspace/pluvio-poc",
     ...overrides,
+  };
+}
+
+/**
+ * `GET /console` の既定応答（docs/celeris-api-v1.md §3.98、ADR-0048 D1）。
+ * 偽アダプタの 1 run と同じ形: `task`（開始）→ `progress`（run ごとに 1 件）→ `task`（終了）→ `report`。
+ */
+export function consolePage(overrides: Partial<ConsolePage> = {}): ConsolePage {
+  return {
+    items: consoleBlocks(),
+    next_cursor: "00001789000000000000.4.r01REPORT",
+    ...overrides,
+  };
+}
+
+/** `GET /console` / `GET /console/stream` の 1 本の流れ（4 ブロック）。 */
+export function consoleBlocks(): ConsoleBlock[] {
+  return [
+    {
+      kind: "task",
+      at: "2026-09-20T01:00:00Z",
+      cursor: "00001789000000000000.1.e1",
+      task: {
+        task_id: "01BOARDTASK00000000000001",
+        title: "関連研究を調べる",
+        from: "ready",
+        to: "running",
+        reason: "dispatch",
+        assignee: "research",
+        harness: "fake",
+        tier: "standard",
+        mode: "worktree",
+        project_id: "p1",
+        elapsed_secs: 3,
+      },
+    },
+    consoleProgressBlock(),
+    {
+      kind: "task",
+      at: "2026-09-20T01:00:30Z",
+      cursor: "00001789000000030000.3.e3",
+      task: {
+        task_id: "01BOARDTASK00000000000001",
+        title: "関連研究を調べる",
+        from: "running",
+        to: "done",
+        reason: "worker_done",
+        assignee: "research",
+        harness: "fake",
+        tier: "standard",
+        mode: "worktree",
+        project_id: "p1",
+        elapsed_secs: 33,
+      },
+    },
+    {
+      kind: "report",
+      at: "2026-09-20T01:00:40Z",
+      cursor: "00001789000000040000.4.r01REPORT",
+      report: {
+        id: "01REPORT",
+        project_id: "p1",
+        node_id: "research",
+        kind: "result",
+        level: 0,
+        headline: "関連研究を 12 件集めた",
+        body: "本文",
+        sources: [],
+        created_at: "2026-09-20T01:00:40Z",
+      },
+    },
+  ];
+}
+
+/** 折り畳んだ `progress` ブロック 1 件（SSE の `event: console.block` でも同じ形）。 */
+export function consoleProgressBlock(overrides: Partial<ConsoleProgress> = {}): ConsoleBlock {
+  return {
+    kind: "progress",
+    at: "2026-09-20T01:00:05Z",
+    cursor: "00001789000000050000.2.p01BOARDTASK00000000000001:01RUN",
+    title: "関連研究を調べる",
+    assignee: "research",
+    harness: "fake",
+    tier: "standard",
+    project_id: "p1",
+    progress: {
+      task_id: "01BOARDTASK00000000000001",
+      run_id: "01RUN",
+      count: 12,
+      tool_count: 9,
+      last_status: "searching the web",
+      started_at: "2026-09-20T01:00:05Z",
+      updated_at: "2026-09-20T01:00:29Z",
+      first: [
+        { at: "2026-09-20T01:00:05Z", seq: 2, kind: "status", text: "searching the web" },
+        { at: "2026-09-20T01:00:06Z", seq: 3, kind: "tool_use", tool: "Bash", text: "cargo test --workspace" },
+        { at: "2026-09-20T01:00:07Z", seq: 4, kind: "tool_result", tool: "Bash", text: "test result: ok" },
+      ],
+      last: [{ at: "2026-09-20T01:00:29Z", seq: 13, kind: "text", text: "まとめました。" }],
+      truncated: true,
+      ...overrides,
+    },
   };
 }

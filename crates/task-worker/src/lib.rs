@@ -18,6 +18,8 @@ pub mod local_worktree;
 pub mod memory;
 pub mod paperqa;
 pub mod preamble;
+/// ADR-0048 D2（Phase 60a）: 進行の正規化にアダプタが使う共通の小道具（写像はアダプタ側）。
+mod progress;
 /// ADR-0044 §5 Phase 53 追記（Phase 55）: run の止め方を 1 つにする（プロセスグループごと止める）。
 pub mod process_group;
 pub mod protocol;

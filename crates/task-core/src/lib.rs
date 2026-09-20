@@ -43,7 +43,8 @@ pub use message::{
 };
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, DEFAULT_PRIORITY, Event, GenreSpec, HARNESS_ADAPTERS, Lease, MAX_LABELS,
-    PRIORITY_LABELS, RoleSpec, RunRole, Status, Task, TaskCategory, TaskId, TaskKind, Tier, Usage, WorkerHint,
+    PRIORITY_LABELS, PROGRESS_DETAIL_MAX_BYTES, ProgressFields, ProgressKind, RoleSpec, RunRole, Status, Task,
+    TaskCategory, TaskId, TaskKind, Tier, Usage, WorkerHint,
     WorkspaceMode, WorkspaceSpec, artifact_entry_description, artifact_entry_name, expand_home, home_dir,
     is_valid_label, normalize_labels, priority_from_label, priority_label,
 };

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{ArtifactRef, DelegateTask, GenreSpec, Status, Task, TaskId, Usage};
+use task_core::{ArtifactRef, DelegateTask, GenreSpec, ProgressFields, ProgressKind, Status, Task, TaskId, Usage};
 
 /// `run.protocol`。v2（ADR-0016 M9）: `delegate` メッセージ、`context.role`、`context.children`、`task.role` / `task.aggregate` を追加。
 /// v3（ADR-0027 D1）: `context.available_genres`、`task.genre`、`delegate` の `tasks[].genre` を追加。
@@ -486,8 +486,23 @@ pub struct Evidence {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkerMessage {
+    /// ADR-0048 D2（Phase 60a）: `msg` は従来どおり人が読む 1 行。`kind` / `tool` / `summary` /
+    /// `detail` / `truncated` / `error` は**任意の追加**で、出さないワーカーはそのまま動く
+    /// （`PROTOCOL_VERSION` は 4 のまま）。`detail` は 4 KiB で切る（`truncated`）。
     Progress {
         msg: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ProgressKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        error: bool,
     },
     /// ADR-0044 D2（Phase 53）: タスクのコメント（任意回、非終端）。`progress` と違って**残る**
     /// （`task_comments` に `author_kind = node` で入り、次の run の前置きにも載る）。
@@ -532,6 +547,42 @@ impl WorkerMessage {
             self,
             WorkerMessage::Question { .. } | WorkerMessage::Done { .. } | WorkerMessage::Error { .. }
         )
+    }
+
+    /// ADR-0048 D2（Phase 60a）: `progress` 行を組む（`fields` が既定なら従来の文字列だけの行になる）。
+    pub fn progress(msg: impl Into<String>, fields: ProgressFields) -> Self {
+        WorkerMessage::Progress {
+            msg: msg.into(),
+            kind: fields.kind,
+            tool: fields.tool,
+            summary: fields.summary,
+            detail: fields.detail,
+            truncated: fields.truncated,
+            error: fields.error,
+        }
+    }
+
+    /// ADR-0048 D2: `progress` 行の構造化フィールド（他のメッセージは `None`）。
+    pub fn progress_fields(&self) -> Option<ProgressFields> {
+        match self {
+            WorkerMessage::Progress {
+                kind,
+                tool,
+                summary,
+                detail,
+                truncated,
+                error,
+                ..
+            } => Some(ProgressFields {
+                kind: *kind,
+                tool: tool.clone(),
+                summary: summary.clone(),
+                detail: detail.clone(),
+                truncated: *truncated,
+                error: *error,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -578,6 +629,42 @@ pub(crate) mod tests {
         assert!(serde_json::from_str::<WorkerMessage>(r#"{"type":"bogus"}"#).is_err());
         assert!(serde_json::from_str::<WorkerMessage>(r#"{"type":"error","message":"m"}"#).is_err());
         assert!(!serde_json::from_str::<WorkerMessage>(r#"{"type":"progress","msg":"m"}"#).unwrap().is_terminal());
+    }
+
+    /// ADR-0048 D2（Phase 60a）: `progress` の構造化フィールドは**任意**。従来の `{"type":"progress","msg":…}`
+    /// はそのまま読め（全て `None` / `false`）、書き戻しても余分な鍵は出ない。
+    #[test]
+    fn progress_accepts_both_the_plain_and_the_structured_form() {
+        let plain: WorkerMessage = serde_json::from_str(r#"{"type":"progress","msg":"working"}"#).expect("plain");
+        let fields = plain.progress_fields().expect("progress");
+        assert!(fields.is_plain());
+        assert_eq!(serde_json::to_string(&plain).expect("ser"), r#"{"type":"progress","msg":"working"}"#);
+
+        let line = r#"{"type":"progress","msg":"tool_use: Bash …","kind":"tool_use","tool":"Bash",
+            "summary":"cargo test --workspace","detail":"{\"command\":\"cargo test --workspace\"}","truncated":true,"error":false}"#;
+        let structured: WorkerMessage = serde_json::from_str(line).expect("structured");
+        let fields = structured.progress_fields().expect("progress");
+        assert!(!fields.is_plain());
+        assert_eq!(fields.kind, Some(ProgressKind::ToolUse));
+        assert_eq!(fields.tool.as_deref(), Some("Bash"));
+        assert_eq!(fields.summary.as_deref(), Some("cargo test --workspace"));
+        assert!(fields.truncated);
+        assert!(!fields.error);
+        assert!(!structured.is_terminal());
+
+        // 知らない `kind` の行は**行ごと**読めない（unknown type と同じ扱い）。混在は `msg` で救う。
+        assert!(serde_json::from_str::<WorkerMessage>(r#"{"type":"progress","msg":"m","kind":"bogus"}"#).is_err());
+
+        // 組み立て側（`WorkerMessage::progress`）と対称。
+        let built = WorkerMessage::progress(
+            "tool_result: ok",
+            ProgressFields::of(ProgressKind::ToolResult).with_summary("ok").with_error(true),
+        );
+        let json = serde_json::to_string(&built).expect("ser");
+        assert!(json.contains(r#""kind":"tool_result""#), "{json}");
+        assert!(json.contains(r#""error":true"#), "{json}");
+        assert!(!json.contains("truncated"), "{json}");
+        assert_eq!(serde_json::from_str::<WorkerMessage>(&json).expect("round trip"), built);
     }
 
     /// ADR-0012 D3（P-12）: コマンドを伴わない条件の evidence は `criterion` だけでよく、旧形式（全フィールドあり）も読める。

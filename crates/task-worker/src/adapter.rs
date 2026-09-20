@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use task_core::{ArtifactRef, RateLimitObservation, Usage};
+use task_core::{ArtifactRef, ProgressFields, RateLimitObservation, Usage};
 
 use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 
@@ -84,6 +84,12 @@ impl AdapterError {
 /// 同期 API（ストアは `Mutex<Connection>` で直列化されるため）。
 pub trait EventSink: Send + Sync {
     fn progress(&self, msg: &str);
+    /// ADR-0048 D2（Phase 60a）: 構造化した進行（`kind` / `tool` / `summary` / `detail`）。
+    /// 既定は `msg` だけを `progress` に流す（この口を実装していないシンクでも従来どおり動く）。
+    /// アダプタごとの写像はアダプタ側にあり、ここには何の判断も無い。
+    fn progress_with(&self, msg: &str, _fields: &ProgressFields) {
+        self.progress(msg);
+    }
     /// パス検査と sha256 計算済みの成果物（`crate::artifact::resolve` を通したもの）。
     fn artifact(&self, artifact: &ArtifactRef);
     /// ワーカーの stdout から 1 行読むたびにアダプタが呼ぶ生存通知。ディスパッチャはこれでリースを延長する

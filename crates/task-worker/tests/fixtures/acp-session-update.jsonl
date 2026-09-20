@@ -1,0 +1,7 @@
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"どのファイルから見るか考える\n"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"テストを"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"回します。\n"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call","toolCallId":"tc-1","title":"Bash","kind":"execute","status":"in_progress","rawInput":{"command":"cargo test --workspace"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tc-1","title":"Bash","status":"completed","content":[{"type":"content","content":{"type":"text","text":"test result: ok. 812 passed"}}]}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tc-2","title":"Read","status":"failed","rawOutput":"no such file"}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sess-1","update":{"sessionUpdate":"plan","entries":[{"content":"直す","status":"pending"}]}}}

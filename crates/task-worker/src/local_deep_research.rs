@@ -23,6 +23,7 @@ use tokio::process::Command;
 use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
+use crate::progress;
 use crate::protocol::{Answer, RunContext, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
@@ -344,7 +345,7 @@ async fn run_ldr(
                 stdout_buf.push('\n');
                 if let Some(rest) = trimmed.strip_prefix(PROGRESS_PREFIX) {
                     // ADR-0029 D1 手順 3: ランナーは検索・要約の進捗を `progress: <text>` の形で出す。
-                    sink.progress(&truncate_chars(rest.trim(), PROGRESS_LINE_MAX_CHARS));
+                    progress::emit_status(sink, &truncate_chars(rest.trim(), PROGRESS_LINE_MAX_CHARS));
                 } else if let Some(rest) = trimmed.strip_prefix(RESULT_PREFIX) {
                     match serde_json::from_str::<serde_json::Value>(rest) {
                         Ok(value) => task_result = Some(value),
@@ -543,6 +544,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
+        /// ADR-0048 D2（Phase 60a）: 構造化した進行（このアダプタは `status` だけ）。
+        structured: Mutex<Vec<(String, task_core::ProgressFields)>>,
         heartbeat_count: Mutex<u32>,
         artifacts: Mutex<Vec<ArtifactRef>>,
     }
@@ -550,6 +553,13 @@ mod tests {
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
             self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+        }
+        fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
+            self.progress(msg);
+            self.structured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((msg.to_string(), fields.clone()));
         }
         fn artifact(&self, artifact: &ArtifactRef) {
             self.artifacts.lock().unwrap_or_else(|e| e.into_inner()).push(artifact.clone());
@@ -641,6 +651,17 @@ echo '{result_line}'
         assert!(progress.iter().any(|m| m.contains("searching the web")));
         assert!(progress.iter().any(|m| m.contains("reading 3 pages")));
         assert!(*sink.heartbeat_count.lock().unwrap() >= 3);
+        // ADR-0048 D2（Phase 60a）: このアダプタが出せる進行は節目（`status`）だけで、
+        // すべての行が構造化されている（`msg` は従来どおり）。
+        let structured = sink.structured.lock().unwrap().clone();
+        assert_eq!(structured.len(), progress.len(), "{structured:#?}");
+        assert!(
+            structured
+                .iter()
+                .all(|(_, f)| f.kind == Some(task_core::ProgressKind::Status)),
+            "{structured:#?}"
+        );
+        assert!(structured.iter().all(|(_, f)| f.summary.is_some()), "{structured:#?}");
 
         // ADR-0031 受け入れ条件 1: report.md / sources.json / research.json の 3 つが成果物として申告される。
         let artifacts = sink.artifacts.lock().unwrap();

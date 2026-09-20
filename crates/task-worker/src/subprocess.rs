@@ -178,7 +178,31 @@ pub async fn run_subprocess(
                 }
                 match serde_json::from_str::<WorkerMessage>(trimmed) {
                     Ok(msg) => match msg {
-                        WorkerMessage::Progress { msg } => sink.progress(&msg),
+                        // ADR-0048 D2（Phase 60a）: 構造化フィールドがあればそのまま渡す。
+                        // 無ければ従来どおり `progress`（この口を実装していないシンクも動く）。
+                        WorkerMessage::Progress {
+                            msg,
+                            kind,
+                            tool,
+                            summary,
+                            detail,
+                            truncated,
+                            error,
+                        } => {
+                            let fields = task_core::ProgressFields {
+                                kind,
+                                tool,
+                                summary,
+                                detail,
+                                truncated,
+                                error,
+                            };
+                            if fields.is_plain() {
+                                sink.progress(&msg);
+                            } else {
+                                sink.progress_with(&msg, &fields);
+                            }
+                        }
                         // ADR-0044 D2（Phase 53）: 残る記録。run は止まらない。
                         WorkerMessage::Comment { body } => sink.comment(&body),
                         WorkerMessage::Delegate { tasks } => sink.delegate(&tasks),

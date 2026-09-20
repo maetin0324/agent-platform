@@ -99,3 +99,38 @@
 4. GUI `/` = Console（範囲・流れ・折り畳み・展開・返信・その場の認可と回答・途中目標の判定・`@node`）。ノード画面も同じ部品。
 5. 実機: Console から「〜を直して」と 1 行入れる → CoS の返事と `create_task` → matching で担当が決まり `ready` → 進行が折り畳みで流れ、
    開くと tool_use が見える → 終わると report ブロックが出る。
+
+## Phase 60a 追記（2026-09-20。D1 の読み取り側と D2 の実装で決めたこと）
+
+Phase 60a で入ったのは **D1 の読み取り側**（`GET /console` / `GET /console/stream`）と **D2**（進行の正規化）だけ。
+D3（`POST /console/instruct` と CoS の `actions`）と D4（GUI）は Phase 60b。
+
+1. **`progress` の `error`**。D2 が挙げた 4 つ（`kind` / `tool` / `summary` / `detail`）に加えて `truncated` と
+   **`error`** を足した。D2 の本文が `tool_result` に「エラーフラグ」を求めているのに、置き場が無かったため
+   （`kind` は `tool_result` で埋まっている）。どちらも任意・既定 false なので `PROTOCOL_VERSION` は 4 のまま。
+2. **`comment` は `kind` に入れない**。D2 の列挙に `comment` があるが、コメントは ADR-0044 D2 の**別 type**
+   （`{"type":"comment"}` → `task_comments`）のままで、`progress` の `kind` ではない。`ProgressKind` は
+   `tool_use` / `tool_result` / `text` / `thinking` / `status` の 5 つ。
+3. **`thinking` は `detail` を持たない**。D2 の「あれば要約だけ」をそのまま実装した（思考の本文は流さない）。
+4. **`codex` の `reasoning` は `thinking`**。D2 は codex について `tool_use` / `tool_result` / `text`
+   「where the event types allow, else status」としていたが、`item.reasoning` は素直に `thinking` に写る
+   ので、そうした。`todo_list` など残りは `status`。
+5. **範囲の効き方**。D1 は「CoS の対話はどの範囲でも見える」と書いているが、`GET /console` は
+   **範囲どおりに絞る**（`project:<id>` はその案件のタスク・対話・報告・途中目標、`node:<id>` は
+   そのノードのタスク・対話・報告）。全体の流れが見たいときは `scope=all` で、CoS の対話は常にそこに出る。
+   「どの範囲でも CoS が見える」は画面側の置き方（Phase 60b / D4）で決める。
+6. **質問と認可の重複**。Phase 44 でディスパッチャの質問も `approvals` に残るようになったため、
+   同じ質問が `question` と `approval` の 2 ブロックに出る。同じタスク・同じ質問文の認可があるときは
+   **`approval` の側だけ**出す（答える口が 1 つになる）。
+7. **`milestone` は `proposed` だけ**。D1 の `milestone` は「途中目標の提案」なので、`approved` 以降の
+   途中目標は流れに出さない（案件の画面で見る）。ノードの範囲には出さない。
+8. **カーソル**。`(時刻のナノ秒, 同時刻の並びを決める tie, events の読み進み)` の 3 つ組を 1 つの
+   不透明な文字列にした。出どころ（`events` / `messages` / `approvals` / `milestones` / `reports`）が
+   ばらばらなので、時刻だけでは同時刻の取りこぼしと重複が避けられない。`since` は時刻について**閉区間**で
+   引き、カーソルで落とす。
+9. **`progress` の詳細**。折り畳みの見出しには始めの 3 行と終わりの 3 行だけを載せ、全行は
+   **`GET /tasks/{id}/runs/{run_id}/events`**（Phase 60a で追加）で取る（D2 の「詳細は必要なときだけ」）。
+10. **SSE のまとめ方**。`progress` は run ごとに 1 秒に 1 回まで。流れてくるのは**その接続で見た積み上げ**
+    （`count` / `tool_count` はその run の合計）。対話・認可・報告・途中目標は 1 秒ごとに見に行く。
+    `Last-Event-ID` は使わない（再開は `since`）。
+11. **`knowledge` ブロック**は形だけ予約した（Phase 60a では誰も作らない）。中身は ADR-0047 側が決める。

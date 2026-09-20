@@ -1178,3 +1178,128 @@ pub struct ProjectIntegrationItem {
     pub task_title: String,
     pub task_status: Status,
 }
+
+// ========== ADR-0048 D1（Phase 60a）: Console（一本の流れ）==========
+//
+// `GET /console` と `GET /console/stream` が返す**正規化したブロック**。ストアを引くのは
+// `crate::console`、決定的な写像（束ね方・1 行の作り方・カーソル）は `task_ops::console` にある。
+// ここにあるのは HTTP に出る形だけで、判断は無い。
+
+/// `GET /console` の応答（ADR-0048 D1）。`items` は**時刻の昇順**（新しいものが最後）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ConsolePage {
+    pub items: Vec<ConsoleBlock>,
+    /// 次に読む位置。`GET /console?since=` にそのまま渡す（中身は不透明な文字列）。
+    /// 1 件も無ければ渡された `since` をそのまま返す（それも無ければ `null`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+/// Console の 1 ブロック（ADR-0048 D1 の 8 種 + 予約の `knowledge`）。
+/// `at` は RFC 3339、`cursor` はそのブロックの位置（`since` にそのまま渡せる）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConsoleBlock {
+    /// 人の発言（`messages` の `role = user`）。
+    Human {
+        at: String,
+        cursor: String,
+        message_id: String,
+        /// 話しかけた相手（組織のノード id）。
+        node_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<task_core::ProjectId>,
+        /// この 1 往復を起こした対話用タスク。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<TaskId>,
+        text: String,
+    },
+    /// CoS または部署ノードの返事（`messages` の `role = node`。本文は Markdown）。
+    Reply {
+        at: String,
+        cursor: String,
+        message_id: String,
+        node_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<task_core::ProjectId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<TaskId>,
+        /// 返事を作った run。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        text: String,
+    },
+    /// タスクの開始・終了・失敗・中止・割り込み（`Event::Transitioned` の 1 行）。
+    Task {
+        at: String,
+        cursor: String,
+        task: task_ops::console::ConsoleTaskLine,
+    },
+    /// ワーカーの進行（ADR-0048 D2 の正規化を run ごとに束ねたもの。**既定は折り畳み**）。
+    Progress {
+        at: String,
+        cursor: String,
+        progress: task_ops::console::ConsoleProgress,
+        /// 折り畳みの見出しに出す、そのタスクの題名。
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        assignee: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        harness: Option<String>,
+        tier: Tier,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<task_core::ProjectId>,
+    },
+    /// ディスパッチャが人に出した質問（`Event::QuestionRaised`）。同じ質問が認可（`approvals`）にも
+    /// あるときは**認可の側だけ**出す（同じことを 2 回出さない）。
+    Question {
+        at: String,
+        cursor: String,
+        task_id: TaskId,
+        run_id: String,
+        /// 聞いてきたノード（`task.assignee`。無ければ `null`）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<task_core::ProjectId>,
+        text: String,
+        /// 人が答えたか。
+        answered: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
+    },
+    /// 認可（ADR-0033 D5）。状態（`decision` / `answer` / `decided_at`）ごと渡す。
+    Approval {
+        at: String,
+        cursor: String,
+        approval: task_core::Approval,
+    },
+    /// 途中目標の提案（ADR-0038）。秘書のレビューの返事が付いていれば一緒に渡す。
+    Milestone {
+        at: String,
+        cursor: String,
+        milestone: task_core::Milestone,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        review: Option<MilestoneReviewView>,
+    },
+    /// 報告（ADR-0034）。見出しと本文を渡す（GUI は見出しだけ出して開かせる）。
+    Report {
+        at: String,
+        cursor: String,
+        report: task_core::Report,
+    },
+    /// 知識の候補が入った・取り込まれた（ADR-0047）。**Phase 60a では誰も作らない**予約の形で、
+    /// 知識の側（Phase 61）が埋める。
+    Knowledge {
+        at: String,
+        cursor: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project_id: Option<task_core::ProjectId>,
+        /// 知識の項目の id。
+        entry_id: String,
+        title: String,
+        /// `candidate` / `accepted` など（ADR-0047 が決める語）。
+        state: String,
+    },
+}
+// ========== ADR-0048 D1（Phase 60a）: ここまで ==========

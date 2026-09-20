@@ -15,8 +15,6 @@ use axum::http::StatusCode;
 use task_core::{
     ApprovalStore, Event, ReportFilter, ReportStore, SqliteStore, Task, TaskId, TaskIntegration, TaskStore,
 };
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 use crate::handlers::{ApiResult, Params, json_response, no_query};
 use crate::problem::{ApiProblem, store_problem};
@@ -66,21 +64,10 @@ pub(crate) async fn timeline(
 ///
 /// RFC 3339 は**文字列のままでは比べられない**: `…:00.500Z` は `…:00Z` より後の時刻なのに
 /// `'.' < 'Z'` なので文字列では前に来る（`created_at` には小数秒が付く。Phase 53 の監査で発見）。
-/// 解析できたものは `OffsetDateTime` で、できなかったもの（`built_at` が読めないリリース等）は
-/// 「いちばん古い」として扱う。
+/// 時刻として比べる規則は `task_ops::console::at_nanos` に 1 つだけ置き、`GET /console`（ADR-0048 D1）
+/// と共有する（解析できない `at` は 0 = いちばん古い扱い）。
 fn sort_items(items: &mut [TimelineItem]) {
-    items.sort_by_key(|item| {
-        OffsetDateTime::parse(at_of(item), &Rfc3339)
-            .map(SortKey::At)
-            .unwrap_or(SortKey::Unknown)
-    });
-}
-
-/// 解析できない `at` は先頭（いちばん古い）に置く。
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum SortKey {
-    Unknown,
-    At(OffsetDateTime),
+    items.sort_by_key(|item| task_ops::console::at_nanos(at_of(item)));
 }
 
 pub(crate) fn at_of(item: &TimelineItem) -> &str {

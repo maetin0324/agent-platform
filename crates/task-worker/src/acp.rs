@@ -37,9 +37,12 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tracing::warn;
 
+use task_core::ProgressKind;
+
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 use crate::claude_code::build_prompt;
 use crate::delegate_file::{clear_delegate_file, forward_delegate_file};
+use crate::progress;
 use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
@@ -318,20 +321,35 @@ fn choose_permission_option(options: &[serde_json::Value], permission: AcpPermis
 /// エージェントの本文はトークン単位の細切れで届く（実機の opencode + Qwen3.8-27B では 1 タスクで 259 件・
 /// 平均 9 文字だった）。そのまま `progress` にすると `WorkerProgress` イベントが膨れるので、改行が来るか
 /// 一定量たまるまで溜めてから出す。`heartbeat()` は溜めずに毎行呼ぶので、無出力タイムアウトの判定は変わらない。
-#[derive(Default)]
 struct ChunkBuffer {
     text: String,
+    /// ADR-0048 D2（Phase 60a）: 溜めている本文の種別（`text` = 発話 / `thinking` = 思考）。
+    /// 種別が変わったら先に出す（発話と思考を 1 件に混ぜない）。
+    kind: ProgressKind,
+}
+
+impl Default for ChunkBuffer {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            kind: ProgressKind::Text,
+        }
+    }
 }
 
 impl ChunkBuffer {
     /// 改行が来なくてもこの文字数でいったん出す。
     const FLUSH_AT: usize = 400;
 
-    fn push(&mut self, chunk: &str, sink: &dyn EventSink) {
+    fn push(&mut self, chunk: &str, kind: ProgressKind, sink: &dyn EventSink) {
+        if kind != self.kind {
+            self.flush(sink);
+            self.kind = kind;
+        }
         self.text.push_str(chunk);
         while let Some(idx) = self.text.find('\n') {
             let line: String = self.text.drain(..=idx).collect();
-            Self::emit(line.trim(), sink);
+            Self::emit(line.trim(), kind, sink);
         }
         if self.text.chars().count() >= Self::FLUSH_AT {
             self.flush(sink);
@@ -340,13 +358,19 @@ impl ChunkBuffer {
 
     fn flush(&mut self, sink: &dyn EventSink) {
         let text = std::mem::take(&mut self.text);
-        Self::emit(text.trim(), sink);
+        Self::emit(text.trim(), self.kind, sink);
     }
 
-    fn emit(text: &str, sink: &dyn EventSink) {
-        if !text.is_empty() {
-            sink.progress(&truncate(text, 500));
+    fn emit(text: &str, kind: ProgressKind, sink: &dyn EventSink) {
+        if text.is_empty() {
+            return;
         }
+        let msg = truncate(text, 500);
+        let fields = match kind {
+            ProgressKind::Thinking => progress::thinking(&progress::one_line(text)),
+            _ => progress::text(&progress::one_line(text)),
+        };
+        sink.progress_with(&msg, &fields);
     }
 }
 
@@ -363,9 +387,15 @@ fn handle_notification(value: &serde_json::Value, sink: &dyn EventSink, chunks: 
         return;
     };
     match update.get("sessionUpdate").and_then(|k| k.as_str()).unwrap_or("") {
-        "agent_message_chunk" | "agent_thought_chunk" => {
+        // ADR-0048 D2（Phase 60a）: 発話は `text`、思考は `thinking`（要約だけ）。
+        kind @ ("agent_message_chunk" | "agent_thought_chunk") => {
             if let Some(text) = update.pointer("/content/text").and_then(|t| t.as_str()) {
-                chunks.push(text, sink);
+                let kind = if kind == "agent_thought_chunk" {
+                    ProgressKind::Thinking
+                } else {
+                    ProgressKind::Text
+                };
+                chunks.push(text, kind, sink);
             }
         }
         "tool_call" | "tool_call_update" => {
@@ -373,10 +403,49 @@ fn handle_notification(value: &serde_json::Value, sink: &dyn EventSink, chunks: 
             chunks.flush(sink);
             let name = update.get("title").and_then(|t| t.as_str()).unwrap_or("tool");
             let status = update.get("status").and_then(|s| s.as_str()).unwrap_or("pending");
-            sink.progress(&format!("tool: {name} {status}"));
+            // ADR-0048 D2: 終わった道具（`completed` / `failed`）は `tool_result`、それ以外は `tool_use`。
+            let fields = match status {
+                "completed" | "failed" => {
+                    let body = tool_call_output(update);
+                    progress::tool_result(Some(name), &body, status == "failed")
+                }
+                _ => {
+                    let input = update.get("rawInput").or_else(|| update.get("locations"));
+                    let fields = progress::tool_use(name, input);
+                    // `rawInput` が無い実装（opencode など）では題名を要約にする。
+                    if fields.summary.as_deref().unwrap_or("").is_empty() {
+                        fields.with_summary(name)
+                    } else {
+                        fields
+                    }
+                }
+            };
+            sink.progress_with(&format!("tool: {name} {status}"), &fields);
         }
         // `plan` やそれ以外の通知は heartbeat のみ（ADR-0026 D3 の表）。
         _ => {}
+    }
+}
+
+/// ADR-0048 D2（Phase 60a）: 終わった `tool_call` の出力（`content[]` の `text`、無ければ `rawOutput`）。
+fn tool_call_output(update: &serde_json::Value) -> String {
+    if let Some(items) = update.get("content").and_then(|c| c.as_array()) {
+        let texts: Vec<&str> = items
+            .iter()
+            .filter_map(|i| {
+                i.pointer("/content/text")
+                    .or_else(|| i.get("text"))
+                    .and_then(|t| t.as_str())
+            })
+            .collect();
+        if !texts.is_empty() {
+            return texts.join("\n");
+        }
+    }
+    match update.get("rawOutput") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+        None => String::new(),
     }
 }
 
@@ -1080,6 +1149,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
+        /// ADR-0048 D2（Phase 60a）: 構造化した進行（`msg` と一緒に）。
+        structured: Mutex<Vec<(String, task_core::ProgressFields)>>,
         delegated: Mutex<Vec<Vec<DelegateTask>>>,
         rate_limits: Mutex<Vec<RateLimitObservation>>,
     }
@@ -1087,6 +1158,13 @@ mod tests {
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
             self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+        }
+        fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
+            self.progress(msg);
+            self.structured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((msg.to_string(), fields.clone()));
         }
         fn artifact(&self, _artifact: &ArtifactRef) {}
         fn delegate(&self, tasks: &[DelegateTask]) {
@@ -1099,6 +1177,46 @@ mod tests {
 
     fn progress_of(sink: &RecordingSink) -> Vec<String> {
         sink.progress.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// ADR-0048 D2（Phase 60a）: `session/update` の標本（`tests/fixtures/acp-session-update.jsonl`）を
+    /// `handle_notification` に通す。`tool_call` → `tool_use`、終わった `tool_call_update` → `tool_result`、
+    /// `agent_message_chunk` → `text`、`agent_thought_chunk` → `thinking`。`plan` は何も出さない。
+    #[test]
+    fn session_updates_map_to_structured_progress() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/acp-session-update.jsonl");
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let sink = RecordingSink::default();
+        let mut chunks = ChunkBuffer::default();
+        for line in text.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap_or_else(|e| panic!("{line}: {e}"));
+            handle_notification(&value, &sink, &mut chunks);
+        }
+        chunks.flush(&sink);
+        let items = sink.structured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let kinds: Vec<Option<ProgressKind>> = items.iter().map(|(_, f)| f.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                Some(ProgressKind::Thinking),
+                Some(ProgressKind::Text),
+                Some(ProgressKind::ToolUse),
+                Some(ProgressKind::ToolResult),
+                Some(ProgressKind::ToolResult),
+            ],
+            "{items:#?}"
+        );
+        assert_eq!(items[0].1.summary.as_deref(), Some("どのファイルから見るか考える"));
+        // 細切れの本文は 1 件にまとまる。
+        assert_eq!(items[1].1.summary.as_deref(), Some("テストを回します。"));
+        assert_eq!(items[2].1.tool.as_deref(), Some("Bash"));
+        assert_eq!(items[2].1.summary.as_deref(), Some("cargo test --workspace"));
+        assert!(items[2].0.starts_with("tool: Bash"), "{}", items[2].0);
+        assert_eq!(items[3].1.summary.as_deref(), Some("test result: ok. 812 passed"));
+        assert!(!items[3].1.error);
+        // `failed` は失敗の印（本文は `rawOutput`）。
+        assert!(items[4].1.error, "{:?}", items[4]);
+        assert_eq!(items[4].1.summary.as_deref(), Some("no such file"));
     }
 
     fn stub_acp(dir: &Path, script: &str) -> AcpConfig {
@@ -1469,11 +1587,11 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         let sink = RecordingSink::default();
         let mut buffer = ChunkBuffer::default();
         for chunk in ["Cre", "ated ", "artifacts", "/ok.txt"] {
-            buffer.push(chunk, &sink);
+            buffer.push(chunk, ProgressKind::Text, &sink);
         }
         assert!(progress_of(&sink).is_empty(), "改行も上限も来ていないので、まだ出さない");
 
-        buffer.push(" done\nnext line", &sink);
+        buffer.push(" done\nnext line", ProgressKind::Text, &sink);
         assert_eq!(progress_of(&sink), vec!["Created artifacts/ok.txt done".to_string()]);
 
         buffer.flush(&sink);
@@ -1486,7 +1604,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         let sink2 = RecordingSink::default();
         let mut buffer2 = ChunkBuffer::default();
         for _ in 0..ChunkBuffer::FLUSH_AT {
-            buffer2.push("x", &sink2);
+            buffer2.push("x", ProgressKind::Text, &sink2);
         }
         assert_eq!(progress_of(&sink2).len(), 1);
     }

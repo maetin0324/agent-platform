@@ -495,6 +495,127 @@ pub enum RunRole {
     Reviewer,
 }
 
+/// ADR-0048 D2（Phase 60a）: ワーカーの進行の種別。アダプタごとの差はアダプタ側で吸収し、
+/// Console（ADR-0048 D1）はこの 5 種だけを知る。`comment` はプロトコルの別 type（ADR-0044 D2）の
+/// ままなのでここには無い。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressKind {
+    /// 道具を使った（`tool` に名前、`summary` に入力の 1 行要約）。
+    ToolUse,
+    /// 道具の結果（`summary` に先頭の要約、`error` に失敗の印）。
+    ToolResult,
+    /// モデルの発話。
+    Text,
+    /// 思考（要約だけ。本文は流さない）。
+    Thinking,
+    /// アダプタの節目（起動・段取り・終わりなど）。
+    Status,
+}
+
+impl ProgressKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProgressKind::ToolUse => "tool_use",
+            ProgressKind::ToolResult => "tool_result",
+            ProgressKind::Text => "text",
+            ProgressKind::Thinking => "thinking",
+            ProgressKind::Status => "status",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "tool_use" => Some(ProgressKind::ToolUse),
+            "tool_result" => Some(ProgressKind::ToolResult),
+            "text" => Some(ProgressKind::Text),
+            "thinking" => Some(ProgressKind::Thinking),
+            "status" => Some(ProgressKind::Status),
+            _ => None,
+        }
+    }
+}
+
+/// ADR-0048 D2: `detail` の上限（4 KiB）。超えたら切って `truncated = true` にする。
+pub const PROGRESS_DETAIL_MAX_BYTES: usize = 4 * 1024;
+
+/// ADR-0048 D2（Phase 60a）: 進行 1 件の構造化フィールド。`Event::WorkerProgress` と
+/// ワーカープロトコルの `progress` 行で同じ形を使う。既定（`Default`）は「従来の文字列だけ」。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ProgressFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ProgressKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub error: bool,
+}
+
+impl ProgressFields {
+    /// 種別だけ。
+    pub fn of(kind: ProgressKind) -> Self {
+        Self {
+            kind: Some(kind),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_tool(mut self, tool: impl Into<String>) -> Self {
+        self.tool = Some(tool.into());
+        self
+    }
+
+    pub fn with_summary(mut self, summary: impl Into<String>) -> Self {
+        self.summary = Some(summary.into());
+        self
+    }
+
+    /// `detail` を 4 KiB で切って入れる（切ったら `truncated = true`）。空文字は入れない。
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        let detail = detail.into();
+        if detail.is_empty() {
+            return self;
+        }
+        let (text, truncated) = truncate_detail(&detail);
+        self.detail = Some(text);
+        self.truncated = self.truncated || truncated;
+        self
+    }
+
+    pub fn with_error(mut self, error: bool) -> Self {
+        self.error = error;
+        self
+    }
+
+    /// 構造化フィールドが 1 つも無い（＝従来の文字列 progress）。
+    pub fn is_plain(&self) -> bool {
+        self.kind.is_none()
+            && self.tool.is_none()
+            && self.summary.is_none()
+            && self.detail.is_none()
+            && !self.truncated
+            && !self.error
+    }
+}
+
+/// `PROGRESS_DETAIL_MAX_BYTES` で切る（UTF-8 の境界を守る）。戻り値の `bool` は切ったか。
+pub fn truncate_detail(detail: &str) -> (String, bool) {
+    if detail.len() <= PROGRESS_DETAIL_MAX_BYTES {
+        return (detail.to_string(), false);
+    }
+    let mut end = PROGRESS_DETAIL_MAX_BYTES;
+    while end > 0 && !detail.is_char_boundary(end) {
+        end -= 1;
+    }
+    (detail[..end].to_string(), true)
+}
+
 /// DESIGN §4.3 の `Event`（追記専用）。ADR-0002 D2: `Transitioned` は遷移の
 /// *結果* を記録するものであり、`transition()` の入力（`Trigger`）とは別物。
 /// `JsonSchema` は ADR-0013 D8: `docs/api/v1/event.schema.json`（`EventRow` 経由）の契約に使う。
@@ -527,9 +648,25 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task_role: Option<String>,
     },
+    /// ADR-0048 D2（Phase 60a）: 構造化した進行。`msg` は従来どおり人が読む 1 行で、
+    /// `kind` / `tool` / `summary` / `detail` / `truncated` / `error` は**追加のみ**
+    /// （付けないワーカー・導入前のイベントは全て `None` / `false` として読める）。
+    /// 構築は `Event::worker_progress` / `Event::worker_progress_with` を使う。
     WorkerProgress {
         run_id: String,
         msg: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ProgressKind>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        truncated: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        error: bool,
     },
     ArtifactProduced {
         run_id: String,
@@ -604,6 +741,59 @@ pub enum Event {
         fields: Vec<String>,
         by: String,
     },
+}
+
+impl Event {
+    /// 従来どおりの文字列だけの進行（ADR-0048 D2 の構造化フィールドは付けない）。
+    pub fn worker_progress(run_id: impl Into<String>, msg: impl Into<String>) -> Self {
+        Event::WorkerProgress {
+            run_id: run_id.into(),
+            msg: msg.into(),
+            kind: None,
+            tool: None,
+            summary: None,
+            detail: None,
+            truncated: false,
+            error: false,
+        }
+    }
+
+    /// ADR-0048 D2: 構造化した進行。
+    pub fn worker_progress_with(run_id: impl Into<String>, msg: impl Into<String>, fields: ProgressFields) -> Self {
+        Event::WorkerProgress {
+            run_id: run_id.into(),
+            msg: msg.into(),
+            kind: fields.kind,
+            tool: fields.tool,
+            summary: fields.summary,
+            detail: fields.detail,
+            truncated: fields.truncated,
+            error: fields.error,
+        }
+    }
+
+    /// ADR-0048 D2: `WorkerProgress` の構造化フィールドを取り出す（他のイベントは `None`）。
+    pub fn progress_fields(&self) -> Option<ProgressFields> {
+        match self {
+            Event::WorkerProgress {
+                kind,
+                tool,
+                summary,
+                detail,
+                truncated,
+                error,
+                ..
+            } => Some(ProgressFields {
+                kind: *kind,
+                tool: tool.clone(),
+                summary: summary.clone(),
+                detail: detail.clone(),
+                truncated: *truncated,
+                error: *error,
+            }),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

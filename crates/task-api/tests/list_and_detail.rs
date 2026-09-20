@@ -156,10 +156,7 @@ async fn detail_matches_task_ops_task_detail_byte_for_byte() {
                 role: None,
                 task_role: None,
             },
-            Event::WorkerProgress {
-                run_id: run_id.clone(),
-                msg: "working".into(),
-            },
+            Event::worker_progress(run_id.clone(), "working"),
         ],
     );
     let run_dir = env.workspace(&parent).join("runs").join(&run_id);

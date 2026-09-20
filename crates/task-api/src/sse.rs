@@ -26,8 +26,8 @@ use crate::state::{ApiState, StreamSlot};
 use crate::types::{StreamHeartbeat, StreamHello, StreamReset};
 
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
-const X_ACCEL_BUFFERING: HeaderName = HeaderName::from_static("x-accel-buffering");
-const CHANNEL_CAPACITY: usize = 64;
+pub(crate) const X_ACCEL_BUFFERING: HeaderName = HeaderName::from_static("x-accel-buffering");
+pub(crate) const CHANNEL_CAPACITY: usize = 64;
 
 pub(crate) async fn stream(
     State(state): State<ApiState>,
@@ -191,7 +191,7 @@ async fn poll_events(
 }
 
 /// 1 フレームを送る。送信路が閉じているか停止中なら `false`。
-async fn send(state: &ApiState, tx: &mpsc::Sender<Bytes>, frame: Option<Bytes>) -> bool {
+pub(crate) async fn send(state: &ApiState, tx: &mpsc::Sender<Bytes>, frame: Option<Bytes>) -> bool {
     let Some(frame) = frame else {
         return true;
     };
@@ -203,12 +203,12 @@ async fn send(state: &ApiState, tx: &mpsc::Sender<Bytes>, frame: Option<Bytes>) 
 }
 
 /// 停止が要求される（または送信側が消える）まで待つ。`watch::Ref` を待機点の外に持ち出さない。
-async fn closed(shutdown: &mut watch::Receiver<bool>) {
+pub(crate) async fn closed(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.wait_for(|closed| *closed).await.map(|_| ());
 }
 
 /// `event: <name>\n[id: <id>\n]data: <json>\n\n`（JSON は 1 行）。
-fn frame<T: Serialize>(event: &str, id: Option<u64>, data: &T) -> Option<Bytes> {
+pub(crate) fn frame<T: Serialize>(event: &str, id: Option<u64>, data: &T) -> Option<Bytes> {
     let json = match serde_json::to_string(data) {
         Ok(json) => json,
         Err(e) => {

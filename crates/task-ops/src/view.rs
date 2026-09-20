@@ -478,7 +478,7 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                     files: None,
                 });
             }
-            Event::WorkerProgress { run_id, msg } => {
+            Event::WorkerProgress { run_id, msg, .. } => {
                 if let Some(r) = by_run.get_mut(run_id) {
                     r.progress += 1;
                     if msg.starts_with(derive::REVIEWER_REQUEUED_PREFIX) {
@@ -1039,15 +1039,12 @@ mod tests {
         let tid = TaskId::new();
         let rows = vec![
             row(0, "t0", tid, started("r1", None)),
-            row(1, "t1", tid, Event::WorkerProgress { run_id: "r1".into(), msg: "chugging along".into() }),
+            row(1, "t1", tid, Event::worker_progress("r1", "chugging along")),
             row(
                 2,
                 "t2",
                 tid,
-                Event::WorkerProgress {
-                    run_id: "r1".into(),
-                    msg: format!("{}throttled", derive::REVIEWER_REQUEUED_PREFIX),
-                },
+                Event::worker_progress("r1", format!("{}throttled", derive::REVIEWER_REQUEUED_PREFIX)),
             ),
             row(3, "t3", tid, Event::ArtifactProduced { run_id: "r1".into(), artifact: artifact("a") }),
             row(

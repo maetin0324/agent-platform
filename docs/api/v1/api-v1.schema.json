@@ -1777,6 +1777,625 @@
       ],
       "type": "object"
     },
+    "ConsoleBlock": {
+      "description": "Console の 1 ブロック（ADR-0048 D1 の 8 種 + 予約の `knowledge`）。\n`at` は RFC 3339、`cursor` はそのブロックの位置（`since` にそのまま渡せる）。",
+      "oneOf": [
+        {
+          "description": "人の発言（`messages` の `role = user`）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "human",
+              "type": "string"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "node_id": {
+              "description": "話しかけた相手（組織のノード id）。",
+              "type": "string"
+            },
+            "project_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProjectId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskId"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "この 1 往復を起こした対話用タスク。"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "cursor",
+            "message_id",
+            "node_id",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "CoS または部署ノードの返事（`messages` の `role = node`。本文は Markdown）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "reply",
+              "type": "string"
+            },
+            "message_id": {
+              "type": "string"
+            },
+            "node_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProjectId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "run_id": {
+              "description": "返事を作った run。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/TaskId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "cursor",
+            "message_id",
+            "node_id",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "タスクの開始・終了・失敗・中止・割り込み（`Event::Transitioned` の 1 行）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "task",
+              "type": "string"
+            },
+            "task": {
+              "$ref": "#/$defs/ConsoleTaskLine"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "cursor",
+            "task"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ワーカーの進行（ADR-0048 D2 の正規化を run ごとに束ねたもの。**既定は折り畳み**）。",
+          "properties": {
+            "assignee": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "at": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "harness": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "const": "progress",
+              "type": "string"
+            },
+            "progress": {
+              "$ref": "#/$defs/ConsoleProgress"
+            },
+            "project_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProjectId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "tier": {
+              "$ref": "#/$defs/Tier"
+            },
+            "title": {
+              "description": "折り畳みの見出しに出す、そのタスクの題名。",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "cursor",
+            "progress",
+            "title",
+            "tier"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ディスパッチャが人に出した質問（`Event::QuestionRaised`）。同じ質問が認可（`approvals`）にも\nあるときは**認可の側だけ**出す（同じことを 2 回出さない）。",
+          "properties": {
+            "answer": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "answered": {
+              "description": "人が答えたか。",
+              "type": "boolean"
+            },
+            "at": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "question",
+              "type": "string"
+            },
+            "node_id": {
+              "description": "聞いてきたノード（`task.assignee`。無ければ `null`）。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "project_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProjectId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "task_id": {
+              "$ref": "#/$defs/TaskId"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "cursor",
+            "task_id",
+            "run_id",
+            "text",
+            "answered"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "認可（ADR-0033 D5）。状態（`decision` / `answer` / `decided_at`）ごと渡す。",
+          "properties": {
+            "approval": {
+              "$ref": "#/$defs/Approval"
+            },
+            "at": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "approval",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "cursor",
+            "approval"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "途中目標の提案（ADR-0038）。秘書のレビューの返事が付いていれば一緒に渡す。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "milestone",
+              "type": "string"
+            },
+            "milestone": {
+              "$ref": "#/$defs/Milestone"
+            },
+            "review": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MilestoneReviewView"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "cursor",
+            "milestone"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "報告（ADR-0034）。見出しと本文を渡す（GUI は見出しだけ出して開かせる）。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "report",
+              "type": "string"
+            },
+            "report": {
+              "$ref": "#/$defs/Report"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "cursor",
+            "report"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "知識の候補が入った・取り込まれた（ADR-0047）。**Phase 60a では誰も作らない**予約の形で、\n知識の側（Phase 61）が埋める。",
+          "properties": {
+            "at": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "entry_id": {
+              "description": "知識の項目の id。",
+              "type": "string"
+            },
+            "kind": {
+              "const": "knowledge",
+              "type": "string"
+            },
+            "project_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProjectId"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "description": "`candidate` / `accepted` など（ADR-0047 が決める語）。",
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "at",
+            "cursor",
+            "entry_id",
+            "title",
+            "state"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ConsoleHello": {
+      "description": "`GET /console/stream` の最初のフレーム（`event: hello`）。",
+      "properties": {
+        "cursor": {
+          "description": "いまの位置（`GET /console?since=` に渡せる）。",
+          "type": "string"
+        },
+        "now": {
+          "description": "RFC 3339。",
+          "type": "string"
+        },
+        "scope": {
+          "description": "`all` / `project:<id>` / `node:<id>`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cursor",
+        "scope",
+        "now"
+      ],
+      "type": "object"
+    },
+    "ConsolePage": {
+      "description": "`GET /console` の応答（ADR-0048 D1）。`items` は**時刻の昇順**（新しいものが最後）。",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/ConsoleBlock"
+          },
+          "type": "array"
+        },
+        "next_cursor": {
+          "description": "次に読む位置。`GET /console?since=` にそのまま渡す（中身は不透明な文字列）。\n1 件も無ければ渡された `since` をそのまま返す（それも無ければ `null`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "ConsoleProgress": {
+      "description": "run 1 つ分の進行（ADR-0048 D1 の `progress` ブロックの中身）。",
+      "properties": {
+        "count": {
+          "description": "この run の進行の件数。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "first": {
+          "items": {
+            "$ref": "#/$defs/ConsoleProgressLine"
+          },
+          "type": "array"
+        },
+        "last": {
+          "items": {
+            "$ref": "#/$defs/ConsoleProgressLine"
+          },
+          "type": "array"
+        },
+        "last_status": {
+          "description": "最後に見た `status`（アダプタの節目）の 1 行。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "description": "最初の進行の時刻（RFC 3339）。ブロックの `at` でもある。",
+          "type": "string"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "tool_count": {
+          "description": "そのうち `tool_use` の回数（折り畳みの見出しの「tool 12 回」）。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "`first` と `last` の間に出していない行がある（全行は `GET /tasks/{id}/runs/{run}/events`）。",
+          "type": "boolean"
+        },
+        "updated_at": {
+          "description": "最後の進行の時刻（RFC 3339）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id",
+        "count",
+        "tool_count",
+        "started_at",
+        "updated_at",
+        "first",
+        "last"
+      ],
+      "type": "object"
+    },
+    "ConsoleProgressLine": {
+      "description": "折り畳んだ `progress` の中の 1 行（ADR-0048 D2）。本文（`detail`）は載せない\n（初期表示を軽くするため。全行は `GET /tasks/{id}/runs/{run}/events`）。",
+      "properties": {
+        "at": {
+          "description": "RFC 3339。",
+          "type": "string"
+        },
+        "error": {
+          "type": "boolean"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProgressKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "seq": {
+          "description": "そのタスクの中での `events.seq`（`GET /tasks/{id}/events` と突き合わせられる）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "description": "人が読む 1 行（`summary` があればそれ、無ければ `msg`）。",
+          "type": "string"
+        },
+        "tool": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "seq",
+        "text"
+      ],
+      "type": "object"
+    },
+    "ConsoleTaskLine": {
+      "description": "`task` ブロックの中身（ADR-0048 D1: 開始・終了・失敗・中止・割り込みを 1 行で）。",
+      "properties": {
+        "assignee": {
+          "description": "担当（組織のノード id）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "elapsed_secs": {
+          "description": "タスクが作られてからこの遷移までの秒数（時刻が読めなければ `null`）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "from": {
+          "$ref": "#/$defs/Status"
+        },
+        "harness": {
+          "description": "ハーネス（`worker_hint.adapter`。未指定なら役割・分野から決まるので `null`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "作業場所の使い方（`shared` / `worktree`。未指定なら `null`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "description": "遷移の理由（`worker_done` / `cancel` / `comment` …）。",
+          "type": "string"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "tier": {
+          "$ref": "#/$defs/Tier"
+        },
+        "title": {
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/$defs/Status"
+        }
+      },
+      "required": [
+        "task_id",
+        "title",
+        "from",
+        "to",
+        "reason",
+        "tier"
+      ],
+      "type": "object"
+    },
     "ContainerProbeView": {
       "description": "`<runtime> info` の結果 1 件（`detail` は成功なら `\"ok\"`、失敗なら理由の 1 行）。",
       "properties": {
@@ -2838,12 +3457,47 @@
           "type": "object"
         },
         {
+          "description": "ADR-0048 D2（Phase 60a）: 構造化した進行。`msg` は従来どおり人が読む 1 行で、\n`kind` / `tool` / `summary` / `detail` / `truncated` / `error` は**追加のみ**\n（付けないワーカー・導入前のイベントは全て `None` / `false` として読める）。\n構築は `Event::worker_progress` / `Event::worker_progress_with` を使う。",
           "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "type": "boolean"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProgressKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "msg": {
               "type": "string"
             },
             "run_id": {
               "type": "string"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "truncated": {
+              "type": "boolean"
             },
             "type": {
               "const": "worker_progress",
@@ -4849,6 +5503,36 @@
         "instance"
       ],
       "type": "object"
+    },
+    "ProgressKind": {
+      "description": "ADR-0048 D2（Phase 60a）: ワーカーの進行の種別。アダプタごとの差はアダプタ側で吸収し、\nConsole（ADR-0048 D1）はこの 5 種だけを知る。`comment` はプロトコルの別 type（ADR-0044 D2）の\nままなのでここには無い。",
+      "oneOf": [
+        {
+          "const": "tool_use",
+          "description": "道具を使った（`tool` に名前、`summary` に入力の 1 行要約）。",
+          "type": "string"
+        },
+        {
+          "const": "tool_result",
+          "description": "道具の結果（`summary` に先頭の要約、`error` に失敗の印）。",
+          "type": "string"
+        },
+        {
+          "const": "text",
+          "description": "モデルの発話。",
+          "type": "string"
+        },
+        {
+          "const": "thinking",
+          "description": "思考（要約だけ。本文は流さない）。",
+          "type": "string"
+        },
+        {
+          "const": "status",
+          "description": "アダプタの節目（起動・段取り・終わりなど）。",
+          "type": "string"
+        }
+      ]
     },
     "Project": {
       "description": "案件（SPEC §3.3）。仕事の木は `tasks WHERE project_id = ?`。",
@@ -8636,6 +9320,17 @@
     "config": {
       "$ref": "#/$defs/ConfigView"
     },
+    "console": {
+      "$ref": "#/$defs/ConsolePage",
+      "description": "`GET /console` の応答と、その 1 ブロック（9 種）。"
+    },
+    "console_block": {
+      "$ref": "#/$defs/ConsoleBlock"
+    },
+    "console_hello": {
+      "$ref": "#/$defs/ConsoleHello",
+      "description": "`GET /console/stream` の最初のフレーム（`event: hello`）。ブロックは `console_block` と同じ形で\n`event: console.block` として流れる。"
+    },
     "daemon": {
       "$ref": "#/$defs/DaemonView"
     },
@@ -8959,6 +9654,9 @@
     "comment_result",
     "reopen",
     "timeline",
+    "console",
+    "console_block",
+    "console_hello",
     "changes",
     "change_diff",
     "integrate",

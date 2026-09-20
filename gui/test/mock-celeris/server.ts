@@ -15,6 +15,7 @@ import type {
 } from "~/celeris/types";
 import {
   commentResult,
+  consolePage,
   defaultHealth,
   editResult,
   milestone,
@@ -285,6 +286,11 @@ export async function startMockCeleris(options: StartMockCelerisOptions = {}): P
 
   on("GET", "/api/v1/health", (_req, res) => {
     sendJson(res, 200, options.health ?? defaultHealth);
+  });
+
+  // ADR-0048 D1（Phase 60a）: Console の一本の流れ。テストは `on` で上書きできる。
+  on("GET", "/api/v1/console", (_req, res) => {
+    sendJson(res, 200, consolePage());
   });
 
   await new Promise<void>((resolve, reject) => {

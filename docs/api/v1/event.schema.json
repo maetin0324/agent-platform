@@ -232,12 +232,47 @@
           "type": "object"
         },
         {
+          "description": "ADR-0048 D2（Phase 60a）: 構造化した進行。`msg` は従来どおり人が読む 1 行で、\n`kind` / `tool` / `summary` / `detail` / `truncated` / `error` は**追加のみ**\n（付けないワーカー・導入前のイベントは全て `None` / `false` として読める）。\n構築は `Event::worker_progress` / `Event::worker_progress_with` を使う。",
           "properties": {
+            "detail": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "error": {
+              "type": "boolean"
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ProgressKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "msg": {
               "type": "string"
             },
             "run_id": {
               "type": "string"
+            },
+            "summary": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "truncated": {
+              "type": "boolean"
             },
             "type": {
               "const": "worker_progress",
@@ -566,6 +601,36 @@
     "MilestoneId": {
       "description": "途中目標の一意識別子（ULID）。",
       "type": "string"
+    },
+    "ProgressKind": {
+      "description": "ADR-0048 D2（Phase 60a）: ワーカーの進行の種別。アダプタごとの差はアダプタ側で吸収し、\nConsole（ADR-0048 D1）はこの 5 種だけを知る。`comment` はプロトコルの別 type（ADR-0044 D2）の\nままなのでここには無い。",
+      "oneOf": [
+        {
+          "const": "tool_use",
+          "description": "道具を使った（`tool` に名前、`summary` に入力の 1 行要約）。",
+          "type": "string"
+        },
+        {
+          "const": "tool_result",
+          "description": "道具の結果（`summary` に先頭の要約、`error` に失敗の印）。",
+          "type": "string"
+        },
+        {
+          "const": "text",
+          "description": "モデルの発話。",
+          "type": "string"
+        },
+        {
+          "const": "thinking",
+          "description": "思考（要約だけ。本文は流さない）。",
+          "type": "string"
+        },
+        {
+          "const": "status",
+          "description": "アダプタの節目（起動・段取り・終わりなど）。",
+          "type": "string"
+        }
+      ]
     },
     "ProjectId": {
       "description": "案件の一意識別子（ULID）。`TaskId` と同じ形。",

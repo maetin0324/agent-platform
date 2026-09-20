@@ -69,6 +69,136 @@ export type CommentEffect = "stored" | "interrupted" | "answered" | "terminal";
  * DESIGN §5.4 の `WorkerHint`。
  */
 export type Tier = "frontier" | "standard" | "cheap";
+/**
+ * Console の 1 ブロック（ADR-0048 D1 の 8 種 + 予約の `knowledge`）。
+ * `at` は RFC 3339、`cursor` はそのブロックの位置（`since` にそのまま渡せる）。
+ */
+export type ConsoleBlock =
+  | {
+      at: string;
+      cursor: string;
+      kind: "human";
+      message_id: string;
+      /**
+       * 話しかけた相手（組織のノード id）。
+       */
+      node_id: string;
+      project_id?: ProjectId | null;
+      /**
+       * この 1 往復を起こした対話用タスク。
+       */
+      task_id?: TaskId | null;
+      text: string;
+    }
+  | {
+      at: string;
+      cursor: string;
+      kind: "reply";
+      message_id: string;
+      node_id: string;
+      project_id?: ProjectId | null;
+      /**
+       * 返事を作った run。
+       */
+      run_id?: string | null;
+      task_id?: TaskId | null;
+      text: string;
+    }
+  | {
+      at: string;
+      cursor: string;
+      kind: "task";
+      task: ConsoleTaskLine;
+    }
+  | {
+      assignee?: string | null;
+      at: string;
+      cursor: string;
+      harness?: string | null;
+      kind: "progress";
+      progress: ConsoleProgress;
+      project_id?: ProjectId | null;
+      tier: Tier;
+      /**
+       * 折り畳みの見出しに出す、そのタスクの題名。
+       */
+      title: string;
+    }
+  | {
+      answer?: string | null;
+      /**
+       * 人が答えたか。
+       */
+      answered: boolean;
+      at: string;
+      cursor: string;
+      kind: "question";
+      /**
+       * 聞いてきたノード（`task.assignee`。無ければ `null`）。
+       */
+      node_id?: string | null;
+      project_id?: ProjectId | null;
+      run_id: string;
+      task_id: TaskId;
+      text: string;
+    }
+  | {
+      approval: Approval;
+      at: string;
+      cursor: string;
+      kind: "approval";
+    }
+  | {
+      at: string;
+      cursor: string;
+      kind: "milestone";
+      milestone: Milestone;
+      review?: MilestoneReviewView | null;
+    }
+  | {
+      at: string;
+      cursor: string;
+      kind: "report";
+      report: Report;
+    }
+  | {
+      at: string;
+      cursor: string;
+      /**
+       * 知識の項目の id。
+       */
+      entry_id: string;
+      kind: "knowledge";
+      project_id?: ProjectId | null;
+      /**
+       * `candidate` / `accepted` など（ADR-0047 が決める語）。
+       */
+      state: string;
+      title: string;
+    };
+/**
+ * ADR-0048 D2（Phase 60a）: ワーカーの進行の種別。アダプタごとの差はアダプタ側で吸収し、
+ * Console（ADR-0048 D1）はこの 5 種だけを知る。`comment` はプロトコルの別 type（ADR-0044 D2）の
+ * ままなのでここには無い。
+ */
+export type ProgressKind = "tool_use" | "tool_result" | "text" | "thinking" | "status";
+/**
+ * 途中目標の一意識別子（ULID）。
+ */
+export type MilestoneId = string;
+/**
+ * 途中目標の状態（ADR-0033 D2。SPEC §7 のアジャイル: 達成ごとに人が判定し、Go か再設計）。
+ */
+export type MilestoneStatus =
+  ("proposed" | "approved" | "in_progress" | "reached" | "redesigned") | "paused" | "cancelled";
+/**
+ * 報告の一意識別子（ULID）。
+ */
+export type ReportId = string;
+/**
+ * 報告の種類（ADR-0033 D3）。
+ */
+export type ReportKind = "progress" | "result" | "bad_news" | "proposal" | "question";
 export type InFlightKind = "worker" | "reviewer";
 /**
  * DESIGN §4.3 の `Event`（追記専用）。ADR-0002 D2: `Transitioned` は遷移の
@@ -110,8 +240,14 @@ export type Event =
       type: "worker_started";
     }
   | {
+      detail?: string | null;
+      error?: boolean;
+      kind?: ProgressKind | null;
       msg: string;
       run_id: string;
+      summary?: string | null;
+      tool?: string | null;
+      truncated?: boolean;
       type: "worker_progress";
     }
   | {
@@ -216,10 +352,6 @@ export type Check =
  */
 export type MessageId = string;
 /**
- * 途中目標の一意識別子（ULID）。
- */
-export type MilestoneId = string;
-/**
  * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
  * celeris はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
  */
@@ -279,11 +411,6 @@ export type AttentionItem =
  * 誰が言ったか（ADR-0033 D4）。`user` = 人、`node` = 組織のノード（その run の返事）。
  */
 export type MessageRole = "user" | "node";
-/**
- * 途中目標の状態（ADR-0033 D2。SPEC §7 のアジャイル: 達成ごとに人が判定し、Go か再設計）。
- */
-export type MilestoneStatus =
-  ("proposed" | "approved" | "in_progress" | "reached" | "redesigned") | "paused" | "cancelled";
 /**
  * 受け入れ条件 1 件の指定。現在の `celerisctl add` の `--accept`/`--check-cmd`/
  * `--check-artifact`/`--check-reviewer` に対応する。API の `POST /tasks` の `acceptance[]` でもある（`docs/gui/api.md` §3.4）。
@@ -348,14 +475,6 @@ export type InstanceRole = "active" | "standby" | "draining" | "verify";
  * **`container` は ADR-0043 A3 の工事**（この Phase では読むだけで、実行には使わない）。
  */
 export type RepoRun = "auto" | "host" | "container";
-/**
- * 報告の一意識別子（ULID）。
- */
-export type ReportId = string;
-/**
- * 報告の種類（ADR-0033 D3）。
- */
-export type ReportKind = "progress" | "result" | "bad_news" | "proposal" | "question";
 /**
  * タイムラインの 1 件（ADR-0044 D5）。`at` は RFC 3339。
  */
@@ -438,6 +557,9 @@ export interface ApiV1Schema {
   comment_list: CommentList;
   comment_result: CommentResult;
   config: ConfigView;
+  console: ConsolePage;
+  console_block: ConsoleBlock;
+  console_hello: ConsoleHello;
   daemon: DaemonView;
   decision: DecisionBody;
   doc_page: DocPage;
@@ -1232,6 +1354,183 @@ export interface RoleConfigView {
   max_turns?: number | null;
   max_wall_secs?: number | null;
   tier?: Tier | null;
+}
+/**
+ * `GET /console` の応答と、その 1 ブロック（9 種）。
+ */
+export interface ConsolePage {
+  items: ConsoleBlock[];
+  /**
+   * 次に読む位置。`GET /console?since=` にそのまま渡す（中身は不透明な文字列）。
+   * 1 件も無ければ渡された `since` をそのまま返す（それも無ければ `null`）。
+   */
+  next_cursor?: string | null;
+}
+/**
+ * `task` ブロックの中身（ADR-0048 D1: 開始・終了・失敗・中止・割り込みを 1 行で）。
+ */
+export interface ConsoleTaskLine {
+  /**
+   * 担当（組織のノード id）。
+   */
+  assignee?: string | null;
+  /**
+   * タスクが作られてからこの遷移までの秒数（時刻が読めなければ `null`）。
+   */
+  elapsed_secs?: number | null;
+  from: Status;
+  /**
+   * ハーネス（`worker_hint.adapter`。未指定なら役割・分野から決まるので `null`）。
+   */
+  harness?: string | null;
+  /**
+   * 作業場所の使い方（`shared` / `worktree`。未指定なら `null`）。
+   */
+  mode?: string | null;
+  project_id?: ProjectId | null;
+  /**
+   * 遷移の理由（`worker_done` / `cancel` / `comment` …）。
+   */
+  reason: string;
+  task_id: TaskId;
+  tier: Tier;
+  title: string;
+  to: Status;
+}
+/**
+ * run 1 つ分の進行（ADR-0048 D1 の `progress` ブロックの中身）。
+ */
+export interface ConsoleProgress {
+  /**
+   * この run の進行の件数。
+   */
+  count: number;
+  first: ConsoleProgressLine[];
+  last: ConsoleProgressLine[];
+  /**
+   * 最後に見た `status`（アダプタの節目）の 1 行。
+   */
+  last_status?: string | null;
+  run_id: string;
+  /**
+   * 最初の進行の時刻（RFC 3339）。ブロックの `at` でもある。
+   */
+  started_at: string;
+  task_id: TaskId;
+  /**
+   * そのうち `tool_use` の回数（折り畳みの見出しの「tool 12 回」）。
+   */
+  tool_count: number;
+  /**
+   * `first` と `last` の間に出していない行がある（全行は `GET /tasks/{id}/runs/{run}/events`）。
+   */
+  truncated?: boolean;
+  /**
+   * 最後の進行の時刻（RFC 3339）。
+   */
+  updated_at: string;
+}
+/**
+ * 折り畳んだ `progress` の中の 1 行（ADR-0048 D2）。本文（`detail`）は載せない
+ * （初期表示を軽くするため。全行は `GET /tasks/{id}/runs/{run}/events`）。
+ */
+export interface ConsoleProgressLine {
+  /**
+   * RFC 3339。
+   */
+  at: string;
+  error?: boolean;
+  kind?: ProgressKind | null;
+  /**
+   * そのタスクの中での `events.seq`（`GET /tasks/{id}/events` と突き合わせられる）。
+   */
+  seq: number;
+  /**
+   * 人が読む 1 行（`summary` があればそれ、無ければ `msg`）。
+   */
+  text: string;
+  tool?: string | null;
+}
+/**
+ * 途中目標（ADR-0033 D2）。`seq` は案件の中での通し番号（1 始まり。ストアが採番する）。
+ */
+export interface Milestone {
+  created_at: string;
+  description?: string;
+  id: MilestoneId;
+  /**
+   * ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。
+   */
+  paused_from?: MilestoneStatus | null;
+  project_id: ProjectId;
+  seq: number;
+  status: MilestoneStatus;
+  title: string;
+  updated_at: string;
+}
+/**
+ * 秘書のレビューの返事（`messages` の 1 行。ADR-0038 D1）。
+ */
+export interface MilestoneReviewView {
+  /**
+   * RFC 3339。
+   */
+  at: string;
+  message_id: string;
+  /**
+   * 返事の本文（Markdown。GUI がカードに出す）。
+   */
+  text: string;
+}
+/**
+ * 1 件の報告。
+ */
+export interface Report {
+  body?: string;
+  created_at: string;
+  headline: string;
+  id: ReportId;
+  kind: ReportKind;
+  /**
+   * 組織の木の深さ（秘書 = 0）。GUI は `level = 0` を「人が見る報告」として扱う。
+   */
+  level: number;
+  /**
+   * 報告した組織のノード（`org_nodes.id`）。
+   */
+  node_id: string;
+  /**
+   * 案件。`None` は「案件なし」（クラスタの障害など、案件に紐づかない悪い知らせ）。DB でも NULL
+   * （migration 0007 で NOT NULL を外した。ADR-0034 D1 の「将来」の項）。
+   */
+  project_id?: ProjectId | null;
+  read_at?: string | null;
+  /**
+   * 元になった報告の id（まとめなら子の報告、悪い知らせの複製なら 1 段下の報告）。
+   */
+  sources?: ReportId[];
+  /**
+   * 元になったタスク（まとめの報告では、そのまとめの run のタスク）。
+   */
+  task_id?: TaskId | null;
+}
+/**
+ * `GET /console/stream` の最初のフレーム（`event: hello`）。ブロックは `console_block` と同じ形で
+ * `event: console.block` として流れる。
+ */
+export interface ConsoleHello {
+  /**
+   * いまの位置（`GET /console?since=` に渡せる）。
+   */
+  cursor: string;
+  /**
+   * RFC 3339。
+   */
+  now: string;
+  /**
+   * `all` / `project:<id>` / `node:<id>`。
+   */
+  scope: string;
 }
 /**
  * `GET /daemon`。
@@ -2192,32 +2491,15 @@ export interface MilestoneDecided {
    * `discuss` / `ng` で秘書に送った `role = "user"` の行。
    */
   message_id?: string | null;
-  milestone: Milestone;
+  milestone: Milestone1;
   /**
    * `ok` で承認して分解を始めた次の途中目標、`ng` で `redesigned` にした提案（無ければ省略）。
    */
-  next_milestone?: Milestone1 | null;
+  next_milestone?: Milestone | null;
   /**
    * `ok` で起きた分解（計画 run）のタスク。
    */
   plan_task_id?: TaskId | null;
-}
-/**
- * 判定した途中目標（更新後）。
- */
-export interface Milestone {
-  created_at: string;
-  description?: string;
-  id: MilestoneId;
-  /**
-   * ADR-0044 D6: `pause` する直前の状態（`resume` の戻り先）。`paused` でなければ `None`。
-   */
-  paused_from?: MilestoneStatus | null;
-  project_id: ProjectId;
-  seq: number;
-  status: MilestoneStatus;
-  title: string;
-  updated_at: string;
 }
 /**
  * 途中目標（ADR-0033 D2）。`seq` は案件の中での通し番号（1 始まり。ストアが採番する）。
@@ -2241,7 +2523,7 @@ export interface Milestone1 {
  */
 export interface MilestoneLifecycle {
   cancelled_tasks?: TaskRef[];
-  milestone: Milestone1;
+  milestone: Milestone;
 }
 /**
  * `PATCH /milestones/{id}` の要求本文。
@@ -2545,7 +2827,7 @@ export interface MilestoneView {
   /**
    * その返事が提案した次の途中目標（`proposed` の最新。無ければ省略）。
    */
-  proposal?: Milestone1 | null;
+  proposal?: Milestone | null;
   /**
    * 秘書のレビューの返事（まだ無ければ省略。run 中は `tasks[]` の
    * `support = "milestone_review"` が動いている）。
@@ -2555,20 +2837,6 @@ export interface MilestoneView {
   status: MilestoneStatus;
   title: string;
   updated_at: string;
-}
-/**
- * 秘書のレビューの返事（`messages` の 1 行。ADR-0038 D1）。
- */
-export interface MilestoneReviewView {
-  /**
-   * RFC 3339。
-   */
-  at: string;
-  message_id: string;
-  /**
-   * 返事の本文（Markdown。GUI がカードに出す）。
-   */
-  text: string;
 }
 /**
  * 案件（SPEC §3.3）。仕事の木は `tasks WHERE project_id = ?`。
@@ -3147,38 +3415,6 @@ export interface ReportDetail {
    * `report.sources` の順に引いた元の報告（見つからなかったものは飛ばす）。
    */
   sources_expanded: Report[];
-}
-/**
- * 1 件の報告。
- */
-export interface Report {
-  body?: string;
-  created_at: string;
-  headline: string;
-  id: ReportId;
-  kind: ReportKind;
-  /**
-   * 組織の木の深さ（秘書 = 0）。GUI は `level = 0` を「人が見る報告」として扱う。
-   */
-  level: number;
-  /**
-   * 報告した組織のノード（`org_nodes.id`）。
-   */
-  node_id: string;
-  /**
-   * 案件。`None` は「案件なし」（クラスタの障害など、案件に紐づかない悪い知らせ）。DB でも NULL
-   * （migration 0007 で NOT NULL を外した。ADR-0034 D1 の「将来」の項）。
-   */
-  project_id?: ProjectId | null;
-  read_at?: string | null;
-  /**
-   * 元になった報告の id（まとめなら子の報告、悪い知らせの複製なら 1 段下の報告）。
-   */
-  sources?: ReportId[];
-  /**
-   * 元になったタスク（まとめの報告では、そのまとめの run のタスク）。
-   */
-  task_id?: TaskId | null;
 }
 /**
  * Phase 25（ADR-0033 D3）: 報告（生成は決定的、圧縮は別 run）。

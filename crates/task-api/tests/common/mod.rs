@@ -662,8 +662,5 @@ pub async fn eventually(within: Duration, mut cond: impl FnMut() -> bool) -> boo
 }
 
 pub fn progress(msg: &str) -> Event {
-    Event::WorkerProgress {
-        run_id: "01J9ZX5T3K8Q7W6V5R4P3N2M1J".into(),
-        msg: msg.into(),
-    }
+    Event::worker_progress("01J9ZX5T3K8Q7W6V5R4P3N2M1J", msg)
 }

@@ -509,10 +509,7 @@ struct StoreSink {
 
 impl StoreSink {
     fn note(&self, msg: String) {
-        let ev = Event::WorkerProgress {
-            run_id: self.run_id.clone(),
-            msg,
-        };
+        let ev = Event::worker_progress(self.run_id.clone(), msg);
         if let Err(e) = self.store.append_event(self.task_id, &ev) {
             tracing::warn!(task_id = %self.task_id, error = %e, "failed to record delegation note");
         }
@@ -608,10 +605,16 @@ impl StoreSink {
 
 impl EventSink for StoreSink {
     fn progress(&self, msg: &str) {
-        let ev = Event::WorkerProgress {
-            run_id: self.run_id.clone(),
-            msg: msg.to_string(),
-        };
+        let ev = Event::worker_progress(self.run_id.clone(), msg);
+        if let Err(e) = self.store.append_event(self.task_id, &ev) {
+            tracing::warn!(task_id = %self.task_id, error = %e, "failed to record progress");
+        }
+    }
+
+    /// ADR-0048 D2（Phase 60a）: 構造化した進行をそのまま `Event::WorkerProgress` に残す
+    /// （判断はしない。アダプタが決めた `kind` / `tool` / `summary` / `detail` を写すだけ）。
+    fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
+        let ev = Event::worker_progress_with(self.run_id.clone(), msg, fields.clone());
         if let Err(e) = self.store.append_event(self.task_id, &ev) {
             tracing::warn!(task_id = %self.task_id, error = %e, "failed to record progress");
         }
@@ -704,10 +707,10 @@ struct ReviewerSink {
 
 impl EventSink for ReviewerSink {
     fn progress(&self, msg: &str) {
-        let ev = Event::WorkerProgress {
-            run_id: self.subject_run_id.clone(),
-            msg: format!("reviewer run {}: {msg}", self.review_run_id),
-        };
+        let ev = Event::worker_progress(
+            self.subject_run_id.clone(),
+            format!("reviewer run {}: {msg}", self.review_run_id),
+        );
         if let Err(e) = self.store.append_event(self.task_id, &ev) {
             tracing::warn!(task_id = %self.task_id, error = %e, "failed to record reviewer progress");
         }
@@ -1837,10 +1840,7 @@ impl Dispatcher {
                 // プロバイダを cooldown にする（attempts を消費しない）。
                 self.store.append_event(
                     task_id,
-                    &Event::WorkerProgress {
-                        run_id: run_id.clone(),
-                        msg: format!("{REVIEWER_REQUEUED_PREFIX}{}", pf.message),
-                    },
+                    &Event::worker_progress(run_id.clone(), format!("{REVIEWER_REQUEUED_PREFIX}{}", pf.message)),
                 )?;
                 if let Some(ev) = &reviewer_finished {
                     self.store.append_event(task_id, ev)?;
@@ -1906,10 +1906,10 @@ impl Dispatcher {
                 }
                 self.store.append_event(
                     task_id,
-                    &Event::WorkerProgress {
-                        run_id: run_id.clone(),
-                        msg: format!("waiting for {pending} delegated child task(s) before completing"),
-                    },
+                    &Event::worker_progress(
+                        run_id.clone(),
+                        format!("waiting for {pending} delegated child task(s) before completing"),
+                    ),
                 )?;
                 self.awaiting_children.insert(
                     task_id,
@@ -2135,15 +2135,15 @@ impl Dispatcher {
         // 状態機械と同じ判定（ADR-0021 D1）。ここで分かるのは「やり直せるか」だけ。
         let will_retry = task.attempts < task.budget.max_retries;
         if will_retry {
-            events.push(Event::WorkerProgress {
-                run_id: run_id.to_string(),
-                msg: format!(
+            events.push(Event::worker_progress(
+                run_id,
+                format!(
                     "{} delegated child task(s) failed; retrying this task (attempt {}/{}): {listed}",
                     failed.len(),
                     task.attempts + 1,
                     task.budget.max_retries,
                 ),
-            });
+            ));
         } else {
             let text = format!(
                 "委譲した子タスクが失敗し、やり直し（max_retries = {}）でも解決しませんでした。どうしますか。\n\
@@ -2179,10 +2179,10 @@ impl Dispatcher {
     /// ADR-0016 M1 / M4: `Aggregate`（reviewing → ready、attempts 据え置き）を適用し、次の dispatch を集約 run にする。
     fn schedule_aggregate_run(&mut self, task_id: TaskId, run_id: &str, mut events: Vec<Event>) -> Result<(), DispatchError> {
         let children = self.store.children(task_id)?.len();
-        events.push(Event::WorkerProgress {
-            run_id: run_id.to_string(),
-            msg: format!("all {children} delegated child task(s) finished; scheduling the aggregate run"),
-        });
+        events.push(Event::worker_progress(
+            run_id,
+            format!("all {children} delegated child task(s) finished; scheduling the aggregate run"),
+        ));
         match self.store.apply_transition_with_events(task_id, Trigger::Aggregate, events) {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, next = ?outcome.next, "aggregate run scheduled");
@@ -3838,10 +3838,10 @@ impl Dispatcher {
                         let run_id = last_run_id(&self.store.events_for(id)?).unwrap_or_default();
                         self.store.append_event(
                             id,
-                            &Event::WorkerProgress {
+                            &Event::worker_progress(
                                 run_id,
-                                msg: format!("未コミットの変更が残っています: {}", dirty.join(", ")),
-                            },
+                                format!("未コミットの変更が残っています: {}", dirty.join(", ")),
+                            ),
                         )?;
                     }
                 }
@@ -4549,7 +4549,7 @@ mod tests {
         // 子の `seq`（タスクごとのローカルな連番）が親のどの `seq` よりも大きくなるようにする。
         for i in 0..200u32 {
             store
-                .append_event(child.id, &Event::WorkerProgress { run_id: "child-run".into(), msg: format!("padding {i}") })
+                .append_event(child.id, &Event::worker_progress("child-run", format!("padding {i}")))
                 .unwrap();
         }
         store
@@ -4885,7 +4885,7 @@ mod tests {
         let run_id = last_run_id(&events).unwrap();
         let reviewer_progress = events
             .iter()
-            .filter(|(_, e)| matches!(e, Event::WorkerProgress { run_id: r, msg } if r == &run_id && msg.starts_with("reviewer run ")))
+            .filter(|(_, e)| matches!(e, Event::WorkerProgress { run_id: r, msg, .. } if r == &run_id && msg.starts_with("reviewer run ")))
             .count();
         assert!(reviewer_progress >= 2, "{events:?}");
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: true, reason, .. } if reason.contains("reviewer(") && reason.contains("fine"))));

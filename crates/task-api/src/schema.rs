@@ -135,6 +135,13 @@ pub struct ApiV1Schema {
     pub reopen: ReopenBody,
     /// ADR-0044 D5: `GET /tasks/{id}/timeline`。
     pub timeline: Timeline,
+    // ---- ADR-0048 D1/D2（Phase 60a）: Console の読み取り側 ----
+    /// `GET /console` の応答と、その 1 ブロック（9 種）。
+    pub console: crate::types::ConsolePage,
+    pub console_block: crate::types::ConsoleBlock,
+    /// `GET /console/stream` の最初のフレーム（`event: hello`）。ブロックは `console_block` と同じ形で
+    /// `event: console.block` として流れる。
+    pub console_hello: crate::console::ConsoleHello,
     /// Phase 54（ADR-0043 D5）: 変更の取り込み（差分・merge・PR・衝突タスク）。
     pub changes: crate::types::ChangesView,
     pub change_diff: crate::types::ChangeDiffView,

@@ -33,6 +33,7 @@ use tokio::process::{Child, Command};
 use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
+use crate::progress;
 use crate::protocol::{Answer, RunContext, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
@@ -686,11 +687,11 @@ async fn run_acquire(
     let queries = build_search_queries(&req.task.objective);
     let model = if config.acquire.query_llm { query_llm_model(config).await } else { None };
     match &model {
-        Some(model) => sink.progress(&truncate_chars(
+        Some(model) => progress::emit_status(sink, &truncate_chars(
             &format!("acquiring literature; the search terms are written by {model}"),
             PROGRESS_LINE_MAX_CHARS,
         )),
-        None => sink.progress(&truncate_chars(
+        None => progress::emit_status(sink, &truncate_chars(
             &format!(
                 "acquiring literature for {} search term(s) (deterministic): {}",
                 queries.len(),
@@ -754,7 +755,7 @@ async fn run_acquire(
             // 取得ランナーが起動できないのは設定の誤り（python のパス）だが、ここでは run を止めず
             // 0 件として先に進む（ゲートが「取得が 0 件」として人に返す）。
             warn!("run {run_id}: could not start the literature acquisition runner ({python}): {e}");
-            sink.progress(&truncate_chars(
+            progress::emit_status(sink, &truncate_chars(
                 &format!("literature acquisition could not start ({python}): {e}"),
                 PROGRESS_LINE_MAX_CHARS,
             ));
@@ -773,7 +774,7 @@ async fn run_acquire(
         sink,
         |line| {
             if let Some(rest) = line.strip_prefix(PROGRESS_PREFIX) {
-                sink.progress(&truncate_chars(&format!("acquire: {}", rest.trim()), PROGRESS_LINE_MAX_CHARS));
+                progress::emit_status(sink, &truncate_chars(&format!("acquire: {}", rest.trim()), PROGRESS_LINE_MAX_CHARS));
             } else if let Some(rest) = line.strip_prefix(ACQUIRE_RESULT_PREFIX) {
                 match serde_json::from_str::<serde_json::Value>(rest) {
                     Ok(value) => {
@@ -798,13 +799,13 @@ async fn run_acquire(
     if !streamed.exit.success() {
         let tail = streamed.stderr_tail.lines().next_back().unwrap_or("").to_string();
         warn!("run {run_id}: the literature acquisition runner failed: {tail}");
-        sink.progress(&truncate_chars(
+        progress::emit_status(sink, &truncate_chars(
             &format!("literature acquisition failed: {tail}"),
             PROGRESS_LINE_MAX_CHARS,
         ));
     }
     let counts = counts.unwrap_or_default();
-    sink.progress(&format!(
+    progress::emit_status(sink, &format!(
         "acquire: {} candidate(s), {} PDF(s) in the corpus",
         counts.candidates, counts.pdfs
     ));
@@ -1040,7 +1041,7 @@ async fn run_paperqa(
         sink,
         |line| {
             // PaperQA2 は検索・要約の進捗を出す（ADR-0027 D3 手順 3）。行単位でそのまま progress に写す。
-            sink.progress(&truncate_chars(line, PROGRESS_LINE_MAX_CHARS));
+            progress::emit_status(sink, &truncate_chars(line, PROGRESS_LINE_MAX_CHARS));
         },
     )
     .await?;
@@ -1357,6 +1358,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
+        /// ADR-0048 D2（Phase 60a）: 構造化した進行（このアダプタは `status` だけ）。
+        structured: Mutex<Vec<(String, task_core::ProgressFields)>>,
         heartbeat_count: Mutex<u32>,
         artifacts: Mutex<Vec<ArtifactRef>>,
     }
@@ -1364,6 +1367,13 @@ mod tests {
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
             self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+        }
+        fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
+            self.progress(msg);
+            self.structured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((msg.to_string(), fields.clone()));
         }
         fn artifact(&self, artifact: &ArtifactRef) {
             self.artifacts.lock().unwrap_or_else(|e| e.into_inner()).push(artifact.clone());
@@ -1495,6 +1505,17 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
         assert!(progress.iter().any(|m| m.contains("Searching for relevant papers")));
         assert!(progress.iter().any(|m| m.contains("Gathering evidence")));
         assert!(*sink.heartbeat_count.lock().unwrap() >= 3);
+        // ADR-0048 D2（Phase 60a）: このアダプタが出せる進行は節目（`status`）だけで、
+        // すべての行が構造化されている（`msg` は従来どおり）。
+        let structured = sink.structured.lock().unwrap().clone();
+        assert_eq!(structured.len(), progress.len(), "{structured:#?}");
+        assert!(
+            structured
+                .iter()
+                .all(|(_, f)| f.kind == Some(task_core::ProgressKind::Status)),
+            "{structured:#?}"
+        );
+        assert!(structured.iter().all(|(_, f)| f.summary.is_some()), "{structured:#?}");
 
         // 成果物として申告される（run の一覧と Check::ArtifactExists の解決に使われる）。
         let artifacts = sink.artifacts.lock().unwrap();

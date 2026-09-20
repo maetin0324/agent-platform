@@ -19,6 +19,7 @@ use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 use crate::delegate_file::{clear_delegate_file, forward_delegate_file};
+use crate::progress;
 use crate::protocol::{Answer, Evidence, ProviderFailure, RunContext, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
@@ -838,25 +839,75 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
         sink.rate_limit(obs);
     }
     match ty {
+        // ADR-0048 D2（Phase 60a）: stream-json → 正規化した進行。`msg` の文面は Phase 59 までと同じ
+        // （`tool_use: <名前> <入力>` / 本文そのまま）で、構造化フィールドを**足すだけ**。
+        // 本文（`text`）は 1 つの assistant メッセージ分をまとめて 1 件にする。
         "assistant" => {
             if let Some(content) = value.pointer("/message/content").and_then(|c| c.as_array()) {
+                let mut texts: Vec<&str> = Vec::new();
+                let flush = |texts: &mut Vec<&str>, sink: &dyn EventSink| {
+                    if texts.is_empty() {
+                        return;
+                    }
+                    let joined = texts.join("\n");
+                    texts.clear();
+                    let msg = truncate(&joined, 500);
+                    sink.progress_with(&msg, &progress::text(&joined));
+                };
                 for item in content {
                     match item.get("type").and_then(|t| t.as_str()) {
                         Some("text") => {
                             if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                                sink.progress(&truncate(text, 500));
+                                texts.push(text);
+                            }
+                        }
+                        Some("thinking") => {
+                            flush(&mut texts, sink);
+                            // 思考は**要約だけ**（本文は流さない）。要約が取れなければ何も出さない。
+                            let summary = item
+                                .get("thinking")
+                                .or_else(|| item.get("text"))
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("");
+                            if !summary.trim().is_empty() {
+                                let fields = progress::thinking(&progress::one_line(summary));
+                                let msg = format!("thinking: {}", fields.summary.clone().unwrap_or_default());
+                                sink.progress_with(&msg, &fields);
                             }
                         }
                         Some("tool_use") => {
+                            flush(&mut texts, sink);
                             let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
-                            let input = item
-                                .get("input")
-                                .map(|v| truncate(&v.to_string(), 200))
-                                .unwrap_or_default();
-                            sink.progress(&format!("tool_use: {name} {input}"));
+                            let input = item.get("input");
+                            let shown = input.map(|v| truncate(&v.to_string(), 200)).unwrap_or_default();
+                            sink.progress_with(
+                                &format!("tool_use: {name} {shown}"),
+                                &progress::tool_use(name, input),
+                            );
                         }
                         _ => {}
                     }
+                }
+                flush(&mut texts, sink);
+            }
+        }
+        // 道具の結果は `user` メッセージに `tool_result` として返る（`is_error` が失敗の印）。
+        "user" => {
+            if let Some(content) = value.pointer("/message/content").and_then(|c| c.as_array()) {
+                for item in content {
+                    if item.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                        continue;
+                    }
+                    let body = tool_result_text(item);
+                    let error = item.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let fields = progress::tool_result(None, &body, error);
+                    let head = fields.summary.clone().unwrap_or_default();
+                    let msg = if error {
+                        format!("tool_result (error): {head}")
+                    } else {
+                        format!("tool_result: {head}")
+                    };
+                    sink.progress_with(&msg, &fields);
                 }
             }
         }
@@ -895,6 +946,27 @@ fn truncate(s: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}…", &s[..end])
+}
+
+/// ADR-0048 D2: `tool_result` の本文。Claude Code は文字列の `content` と、`[{"type":"text","text":…}]`
+/// の配列の両方を出す（どちらも読む）。
+fn tool_result_text(item: &serde_json::Value) -> String {
+    let Some(content) = item.get("content") else {
+        return String::new();
+    };
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if let Some(parts) = content.as_array() {
+        let joined: Vec<&str> = parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect();
+        if !joined.is_empty() {
+            return joined.join("\n");
+        }
+    }
+    content.to_string()
 }
 
 /// `result` メッセージと結果ファイルから終端を合成する（ADR-0006 D3/D4, ADR-0010 D5）。呼び出し元は
@@ -968,6 +1040,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
+        /// ADR-0048 D2（Phase 60a）: 構造化した進行（`msg` と一緒に）。
+        structured: Mutex<Vec<(String, task_core::ProgressFields)>>,
         delegated: Mutex<Vec<Vec<DelegateTask>>>,
         rate_limits: Mutex<Vec<RateLimitObservation>>,
     }
@@ -975,6 +1049,13 @@ mod tests {
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
             self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+        }
+        fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
+            self.progress(msg);
+            self.structured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((msg.to_string(), fields.clone()));
         }
         fn artifact(&self, _artifact: &ArtifactRef) {}
         fn delegate(&self, tasks: &[DelegateTask]) {
@@ -1114,6 +1195,67 @@ mod tests {
         let prompt_none = build_prompt(&task, &none_context, "run-review-2", "artifacts");
         assert!(prompt_none.contains("no review context"));
         assert!(prompt_none.contains("artifacts/review.json"));
+    }
+
+    /// ADR-0048 D2（Phase 60a）: stream-json の実物に近い標本（`tests/fixtures/claude-code-stream.jsonl`）を
+    /// 1 行ずつ `handle_line` に通し、`tool_use` / `tool_result` / `text` / `thinking` の写像を確かめる。
+    /// 外部ネットワークには出ない（ファイルを読むだけ）。
+    #[test]
+    fn stream_json_maps_to_structured_progress() {
+        use task_core::ProgressKind;
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/claude-code-stream.jsonl");
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let sink = RecordingSink::default();
+        let mut last_result = None;
+        for line in text.lines() {
+            handle_line(line, &sink, &mut last_result);
+        }
+        let items = sink.structured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let kinds: Vec<Option<ProgressKind>> = items.iter().map(|(_, f)| f.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                Some(ProgressKind::Thinking),
+                Some(ProgressKind::Text),
+                Some(ProgressKind::ToolUse),
+                Some(ProgressKind::ToolResult),
+                Some(ProgressKind::ToolUse),
+                Some(ProgressKind::ToolResult),
+                Some(ProgressKind::ToolUse),
+                Some(ProgressKind::ToolResult),
+                Some(ProgressKind::ToolUse),
+            ],
+            "{items:#?}"
+        );
+
+        // thinking は要約だけ（本文は流さない）。
+        assert_eq!(items[0].1.summary.as_deref(), Some("まず現状のテストを確かめる それから直す"));
+        assert!(items[0].1.detail.is_none());
+        // 1 つの assistant メッセージの本文は 1 件にまとまる。
+        assert_eq!(items[1].1.summary.as_deref(), Some("まずテストを回します。 結果を見てから直します。"));
+        assert_eq!(items[1].0, "まずテストを回します。\n結果を見てから直します。");
+        // Bash は入力のコマンドが 1 行要約、`detail` は入力そのもの。
+        assert_eq!(items[2].1.tool.as_deref(), Some("Bash"));
+        assert_eq!(items[2].1.summary.as_deref(), Some("cargo test --workspace"));
+        assert!(items[2].1.detail.as_deref().unwrap_or("").contains("run the tests"));
+        assert!(items[2].0.starts_with("tool_use: Bash"), "{}", items[2].0);
+        // tool_result は先頭 200 文字の要約と失敗の印。
+        assert_eq!(items[3].1.summary.as_deref(), Some("test result: ok. 812 passed; 0 failed"));
+        assert!(!items[3].1.error);
+        // Read はパス、Grep は模様。配列の `content` も読める。
+        assert_eq!(items[4].1.summary.as_deref(), Some("/repo/crates/task-api/src/console.rs"));
+        assert_eq!(items[5].1.summary.as_deref(), Some("//! Console の読み取り側"));
+        assert_eq!(items[6].1.summary.as_deref(), Some("fn console"));
+        // `is_error` は `error` に写る。
+        assert!(items[7].1.error, "{:?}", items[7]);
+        assert_eq!(items[7].1.summary.as_deref(), Some("No files found"));
+        assert!(items[7].0.contains("(error)"));
+        // 知らない道具は入力そのものの先頭（120 文字）。
+        assert_eq!(items[8].1.tool.as_deref(), Some("WebFetch"));
+        assert!(items[8].1.summary.as_deref().unwrap_or("").contains("example.invalid"));
+        // `result` は進行ではない（終端の合成に使う）。
+        assert!(last_result.is_some());
     }
 
     #[tokio::test]

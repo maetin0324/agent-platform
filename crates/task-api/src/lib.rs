@@ -22,6 +22,8 @@ mod admin;
 mod approvals;
 /// ADR-0043 D5（Phase 54）: 変更の取り込み（差分・merge・PR・衝突タスク）。
 pub mod changes;
+/// ADR-0048 D1（Phase 60a）: Console の読み取り側（一本の流れと SSE）。
+pub mod console;
 pub mod conversation;
 /// ADR-0044 D7（Phase 57）: 案件の文書（git が正本）。ツリー・ページ・編集・昇格。
 pub mod docs;
@@ -84,6 +86,9 @@ pub use types::{RepoCreateBody, RepoList, RepoPatchBody, TreeEntry, TreeFileView
 pub use docs::{
     ArtifactPromoteBody, DocItem, DocPage, DocPagePutBody, DocPageResult, DocsInitResult, DocsTree, MAX_TREE_PAGES,
 };
+// ---- ADR-0048 D1/D2（Phase 60a）: Console ----
+pub use console::{ConsoleHello, EVENT_WINDOW as CONSOLE_EVENT_WINDOW, MAX_LIMIT as CONSOLE_MAX_LIMIT};
+pub use types::{ConsoleBlock, ConsolePage};
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use types::{
     ChangeDiffView, ChangesView, IntegrateBody, IntegrateResult, ProjectIntegrationItem, ProjectIntegrations,

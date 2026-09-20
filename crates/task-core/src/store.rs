@@ -642,6 +642,21 @@ pub trait TaskStore:
         limit: usize,
     ) -> Result<Vec<Message>, StoreError>;
 
+    /// ADR-0048 D1（Phase 60a）: Console の一本の流れ用。`message_list` と違い **絞り込みは任意**で、
+    /// `node_id` / `project_id` が `None` なら「その軸では絞らない」（`message_list` の `project_id: None`
+    /// は「案件に紐づかない行だけ」なので意味が違う）。
+    ///
+    /// `after` は RFC 3339 の `created_at`。`Some` なら **その時刻以降（`>=`、閉区間）を古い順**に最大
+    /// `limit` 件（同じ時刻に複数行あっても取りこぼさないため閉区間。呼び出し側がカーソルで重複を落とす）。
+    /// `None` なら **いちばん新しい `limit` 件**を古い順に返す（Console の初期表示）。
+    fn message_page(
+        &self,
+        node_id: Option<&str>,
+        project_id: Option<ProjectId>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Message>, StoreError>;
+
     // ---- Phase 31: 失敗した仕事をやり直す（実機の事故、2026-09-18）----
 
     /// `original` は `failed` または `cancelled` でなければ `StoreError::InvalidTransition`（`trigger = "retry"`）。
@@ -3097,6 +3112,48 @@ impl TaskStore for SqliteStore {
         Ok(out)
     }
 
+    /// ADR-0048 D1（Phase 60a）: Console の一本の流れ用（絞り込みは任意、`after` は閉区間）。
+    fn message_page(
+        &self,
+        node_id: Option<&str>,
+        project_id: Option<ProjectId>,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Message>, StoreError> {
+        let conn = self.lock()?;
+        let mut where_sql = String::from("1 = 1");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(node_id) = node_id {
+            where_sql.push_str(" AND node_id = ?");
+            args.push(Box::new(node_id.to_string()));
+        }
+        if let Some(project_id) = project_id {
+            where_sql.push_str(" AND project_id = ?");
+            args.push(Box::new(project_id.to_string()));
+        }
+        if let Some(after) = after {
+            where_sql.push_str(" AND created_at >= ?");
+            args.push(Box::new(after.to_string()));
+        }
+        // `after` 有り = 古い順にその先から、無し = 新しい順に `limit` 件取って戻す。
+        let order = if after.is_some() { "ASC" } else { "DESC" };
+        let sql = format!(
+            "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id FROM messages \
+             WHERE {where_sql} ORDER BY created_at {order}, id {order} LIMIT ?"
+        );
+        args.push(Box::new(limit as i64));
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(args.iter().map(|a| a.as_ref())), Self::message_row)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row??);
+        }
+        if after.is_none() {
+            out.reverse();
+        }
+        Ok(out)
+    }
+
     // ---- ADR-0040 D4（Phase 47）: `daemon_instances` ----
 
     // ---- ADR-0044 D1/D2（Phase 53）----
@@ -3754,7 +3811,7 @@ mod tests {
         assert!(store.acquire_lease(task.id, "run-1", StdDuration::from_secs(60)).unwrap());
         let extras = vec![
             Event::WorkerFinished { run_id: "run-1".into(), outcome: "done: x".into(), usage: None, role: None },
-            Event::WorkerProgress { run_id: "run-1".into(), msg: "extra".into() },
+            Event::worker_progress("run-1", "extra"),
         ];
         let outcome = store.apply_transition_with_events(task.id, Trigger::WorkerDone, extras).unwrap();
         assert_eq!(outcome.next, Status::Reviewing);
@@ -4211,7 +4268,7 @@ mod tests {
             expected_b.push((1, ev));
             expected_global.push((b.id, 1));
 
-            let ev = Event::WorkerProgress { run_id: "r".into(), msg: "go".into() };
+            let ev = Event::worker_progress("r", "go");
             insert_legacy_event(&conn, a.id, 2, &ev);
             expected_a.push((2, ev));
             expected_global.push((a.id, 2));
@@ -4462,7 +4519,7 @@ mod tests {
         store.append_event(a.id, &Event::ApprovalRequested).unwrap();
         store.append_event(b.id, &Event::ApprovalRequested).unwrap();
         store
-            .append_event(a.id, &Event::WorkerProgress { run_id: "r".into(), msg: "x".into() })
+            .append_event(a.id, &Event::worker_progress("r", "x"))
             .unwrap();
 
         let all = store.events_since(0, 100).unwrap();

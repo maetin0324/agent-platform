@@ -219,7 +219,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 
 ---
 
-## 2. エンドポイント一覧（86）
+## 2. エンドポイント一覧（89）
 
 | # | メソッド | パス | 目的 | 応答型 | 出所 |
 |---|---|---|---|---|---|
@@ -309,6 +309,9 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 84 | PUT | `/projects/{id}/docs/page` | ページを既定のブランチに直接コミットする（**管理系**） | 200 `DocPageResult` | 一時 worktree + `git commit` |
 | 85 | DELETE | `/projects/{id}/docs/page` | ページを消す（**管理系**） | 200 `DocPageResult` | 一時 worktree + `git commit` |
 | 86 | POST | `/tasks/{id}/artifacts/promote` | 成果物をページに昇格する（**管理系**） | 200 `DocPageResult` | 成果物 + 一時 worktree |
+| 87 | GET | `/console` | 全案件の流れ（正規化したブロック、時刻順、カーソル付き。ADR-0048 D1、Phase 60a） | `ConsolePage` | events + messages + approvals + milestones + reports |
+| 88 | GET | `/console/stream` | 同じブロックを SSE で流す（`event: console.block`） | SSE | 同上 |
+| 89 | GET | `/tasks/{id}/runs/{run_id}/events` | その run のイベントだけ（折り畳んだ進行を開いたとき） | `EventsPage` | store `event_rows_for` |
 
 ---
 
@@ -511,6 +514,11 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | `after_seq` | −1 | この `seq` より大きいものから |
 | `limit` | 500（最大 5000） | |
 | `types` | 全て | `Event` の `type` 名をカンマ区切り（例 `transitioned,worker_finished`）。未知の名前は 400 |
+
+`worker_progress` は `{run_id, msg}` に加えて、ADR-0048 D2（Phase 60a）の
+`kind`（`tool_use` / `tool_result` / `text` / `thinking` / `status`）/ `tool` / `summary` / `detail`（4 KiB まで）/
+`truncated` / `error` を**あれば**持つ（**追加のみ**。付けないワーカー・導入前のイベントには無い）。
+Console（§3.98）はこの形だけを見る。
 
 `types` の語彙（`Event` の `type`、15 種）: `created`、`transitioned`、`worker_started`、`worker_progress`、`artifact_produced`、
 `worker_finished`、`review_verdict`、`approval_requested`、`approval_decided`、`answered`、`provider_throttled`、
@@ -2079,6 +2087,86 @@ fast-forward** する（ADR-0043 D5 の `merge` と同じやり方）。author /
 - コミットの規則（一時 worktree・fast-forward・`default_branch_busy`）は §3.95 と同じ
 - 昇格したページはそのタスクの `GET /tasks/{id}/timeline` に `kind = "doc"` として出る（逆リンク）
 
+### 3.98〜3.100 Console（ADR-0048 D1/D2、Phase 60a。**87〜89。すべて読み取り**）
+
+Console は「全案件の流れが一本で見える画面」。celeris は**正規化したブロック**だけを返し、GUI は
+イベントの種類やアダプタごとの差を知らない。**読み取りだけ**で状態は変えない（入力 `POST /console/instruct`
+は ADR-0048 D3 = Phase 60b）。
+
+#### 3.98 `GET /console?scope=&since=&limit=` → 200 `ConsolePage`
+
+| クエリ | 既定 | 説明 |
+|---|---|---|
+| `scope` | `all` | `all` / `project:<ULID>` / `node:<org ノード id>`。形が違えば 400 |
+| `since` | – | 前回の `next_cursor`（**不透明な文字列**。GUI は中身を解釈しない）。形が違えば 400 |
+| `limit` | 100 | 1〜**200**（超えたら 200 に丸める。0 は 400） |
+
+- `items` は**時刻の昇順**（新しいものが最後。GUI は下に足す）。
+- `since` **無し**は「いちばん新しい `limit` 件」、`since` **有り**は「そのカーソルより後の `limit` 件」。
+  同じブロックを 2 回返さない。
+- `next_cursor` は最後のブロックの位置。1 件も無ければ渡した `since` をそのまま返す（増分取得に使える）。
+- 引きはすべて上限付き（`events` は 1 回 4,000 件の窓、対話・認可・報告は `limit × 4`（最大 800））。
+  窓より古いものは `GET /tasks/{id}/events` や `GET /reports` で見る。
+
+ブロックは `kind` で 9 種（ADR-0048 D1 の 8 種 + 予約の `knowledge`）。どれも `at`（RFC 3339）と
+`cursor` を持つ:
+
+| `kind` | 中身 | 由来 |
+|---|---|---|
+| `human` | 人の発言（`text` / `node_id` / `project_id` / `task_id`） | `messages`（`role = user`） |
+| `reply` | CoS・部署ノードの返事（Markdown。`run_id` 付き） | `messages`（`role = node`） |
+| `task` | 開始・終了・失敗・中止・割り込みの 1 行（`task`: `from` / `to` / `reason` / `assignee` / `harness` / `tier` / `mode` / `elapsed_secs`） | `Event::Transitioned` |
+| `progress` | run ごとに束ねたワーカーの進行。`progress`: `run_id` / `count` / `tool_count` / `last_status` / `started_at` / `updated_at` / `first[]` / `last[]` / `truncated`。見出し用に `title` / `assignee` / `harness` / `tier` | `Event::WorkerProgress`（ADR-0048 D2 の正規化） |
+| `question` | ディスパッチャの質問（`text` / `answered` / `answer` / `run_id`） | `Event::QuestionRaised` + `Event::Answered` |
+| `approval` | 認可 1 件（`Approval` をそのまま。`decision` / `answer` / `decided_at` 付き） | `approvals` |
+| `milestone` | 途中目標の提案（`proposed` のものだけ）と秘書のレビューの返事 | `milestones` + `messages` |
+| `report` | 報告（見出しと本文） | `reports` |
+| `knowledge` | **予約**。Phase 60a では誰も作らない（ADR-0047 側が埋める） | – |
+
+範囲の効き方:
+
+- `project:<id>`: そのタスク（`tasks.project_id`）・その案件についての対話（`messages.project_id`）・
+  報告（`reports.project_id`）・その案件の途中目標。
+- `node:<id>`: そのノードが担当のタスク（`tasks.assignee`）・そのノードとの対話（`messages.node_id`）・
+  そのノードの報告（`reports.node_id`）。**途中目標は出ない**（途中目標は案件のもの）。
+- 同じ質問が `approvals` にもあるときは **`approval` の側だけ**出す（同じことを 2 回出さない）。
+
+`progress` の `first[]` / `last[]` は折り畳みの見出し用に**始めの 3 行と終わりの 3 行**だけ
+（`truncated = true` なら間が省かれている）。全行は §3.100 で取る。1 行は
+`{at, seq, kind?, tool?, text, error?}` で、`text` は `summary` があればそれ、無ければ `msg`。
+
+#### 3.99 `GET /console/stream?scope=&since=`
+
+`GET /stream` と同じ枠組み（認証・同時接続数 16・`heartbeat`・停止で閉じる）。`scope` は §3.98 と同じ。
+
+```
+event: hello
+data: {"cursor":"00001789…000.12345.e12345","scope":"all","now":"…"}
+
+event: console.block
+data: {…§3.98 のブロック 1 件…}
+
+event: heartbeat
+data: {"now":"…"}
+```
+
+- `since` を渡さなければ**「今」から**（履歴は §3.98 で取る）。
+- `progress` は **run ごとに 1 秒に 1 回まで**にまとめて流す（1 回の道具呼び出しごとにフレームが飛ばない）。
+  流れてくる `progress` ブロックは**その run の積み上げ**（`count` / `tool_count` はその接続で見た合計）。
+- `task` / `human` / `reply` / `question` / `approval` / `milestone` / `report` はまとめずにそのまま流す
+  （対話・認可・報告は 1 秒ごとに見に行く）。
+- `Last-Event-ID` は使わない（`id:` を付けない。再開は `since` で行う）。
+
+#### 3.100 `GET /tasks/{id}/runs/{run_id}/events?after_seq=&limit=` → 200 `EventsPage`
+
+折り畳んだ `progress` を開いたときに取る、その run の**全行**。`GET /tasks/{id}/events` の run 絞り込み版で、
+`run_id` を持つイベント（`worker_started` / `worker_progress` / `artifact_produced` / `worker_finished` /
+`review_verdict` / `question_raised` / `delegated`）だけを `seq` 昇順で返す（遷移は run に紐づかないので入らない）。
+`limit` は既定 500・最大 5,000。知らないタスクは 404 `task_not_found`。
+
+`worker_progress` の行には ADR-0048 D2 の `kind` / `tool` / `summary` / `detail` / `truncated` / `error` が
+**あれば**入っている（付けないワーカー・導入前のイベントには無い）。
+
 ---
 
 ## 4. SSE `GET /stream`
@@ -2687,6 +2775,51 @@ pub struct ApiV1Schema {
     pub project_list: ProjectList, pub project_create: ProjectCreateBody, pub project_patch: ProjectPatchBody,
     pub project_detail: ProjectDetail, pub milestone_create: MilestoneCreateBody, pub milestone_patch: MilestonePatchBody,
     pub message_post: MessagePostBody, pub message_accepted: MessageAccepted, pub message_list: MessageList, /* Phase 24, ADR-0033 D4 */
+    pub console: ConsolePage, pub console_block: ConsoleBlock, pub console_hello: ConsoleHello, /* Phase 60a, ADR-0048 D1 */
+}
+
+// ---- ADR-0048 D1（Phase 60a）: Console ----
+
+/// `GET /console`。`items` は時刻の昇順。
+pub struct ConsolePage { pub items: Vec<ConsoleBlock>, pub next_cursor: Option<String> }
+
+/// `GET /console/stream` の `event: hello`。
+pub struct ConsoleHello { pub cursor: String, pub scope: String, pub now: String }
+
+/// 9 種のブロック（`#[serde(tag = "kind", rename_all = "snake_case")]`）。どれも `at`（RFC 3339）と `cursor` を持つ。
+pub enum ConsoleBlock {
+    Human { at: String, cursor: String, message_id: String, node_id: String, project_id: Option<ProjectId>, task_id: Option<TaskId>, text: String },
+    Reply { at: String, cursor: String, message_id: String, node_id: String, project_id: Option<ProjectId>, task_id: Option<TaskId>, run_id: Option<String>, text: String },
+    Task { at: String, cursor: String, task: ConsoleTaskLine },
+    Progress { at: String, cursor: String, progress: ConsoleProgress, title: String, assignee: Option<String>, harness: Option<String>, tier: Tier, project_id: Option<ProjectId> },
+    Question { at: String, cursor: String, task_id: TaskId, run_id: String, node_id: Option<String>, project_id: Option<ProjectId>, text: String, answered: bool, answer: Option<String> },
+    Approval { at: String, cursor: String, approval: Approval },
+    Milestone { at: String, cursor: String, milestone: Milestone, review: Option<MilestoneReviewView> },
+    Report { at: String, cursor: String, report: Report },
+    /// 予約（Phase 60a では誰も作らない。ADR-0047）。
+    Knowledge { at: String, cursor: String, project_id: Option<ProjectId>, entry_id: String, title: String, state: String },
+}
+
+/// `task` ブロックの 1 行（`task_ops::console`）。
+pub struct ConsoleTaskLine {
+    pub task_id: TaskId, pub title: String, pub from: Status, pub to: Status, pub reason: String,
+    pub assignee: Option<String>, pub harness: Option<String>, pub tier: Tier, pub mode: Option<String>,
+    pub project_id: Option<ProjectId>, pub elapsed_secs: Option<u64>,
+}
+
+/// run ごとに束ねた進行（`task_ops::console`）。`first` / `last` は始めと終わりの 3 行まで。
+pub struct ConsoleProgress {
+    pub task_id: TaskId, pub run_id: String, pub count: usize, pub tool_count: usize,
+    pub last_status: Option<String>, pub started_at: String, pub updated_at: String,
+    pub first: Vec<ConsoleProgressLine>, pub last: Vec<ConsoleProgressLine>, pub truncated: bool,
+}
+
+pub struct ConsoleProgressLine {
+    pub at: String, pub seq: u64,
+    /// `tool_use` / `tool_result` / `text` / `thinking` / `status`（ADR-0048 D2）。
+    pub kind: Option<ProgressKind>, pub tool: Option<String>,
+    /// `summary` があればそれ、無ければ `msg`。
+    pub text: String, pub error: bool,
 }
 ```
 

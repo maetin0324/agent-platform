@@ -17,12 +17,15 @@ impl FakeAdapter {
     pub const ID: &'static str = "fake";
 
     /// 既定: `progress` 1 行と `done{evidence:[]}` を返す `sh` スクリプト。
+    ///
+    /// ADR-0048 D2（Phase 60a）: `progress` は `kind = "status"`（節目）を名乗る。`fake` は
+    /// 道具も発話も持たないので、正規化できるのは節目だけである。`msg` は従来どおり `fake worker`。
     pub fn default_command() -> Vec<String> {
         vec![
             "sh".into(),
             "-c".into(),
             "cat >/dev/null; \
-             echo '{\"type\":\"progress\",\"msg\":\"fake worker\"}'; \
+             echo '{\"type\":\"progress\",\"msg\":\"fake worker\",\"kind\":\"status\",\"summary\":\"fake worker\"}'; \
              echo '{\"type\":\"done\",\"summary\":\"fake\",\"evidence\":[]}'"
                 .into(),
         ]

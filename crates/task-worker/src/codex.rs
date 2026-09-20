@@ -21,6 +21,7 @@ use tracing::warn;
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 use crate::claude_code::build_prompt;
 use crate::delegate_file::{clear_delegate_file, forward_delegate_file};
+use crate::progress;
 use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
@@ -350,7 +351,10 @@ fn handle_line(
         sink.rate_limit(obs);
     }
     if ty.starts_with("item.") {
-        sink.progress(&truncate(line, 500));
+        // ADR-0048 D2（Phase 60a）: codex の `item.*` を正規化する。`msg` は従来どおり行そのもの
+        // （500 バイトで切る）で、構造化フィールドを**足すだけ**。
+        let fields = item_progress(ty, value.get("item"));
+        sink.progress_with(&truncate(line, 500), &fields);
         return;
     }
     match ty {
@@ -373,6 +377,70 @@ fn handle_line(
             *last_signal = Some(TurnSignal::Failed { message });
         }
         _ => {}
+    }
+}
+
+/// ADR-0048 D2（Phase 60a）: codex の `item.*` イベント → 正規化した進行（ここだけがアダプタ固有）。
+///
+/// - 道具（`command_execution` / `mcp_tool_call` / `web_search` / `file_change` / `patch_apply`）は
+///   `item.started` / `item.updated` が `tool_use`、`item.completed` が `tool_result`
+///   （`exit_code != 0` は `error`）。
+/// - `agent_message` は `text`、`reasoning` は `thinking`（要約だけ）。
+/// - それ以外（`todo_list` や知らない item）は `status`（節目）。
+fn item_progress(ty: &str, item: Option<&serde_json::Value>) -> task_core::ProgressFields {
+    let Some(item) = item else {
+        return progress::status();
+    };
+    // 実機（codex-cli 0.154）は `type`、古い版・別実装は `item_type` を使う。
+    let item_type = item
+        .get("type")
+        .or_else(|| item.get("item_type"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+    let completed = ty == "item.completed";
+    match item_type {
+        "agent_message" => {
+            let text = item.get("text").and_then(|t| t.as_str()).unwrap_or("");
+            progress::text(&progress::one_line(text))
+        }
+        "reasoning" => {
+            let text = item
+                .get("summary")
+                .or_else(|| item.get("text"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            progress::thinking(&progress::one_line(text))
+        }
+        "command_execution" | "mcp_tool_call" | "web_search" | "file_change" | "patch_apply" => {
+            if completed {
+                let body = item
+                    .get("aggregated_output")
+                    .or_else(|| item.get("output"))
+                    .and_then(|o| o.as_str())
+                    .unwrap_or("");
+                let error = item.get("exit_code").and_then(|c| c.as_i64()).is_some_and(|c| c != 0)
+                    || item.get("status").and_then(|s| s.as_str()) == Some("failed");
+                progress::tool_result(Some(item_type), body, error)
+            } else {
+                let summary = item
+                    .get("command")
+                    .or_else(|| item.get("query"))
+                    .or_else(|| item.get("path"))
+                    .or_else(|| item.get("tool"))
+                    .and_then(|v| v.as_str())
+                    .map(progress::one_line)
+                    .unwrap_or_else(|| progress::one_line(&item.to_string()));
+                task_core::ProgressFields::of(task_core::ProgressKind::ToolUse)
+                    .with_tool(item_type)
+                    .with_summary(progress::truncate_chars(&summary, progress::SUMMARY_MAX_CHARS))
+                    .with_detail(item.to_string())
+            }
+        }
+        // 知らない item は節目として残す（Console は折り畳んだ見出しに最後の `status` を出す）。
+        other => {
+            let summary = if other.is_empty() { ty.to_string() } else { format!("{ty} {other}") };
+            progress::status().with_summary(summary)
+        }
     }
 }
 
@@ -453,6 +521,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink {
         progress: Mutex<Vec<String>>,
+        /// ADR-0048 D2（Phase 60a）: 構造化した進行（`msg` と一緒に）。
+        structured: Mutex<Vec<(String, task_core::ProgressFields)>>,
         delegated: Mutex<Vec<Vec<DelegateTask>>>,
         rate_limits: Mutex<Vec<task_core::RateLimitObservation>>,
     }
@@ -460,6 +530,13 @@ mod tests {
     impl EventSink for RecordingSink {
         fn progress(&self, msg: &str) {
             self.progress.lock().unwrap_or_else(|e| e.into_inner()).push(msg.to_string());
+        }
+        fn progress_with(&self, msg: &str, fields: &task_core::ProgressFields) {
+            self.progress(msg);
+            self.structured
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((msg.to_string(), fields.clone()));
         }
         fn artifact(&self, _artifact: &ArtifactRef) {}
         fn delegate(&self, tasks: &[DelegateTask]) {
@@ -497,6 +574,50 @@ mod tests {
             idle_timeout: Duration::from_secs(30),
             kill_grace: Duration::from_millis(200),
         }
+    }
+
+    /// ADR-0048 D2（Phase 60a）: codex の `item.*` の標本（`tests/fixtures/codex-stream.jsonl`）を
+    /// `handle_line` に通し、`tool_use` / `tool_result` / `text` / `thinking`、それ以外は `status` に
+    /// なることを確かめる。`msg` は従来どおり行そのもの（500 バイトで切る）。
+    #[test]
+    fn json_events_map_to_structured_progress() {
+        use task_core::ProgressKind;
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-stream.jsonl");
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let sink = RecordingSink::default();
+        let (mut signal, mut error) = (None, None);
+        for line in text.lines() {
+            handle_line(line, &sink, &mut signal, &mut error);
+        }
+        let items = sink.structured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let kinds: Vec<Option<ProgressKind>> = items.iter().map(|(_, f)| f.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                Some(ProgressKind::Thinking),
+                Some(ProgressKind::ToolUse),
+                Some(ProgressKind::ToolResult),
+                Some(ProgressKind::ToolResult),
+                Some(ProgressKind::Text),
+                Some(ProgressKind::Status),
+            ],
+            "{items:#?}"
+        );
+        assert_eq!(items[0].1.summary.as_deref(), Some("テストを回して確かめる"));
+        assert_eq!(items[1].1.tool.as_deref(), Some("command_execution"));
+        assert_eq!(items[1].1.summary.as_deref(), Some("cargo test --workspace"));
+        assert_eq!(items[2].1.summary.as_deref(), Some("test result: ok. 812 passed"));
+        assert!(!items[2].1.error);
+        // `exit_code != 0` は失敗の印。
+        assert!(items[3].1.error, "{:?}", items[3]);
+        assert_eq!(items[4].1.summary.as_deref(), Some("テストは通りました。"));
+        // 知らない item（`todo_list`）は節目として残る。
+        assert_eq!(items[5].1.summary.as_deref(), Some("item.completed todo_list"));
+        // `msg` は従来どおり行そのもの。
+        assert!(items[1].0.contains("command_execution"), "{}", items[1].0);
+        assert!(matches!(signal, Some(TurnSignal::Completed { .. })));
+        assert!(error.is_none());
     }
 
     #[tokio::test]
