@@ -138,6 +138,11 @@ pub struct Config {
     /// ADR-0043 D3（Phase 56）: コンテナ実行（runtime・既定のイメージ・ビルドの置き場）。
     #[serde(default)]
     pub containers: ContainersConfig,
+    // ---- ADR-0047（Phase 61）: 知識ベース。ここから ----
+    /// ADR-0047 D1: `[knowledge]`。正本の置き場と、実効 profile が何も言わないときの既定のマウント。
+    #[serde(default)]
+    pub knowledge: KnowledgeConfig,
+    // ---- ADR-0047（Phase 61）: ここまで ----
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -336,6 +341,64 @@ pub struct MemoryConfig {
 fn default_memory_dir() -> PathBuf {
     PathBuf::from("~/.local/celeris/memory")
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0047（Phase 61）: `[knowledge]`。ここから
+// ---------------------------------------------------------------------------
+
+/// `[knowledge]`（ADR-0047 D1 / D2）: 知識ベースの正本の置き場と、既定のマウント。
+///
+/// ```toml
+/// [knowledge]
+/// root = "~/knowledge"
+/// default_mounts = ["kb:user", "kb:environment"]
+/// ```
+///
+/// **celeris はこのディレクトリを勝手に作らない**（用意するのは `celerisctl knowledge init` だけ）。
+/// 無ければ `GET /knowledge/tree` は `initialized: false` を返し、前置きの索引は空になる。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KnowledgeConfig {
+    /// ADR-0047 D1: 既定は `~/knowledge`。相対なら設定ファイル基準。`Config::load` が絶対化する。
+    #[serde(default = "default_knowledge_root")]
+    pub root: PathBuf,
+    /// ADR-0047 D2: 実効 profile（ADR-0046 D1）の `knowledge` に何も無いときに全ノードが継ぐマウント。
+    /// 書き方は `kb:<scope>` / `repo:<name>[:<docs>]` / `dir:<path>` / `memory[:<node>]`。
+    #[serde(default = "default_knowledge_mounts")]
+    pub default_mounts: Vec<String>,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            root: default_knowledge_root(),
+            default_mounts: default_knowledge_mounts(),
+        }
+    }
+}
+
+impl KnowledgeConfig {
+    /// `default_mounts` を [`task_core::KnowledgeMount`] にする（綴り間違いは `validate()` が弾く）。
+    pub fn mounts(&self) -> Result<Vec<task_core::KnowledgeMount>, String> {
+        self.default_mounts
+            .iter()
+            .map(|m| m.parse::<task_core::KnowledgeMount>())
+            .collect()
+    }
+}
+
+fn default_knowledge_root() -> PathBuf {
+    PathBuf::from(task_core::knowledge::DEFAULT_ROOT)
+}
+
+/// ADR-0046 D7 の木が `knowledge` を書くまでの既定（人のことと環境は誰でも読む）。
+fn default_knowledge_mounts() -> Vec<String> {
+    vec!["kb:user".to_string(), "kb:environment".to_string()]
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0047（Phase 61）: `[knowledge]`。ここまで
+// ---------------------------------------------------------------------------
 
 /// `[secrets]`（ADR-0030 D1）: 1 秘密 = 1 ファイル（ファイル名 = id、中身 = 値 1 行）。`dir` を 0700 で作る。
 #[derive(Debug, Clone, Deserialize)]
@@ -1266,6 +1329,11 @@ impl Config {
                 memory.dir = base.join(&memory.dir);
             }
         }
+        // ADR-0047 D1（Phase 61）: `[knowledge] root` も同じ扱い（既定の `~/knowledge` もここで絶対パスになる）。
+        cfg.knowledge.root = task_core::expand_home(&cfg.knowledge.root, task_core::home_dir().as_deref());
+        if cfg.knowledge.root.is_relative() {
+            cfg.knowledge.root = base.join(&cfg.knowledge.root);
+        }
         // ADR-0040 D6 / ADR-0045 D2: `[selfdeploy] releases_dir` も同じ扱い
         // （既定の `~/.local/celeris/releases` もここで絶対パスになる）。
         cfg.selfdeploy.releases_dir =
@@ -1370,6 +1438,10 @@ impl Config {
         }
         if self.github.gh.trim().is_empty() {
             return Err(ConfigError::Invalid("[github] gh must not be blank".into()));
+        }
+        // ADR-0047 D2（Phase 61）: `[knowledge] default_mounts` の綴り（間違いで黙って無視しない）。
+        if let Err(why) = self.knowledge.mounts() {
+            return Err(ConfigError::Invalid(format!("[knowledge] default_mounts: {why}")));
         }
         // ADR-0043 D3: runtime は 3 つだけ（綴り間違いで黙ってホスト実行に倒れないように）。
         if task_worker::RuntimePreference::parse(&self.containers.runtime).is_none() {
@@ -1866,6 +1938,11 @@ impl Config {
             }),
             // ADR-0033 D6: `[memory]` が無ければ記憶を読まないし書かない。
             memory_dir: self.memory.as_ref().map(|m| m.dir.clone()),
+            // ADR-0047 D2（Phase 61）: 知識ベースの根と既定のマウント（前置きの索引を組むのに使う）。
+            knowledge: task_dispatch::KnowledgeRuntimeConfig {
+                root: self.knowledge.root.clone(),
+                default_mounts: self.knowledge.mounts().unwrap_or_default(),
+            },
             // ADR-0041 D1 / ADR-0042 D3: ローカルの worktree（既定 `celeris/`）。
             worktree_branch_prefix: self.workspace.worktree_branch_prefix.clone(),
             releases_dir: Some(self.selfdeploy.releases_dir.clone()),
@@ -2259,7 +2336,9 @@ genre = {}
 mod tests {
     use super::*;
 
-    /// `config/org.example.toml` が指す分野（`coding` / `literature` / `web-research`）を持つ最小の設定。
+    /// ADR-0046 D3（Phase 59）: `config/org.example.toml` の `genre` が指す全ての harness を、
+    /// 互換の `[[genres]]`（`conversation` / `coding` / `literature` / `web-research` / `data-analysis` /
+    /// `writing`）として定義する（`config/celeris.example.toml` の `[[harnesses]]` の互換の射影と同じ集合）。
     const ORG_TEST_GENRES: &str = r#"
 [[providers]]
 id = "x"
@@ -2272,13 +2351,13 @@ id = "implementer"
 id = "literature-reader"
 
 [[roles]]
-id = "secretary"
+id = "cos-role"
 
 [[genres]]
-id = "secretary"
+id = "conversation"
 description = "人と話す"
-default_role = "secretary"
-roles = ["secretary"]
+default_role = "cos-role"
+roles = ["cos-role"]
 
 [[genres]]
 id = "coding"
@@ -2300,13 +2379,35 @@ id = "web-research"
 description = "一般 Web の調査"
 default_role = "web-researcher"
 roles = ["web-researcher"]
+
+[[roles]]
+id = "data-analyst"
+
+[[genres]]
+id = "data-analysis"
+description = "データを整える"
+default_role = "data-analyst"
+roles = ["data-analyst"]
+
+[[roles]]
+id = "writer"
+
+[[genres]]
+id = "writing"
+description = "書く"
+default_role = "writer"
+roles = ["writer"]
+
+[conversation]
+genre = "conversation"
 "#;
 
     // ---- ADR-0033 D1（Phase 23）: 組織図の種 ----
 
-    /// 例の設定（`config/org.example.toml`）が読め、SPEC §3.2 の組織図（11 ノード。2026-09-18 に
-    /// 研究部が「研究文献調査課」と「Web 調査課」に分かれて 1 つ増えた）になる。
-    /// `genre` は実在する分野 id（`coding` / `literature` / `web-research`）だけを指す。
+    /// 例の設定（`config/org.example.toml`）が読め、ADR-0046 D7 の組織図（13 ノード。cos を根に
+    /// Engineering / Research / Operations の 3 部、それぞれの下に課）になる。`genre` は実在する
+    /// harness id（`conversation` / `coding` / `literature` / `web-research` / `data-analysis` /
+    /// `writing`）だけを指す。
     #[test]
     fn loads_the_org_example_and_maps_it_to_org_nodes() {
         let dir = tempfile::tempdir().unwrap();
@@ -2323,38 +2424,41 @@ roles = ["web-researcher"]
         assert_eq!(
             ids,
             vec![
-                "secretary",
-                "coding",
-                "coding-frontend",
-                "coding-performance",
-                "coding-poc",
+                "cos",
+                "engineering",
+                "software-engineering",
+                "systems-performance",
                 "research",
-                "research-survey",
-                "research-web",
-                "research-writing",
-                "research-data",
-                "infra",
+                "literature-research",
+                "web-research",
+                "experiment-data",
+                "scientific-writing",
+                "operations",
+                "cluster-hpc",
+                "infrastructure",
+                "monitoring-automation",
             ]
         );
         let nodes = cfg.org_nodes(time::OffsetDateTime::now_utc());
-        assert_eq!(nodes.len(), 11);
-        // 親が子より先に来る（secretary → 部 → 課）。
+        assert_eq!(nodes.len(), 13);
+        // 親が子より先に来る（cos → 部 → 課）。
         let order: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
-        assert_eq!(order[0], "secretary");
-        assert!(order.iter().position(|id| *id == "coding") < order.iter().position(|id| *id == "coding-poc"));
-        // ADR-0033 D4（Phase 24）: 秘書は対話用の分野を持つ。
-        assert_eq!(nodes.iter().find(|n| n.id == "secretary").unwrap().genre.as_deref(), Some("secretary"));
-        let survey = nodes.iter().find(|n| n.id == "research-survey").unwrap();
-        assert_eq!(survey.kind, OrgKind::Section);
-        assert_eq!(survey.genre.as_deref(), Some("literature"));
-        assert_eq!(survey.parent_id.as_deref(), Some("research"));
-        assert!(!survey.brief.is_empty());
+        assert_eq!(order[0], "cos");
+        assert!(order.iter().position(|id| *id == "engineering") < order.iter().position(|id| *id == "software-engineering"));
+        // ADR-0046 D6: CoS（根）は対話用の harness を持つ。
+        assert_eq!(nodes.iter().find(|n| n.id == "cos").unwrap().genre.as_deref(), Some("conversation"));
+        let literature = nodes.iter().find(|n| n.id == "literature-research").unwrap();
+        assert_eq!(literature.kind, OrgKind::Section);
+        assert_eq!(literature.genre.as_deref(), Some("literature"));
+        assert_eq!(literature.parent_id.as_deref(), Some("research"));
+        assert!(!literature.brief.is_empty());
         // 人間の決定（2026-09-18、ADR-0035 §1）: 学術文献は PaperQA2（literature）、一般 Web は LDR。
-        let web = nodes.iter().find(|n| n.id == "research-web").unwrap();
+        let web = nodes.iter().find(|n| n.id == "web-research").unwrap();
         assert_eq!(web.genre.as_deref(), Some("web-research"));
         assert_eq!(web.parent_id.as_deref(), Some("research"));
-        // 分野を当てていないノードもある（まだその分野が無い）。
-        assert_eq!(nodes.iter().find(|n| n.id == "research-writing").unwrap().genre, None);
+        // ADR-0046 D7: 新しい harness `data-analysis` / `writing` はそれぞれの課の分野。
+        assert_eq!(nodes.iter().find(|n| n.id == "experiment-data").unwrap().genre.as_deref(), Some("data-analysis"));
+        assert_eq!(nodes.iter().find(|n| n.id == "scientific-writing").unwrap().genre.as_deref(), Some("writing"));
         assert_eq!(nodes.iter().filter(|n| n.kind == OrgKind::Secretary).count(), 1);
     }
 
@@ -2431,14 +2535,14 @@ roles = ["web-researcher"]
         assert!(!cfg.plan.auto_accept);
         assert!(!cfg.dispatch_config().plan_auto_accept);
         cfg.validate().unwrap();
-        // 監査 M-1: 役割は tier だけ（`fake` のプロバイダでもそのまま回る）で、分野は
-        // `config/org.example.toml` の課が使う 4 つが揃っている（2026-09-18 に `web-research` が増えた）。
+        // 監査 M-1（Phase 59 追記）: `[[harnesses]]`（互換の射影で `[[genres]]` になる）は
+        // `config/org.example.toml` の課が使うもの全部が揃っている（`[[harnesses]]` の宣言順）。
         assert!(cfg.roles.iter().all(|r| r.adapter.is_none()), "{:?}", cfg.roles);
         let mut genres: Vec<&str> = cfg.genres.iter().map(|g| g.id.as_str()).collect();
         genres.sort_unstable();
-        assert_eq!(genres, vec!["coding", "literature", "secretary", "web-research"]);
-        // Phase 30: `[conversation]` は例では省略（コメントアウト）してあり、既定の `secretary` が使われる。
-        assert_eq!(cfg.conversation_genre_id(), "secretary");
+        assert_eq!(genres, vec!["coding", "conversation", "data-analysis", "literature", "plan", "web-research", "writing"]);
+        // ADR-0046 D6（Phase 59）: `[conversation] genre = "conversation"` を明示している。
+        assert_eq!(cfg.conversation_genre_id(), "conversation");
     }
 
     /// 監査 M-1: 例の設定 2 つ（`celeris.example.toml` + `org.example.toml`）を**組み合わせて**読める。
@@ -2456,7 +2560,7 @@ roles = ["web-researcher"]
         let cfg = Config::load(&dir.path().join("config.toml")).unwrap();
         cfg.validate().unwrap();
         let ids: Vec<&str> = cfg.org.iter().map(|n| n.id.as_str()).collect();
-        assert!(ids.contains(&"secretary") && ids.contains(&"coding-poc") && ids.contains(&"research-survey"));
+        assert!(ids.contains(&"cos") && ids.contains(&"software-engineering") && ids.contains(&"literature-research"));
         assert_eq!(cfg.org.iter().filter(|n| n.kind == task_core::OrgKind::Secretary).count(), 1);
         // 課の分野はすべて `[[genres]]` にある（`validate` が見ているのと同じ条件を明示しておく）。
         for node in &cfg.org {
@@ -3688,6 +3792,53 @@ roles = ["lead"]
         assert!(no_secrets.secrets.is_none());
         // 未知キーは拒否。
         assert!(toml::from_str::<Config>("[secrets]\nbogus = 1\n").is_err());
+    }
+
+    /// ADR-0047 D1 / D2（Phase 61）: `[knowledge]` は既定でも値を持ち（`~/knowledge`）、
+    /// 相対パスは設定ファイル基準で絶対化され、`default_mounts` の綴り間違いは `validate()` が弾く。
+    /// **ディレクトリは作らない**（用意するのは `celerisctl knowledge init` だけ）。
+    #[test]
+    fn the_knowledge_section_resolves_its_root_and_checks_the_default_mounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "db = \"t.sqlite3\"\n[knowledge]\nroot = \"kb\"\ndefault_mounts = [\"kb:user\", \"memory\"]\n\
+             [[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.knowledge.root.is_absolute());
+        assert_eq!(cfg.knowledge.root, dir.path().canonicalize().unwrap().join("kb"));
+        // 読んだだけでは作らない。
+        assert!(!cfg.knowledge.root.exists());
+        assert_eq!(
+            cfg.knowledge.mounts().expect("mounts"),
+            vec![
+                task_core::KnowledgeMount::kb("user"),
+                task_core::KnowledgeMount::memory(None)
+            ]
+        );
+        assert_eq!(cfg.dispatch_config().knowledge.root, cfg.knowledge.root);
+        assert_eq!(cfg.dispatch_config().knowledge.default_mounts.len(), 2);
+
+        // 節を書かなければ既定（`~/knowledge` と `kb:user` / `kb:environment`）。
+        let default: Config = toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert_eq!(default.knowledge.root, PathBuf::from("~/knowledge"));
+        assert_eq!(default.knowledge.default_mounts, vec!["kb:user", "kb:environment"]);
+        // 未知キーは拒否。
+        assert!(toml::from_str::<Config>("[knowledge]\nbogus = 1\n").is_err());
+        // 綴り間違いは `validate()` で落ちる（黙って無視しない）。
+        let bad: Config =
+            toml::from_str("[knowledge]\ndefault_mounts = [\"nope:x\"]\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n")
+                .unwrap();
+        let why = bad.validate().expect_err("bad mount").to_string();
+        assert!(why.contains("[knowledge] default_mounts"), "{why}");
+        // KB の外を指す scope も落ちる。
+        let escape: Config =
+            toml::from_str("[knowledge]\ndefault_mounts = [\"kb:../etc\"]\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n")
+                .unwrap();
+        assert!(escape.validate().is_err());
     }
 
     /// ADR-0033 D6（Phase 24）: `[memory] dir` は設定ファイル基準で絶対化され、0700 で作られ、

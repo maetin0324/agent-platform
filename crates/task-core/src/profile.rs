@@ -17,6 +17,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::knowledge::KnowledgeMount;
 use crate::model::{Task, Tier};
 use crate::org::OrgNode;
 
@@ -31,57 +32,6 @@ pub const COS_ID: &str = "cos";
 
 /// ADR-0046 D6: 根ノードの表示名。
 pub const COS_NAME: &str = "Chief of Staff";
-
-/// ADR-0046 D1: 知識のマウントの種類（ADR-0047 の知識。ここでは「何をマウントするか」の宣言だけを持ち、
-/// 実際に読むのは Knowledge Base 側）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum KnowledgeKind {
-    /// Knowledge Base の範囲（`scope`）。
-    Kb,
-    /// リポジトリの文書（`name` のリポジトリの `docs`）。
-    Repo,
-    /// このノードの長期記憶（`memory/<node>/`）。
-    Memory,
-}
-
-impl KnowledgeKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            KnowledgeKind::Kb => "kb",
-            KnowledgeKind::Repo => "repo",
-            KnowledgeKind::Memory => "memory",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "kb" => Some(KnowledgeKind::Kb),
-            "repo" => Some(KnowledgeKind::Repo),
-            "memory" => Some(KnowledgeKind::Memory),
-            _ => None,
-        }
-    }
-}
-
-/// ADR-0046 D1: 知識のマウント 1 件。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct KnowledgeMount {
-    pub kind: KnowledgeKind,
-    /// `kb` の範囲（`environment/clusters` など）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
-    /// `repo` のリポジトリ名。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// 任意のパス（`repo` の中の場所、`kb` のファイル）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    /// `repo` の文書ディレクトリ（既定は無し）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub docs: Option<String>,
-}
 
 /// ADR-0046 D1: `run`（どこで動かすか）。子が勝つ。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]

@@ -374,6 +374,15 @@ fn rollback(store: &SqliteStore, backup_dir: &Path, dry_run: bool) -> Result<Exi
         return Ok(ExitCode::SUCCESS);
     }
     let sqlite = store;
+    // `replace_org_nodes` は親が先に来る並びを要求する。`backup.nodes` は移行前の `org_list()` の
+    // スナップショット（`position ASC, id ASC` の並び）なので、同じ position のノードが混じっている
+    // と親が後に来ることがある。`migrate()` の `next.sort_by_key` と同じ規律で並べ直す。
+    let mut restored_nodes = backup.nodes.clone();
+    restored_nodes.sort_by_key(|n| match n.kind {
+        task_core::OrgKind::Secretary => 0,
+        task_core::OrgKind::Department => 1,
+        task_core::OrgKind::Section => 2,
+    });
     // 行を元に戻す（新しい値は写像で分かるので、記録した「元の値」をそのまま書き戻す）。
     for change in &backup.rows {
         sqlite.restore_node_ref(&change.table, &change.column, &change.id, &change.old)?;
@@ -402,21 +411,9 @@ fn rollback(store: &SqliteStore, backup_dir: &Path, dry_run: bool) -> Result<Exi
                 .map_err(|e| CliError::msg(format!("restore {}: {e}", mv.from.display())))?;
         }
     }
-    sqlite.replace_org_nodes(&backup.nodes)?;
+    sqlite.replace_org_nodes(&restored_nodes)?;
     outln!("done. the tree is back to the shape before migrate-v2");
     Ok(ExitCode::SUCCESS)
-}
-
-/// テスト用の入口（`SqliteStore` を直接渡す）。
-#[cfg(test)]
-pub fn migrate_for_test(store: &SqliteStore, config: &Config, backup_dir: &Path) -> Result<(), CliError> {
-    migrate(store, config, backup_dir, false).map(|_| ())
-}
-
-/// テスト用の入口（`--rollback`）。
-#[cfg(test)]
-pub fn rollback_for_test(store: &SqliteStore, backup_dir: &Path) -> Result<(), CliError> {
-    rollback(store, backup_dir, false).map(|_| ())
 }
 
 #[cfg(test)]

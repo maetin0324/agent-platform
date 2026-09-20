@@ -827,7 +827,6 @@ impl SqliteStore {
         Self::from_connection(conn, &options)
     }
 
-    /// 現在の DB のスキーマ版数（`schema_migrations` の最大 `version`。行が無ければ 0）。
     // ---- ADR-0046 D7（Phase 59）: `celerisctl org migrate-v2` のための低レベルの書き換え。
     // 通常の経路（`org_upsert` / `update_task`）は状態機械と検証を通すが、移行は「id の付け替え」だけを
     // まとめて行うので、ここに専用の関数を置く（`celerisctl` からしか呼ばない）。
@@ -905,6 +904,7 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// 現在の DB のスキーマ版数（`schema_migrations` の最大 `version`。行が無ければ 0）。
     pub fn schema_version(&self) -> Result<u32, StoreError> {
         let conn = self.lock()?;
         let v: i64 = conn.query_row(

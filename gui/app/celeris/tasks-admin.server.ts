@@ -27,24 +27,36 @@ import type {
  */
 
 /** `TaskEdit` のうち、`null` を送ると「消す」になる項目（Rust の `Option<Option<T>>`）。 */
-const NULLABLE_FIELDS = ["assignee", "role", "adapter", "milestone_id"] as const;
+const NULLABLE_FIELDS = ["assignee", "role", "adapter", "milestone_id", "harness"] as const;
 
 /** 数値の項目（空欄・非数値は送らない = 変えない）。 */
 const NUMBER_FIELDS = ["max_turns", "max_wall_secs", "max_retries"] as const;
 
-/** 文字列をそのまま送る項目（省略 = 変えない）。 */
-const STRING_FIELDS = ["title", "objective", "priority", "category", "tier"] as const;
+/**
+ * 文字列をそのまま送る項目（省略 = 変えない）。`mode`（ADR-0046 D4）は既定 `production` を含め
+ * 常に値を持つ `<select>` なので、`null` で外せる `harness` とは分けて扱う。
+ */
+const STRING_FIELDS = ["title", "objective", "priority", "category", "tier", "mode"] as const;
 
 /** 差し替えになる配列の項目。フォームは空の番兵（`value=""`）を 1 つ置き、`form.has` で「送る意思」を示す。 */
 const ARRAY_FIELDS = ["labels", "depends_on"] as const;
+
+/**
+ * ADR-0046 D2（Phase 59）: 空白かカンマ区切りの自由記述で差し替える項目（開いた語彙なので `labels` の
+ * ようなチップの選択肢にはできない。`profile_skills` と同じ考え方。空にすれば `[]`（能力タグ無し））。
+ */
+const WORDS_FIELDS = ["skills"] as const;
 
 /**
  * 編集フォーム（`/tasks/:id` の「概要」タブ）とボードの行内編集の両方から `TaskEdit` を組み立てる
  * （ADR-0044 D1）。**フォームに現れた項目だけ**を本文に入れる（`TaskEdit` は「省略 = 変えない」）ので、
  * ボードのように 1 項目だけ送るフォームもそのまま使える。
  *
- * - `assignee` / `role` / `adapter` / `milestone_id` は空文字を `null`（= 外す）として送る
+ * - `assignee` / `role` / `adapter` / `milestone_id` / `harness`（ADR-0046 D3）は空文字を `null`
+ *   （= 外す）として送る
  * - `labels` / `depends_on` は差し替え。空の値は落とすので、番兵だけの状態は `[]`（全部外す）になる
+ * - `skills`（ADR-0046 D2）も差し替えだが、開いた語彙なので 1 本の自由記述欄（空白/カンマ区切り）から組む
+ * - `mode`（ADR-0046 D4）は常に値を持つ選択肢なので、`title` 等と同じ「そのまま送る」項目
  * - `priority` は `"P1"` のラベルのまま送る（celeris が `PriorityInput` として受ける。ADR-0044 D3）
  */
 export function buildTaskEdit(form: FormData): TaskEdit {
@@ -70,6 +82,13 @@ export function buildTaskEdit(form: FormData): TaskEdit {
     (edit as Record<string, unknown>)[name] = form
       .getAll(name)
       .map((v) => String(v).trim())
+      .filter((v) => v !== "");
+  }
+  for (const name of WORDS_FIELDS) {
+    if (!form.has(name)) continue;
+    (edit as Record<string, unknown>)[name] = (formString(form, name) ?? "")
+      .split(/[\s,]+/)
+      .map((v) => v.trim())
       .filter((v) => v !== "");
   }
   const expected = formString(form, "expected_status");

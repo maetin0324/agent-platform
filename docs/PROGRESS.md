@@ -8602,3 +8602,408 @@ scripts/selfdeploy/migrate-to-celeris.sh --rollback
 - `release.sh main`（環境変数なし。新しい既定のパス）→ `08e5e4a52fb5`。`verify.sh` → 検査 1〜6 すべて true（N-1: 旧 `926e19c0b408` の `bin/celeris`）→ live_ok。
 - `promote.sh 08e5e4a52fb5`（mode=live）: 2 秒で新が active、GUI 9 秒で切替、旧 `celeris@926e19c0b408` は drain して exit 0。
   `current -> 08e5e4a52fb5`、`previous -> 926e19c0b408`。ADR-0045 §3 の受け入れ条件 4 をすべて満たした。
+
+## Phase 61 — Knowledge Base v1（ADR-0047 D1–D3。2026-09-20）
+
+**正本はローカルの Markdown**（`[knowledge] root`、既定 `~/knowledge`）。DB には何も持たない。索引（`index.json`）は
+再生成できる派生物。エージェントからのアクセスは `celerisctl knowledge`（DB を開かない）、人からは GUI の「知識」画面と
+API 6 本。LangMem（D4）は Phase 62。
+
+### 入れたもの
+
+| 層 | ファイル | 中身 |
+|---|---|---|
+| core | `crates/task-core/src/knowledge.rs`（新） | front matter の読み書き（往復）、パスの境界、`Index` / `IndexItem`、検索の順位付け（純粋関数）、`KnowledgeMount`（ADR-0046 D1 の型。**Phase 59 の `Profile.knowledge` はこれを持つ**）、D4 の秘密の検査 |
+| ops | `crates/task-ops/src/knowledge.rs`（新） | `init` / `reindex` / `read_page` / `etag` / `history` / `commit_page` / `grep` / `search` / `record` / `inbox_list` / `inbox_accept` / `inbox_reject`。`git` を上限付きで起こすだけ |
+| api | `crates/task-api/src/knowledge.rs`（新） | `GET /knowledge/tree`・`GET /knowledge/page`・`PUT /knowledge/page`（管理系）・`GET /knowledge/inbox`・`POST /knowledge/inbox/{id}/{accept,reject}`（管理系） |
+| cli | `crates/celerisctl/src/commands/knowledge.rs`（新） | `init` / `search` / `get` / `record` / `reindex`。**`main` が DB を開く前に処理する**（コンテナの中で動くため） |
+| 前置き | `crates/task-worker/src/preamble.rs` | `knowledge_section(mounts, index)` を追加し、`render` から 1 回呼ぶ |
+| コンテナ | `crates/task-worker/src/container.rs` | `ContainerPlan.knowledge_root` → KB を同じパスに `:ro`、`_inbox` だけ書き込み可 |
+| 設定 | `crates/celeris/src/config.rs` | `[knowledge] root` / `default_mounts`（新しい節。`validate()` が綴りを見る） |
+| 文書 | `docs/knowledge.md`（新）、`docs/gui/api.md` §3.98〜3.103、`config/celeris.example.toml` `[knowledge]`、ADR-0047 `## Phase 61 追記` | |
+
+GUI は同じ worktree で Phase G21 として実装した（`gui/docs/PROGRESS.md` を参照）。
+`gui/app/routes/knowledge.tsx` / `knowledge.inbox.tsx`、`gui/app/celeris/knowledge.ts`、`gui/app/lib/knowledge.ts`、
+`gui/app/components/KnowledgeMeta.tsx`、mock-celeris の fixtures / handlers、vitest 27 本。
+
+### 受け入れ条件ごとの証跡
+
+- **条件: `~/knowledge` の初期化（git、雛形）** — `cargo test -p task-ops knowledge` の
+  `init_creates_the_skeleton_and_is_idempotent`。骨組み 7 ディレクトリ ＋ `_inbox` ＋ `README.md` ＋
+  `user/{profile,expertise,preferences,goals}.md` ＋ `environment/clusters/{pegasus,sirius,fern03}.md` ＋
+  `projects/README.md` ＋ `experience/README.md` ＋ `.gitignore` ＋ `index.json`。**2 回目は何も足さず、
+  人が書き換えたページも触らない**（履歴の件数が増えないことを assert）。
+- **条件: front matter と `index.json`** — `cargo test -p task-core knowledge`（6 本）の
+  `front_matter_round_trips` / `front_matter_reads_block_lists_and_ignores_unclosed_blocks`、
+  `cargo test -p task-ops knowledge` の `reindex_reads_front_matter_and_defaults_the_scope`
+  （`scope` が無いページは置き場から `project:<slug>` などを当てる）。
+- **条件: `celerisctl knowledge search|get|record|reindex`（tempdir の KB でテスト）** —
+  `cargo test -p celerisctl knowledge`（2 本）の `the_cli_works_on_a_temporary_knowledge_base`（`--root` に
+  tempdir を渡し、`--config /nonexistent` で**実ホームの設定を読ませない**）と
+  `the_root_flag_wins_over_an_unreadable_config`。順位付けは `task_core` の
+  `search_ranks_tags_above_titles_above_bodies`、本文一致は `task_ops` の `search_finds_pages_by_tag_title_and_body`。
+  `record` は `record_writes_a_candidate_and_refuses_secrets_and_missing_sources`
+  （`_inbox` に書く / `--source` 無しは `NoSources` / `sk-…` は `Secret`）。
+- **条件: API と管理系の認可** — `cargo test -p task-api --test knowledge` の 6 本:
+  `an_uninitialized_knowledge_base_reads_empty_and_refuses_writes`（読み取りは**何も作らない**、
+  変更系は 409）、`the_tree_lists_pages_and_filters_by_scope_and_query`、
+  `a_page_is_rendered_with_its_front_matter_history_and_etag`（生 HTML を捨てる / `celeris:task/` と `[[…]]` /
+  履歴の author が `Celeris (human)` / 書いたら索引が作り直る）、
+  `writing_a_page_checks_the_etag_and_the_path`（409 etag / 403 `..` / 403 絶対パス / 422 `.md` 以外 /
+  403 `_inbox`）、`candidates_can_be_accepted_or_rejected`（404 / 403 / 409 `page_exists` / `overwrite` /
+  `path:` が落ちる / reject）、`the_write_endpoints_are_admin_only`（401）。
+- **条件: profile の `knowledge` マウントの実効化と前置きの索引** —
+  `cargo test -p task-worker preamble` の `the_knowledge_section_lists_the_index_of_every_mount_kind`
+  （`kb` / `repo` / `memory` の 3 種、マウントの順、D3 の案内文、マウントしていない scope は出ない、
+  索引を渡さない run の前置きは 1 バイトも変わらない）と
+  `the_knowledge_index_is_capped_at_two_hundred_items`。実効マウントの計算はディスパッチャの
+  `knowledge_context`（`[knowledge] default_mounts` ＋ 案件の `projects/<slug>`）。
+- **条件: コンテナへのマウント** — `cargo test -p task-worker container::` の
+  `the_knowledge_base_is_mounted_read_only_with_a_writable_inbox`（`-v <root>:<root>:ro` と
+  `-v <root>/_inbox:<root>/_inbox`、設定しなければ 1 バイトも変わらない、相対パスは無視）。
+- **条件: GUI「知識」画面と `_inbox`** — `gui/docs/PROGRESS.md` の Phase G21。
+
+### 実行したコマンドと出力の要点
+
+```
+cargo test --workspace                          → exit 0、grep -c "^test result: FAILED" = 0、passed 合計 1399
+cargo clippy --workspace --all-targets -- -D warnings → exit 0（警告 0）
+UPDATE_SCHEMA=1 cargo test -p task-api -p task-worker -p task-core
+                                                → docs/api/v1/api-v1.schema.json +435 行、
+                                                  docs/protocol/worker-protocol.schema.json +157 行
+cargo test --workspace（UPDATE_SCHEMA 無し）    → スキーマ一致テストを含めて exit 0
+python3 -c "import tomllib; tomllib.load(...)"  → config/celeris.example.toml は TOML として読める
+bash scripts/sync-gui-docs.sh --check           → up to date
+```
+
+GUI（`gui/` で実行。詳細は `gui/docs/PROGRESS.md`）:
+
+```
+pnpm gen:types   → exit 0。types.ts の sha256 は 3 回とも c10e490b…（冪等）
+pnpm lint        → exit 0（Checked 211 files）
+pnpm typecheck   → exit 0
+pnpm test        → exit 0。Test Files 55 passed / Tests 802 passed（新規 27 本）
+pnpm build       → exit 0（client 127 modules + SSR）
+pnpm e2e         → **実行していない**（実 celeris のバイナリと `[knowledge] root` を用意した fixture が要る）
+```
+
+### 本番の手順（人が実行する。**まだやっていない**）
+
+```bash
+# 1. 知識ベースを用意する（1 回だけ。冪等。既にあるファイルは触らない）
+celerisctl knowledge init
+ls ~/knowledge                       # user/ environment/ projects/ experience/ _inbox/ README.md .gitignore
+cd ~/knowledge && git log --oneline  # "knowledge: 知識ベースを作る（ADR-0047 D1）" 1 件
+
+# 2. 設定に `[knowledge]` を足す（既定でよければ省略できる。足すなら ~/.config/celeris/config.toml）
+#    [knowledge]
+#    root = "~/knowledge"
+#    default_mounts = ["kb:user", "kb:environment"]
+#    → 綴りを間違えると起動時に exit 2（設定エラー）。先に python3 -c "import tomllib; …" で読めることを確認する
+
+# 3. 雛形を埋める（**celeris は埋めない**。出典の無い知識を作らないため）
+$EDITOR ~/knowledge/user/profile.md            # 所属・呼び方・連絡の好み
+$EDITOR ~/knowledge/user/preferences.md
+$EDITOR ~/knowledge/environment/clusters/pegasus.md   # 接続 / 作業場所 / ジョブ / 環境
+$EDITOR ~/knowledge/environment/clusters/sirius.md
+$EDITOR ~/knowledge/environment/clusters/fern03.md
+#    中身は docs/workspace.md と ~/.config/celeris/config.toml の [[clusters]] に既に書いてあることを書き写す
+#    （host / 踏み台 / auth / worktree_root / setup / env / 投げ方）。埋めたら confidence: high にする
+cd ~/knowledge && git add -A && git commit -m "knowledge: 雛形を埋めた"
+celerisctl knowledge reindex          # → "<N> pages (<時刻>)"
+
+# 4. 道具が動くことを確かめる
+celerisctl knowledge search pegasus --scope environment
+celerisctl knowledge get environment/clusters/pegasus.md | head -20
+echo "テストの記録" | celerisctl knowledge record --title "動作確認" --scope user --source human
+celerisctl knowledge search 動作確認   # → 出ない（候補は索引に入らない）
+ls ~/knowledge/_inbox                  # → 1 件
+
+# 5. 昇格して GUI で見る（release.sh → verify.sh → promote.sh。従来どおり）
+scripts/selfdeploy/release.sh main
+scripts/selfdeploy/verify.sh <sha12>
+scripts/selfdeploy/promote.sh <sha12>
+curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" \
+  http://127.0.0.1:7710/api/v1/knowledge/tree | python3 -m json.tool | head -30
+#    → initialized: true、items に user/profile.md と environment/clusters/pegasus.md、inbox_count: 1
+#    GUI の「知識」→ 4 の候補を reject（または accept）して、コミットが 1 件増えることを見る
+
+# 6. 実機の受け入れ（ADR-0047 §3）
+#    自己改善案件のタスクを 1 本走らせ、runs/<run_id>/stdout.jsonl の前置きに
+#    「## 知識 (knowledge base — 索引だけ。本文は道具で読む)」と environment/clusters/pegasus.md が出ること、
+#    ワーカーが `celerisctl knowledge search` でそのページを引けることを確認する
+```
+
+### 未解決
+
+- **実機はまだ**（上の 1〜6）。`~/knowledge` は**このフェーズでは 1 度も触っていない**（テストは全部 tempdir。
+  `celerisctl knowledge` のテストは `--config /nonexistent` で実ホームの設定も読ませない）。
+- **Phase 59（ADR-0046）との合流**が必要。`KnowledgeMount` は `task_core::knowledge` に定義してあるので、
+  Phase 59 の `Profile.knowledge` はこの型（`Vec<KnowledgeMount>`）を持てばよい。合流点は
+  `task_dispatch::Dispatcher::knowledge_context`（いまは `[knowledge] default_mounts` ＋ 案件の
+  `projects/<slug>`）で、ここに実効 profile の `knowledge` を
+  `task_core::knowledge::merge_mounts(&[profile, default, project, task])` の形で足す。
+- **Phase 60a（protocol.rs）との合流**: `RunContext` の末尾に `knowledge: Option<KnowledgeContext>` を 1 つ足した
+  （`KnowledgeContext` も `protocol.rs` に定義）。衝突したら両方を残せばよい。
+- `GET /knowledge/tree` は毎回 `ensure_index` を通るので、索引が 6 時間より古ければその場で作り直す
+  （大きな KB では最初の 1 回が遅くなる）。実測して困るようなら `reindex` を裏方 tick に移す。
+- GUI の e2e が無い（`gui/docs/PROGRESS.md` U1）。`DELETE /knowledge/page` も無いので、ページを消すのは
+  エディタ ＋ `reindex`（または `git rm`）。
+
+### 提案
+
+- **P-61-i**: ADR-0047 D3 は「daemon は起動時と `_inbox` 変化時に `reindex` を呼ぶ」と書いているが、Phase 61 では
+  **API の読み取りが `ensure_index`（無い・6 時間より古ければ作り直す）で代用**している。daemon の tick に
+  入れるのは、`_inbox` の変化を見る仕組み（inotify か tick ごとの mtime 比較）が要るので Phase 62 の
+  知識整理 run と一緒に入れたい。
+- **P-61-j**: `[knowledge] default_mounts` は Phase 59 が入ったら**役目を終える**（実効 profile が
+  `knowledge` を持つ）。ADR-0046 D7 の木に `knowledge` を書いたら、この設定の既定を `[]` に落として
+  「設定で上書きしたい人だけが書く」ものにしたい。
+- **P-61-k**: `DELETE /knowledge/page` が無い（文書には §3.96 がある）。人がページを捨てる経路が
+  エディタしか無いので、GUI から消せるようにするか、「捨てずに `confidence: low` にして `retire` する」
+  （D4 の `op: retire`）に一本化するかを、Phase 62 で決めたい。
+
+## Phase 59 — 組織 = Agent Profile の継承木（ADR-0046。2026-09-20）
+
+**完了日**: 2026-09-20。前段の agent（レート制限で中断）が実装したコード（`profile.rs` / `harness.rs` /
+`matching.rs` / `celerisctl org migrate-v2` / `config to-harnesses` / API・前置きの配線）は `cargo check
+--workspace --all-targets` こそ通っていたが、`cargo test` は 1 度も走らせていなかった。本 Phase では
+(1) main（Phase 61 = Knowledge Base）を merge して `Profile.knowledge` を ADR-0047 の `KnowledgeMount`
+型に合わせ、`Dispatcher::knowledge_context` に実効 profile の知識マウントを足し、
+(2) `cargo test --workspace` を実際に通し、そこで見つかった 5 件の実バグ（後述）を直し、
+(3) GUI（G21）の未実装だった部分（組織画面の profile 表示・編集、タスク画面の harness/skills/mode 編集、
+「なぜこの担当か」）を実装した。
+
+### 受け入れ条件（ADR-0046 §4）ごとの証跡
+
+1. **`profile_json` と `EffectiveProfile`（merge 規則）。前置きに profile の節** —
+   `cargo test -p task-core profile::`（7 本）: `resolve_merges_lists_by_union_scalars_by_child_and_tiers_by_intersection`
+   （和・子勝ち・deny 勝ち・交わり・連結を 1 本で確認）、`an_empty_parent_allowed_tiers_means_no_restriction`、
+   `resolve_of_an_unknown_node_is_empty_and_a_broken_chain_terminates`、`with_task_overrides_harness_tier_and_skills`、
+   `validate_profile_rejects_unknown_tools_harnesses_and_skills`、`an_empty_profile_serializes_to_an_empty_object`
+   （空 profile は `{}`、導入前のノードと 1 バイトも変わらない）。前置きは
+   `cargo test -p task-worker preamble::` の `profile_section` 系（実効 profile の節、道具の許可制、
+   知識マウントの表示）。
+2. **`[[harnesses]]` と旧 `[[genres]]`+`[[roles]]` の互換読み込み。`celerisctl config to-harnesses`。
+   組み込み harness** — `cargo test -p task-core harness::`（5 本）:
+   `from_legacy_maps_genres_to_harnesses_and_folds_the_default_role_in`（本番相当の `config.toml` を読んで
+   同じ harness 集合になる）、`declared_harnesses_override_the_builtins`、
+   `the_registry_projects_back_to_genres_and_roles`（互換の射影で既存経路がそのまま動く）、
+   `known_harness_ids_adds_the_builtins_but_stays_empty_for_a_minimal_config`。
+   `cargo test -p celerisctl --test org_migrate_v2 config_to_harnesses_prints_the_new_shape_from_the_legacy_one`。
+3. **`tasks.skills` / `tasks.mode`、計画出力の `skills` / `mode`、mode の前置きとレビューの切替** —
+   `task_core::plan` のテスト（`skills` / `mode` の検証、`docs/protocol/plan-output.schema.json` との一致）、
+   `task_ops::edit` / `task_ops::add` のテスト（`normalize_skills`、`mode` の継承）、
+   `cargo test -p task-worker preamble::mode_section` 系（3 モードの前置きの規則）。
+4. **matching（スコア・同点・候補なし → blocked・明示 assignee の 422）、`Event::Assigned`** —
+   `cargo test -p task-ops matching::`（8 本）: `the_node_with_the_most_overlapping_skills_wins`、
+   `ties_go_to_the_shallower_node_then_to_the_lexicographically_smaller_id`、
+   `without_skills_the_default_harness_node_wins_then_the_shallowest`、`the_root_is_never_a_candidate`
+   （根の harness も子に継がれるので `Assigned` になるが、根自身は選ばれない。根しか無い組織では候補が無く
+   `Unroutable`）、`no_candidate_is_unroutable_with_a_question`、
+   `a_task_with_an_assignee_or_without_a_harness_is_not_applicable`、`an_explicit_assignee_must_allow_the_harness`、
+   **`an_empty_org_never_runs_matching`（今回追加。§5 参照）**。`Event::Assigned` の書き戻しと `blocked` 遷移は
+   `crates/task-dispatch/src/dispatcher.rs` の `assign_if_needed`（`cargo test -p task-dispatch dispatcher::`
+   に組み込み済みの既存シナリオが matching を経由することを確認）。
+5. **CoS = `cos`。`celerisctl org migrate-v2`（tempdir の DB と記憶で往復）。新しい `org.toml`** —
+   `cargo test -p celerisctl --test org_migrate_v2 migrate_v2_maps_the_tree_and_rollback_restores_it_exactly`
+   （`--dry-run` は無変更、本番で 11→13 ノードへ写像・`coding-poc`/`coding-frontend` の合流・
+   `tasks.assignee` と記憶ディレクトリの書き換え、`--rollback` で完全に元へ戻ることを確認）。
+   `config/org.example.toml` は ADR-0046 D7 の木（`cos` 根、13 ノード）。
+6. **GUI: 組織画面の profile 表示・編集、タスク画面の harness/skills/mode 編集、「なぜこの担当か」** —
+   下の「GUI（G21）」節。
+7. **実機** — まだ（「本番の手順」参照。認証が要る本番環境はこのセッションから触れない。ADR-0009 P-34 に
+   従い手順を書いて人間に依頼する）。
+
+### §5. 直したバグ（`cargo test --workspace` を実際に通して見つけたもの。前段 agent の未検証コード）
+
+- **`crates/celeris/src/config.rs` / `crates/celeris/src/lib.rs`**: `loads_the_org_example_and_maps_it_to_org_nodes` /
+  `loads_example_config_and_resolves_relative_paths` / `the_two_example_files_load_together_through_org_include` /
+  `seeds_the_org_once_into_an_empty_db_and_never_again` の 4 本が、Phase 58 までの日本語の木
+  （`secretary` / `coding` / …）を前提にしたまま残っていた（`config/org.example.toml` は既に ADR-0046 D7 の
+  `cos` の木に書き換わっていたため）。ADR-0046 D7 の木・harness 集合（`conversation` / `coding` / `data-analysis` /
+  `literature` / `plan` / `web-research` / `writing`）に合わせて書き直した。
+- **`crates/celerisctl/tests/org_migrate_v2.rs`**: テスト用の `config.toml` に `[[providers]]` が無く、
+  `Config::load` の `validate()`（「`[[providers]]` が 1 件も無い」は既存の設定エラー）で全滅していた。
+  `fake` プロバイダを 1 行足した。
+- **`crates/celerisctl/src/commands/org.rs`**: `--rollback` が `backup.nodes`（移行前の `org_list()` の
+  スナップショット。`position ASC, id ASC` の並び）をそのまま `replace_org_nodes`（親が先の並びを要求）に
+  渡していた。テストの fixture は全ノードが `position = 0` なので id の辞書順になり、`secretary` が最後に
+  来て「parent "secretary" does not exist」で落ちていた。`migrate()` の `next.sort_by_key`（kind 順）と同じ
+  並べ替えを `rollback()` にも足した。
+- **`crates/task-ops/src/matching.rs`**: `decide` が `org` の中身を見ずに matching を走らせていたため、
+  組織を 1 つも作っていない構成（`org_nodes` が空。ADR-0041 D5 の `smoke` 煙試験のように、組織を使わない
+  既存の genre 付きタスクが動く構成）で、genre 付きタスクが軒並み `Unroutable` → `blocked` になっていた
+  （`crates/celeris/tests/instance_handoff.rs` の `verify_mode_never_dispatches_and_never_touches_daemon_instances` /
+  `normal_mode_does_not_inject_the_smoke_builtins` が検出）。「`org` が空なら `NotApplicable`」を先頭に足し、
+  `an_empty_org_never_runs_matching` を追加した。
+- **`crates/task-dispatch/src/dispatcher.rs`**: `conversation_runs_get_no_delegation_tools_but_get_the_addressee`
+  が「対話 run には `organization` を渡さない」という Phase 28 時点の前提のままで、ADR-0046 D6
+  （CoS の対話 run にだけ組織の一覧を渡す）と矛盾して落ちていた。テストを D6 の挙動（CoS 宛てには渡す・
+  それ以外には渡さない）に更新した。
+- 副次的な clippy 指摘（`-D warnings` で検出）: `store.rs` の孤立した doc comment（`empty_line_after_doc_comments`）、
+  `main.rs` の不要な `return`（`needless_return`）、`org.rs` の未使用テスト関数（`dead_code`。
+  実際のテストはサブプロセス経由で CLI を叩くので直接呼んでいなかった）を削除・修正した。
+
+### Phase 61（Knowledge Base）との合流
+
+`git merge main`（`abc8aaa`）。競合したのは `crates/celerisctl/src/commands/mod.rs` / `main.rs`
+（`knowledge` と `org` サブコマンドの追加が同じ場所。両方残す）、`crates/task-core/src/lib.rs`
+（`KnowledgeMount` を profile.rs 側の型ではなく `task_core::knowledge::KnowledgeMount`（ADR-0047）に一本化。
+profile.rs から独自の `KnowledgeKind`/`KnowledgeMount` を削除）、`crates/task-dispatch/src/dispatcher.rs`
+（`RunExtras` に `profile`/`mode` と `knowledge` の両方を残す）、`crates/task-worker/src/protocol.rs`
+（`RunContext` に同上）、`gui/app/lib/labels.ts`（Phase 59 と Phase 61 が別々に足した定数。両方残す）、
+生成物 2 つ（`docs/api/v1/api-v1.schema.json` / `docs/protocol/worker-protocol.schema.json`。
+`UPDATE_SCHEMA=1` で作り直した）。
+
+`Dispatcher::knowledge_context` を「担当ノードの実効 profile の `knowledge` → 設定の `[knowledge]
+default_mounts` → 案件の `projects/<slug>`」の順で `task_core::knowledge::merge_mounts` に渡すよう変更
+（`crates/task-dispatch/src/dispatcher.rs`）。`preamble.rs` の `profile_section` の知識の表示は
+`KnowledgeMount::label()`（ADR-0047）を使うように直した（`path` が `String` から `PathBuf` に変わったため、
+前段 agent の実装のままではコンパイルが通らなかった）。
+
+### GUI（G21。`gui/` で実装。celeris 側と同じ worktree・同じコミット）
+
+- **`gui/app/routes/org.tsx`**: `EffectiveProfileView`（`GET /org` の `effective_profiles[]` をそのまま表示。
+  継承の再計算はしない）と `ProfileEditForm`（`skills` / `knowledge`（並行配列 4 本を行ごとに組み直す）/
+  `harnesses.allowed`+`default` / `tools`+`deny_tools`（固定語彙のチェックボックス＋`cluster:<id>` 用の
+  自由記述欄）/ `run` / `model.tier`+`allowed_tiers` / `review.*` / `policy` / `permissions.approvals`）を追加。
+  名前・種類等の既存の編集フォームとは**別に送る**（`profile_present` の hidden で「丸ごと差し替え」の意思を
+  示す。§3.44 の規律）。
+- **`gui/app/celeris/org-admin.server.ts`**: `buildProfileInput` の `skills` を `readList`（`getAll` ベース）
+  から `readWords`（空白/カンマ区切りの自由記述）に変更（能力タグは開いた語彙なのでチェックボックスの
+  選択肢にできない。ここは前段 agent の実装に対するテストが無かったので、UI に合わせて安全に変更できた）。
+- **`gui/app/routes/tasks.$id.tsx`**: 編集フォームに「ハーネス」（`GET /config` の `genres[].id` が選択肢。
+  空なら自由記述）「能力タグ」（自由記述）「進め方」（`prototype`/`production`/`research`）を追加
+  （`buildTaskEdit` の `harness`（nullable）/`skills`（自由記述の差し替え）/`mode`（そのまま送る）に対応）。
+  ヘッダーの「担当」の横に「なぜこの担当か」（`Event::Assigned` の `reason`。`GET /tasks/{id}/events` に
+  載っている最新の `assigned` イベントから）を出す。明示の `assignee` で作られたタスクには出ない。
+- **`gui/app/lib/labels.ts`**: `MountKind` に増えた `"dir"` のラベルを追加（`KnowledgeKind` → `MountKind`
+  の改名は Phase 61 側。§3 の merge を参照）。
+- 新規テスト: `test/unit/org.test.ts` に `buildProfileInput` の 9 本（空 / skills / knowledge の行の組み直し /
+  harnesses / tools・deny_tools の重複排除 / run・model・review / policy・approvals / 空項目は書かない）と
+  `buildOrgPatchInput` の `profile_present` 2 本。`test/unit/tasks.manage.action.test.ts` に
+  `harness`/`mode`/`skills` の 4 本。`test/unit/tasks.detail.loader.test.ts` に `genres`/`assignedEvent` の
+  1 本（既存 1 本は新しいフィールド分を更新）。
+- **既知の逸脱（次の GUI Phase へ）**: ADR-0046 D6 は「GUI の `/org/cos`。`/` → 秘書の導線は CoS へ」も
+  決めているが、今回は `SECRETARY_NODE_ID` の**値**だけを `"secretary"` → `"cos"` に直した（`celerisctl org
+  migrate-v2` 後の本番で根の id が `cos` になるため、直さないと `/org/secretary` が 404 になる実害があった）。
+  URL パス（`/org/secretary`）と画面の言葉（「秘書」）はそのまま。全面的な改名（パス・ラベル・ナビ）は
+  8 ファイルにまたがる GUI 側の別 Phase として提案する（下の「提案」）。
+
+### 実行したコマンドと出力の要点
+
+```
+cargo test --workspace                                 → exit 0、grep -c "^test result: FAILED" = 0、
+                                                           passed 合計 1421（67 バイナリ）
+cargo clippy --workspace --all-targets -- -D warnings   → exit 0（警告 0）
+UPDATE_SCHEMA=1 cargo test -p task-core -p task-api -p task-worker --lib
+                                                         → exit 0（49 + 187 + 270 = 506 passed）。
+                                                           docs/api/v1/api-v1.schema.json /
+                                                           docs/protocol/worker-protocol.schema.json を
+                                                           merge の競合解消（`--ours` で暫定）後に作り直し
+python3 -c "import tomllib; tomllib.load(...)"          → config/celeris.example.toml / config/org.example.toml
+                                                           は両方 TOML として読める
+bash scripts/sync-gui-docs.sh --check                   → up to date
+```
+
+GUI（`gui/` で実行）:
+
+```
+pnpm gen:types   → exit 0（`KnowledgeKind` → `MountKind`、`dir` が増えた。冪等: 2 回目は無変更）
+pnpm lint        → exit 0（Checked 211 files）
+pnpm typecheck   → exit 0
+pnpm test        → exit 0。Test Files 55 passed / Tests 816 passed（新規 14 本）
+pnpm build       → exit 0（client + SSR）
+pnpm e2e         → **実行していない**（実 celeris のバイナリが要る。Phase 61 と同じ理由）
+```
+
+### 本番の手順（人が実行する。**まだやっていない**。ADR-0009 P-34）
+
+スキーマが 15 → **16**（`org_nodes.profile_json` / `tasks.skills_json` / `tasks.mode`）に上がる。
+`celerisctl org migrate-v2` は DB を直接開く CLI（デーモンを経由しない）ので、**celeris を止めてから**
+実行する（動いている旧デーモンと同時に書くと競合する）。`promote.sh` はこの後、動いている旧デーモンが
+無い（＝ライブ引き継ぎの検査対象が無い）ことを見て自動的に **stop-start** で昇格する。
+
+```bash
+# 0. 現在地の確認
+curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" http://127.0.0.1:7710/api/v1/health \
+  | python3 -m json.tool   # → schema_version（15 のはず）、release、role
+
+# 1. 新しいリリースを作る（まだ昇格しない。verify も後で）
+scripts/selfdeploy/release.sh main      # → releases/<sha12>/{bin/celeris,bin/celerisctl,manifest.json,…}
+SHA12=<出力された sha12>
+
+# 2. 設定を [[harnesses]] 形式に書き直す（ADR-0046 D3）。人が確認しながら差し替える
+releases/$SHA12/bin/celerisctl config to-harnesses --config ~/.config/celeris/config.toml
+#    → 出力された [[harnesses]] と [conversation] を ~/.config/celeris/config.toml に貼り、
+#       古い [[genres]] / [[roles]] の節を消す（celerisctl が注意書きを出す）
+python3 -c "import tomllib; tomllib.load(open('/home/$USER/.config/celeris/config.toml','rb'))"  # 構文だけ確認
+
+# 3. celeris を止める（migrate-v2 は DB を直接開くので、動いているデーモンと同時に書かせない）
+systemctl --user stop celeris@<いま動いている sha12> celeris-gui@<いま動いている sha12>
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7710/api/v1/health   # → 000 / 接続不可を確認
+
+# 4. 組織の木を ADR-0046 D7 の木へ写す（新しい celerisctl を使う。DB は本番のものを直接）
+releases/$SHA12/bin/celerisctl --db ~/.local/celeris/celeris.sqlite3 org migrate-v2 \
+  --config ~/.config/celeris/config.toml --dry-run
+#    → rename secretary -> cos / merge coding-poc -> software-engineering / create operations 等を確認
+releases/$SHA12/bin/celerisctl --db ~/.local/celeris/celeris.sqlite3 org migrate-v2 \
+  --config ~/.config/celeris/config.toml
+#    → 逆写像を ~/.local/celeris/backups/org-v1-map.json に書く（--rollback で戻せる）
+sqlite3 ~/.local/celeris/celeris.sqlite3 \
+  "select id, parent_id, kind from org_nodes order by position, id"   # → cos を根に 13 ノード
+
+# 5. 検証して昇格する（旧デーモンは 3. で止めてあるので、verify の N-1 検査は「current が無い」扱いになり、
+#    promote.sh は自動的に stop-start を選ぶ）
+scripts/selfdeploy/verify.sh $SHA12
+scripts/selfdeploy/promote.sh $SHA12       # → ログに "promotion mode: stop-start" が出ることを確認
+
+# 6. 事後確認
+curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" http://127.0.0.1:7710/api/v1/health \
+  | python3 -m json.tool   # → schema_version: 16, release: $SHA12, role: active
+curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" http://127.0.0.1:7710/api/v1/org \
+  | python3 -m json.tool | head -40   # → id: "cos" が根、effective_profiles[] が付いている
+# GUI（:7700）の「組織」で cos の profile（harnesses.allowed / knowledge / policy）が出ることを見る
+
+# 7. 実機の受け入れ（ADR-0046 §4-7）
+#    自己改善案件を 1 本、Console から作る（または既存の秘書との対話）。計画 run が子タスクに
+#    skills / harness / mode を書くこと、assignee を書かない子が matching で担当を得て
+#    Event::Assigned が付くこと（GUI のタスク画面の「なぜこの担当か」）を確認する。
+```
+
+**ロールバック**（5. の昇格前、または昇格後に問題が見つかった場合）:
+
+```bash
+# 昇格前（4. の直後）に木を戻すだけなら:
+releases/$SHA12/bin/celerisctl --db ~/.local/celeris/celeris.sqlite3 org migrate-v2 \
+  --config ~/.config/celeris/config.toml --rollback
+# 昇格後に戻す場合は先に celeris を止め、上のロールバックをしてから旧リリースで stop-start に戻す
+# （scripts/selfdeploy/rollback.sh の通常の手順。DB のバックアップは promote.sh が
+#  ~/.local/celeris/backups/<ts>-pre-<sha12>.sqlite3 に取ってある）。
+```
+
+### 未解決事項
+
+- **実機はまだ**（上の「本番の手順」1〜7）。認証が要る本番環境（`~/.config/celeris` / `~/.local/celeris` /
+  ポート 7710・7700・`systemctl`）はこのセッションから触れない（CLAUDE.md の禁止）。
+- **GUI の全面的な CoS 改名が未着手**（`/org/secretary` → `/org/cos`、「秘書」→「Chief of Staff」等の表示）。
+  今回は `SECRETARY_NODE_ID` の値だけを直した（上の「既知の逸脱」）。
+- **`celerisctl org migrate-v2` は D7 の固定 3 階層（secretary/department/section）専用**（`--rollback` の
+  並べ替えも `next.sort_by_key` も kind 3 値の決め打ち）。組織がこの形を超えて深くなったら見直しが要る。
+- 前段 agent が書いた `docs/gui/api.md` §3.6 の `types` の語彙が 15 種のまま（`edited` / `assigned` が
+  抜けていた）。17 種に更新し、`bash scripts/sync-gui-docs.sh` で GUI 側の写しにも反映した。
+
+### 提案
+
+- **P-59-a**: GUI の CoS 全面改名（`/org/cos`、「Chief of Staff」表示、ナビ）を別 Phase として起こす。
+  影響ファイルは `gui/app/lib/conversation.ts`（`SECRETARY_NODE_ID`）、`gui/app/routes/org.secretary.tsx`
+  （→ `org.cos.tsx` にリネームし `/org/secretary` は 302 で残す）、`gui/app/routes.ts`、`gui/app/root.tsx`、
+  `gui/app/routes/home.tsx`、`gui/app/components/Conversation.tsx`、`gui/app/routes/{tasks.$id,org.$id,
+  projects,projects.$id,inbox}.tsx`、`gui/app/components/ReportsList.tsx`。既存の GUI 単体テスト（`secretary`
+  という文字列を直接使っているもの）の更新も伴う。
+- **P-59-b**: `celerisctl org migrate-v2` は 1 回きりの決め打ちの写像（Phase 58→59）。次に組織の形を変える
+  ときのための「一般化した組織の再編（rename/merge/split）」コマンドがあると、今回のような使い捨てコードを
+  毎回書かずに済む。
+- **P-59-c**: matching の「組織が空なら NotApplicable」（§5 で追加した規律）は ADR-0046 の本文には明示が無い。
+  ADR-0046 に「Phase 59 追記」として文言を足した（後述）。次に matching を触るときはこの前提を壊さないこと。

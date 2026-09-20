@@ -101,6 +101,8 @@ pub struct TestEnv {
     pub workspace_root: PathBuf,
     /// ADR-0044 D7（Phase 57）: 既定の文書リポジトリを作る場所（`~/workspace` の代わり）。
     pub docs_repo_root: PathBuf,
+    /// ADR-0047（Phase 61）: 知識ベースの根（`~/knowledge` の代わり。**tempdir の中**）。
+    pub knowledge_root: PathBuf,
     /// テストが書き込みに使う別接続（celerisctl / ディスパッチャ相当）。
     pub store: SqliteStore,
     pub state: ApiState,
@@ -121,10 +123,13 @@ impl TestEnv {
         let (daemon_tx, daemon_rx) = watch::channel(None);
         // ADR-0044 D7（Phase 57）: 既定の文書リポジトリも tempdir の中に作る。
         let docs_repo_root = dir.path().join("workspace");
-        let settings = settings(&db_path, &workspace_root, &docs_repo_root, options);
+        // ADR-0047（Phase 61）: 知識ベースも tempdir の中（実ホームの `~/knowledge` には絶対に触らない）。
+        let knowledge_root = dir.path().join("knowledge");
+        let settings = settings(&db_path, &workspace_root, &docs_repo_root, &knowledge_root, options);
         let state = ApiState::new(settings, daemon_rx).expect("api state");
         Self {
             docs_repo_root,
+            knowledge_root,
             dir,
             db_path,
             workspace_root,
@@ -252,6 +257,7 @@ pub fn settings(
     db_path: &std::path::Path,
     workspace_root: &std::path::Path,
     docs_repo_root: &std::path::Path,
+    knowledge_root: &std::path::Path,
     options: EnvOptions,
 ) -> ApiSettings {
     ApiSettings {
@@ -293,6 +299,8 @@ pub fn settings(
         github: options.github,
         // ADR-0044 D7（Phase 57）: テストは **tempdir の中**に文書リポジトリを作る（`$HOME` は触らない）。
         docs_repo_root: Some(docs_repo_root.to_path_buf()),
+        // ADR-0047（Phase 61）: 知識ベースも tempdir の中。
+        knowledge_root: Some(knowledge_root.to_path_buf()),
     }
 }
 

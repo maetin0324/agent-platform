@@ -110,6 +110,23 @@ describe("buildTaskEdit（ADR-0044 D1）", () => {
       depends_on: [],
     });
   });
+
+  // ADR-0046 D2 / D3 / D4（Phase 59）: `skills` / `mode` / `harness`。
+  it("harness: 空文字を null（= 外す）として送る", () => {
+    expect(buildTaskEdit(form([["harness", ""]]))).toEqual({ harness: null });
+    expect(buildTaskEdit(form([["harness", "coding"]]))).toEqual({ harness: "coding" });
+  });
+
+  it("mode: 常に値を持つ選択肢なので、そのまま送る", () => {
+    expect(buildTaskEdit(form([["mode", "prototype"]]))).toEqual({ mode: "prototype" });
+  });
+
+  it("skills: 開いた語彙の自由記述（空白/カンマ区切り）を差し替える。空なら []（外す）", () => {
+    expect(buildTaskEdit(form([["skills", "rust, benchmark  io_uring"]]))).toEqual({
+      skills: ["rust", "benchmark", "io_uring"],
+    });
+    expect(buildTaskEdit(form([["skills", ""]]))).toEqual({ skills: [] });
+  });
 });
 
 describe("editTask（PATCH /tasks/{id}）", () => {

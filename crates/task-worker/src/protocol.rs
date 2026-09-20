@@ -396,6 +396,23 @@ pub struct RunContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<task_core::TaskMode>,
     // ---- ADR-0046（Phase 59）: ここまで ----
+    // ---- ADR-0047 D2（Phase 61）: 知識ベース。ここから ----
+    /// ADR-0047 D2: マウントされた知識の**索引だけ**（本文は入れない）。ディスパッチャが実効マウントと
+    /// `index.json` から決定的に組む。`None` の run の前置きは Phase 60 までと 1 バイトも変わらない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub knowledge: Option<KnowledgeContext>,
+    // ---- ADR-0047 D2（Phase 61）: ここまで ----
+}
+
+/// ADR-0047 D2（Phase 61）: 前置きに出す知識の索引（`preamble::knowledge_section` が読む）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct KnowledgeContext {
+    /// 実効マウント（組織の和 ＋ 案件の `projects/<slug>` ＋ タスクの明示）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<task_core::KnowledgeMount>,
+    /// そのマウントで読めるページの索引（`path` / `title` / `tags` / `scope`）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub index: Vec<task_core::KnowledgeItem>,
 }
 
 /// `context.comments[]`（ADR-0044 D2 / Phase 53）: タスクに付いたコメントの 1 件。

@@ -235,6 +235,15 @@
       ],
       "type": "object"
     },
+    "Confidence": {
+      "description": "ADR-0047 D1 / D4。",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ],
+      "type": "string"
+    },
     "ConversationAddressee": {
       "description": "`context.conversation_addressee`（ADR-0033 D4 / Phase 28）: この run が対話用タスクなら、相手が\n秘書かそれ以外かを表す。対話でない run では `None`。この値そのものは判断せず、`preamble::render`\nが対話専用の指示文（作業を始めない・委譲不可）を出し分けるためだけに使う純粋なデータ\n（判定はディスパッチャが `task.conversation` と組織図から決定的に行う。DESIGN 原則 1）。",
       "enum": [
@@ -574,56 +583,107 @@
       ],
       "type": "object"
     },
-    "KnowledgeKind": {
-      "description": "ADR-0046 D1: 知識のマウントの種類（ADR-0047 の知識。ここでは「何をマウントするか」の宣言だけを持ち、\n実際に読むのは Knowledge Base 側）。",
-      "oneOf": [
-        {
-          "const": "kb",
-          "description": "Knowledge Base の範囲（`scope`）。",
+    "IndexItem": {
+      "description": "`index.json` の 1 件。",
+      "properties": {
+        "confidence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Confidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "description": "KB の根からの相対パス（`environment/clusters/pegasus.md`）。",
           "type": "string"
         },
-        {
-          "const": "repo",
-          "description": "リポジトリの文書（`name` のリポジトリの `docs`）。",
+        "scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
           "type": "string"
         },
-        {
-          "const": "memory",
-          "description": "このノードの長期記憶（`memory/<node>/`）。",
-          "type": "string"
+        "updated": {
+          "description": "front matter の `updated` → 最後のコミットの時刻（RFC 3339）。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
-      ]
+      },
+      "required": [
+        "path",
+        "title"
+      ],
+      "type": "object"
+    },
+    "KnowledgeContext": {
+      "description": "ADR-0047 D2（Phase 61）: 前置きに出す知識の索引（`preamble::knowledge_section` が読む）。",
+      "properties": {
+        "index": {
+          "description": "そのマウントで読めるページの索引（`path` / `title` / `tags` / `scope`）。",
+          "items": {
+            "$ref": "#/$defs/IndexItem"
+          },
+          "type": "array"
+        },
+        "mounts": {
+          "description": "実効マウント（組織の和 ＋ 案件の `projects/<slug>` ＋ タスクの明示）。",
+          "items": {
+            "$ref": "#/$defs/KnowledgeMount"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
     },
     "KnowledgeMount": {
-      "additionalProperties": false,
-      "description": "ADR-0046 D1: 知識のマウント 1 件。",
+      "description": "ADR-0046 D1 の `knowledge = [ … ]` の 1 件。**Phase 59 の `Profile.knowledge` はこの型を持つ**\n（Phase 61 がここで定義し、Phase 59 が使う）。\n\nTOML での形（ADR-0046 D1 のまま）:\n\n```toml\nknowledge = [ { kind = \"kb\", scope = \"environment/clusters\" },\n              { kind = \"repo\", name = \"pluvio\", docs = \"docs\" },\n              { kind = \"dir\", path = \"/opt/share/notes\" },\n              { kind = \"memory\" } ]\n```",
       "properties": {
         "docs": {
-          "description": "`repo` の文書ディレクトリ（既定は無し）。",
+          "description": "`repo`: そのリポジトリの文書の根（既定 `docs`）。",
           "type": [
             "string",
             "null"
           ]
         },
         "kind": {
-          "$ref": "#/$defs/KnowledgeKind"
+          "$ref": "#/$defs/MountKind"
         },
         "name": {
-          "description": "`repo` のリポジトリ名。",
+          "description": "`repo`: 案件のリポジトリの名前。`memory`: ノードの id（省略なら担当のノード）。",
           "type": [
             "string",
             "null"
           ]
         },
         "path": {
-          "description": "任意のパス（`repo` の中の場所、`kb` のファイル）。",
+          "description": "`dir`: ローカルのディレクトリ（読み取り）。",
           "type": [
             "string",
             "null"
           ]
         },
         "scope": {
-          "description": "`kb` の範囲（`environment/clusters` など）。",
+          "description": "`kb`: KB の相対パス（`user` / `environment/clusters` / `projects/<slug>`）。",
           "type": [
             "string",
             "null"
@@ -750,6 +810,31 @@
         "status"
       ],
       "type": "object"
+    },
+    "MountKind": {
+      "description": "ADR-0047 D2: 何をマウントするか。",
+      "oneOf": [
+        {
+          "const": "kb",
+          "description": "KB の一部（`scope` = KB の相対パス。`user`、`environment/clusters`、`projects/<slug>`）。",
+          "type": "string"
+        },
+        {
+          "const": "repo",
+          "description": "案件のリポジトリの `docs/`（ADR-0043）。",
+          "type": "string"
+        },
+        {
+          "const": "dir",
+          "description": "任意のローカルディレクトリ（読み取り）。",
+          "type": "string"
+        },
+        {
+          "const": "memory",
+          "description": "そのノードの長期記憶（`memory/<node>/notes.md`。ADR-0033 D3）。",
+          "type": "string"
+        }
+      ]
     },
     "NodeContext": {
       "description": "`context.node`（ADR-0033 D4 / Phase 24）: この run をしている「人」（組織のノード）。\nプロンプトの一番前に「あなたは誰で、何の担当か」として置かれる。",
@@ -1125,6 +1210,17 @@
             "string",
             "null"
           ]
+        },
+        "knowledge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KnowledgeContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0047 D2: マウントされた知識の**索引だけ**（本文は入れない）。ディスパッチャが実効マウントと\n`index.json` から決定的に組む。`None` の run の前置きは Phase 60 までと 1 バイトも変わらない。"
         },
         "memory": {
           "anyOf": [

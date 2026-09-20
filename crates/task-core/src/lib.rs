@@ -13,6 +13,8 @@ pub mod harness;
 pub mod instance;
 /// ADR-0043 D5（Phase 54）: 変更の取り込みの記録（`task_integrations`）。
 pub mod integrations;
+/// ADR-0047（Phase 61）: 知識ベース（front matter・索引・検索・マウント。純粋関数だけ）。
+pub mod knowledge;
 pub mod message;
 pub mod model;
 pub mod notify;
@@ -45,12 +47,17 @@ pub use harness::{
     HarnessRegistry, HarnessSpec, builtin_harnesses, known_harness_ids,
 };
 // ---- ADR-0046 D1（Phase 59）: profile の継承木 ----
+// `KnowledgeMount` は ADR-0047（Phase 61）の型をそのまま使う（Phase 59 追記）。
 pub use profile::{
-    CLUSTER_TOOL_PREFIX, COS_ID, COS_NAME, EffectiveProfile, HarnessPrefs, KnowledgeKind, KnowledgeMount,
-    ModelPrefs, Permissions, Profile, ProfileError, ProfileRun, ReviewPrefs, TOOL_VOCABULARY, ancestry,
-    is_known_tool, is_valid_skill, validate_profile,
+    CLUSTER_TOOL_PREFIX, COS_ID, COS_NAME, EffectiveProfile, HarnessPrefs, ModelPrefs, Permissions, Profile,
+    ProfileError, ProfileRun, ReviewPrefs, TOOL_VOCABULARY, ancestry, is_known_tool, is_valid_skill, validate_profile,
 };
 pub use profile::resolve as resolve_profile;
+// ---- ADR-0047（Phase 61）: 知識ベース ----
+pub use knowledge::{
+    Confidence, Index as KnowledgeIndex, IndexItem as KnowledgeItem, KnowledgeMount, MountKind,
+    SearchHit as KnowledgeHit, merge_mounts,
+};
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use integrations::{IntegrationId, IntegrationMethod, IntegrationState, TaskIntegration};
 pub use message::{

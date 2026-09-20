@@ -3,8 +3,8 @@ import { toActionError } from "./actions.server";
 import type { CelerisClient } from "./client.server";
 import { formString } from "./forms";
 import type {
-  KnowledgeKind,
   KnowledgeMount,
+  MountKind,
   OrgCreateBody,
   OrgKind,
   OrgNode,
@@ -95,7 +95,7 @@ function readKnowledge(form: FormData): KnowledgeMount[] {
   const rows: KnowledgeMount[] = [];
   for (const [i, kind] of kinds.entries()) {
     if (kind === "") continue;
-    const row: KnowledgeMount = { kind: kind as KnowledgeKind };
+    const row: KnowledgeMount = { kind: kind as MountKind };
     const scope = cell("profile_knowledge_scope", i);
     if (scope !== undefined) row.scope = scope;
     const name = cell("profile_knowledge_name", i);
@@ -118,7 +118,9 @@ function readKnowledge(form: FormData): KnowledgeMount[] {
 export function buildProfileInput(form: FormData): Profile {
   const profile: Profile = {};
 
-  const skills = readList(form, "profile_skills");
+  // 能力タグは開いた語彙（celeris の設定に無い）なので、道具の `_extra` 欄と同じ空白/カンマ区切りの
+  // 自由記述の 1 本の欄で受ける（チェックボックスにできる固定の選択肢が無いため）。
+  const skills = readWords(form, "profile_skills");
   if (skills.length > 0) profile.skills = skills;
 
   const knowledge = readKnowledge(form);

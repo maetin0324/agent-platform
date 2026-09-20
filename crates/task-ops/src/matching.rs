@@ -62,6 +62,13 @@ pub fn decide(org: &[OrgNode], task: &Task) -> Assignment {
     let Some(harness) = task.genre.as_deref().filter(|g| !g.is_empty()) else {
         return Assignment::NotApplicable;
     };
+    // ADR-0046 D5 / Phase 59 の規律「Phase 59 より前の組織を壊さない」: 組織を 1 つも作っていない
+    // 構成（`org_include` を書いていない・`org_nodes` が空）では matching そのものを走らせない
+    // （さもないと ADR-0041 D5 の `smoke` 煙試験のような、組織を使わない既存の genre 付きタスクが
+    // 軒並み `blocked` になってしまう）。
+    if org.is_empty() {
+        return Assignment::NotApplicable;
+    }
 
     // 候補: 根を除く全ノードのうち、実効 profile がその harness を許すもの。
     let mut candidates: Vec<Candidate> = Vec::new();
@@ -295,12 +302,21 @@ mod tests {
         assert_eq!(node, "systems-performance");
     }
 
-    /// 根（CoS）は候補に入らない。
+    /// 根（CoS）は候補に入らない。`harnesses.allowed` は親と和なので、根だけに書いた harness
+    /// （`conversation`）も子は実効的に継ぐ——それでも根自身が担当に選ばれることは無い。
     #[test]
     fn the_root_is_never_a_candidate() {
         let org = org();
+        let Assignment::Assigned { node: assigned, .. } = decide(&org, &task(Some("conversation"), &[])) else {
+            panic!("engineering 以下が継いでいるので Assigned のはず");
+        };
+        assert_ne!(assigned, "cos");
+        assert_eq!(assigned, "engineering", "根の直下でいちばん浅い");
+
+        // 根しか無い組織では、根だけが持つ harness は誰にも継がれず候補が無い。
+        let root_only = vec![node("cos", None, &["conversation"], Some("conversation"), &[])];
         assert!(matches!(
-            decide(&org, &task(Some("conversation"), &[])),
+            decide(&root_only, &task(Some("conversation"), &[])),
             Assignment::Unroutable { .. }
         ));
     }
@@ -324,6 +340,15 @@ mod tests {
         assert_eq!(decide(&org, &t), Assignment::NotApplicable);
         assert_eq!(decide(&org, &task(None, &["rust"])), Assignment::NotApplicable);
         assert_eq!(decide(&org, &task(Some(""), &[])), Assignment::NotApplicable);
+    }
+
+    /// Phase 59 より前の組織（`org_nodes` が空。組織そのものを使っていない構成）では、genre 付きの
+    /// タスクでも matching を走らせない（さもないと ADR-0041 D5 の `smoke` 煙試験のような、組織を
+    /// 使わない既存のタスクが軒並み `blocked` になってしまう）。
+    #[test]
+    fn an_empty_org_never_runs_matching() {
+        assert_eq!(decide(&[], &task(Some("smoke"), &[])), Assignment::NotApplicable);
+        assert_eq!(decide(&[], &task(Some("coding"), &["rust"])), Assignment::NotApplicable);
     }
 
     /// ADR-0046 D5: 明示の `assignee` が受けられないハーネスは弾く（API は 422）。

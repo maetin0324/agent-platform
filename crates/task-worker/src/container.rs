@@ -353,6 +353,9 @@ pub struct ContainerPlan {
     pub creds: Vec<PathBuf>,
     /// `workspace.toml` の `[container] mounts`（`src:dst[:opts]`）。
     pub extra_mounts: Vec<String>,
+    /// ADR-0047 D3（Phase 61）: 知識ベースの根。**同じパスに読み取り専用**でマウントし、`_inbox` だけ
+    /// 書き込み可にする（`celerisctl knowledge` がコンテナの中でもそのまま動く）。`None` ならマウントしない。
+    pub knowledge_root: Option<PathBuf>,
     /// `workspace.toml` の `[container] env`（アダプタの環境より**後**に置くので勝つ）。
     pub env: Vec<(String, String)>,
     /// `--label celeris.task=<task_id>`。
@@ -419,6 +422,18 @@ pub fn argv(plan: &ContainerPlan, program: &str, args: &[String], env: &[(String
     for (k, v) in env.iter().chain(plan.env.iter()) {
         out.push("--env".into());
         out.push(format!("{k}={v}"));
+    }
+
+    // ADR-0047 D3（Phase 61）: 知識ベース。正本は読み取り専用、候補の置き場（`_inbox`）だけ書き込み可。
+    if let Some(kb) = &plan.knowledge_root
+        && kb.is_absolute()
+        && !is_under(kb, &rw)
+    {
+        out.push("-v".into());
+        out.push(format!("{0}:{0}:ro", kb.display()));
+        let inbox = kb.join(task_core::knowledge::INBOX_DIR);
+        out.push("-v".into());
+        out.push(format!("{0}:{0}", inbox.display()));
     }
 
     // `workspace.toml` の追加マウント（`/dev/infiniband:/dev/infiniband` など）。
@@ -924,6 +939,7 @@ mod tests {
             dir_repos: vec![PathBuf::from("/data/benchfs-runs")],
             creds: vec![],
             extra_mounts: vec![],
+            knowledge_root: None,
             env: vec![],
             task_id: "01TASK".to_string(),
             uid: 1001,
@@ -989,6 +1005,27 @@ mod tests {
         assert!(line.contains("--env CLAUDE_CONFIG_DIR=/home/u/.local/celeris/accounts/claude/a1"), "{line}");
         // HOME はタスクのディレクトリ（ホストのホームは見せない）。
         assert!(line.contains("--env HOME=/home/u/.local/celeris/workspaces/01TASK"), "{line}");
+    }
+
+    /// ADR-0047 D3（Phase 61）: 知識ベースは**同じパスに読み取り専用**、`_inbox` だけ書き込み可。
+    /// 設定していなければ 1 バイトも変わらない。
+    #[test]
+    fn the_knowledge_base_is_mounted_read_only_with_a_writable_inbox() {
+        let cwd = PathBuf::from("/home/u/.local/celeris/workspaces/01TASK/repos/benchfs");
+        let without = joined(&argv(&plan(Runtime::Podman), "sh", &[], &[], &cwd));
+        assert!(!without.contains("knowledge"), "{without}");
+
+        let mut p = plan(Runtime::Podman);
+        p.knowledge_root = Some(PathBuf::from("/home/u/knowledge"));
+        let line = joined(&argv(&p, "sh", &[], &[], &cwd));
+        assert!(line.contains("-v /home/u/knowledge:/home/u/knowledge:ro"), "{line}");
+        assert!(line.contains("-v /home/u/knowledge/_inbox:/home/u/knowledge/_inbox"), "{line}");
+        // `_inbox` の方は `:ro` が付かない（候補を書けないと `record` が使えない）。
+        assert!(!line.contains("/home/u/knowledge/_inbox:ro"), "{line}");
+        // 相対パスは無視する（ホストのどこを指すか分からないものはマウントしない）。
+        let mut relative = plan(Runtime::Podman);
+        relative.knowledge_root = Some(PathBuf::from("knowledge"));
+        assert!(!joined(&argv(&relative, "sh", &[], &[], &cwd)).contains("knowledge"));
     }
 
     /// `[container] env` はアダプタの環境より**後**（同じキーなら勝つ）。`mounts` はそのまま渡る。

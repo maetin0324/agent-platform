@@ -236,6 +236,8 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
       { href: "/projects", label: "案件", icon: "folder" },
       // ADR-0044 D4（Phase 53）: 案件のタスクを 6 列で見るボード
       { href: "/board", label: "ボード", icon: "layers" },
+      // ADR-0047 D5（Phase 61 / G21）: 組織が覚えていること（正本は `[knowledge] root` の Markdown）
+      { href: "/knowledge", label: "知識", icon: "database" },
       { href: "/reports", label: "報告", icon: "send", badge: "reports" },
       { href: "/approvals", label: "認可", icon: "shield", badge: "org_approvals" },
       { href: "/artifacts", label: "成果物", icon: "file" },

@@ -22,6 +22,8 @@ pub mod error;
 pub mod gate;
 pub mod graph;
 pub mod inbox;
+/// ADR-0047（Phase 61）: 知識ベース（`~/knowledge` の Markdown が正本。git・索引・検索・`_inbox`）。
+pub mod knowledge;
 /// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
 pub mod lifecycle;
 /// ADR-0046 D5（Phase 59）: 担当の決定的な選び方（capability matching）。

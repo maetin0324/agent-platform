@@ -86,6 +86,8 @@ pub(crate) struct Inner {
     pub(crate) github: crate::GithubSettings,
     /// ADR-0044 D7（Phase 57）: 既定の文書リポジトリを作る場所の根（`~/workspace`）。
     pub(crate) docs_repo_root: Option<std::path::PathBuf>,
+    /// ADR-0047 D1（Phase 61）: `[knowledge] root`。`None` なら `/knowledge/*` は 409。
+    pub(crate) knowledge_root: Option<std::path::PathBuf>,
     pub(crate) account_stats: Mutex<crate::stats::AccountStatsState>,
     pub(crate) instance_id: String,
     pub(crate) started_at: String,
@@ -138,6 +140,7 @@ impl ApiState {
             role: settings.role,
             github: settings.github,
             docs_repo_root: settings.docs_repo_root,
+            knowledge_root: settings.knowledge_root,
             account_stats: Mutex::new(crate::stats::AccountStatsState::default()),
             instance_id: settings.instance_id,
             started_at: settings.started_at,

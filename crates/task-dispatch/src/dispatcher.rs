@@ -222,6 +222,19 @@ pub struct DispatchConfig {
     pub releases_dir: Option<PathBuf>,
     /// ADR-0043 D3（Phase 56）: `[containers]`。コンテナ実行の runtime・既定のイメージ・ビルドの置き場。
     pub containers: ContainersRuntimeConfig,
+    // ---- ADR-0047（Phase 61）: 知識ベース。ここから ----
+    /// ADR-0047 D1 / D2: `[knowledge]`。正本の置き場と既定のマウント。
+    pub knowledge: KnowledgeRuntimeConfig,
+    // ---- ADR-0047（Phase 61）: ここまで ----
+}
+
+/// `[knowledge]`（ADR-0047 D1 / D2。Phase 61）。
+#[derive(Debug, Clone, Default)]
+pub struct KnowledgeRuntimeConfig {
+    /// 正本の置き場（絶対パス。既定 `~/knowledge`）。**celeris は作らない**。
+    pub root: PathBuf,
+    /// 実効 profile（ADR-0046 D1）が何も言わないときに全ノードが継ぐマウント。
+    pub default_mounts: Vec<task_core::KnowledgeMount>,
 }
 
 /// `[containers]`（ADR-0043 D3 / ADR-0042 D3）。
@@ -453,6 +466,8 @@ struct RunExtras {
     profile: Option<task_core::EffectiveProfile>,
     /// ADR-0046 D4（Phase 59）: 既定（`production`）以外の進め方のときだけ `Some`。
     mode: Option<task_core::TaskMode>,
+    /// ADR-0047 D2（Phase 61）: マウントされた知識の索引（本文は入れない）。
+    knowledge: Option<task_worker::protocol::KnowledgeContext>,
 }
 
 struct ReviewEntry {
@@ -2890,6 +2905,13 @@ impl Dispatcher {
             .skip(all_comments.len().saturating_sub(task_core::PREAMBLE_COMMENTS))
             .map(CommentContext::from)
             .collect();
+        // ADR-0047 D2（Phase 61）/ ADR-0046 D1（Phase 59 追記）: 実効マウント（担当ノードの実効
+        // profile が継いだ知識 ＋ 設定の既定 ＋ 案件の `projects/<slug>`）と、その索引。
+        // 決定的（`index.json` とファイルを読むだけ。LLM も判断も無い）。
+        let profile_knowledge: Vec<task_core::KnowledgeMount> = assigned
+            .map(|n| task_core::resolve_profile(&org, &n.id).knowledge)
+            .unwrap_or_default();
+        let knowledge = self.knowledge_context(task, assigned.map(|n| n.id.as_str()), &profile_knowledge);
         Ok(RunExtras {
             role,
             children,
@@ -2908,7 +2930,124 @@ impl Dispatcher {
             mode,
             comments,
             interrupt,
+            knowledge,
         })
+    }
+
+    /// ADR-0047 D2（Phase 61）: この run が読める知識の**索引だけ**を組む（純粋に近い: 設定・DB・
+    /// `index.json`・ファイル名を読むだけ。本文は入れない）。
+    ///
+    /// 実効マウント = `[knowledge] default_mounts` ＋ 案件の `projects/<slug>`（自動）
+    /// ＋ タスクの明示（Phase 61 では無い。Phase 59 の実効 profile がここに合流する）。
+    /// ADR-0046 D1（Phase 59 追記）: `profile_knowledge` は担当ノードの**実効 profile**が継いだ
+    /// マウント（`task_core::resolve_profile(..).knowledge`）。組織の和 → 設定の既定 → 案件の順で
+    /// `merge_mounts` に渡す（先に出てきたものが前置きの索引で先頭に来る）。
+    fn knowledge_context(
+        &self,
+        task: &Task,
+        node_id: Option<&str>,
+        profile_knowledge: &[task_core::KnowledgeMount],
+    ) -> Option<task_worker::protocol::KnowledgeContext> {
+        let root = &self.config.knowledge.root;
+        // 案件は自動で `projects/<slug>` をマウントする（ADR-0047 D2）。
+        let project = task
+            .project_id
+            .and_then(|id| self.store.project_get(id).ok().flatten());
+        let mut project_mounts = Vec::new();
+        if let Some(project) = &project {
+            let slug = task_ops::docs::project_slug(&project.title, &project.id.to_string());
+            project_mounts.push(task_core::KnowledgeMount::kb(format!("projects/{slug}")));
+        }
+        // ADR-0046 D1（Phase 59 追記）: 実効 profile ＋ 設定の既定 ＋ 案件の順で和を取る。
+        let mounts =
+            task_core::knowledge::merge_mounts(&[profile_knowledge, &self.config.knowledge.default_mounts, &project_mounts]);
+        if mounts.is_empty() {
+            return None;
+        }
+        let index = if task_ops::knowledge::exists(root) {
+            task_ops::knowledge::ensure_index(root).items
+        } else {
+            Vec::new()
+        };
+        let mut items: Vec<task_core::KnowledgeItem> = Vec::new();
+        for mount in &mounts {
+            match mount.kind {
+                task_core::MountKind::Kb => {
+                    items.extend(index.iter().filter(|i| task_core::knowledge::mount_matches(mount, i)).cloned());
+                }
+                // `repo` は案件のリポジトリの文書の根のページ（ADR-0043 / ADR-0044 D7）。
+                task_core::MountKind::Repo => {
+                    if let Some(name) = mount.name.as_deref() {
+                        items.extend(self.repo_doc_items(task, name, mount));
+                    }
+                }
+                // `dir` は任意のローカルディレクトリの `*.md`（読み取り）。
+                task_core::MountKind::Dir => {
+                    if let Some(dir) = mount.path.as_deref() {
+                        let label = mount.label();
+                        items.extend(task_ops::knowledge::list_pages(dir).into_iter().take(200).map(|rel| {
+                            task_core::KnowledgeItem {
+                                title: rel.rsplit('/').next().unwrap_or(&rel).to_string(),
+                                path: dir.join(&rel).display().to_string(),
+                                scope: Some(label.clone()),
+                                ..task_core::KnowledgeItem::default()
+                            }
+                        }));
+                    }
+                }
+                // `memory` はそのノードの手帳（ADR-0033 D3。中身は「覚えていること」の節に既に出ている）。
+                task_core::MountKind::Memory => {
+                    let node = mount.name.as_deref().or(node_id);
+                    if let (Some(dir), Some(node)) = (&self.config.memory_dir, node) {
+                        let notes = dir.join(node).join("notes.md");
+                        if notes.exists() {
+                            items.push(task_core::KnowledgeItem {
+                                path: notes.display().to_string(),
+                                title: "あなたの手帳（案件をまたぐ記憶）".to_string(),
+                                scope: Some(format!("memory:{node}")),
+                                ..task_core::KnowledgeItem::default()
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Some(task_worker::protocol::KnowledgeContext { mounts, index: items })
+    }
+
+    /// `repo` マウント 1 件分（案件のその名前のリポジトリの文書の根のページ）。
+    fn repo_doc_items(
+        &self,
+        task: &Task,
+        name: &str,
+        mount: &task_core::KnowledgeMount,
+    ) -> Vec<task_core::KnowledgeItem> {
+        let Some(project_id) = task.project_id else {
+            return Vec::new();
+        };
+        let Ok(repos) = self.store.repo_list(project_id) else {
+            return Vec::new();
+        };
+        let Some(repo) = repos.iter().find(|r| r.name == name) else {
+            return Vec::new();
+        };
+        let task_core::WorkspaceSpec::Local { path, .. } = &repo.location else {
+            return Vec::new();
+        };
+        let (config, _) = task_core::workspace_config::load_or_default(path);
+        let docs_root = mount.docs.clone().unwrap_or(config.outputs.docs);
+        let branch = task_ops::changes::default_branch(path, repo.default_branch.as_deref());
+        let label = mount.label();
+        task_ops::docs::list(path, &branch, &docs_root)
+            .into_iter()
+            .take(200)
+            .map(|rel| task_core::KnowledgeItem {
+                title: rel.rsplit('/').next().unwrap_or(&rel).to_string(),
+                path: rel,
+                scope: Some(label.clone()),
+                ..task_core::KnowledgeItem::default()
+            })
+            .collect()
     }
 
     /// Phase 41（ADR-0038 D1）: レビューの対話 run に渡す「その途中目標のここまで」。
@@ -3700,6 +3839,8 @@ impl Dispatcher {
             dir_repos,
             creds: Vec::new(),
             extra_mounts: choice.mounts.clone(),
+            // ADR-0047 D3（Phase 61）: 知識ベースがあれば同じパスで見せる（`_inbox` だけ書き込み可）。
+            knowledge_root: Some(self.config.knowledge.root.clone()).filter(|r| r.is_dir()),
             env: choice.env.clone(),
             task_id: task.id.to_string(),
             uid,
@@ -4284,6 +4425,7 @@ async fn run_worker(
             milestone_review: extras.milestone_review,
             // Phase 43（ADR-0039 D3）: 案件が作業場所を決めている run だけに入る。
             workspace_note: extras.workspace_note,
+            knowledge: extras.knowledge,
             // ADR-0044 D2（Phase 53）: コメントの糸と、直前の run を止めた人のコメント。
             comments: extras.comments,
             interrupt: extras.interrupt,
@@ -4559,6 +4701,7 @@ mod tests {
                 worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
                 releases_dir: None,
                 containers: ContainersRuntimeConfig::default(),
+                knowledge: KnowledgeRuntimeConfig::default(),
             },
         )
     }
@@ -6954,6 +7097,7 @@ mod tests {
                 worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
                 releases_dir: None,
                 containers: ContainersRuntimeConfig::default(),
+                knowledge: KnowledgeRuntimeConfig::default(),
             },
         )
     }
@@ -7915,8 +8059,10 @@ mod tests {
         );
     }
 
-    /// Phase 28（ADR-0033 D4 追記）: 対話 run には委譲の道具（`available_genres` / `organization`）を渡さない。
+    /// Phase 28（ADR-0033 D4 追記）: 対話 run には委譲の道具（`available_genres`）を渡さない。
     /// 相手が秘書かそれ以外かで `conversation_addressee` を出し分ける。通常タスクには付かない。
+    /// ADR-0046 D6（Phase 59 追記）: **CoS（根）の対話 run** にだけ、誰が何をできるかの組織図
+    /// （`organization`）を渡す（人選はしない。matching が決める）。CoS 以外の対話 run には渡さない。
     #[test]
     fn conversation_runs_get_no_delegation_tools_but_get_the_addressee() {
         let dir = tempfile::tempdir().unwrap();
@@ -7946,11 +8092,15 @@ mod tests {
 
         let extras = d.run_extras(&to_secretary, None).unwrap();
         assert!(extras.available_genres.is_empty(), "対話 run は委譲できない: {extras:?}");
-        assert!(extras.organization.is_empty());
+        // ADR-0046 D6: CoS（根 = `secretary`。`OrgKind::Secretary`）宛ての対話には組織の一覧が付く。
+        assert!(!extras.organization.is_empty(), "CoS 宛ての対話には組織の一覧が付く: {extras:?}");
+        assert!(extras.organization.iter().any(|n| n.id == "research-survey"));
         assert_eq!(extras.conversation_addressee, Some(ConversationAddressee::Secretary));
 
         let extras = d.run_extras(&to_survey, None).unwrap();
         assert_eq!(extras.conversation_addressee, Some(ConversationAddressee::Other));
+        // CoS 以外（`research-survey`）宛ての対話には組織の一覧を付けない。
+        assert!(extras.organization.is_empty(), "CoS 以外の対話には付けない: {extras:?}");
 
         // 通常タスク（対話由来でない）には付かない。
         let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");

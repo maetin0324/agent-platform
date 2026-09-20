@@ -95,3 +95,49 @@
 
 **Phase 62（D4）**: `langmem` アダプタと `tools/langmem`、知識整理 run のトリガ、候補の適用規則（high は直接、他は `_inbox`）、秘密の検査、
 手帳の昇格、タイムラインの表示。実機: 1 タスクの終端から候補ができ、high が KB にコミットされ、GUI で読める。
+
+---
+
+## Phase 61 追記（2026-09-20。D1〜D3 と D5 の画面を実装したときの逸脱と細部）
+
+実装は ADR の決定どおり。**決定を変えた点は無い**。書いていなかった細部と、あえて別のやり方にした点だけを残す。
+
+### 決めた細部（ADR が書いていなかったこと）
+
+- **P-61-a: `index.json` はバージョン管理に入れない。** D1 が「再生成できる派生物」と書いているので、`init` が
+  `.gitignore` に `index.json` と `index.*/`（D6 の将来の埋め込み索引）を書く。こうしないと、ページを 1 枚直すたびに
+  索引の差分が同じコミットに混ざって履歴が読めなくなる。
+- **P-61-b: `etag` はページの中身の sha256。** 文書（ADR-0044 D7）は blob sha を使うが、KB は**正本が作業ツリー
+  そのもの**なので、まだコミットされていない人の編集にも etag が要る。GUI から見れば opaque な文字列なので、
+  型は同じまま。
+- **P-61-c: 書き込みは一時 worktree を使わず、作業ツリーに書いてそのパスだけをコミットする。**
+  文書（ADR-0044 D7）が一時 worktree を使うのは「人のチェックアウトが編集中かもしれない共有リポジトリ」だから。
+  KB は人も celeris も同じ 1 本の作業ツリーを見るので、`default_branch_busy` の概念が無い（「人が編集中」は
+  そのまま次に読む内容になる）。
+- **P-61-d: front matter に `_inbox` 専用の鍵 `path` を足した。** D3 の `record` は取り込み先を書けると便利で、
+  D4 の候補（`{op, path, …}`）とも形が揃う。accept のときに落とすので、正本のページには残らない。
+  書かなければ `scope` と題名から `<scope のディレクトリ>/<slug>.md` を当てる。
+- **P-61-e: 検索の `--scope` は「KB の相対パスの接頭辞」と「front matter の `scope` の値」の両方に当たる。**
+  D2 のマウントの `scope` はパス（`environment/clusters`）、D1 の front matter の `scope` はラベル
+  （`project:pluvio`）で、語が同じなのに指すものが違う。両方受けるのがいちばん驚きが少ない。
+- **P-61-f: front matter の実装は `task_ops::docs` と共有せず、`task_core::knowledge` に別に書いた。**
+  読む鍵が違い（`docs` は `title` / `tags` / `tasks`、KB は `title` / `tags` / `scope` / `sources` / `created` /
+  `updated` / `confidence` / `path`）、KB は**書き戻し（往復）**が要る。`docs` 側は 1 バイトも変えていない。
+  将来どちらかを直すときに一方だけ壊れないよう、両方に往復のテストを置いた。
+- **P-61-g: `[knowledge]` は既定でも値を持つ（`root = "~/knowledge"`）。** ADR-0045 D2 の P-58-a
+  （「`None` に意味がある設定に暗黙の既定を入れない」）とは逆に見えるが、ここは `None` に意味が無く、
+  **celeris はこのディレクトリを一切作らない**（読み取りは `initialized: false` を返すだけ）。
+  用意するのは `celerisctl knowledge init` だけ。
+- **P-61-h: `default_mounts` の既定は `["kb:user", "kb:environment"]`。** ADR-0046 D7 の木がまだ `knowledge` を
+  持たない（Phase 59）ので、その間の橋渡し。Phase 59 が入ったら実効 profile の `knowledge` と和を取る。
+
+### D4（Phase 62）に先出しした部分
+
+- **秘密の検査**（`task_core::knowledge::secret_finding`）は Phase 61 で入れた。`record` が拒否するので、
+  ワーカーが書く候補にはこの時点から効く。Phase 62 の「適用前の検査」も同じ関数を使う。
+- **`Celeris (knowledge)` の author** は `record` の候補にだけ使っている。D4 の「high を直接コミット」は Phase 62。
+
+### やっていないこと（ADR のとおり Phase 62）
+
+- LangMem（`tools/langmem`・`langmem` アダプタ・知識整理 run のトリガ・候補の適用規則・手帳の昇格）
+- タスクのタイムライン（ADR-0044 D5）への「この仕事から知識 N 件」の表示

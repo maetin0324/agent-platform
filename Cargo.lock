@@ -1886,6 +1886,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "task-core",
  "tempfile",
  "thiserror",

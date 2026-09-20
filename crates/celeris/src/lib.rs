@@ -657,6 +657,8 @@ pub fn api_settings(
         // ADR-0044 D7（Phase 57）: 案件に git のリポジトリが無いときに文書リポジトリを作る場所
         // （SPEC §5: 成果物は `~/workspace/` に）。`$HOME` が無ければ作れない（409）。
         docs_repo_root: task_core::home_dir().map(|home| home.join("workspace")),
+        // ADR-0047 D1（Phase 61）: 知識ベースの正本（既定 `~/knowledge`）。**API は作らない**。
+        knowledge_root: Some(config.knowledge.root.clone()),
     }
 }
 
@@ -1475,13 +1477,13 @@ id = "implementer"
 id = "literature-reader"
 
 [[roles]]
-id = "secretary"
+id = "cos-role"
 
 [[genres]]
-id = "secretary"
+id = "conversation"
 description = "人と話す"
-default_role = "secretary"
-roles = ["secretary"]
+default_role = "cos-role"
+roles = ["cos-role"]
 
 [[genres]]
 id = "coding"
@@ -1503,6 +1505,27 @@ id = "web-research"
 description = "一般 Web の調査"
 default_role = "web-researcher"
 roles = ["web-researcher"]
+
+[[roles]]
+id = "data-analyst"
+
+[[genres]]
+id = "data-analysis"
+description = "データを整える"
+default_role = "data-analyst"
+roles = ["data-analyst"]
+
+[[roles]]
+id = "writer"
+
+[[genres]]
+id = "writing"
+description = "書く"
+default_role = "writer"
+roles = ["writer"]
+
+[conversation]
+genre = "conversation"
 "#
             ),
         )
@@ -1510,21 +1533,21 @@ roles = ["web-researcher"]
         let config = Config::load(&path).unwrap();
         let store = SqliteStore::open(&config.db).unwrap();
 
-        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 11);
+        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 13);
         let nodes = store.org_list().unwrap();
-        assert_eq!(nodes.len(), 11);
-        let secretary = nodes.iter().find(|n| n.id == "secretary").unwrap();
-        assert_eq!(secretary.kind, task_core::OrgKind::Secretary);
-        assert_eq!(secretary.parent_id, None);
-        assert_eq!(nodes.iter().find(|n| n.id == "coding-poc").unwrap().genre.as_deref(), Some("coding"));
+        assert_eq!(nodes.len(), 13);
+        let cos = nodes.iter().find(|n| n.id == "cos").unwrap();
+        assert_eq!(cos.kind, task_core::OrgKind::Secretary);
+        assert_eq!(cos.parent_id, None);
+        assert_eq!(nodes.iter().find(|n| n.id == "software-engineering").unwrap().genre.as_deref(), Some("coding"));
 
         // 人が GUI で名前を変えても、次の起動で設定に戻されない。
-        let mut renamed = secretary.clone();
+        let mut renamed = cos.clone();
         renamed.name = "本人".into();
         store.org_upsert(&renamed).unwrap();
         assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 0);
-        assert_eq!(store.org_get("secretary").unwrap().unwrap().name, "本人");
-        assert_eq!(store.org_list().unwrap().len(), 11);
+        assert_eq!(store.org_get("cos").unwrap().unwrap().name, "本人");
+        assert_eq!(store.org_list().unwrap().len(), 13);
     }
 
     /// 監査 D-4: `org_include` の並びに木としての不整合（種類の順序。`Config::load` は循環・順序までは

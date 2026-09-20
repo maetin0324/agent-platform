@@ -5,8 +5,8 @@ import type {
   InstanceRole,
   IntegrationMethod,
   IntegrationState,
-  KnowledgeKind,
   MilestoneStatus,
+  MountKind,
   OrgKind,
   ProfileRun,
   ProjectStatus,
@@ -573,16 +573,17 @@ export function taskModeLabel(mode: TaskMode | string): string {
 }
 
 /** 知識のマウントの種類（ADR-0046 D1 / ADR-0047）。 */
-const KNOWLEDGE_KIND_LABEL: Record<KnowledgeKind, string> = {
+const KNOWLEDGE_KIND_LABEL: Record<MountKind, string> = {
   kb: "知識ベース",
   repo: "リポジトリ",
+  dir: "ディレクトリ",
   memory: "記憶",
 };
 
-export const KNOWLEDGE_KINDS: readonly KnowledgeKind[] = ["kb", "repo", "memory"];
+export const KNOWLEDGE_KINDS: readonly MountKind[] = ["kb", "repo", "dir", "memory"];
 
-export function knowledgeKindLabel(kind: KnowledgeKind | string): string {
-  return KNOWLEDGE_KIND_LABEL[kind as KnowledgeKind] ?? kind;
+export function knowledgeKindLabel(kind: MountKind | string): string {
+  return KNOWLEDGE_KIND_LABEL[kind as MountKind] ?? kind;
 }
 
 /** profile の `run`（どこで動かすか。ADR-0046 D1。子が勝つ）。 */
@@ -647,4 +648,58 @@ export const ASSIGNED_WHY_LABEL = "なぜこの担当か";
 
 export function assignedScoreLabel(score: number): string {
   return `能力タグの重なり ${score} 件`;
+}
+
+/**
+ * 知識ベース（ADR-0047 D5、celeris Phase 61 / G21。**正本は `[knowledge] root` の Markdown**）。
+ * ページの中身も履歴も celeris が返すものをそのまま出し、ここには画面の言葉だけを置く。
+ */
+export const KNOWLEDGE_NAV_LABEL = "知識";
+export const KNOWLEDGE_SECTION_DESCRIPTION =
+  "組織が覚えていることです。正本は知識ベースの Markdown（git）で、ここでの編集はそのパスだけを 1 件ずつコミットします。";
+export const KNOWLEDGE_SEARCH_LABEL = "タグ・題名・本文を検索";
+export const KNOWLEDGE_SCOPE_LABEL = "置き場";
+export const KNOWLEDGE_SCOPE_ALL_LABEL = "すべて";
+export const KNOWLEDGE_EDIT_LABEL = "編集";
+export const KNOWLEDGE_SAVE_LABEL = "保存";
+export const KNOWLEDGE_CANCEL_LABEL = "やめる";
+export const KNOWLEDGE_NEW_PAGE_LABEL = "ページを作る";
+export const KNOWLEDGE_RELOAD_LABEL = "再読み込み";
+export const KNOWLEDGE_HISTORY_LABEL = "履歴";
+export const KNOWLEDGE_EMPTY_LABEL = "まだページがありません";
+export const KNOWLEDGE_TRUNCATED_LABEL = "多すぎるので途中まで出しています（500 ページ）";
+export const KNOWLEDGE_TOO_LARGE_LABEL = "大きすぎるので本文を出していません（512 KiB）";
+export const KNOWLEDGE_SEARCH_RESULT_LABEL = "検索結果（タグ → 題名 → 本文 → 更新の新しい順）";
+export const KNOWLEDGE_UNINITIALIZED_TITLE = "知識ベースがまだありません";
+export const KNOWLEDGE_UNINITIALIZED_HINT = "`celerisctl knowledge init` で用意してください。";
+export const KNOWLEDGE_INBOX_LABEL = "候補";
+export const KNOWLEDGE_INBOX_DESCRIPTION =
+  "組織が書き留めた知識の候補（`_inbox/`）です。取り込むか捨てるかは人が決めます（索引にも検索にも出ません）。";
+export const KNOWLEDGE_INBOX_EMPTY_LABEL = "候補はありません";
+export const KNOWLEDGE_ACCEPT_LABEL = "取り込む";
+export const KNOWLEDGE_REJECT_LABEL = "捨てる";
+export const KNOWLEDGE_REJECT_CONFIRM_LABEL = "本当に捨てる";
+export const KNOWLEDGE_TARGET_LABEL = "取り込み先";
+export const KNOWLEDGE_OVERWRITE_LABEL = "既にあるページを上書きする";
+export const KNOWLEDGE_TARGET_EXISTS_LABEL = "取り込み先には既にページがあります（上書きを選ばないと 409 になります）";
+
+/**
+ * 知識ベースの変更が弾かれた理由（celeris の `code`）を人の言葉にする。`detail` は別に出すので、
+ * ここは「次に何をすればよいか」だけ。知らない `code` は `null`（`detail` だけ出す）。
+ */
+export function knowledgeErrorHint(code: string): string | null {
+  switch (code) {
+    case "etag_mismatch":
+      return "読み込んだ後に誰かがこのページを直しました。再読み込みしてから、もう一度編集してください。";
+    case "page_exists":
+      return "その場所には既にページがあります。別の場所にするか、上書きを選んでください。";
+    case "knowledge_unavailable":
+      return "知識ベースの置き場がありません。celeris の `[knowledge] root` を設定し、`celerisctl knowledge init` で用意してください。";
+    case "path_forbidden":
+      return "知識ベースの根の外と `_inbox/` は触れません（`..` や絶対パスは使えません）。";
+    case "candidate_not_found":
+      return "その候補はもうありません（他の画面で取り込んだか捨てたようです）。再読み込みしてください。";
+    default:
+      return null;
+  }
 }

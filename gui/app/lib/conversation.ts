@@ -15,8 +15,16 @@ export const CONVERSATION_WAIT_LIMIT_MS = 10 * 60 * 1000;
 /** 新しい案件の `title` に使う本文の先頭の長さ（SPEC §4「案件を投げる」を秘書との対話に統合するため）。 */
 export const PROJECT_TITLE_LIMIT = 40;
 
-/** 秘書のノード id（`/org/secretary` はこの人との対話。`POST /projects` の最初の返事も同じ相手）。 */
-export const SECRETARY_NODE_ID = "secretary";
+/**
+ * 秘書（Chief of Staff。ADR-0046 D6）のノード id。`/org/secretary` はこの人との対話。
+ * `POST /projects` の最初の返事も同じ相手。
+ *
+ * ADR-0046 D6（Phase 59）で根ノードの id は `secretary` → `cos` に改名された
+ * （`celerisctl org migrate-v2` が本番の DB を書き換える）。URL パス（`/org/secretary`）と
+ * 画面の言葉（「秘書」）は変えていない（別途 GUI 側の Phase で扱う。`docs/PROGRESS.md` の
+ * 「Phase 59 — 未解決事項」参照）が、この定数だけは新しい id に合わせる。
+ */
+export const SECRETARY_NODE_ID = "cos";
 
 /** 対話画面 1 枚ぶんのデータ（loader が組む。`~/celeris/conversation.server.ts`）。 */
 export interface ConversationData {

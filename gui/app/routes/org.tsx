@@ -21,10 +21,12 @@ import {
 } from "~/celeris/org-admin.server";
 import type {
   ConfigView,
+  EffectiveProfile,
   MemoryView,
   OrgKind,
   OrgList,
   OrgNode,
+  Profile,
   Project,
   ProjectList,
   StandingRule,
@@ -38,11 +40,32 @@ import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge, statusTone } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
+import {
+  checkboxClass,
+  chipLabelClass,
+  hintClass,
+  inputClass,
+  labelClass,
+  selectClass,
+  textareaClass,
+} from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import { standingRuleTargetName } from "~/lib/approvals";
-import { orgKindMark, taskStatusLabel } from "~/lib/labels";
+import {
+  harnessOptions,
+  KNOWLEDGE_KINDS,
+  knowledgeKindLabel,
+  orgKindMark,
+  PROFILE_RUNS,
+  PROFILE_TOOLS,
+  PROFILE_TOOLS_EXTRA_HINT,
+  profileFieldLabel,
+  profileRunLabel,
+  TIERS,
+  taskStatusLabel,
+  tierLabel,
+} from "~/lib/labels";
 import { buildOrgTree, countWorkload, type OrgTreeNode, tasksByAssignee, type Workload } from "~/lib/org-tree";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
@@ -228,6 +251,7 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
                 node={selected}
                 org={org.items}
                 genres={genres}
+                effectiveProfile={org.effective_profiles?.find((p) => p.node_id === selected.id)}
                 workload={workload[selected.id]}
                 tasks={nodeTasks}
                 standingRules={standingRules}
@@ -433,6 +457,7 @@ function OrgNodeDetail({
   node,
   org,
   genres,
+  effectiveProfile,
   workload,
   tasks,
   standingRules,
@@ -446,6 +471,7 @@ function OrgNodeDetail({
   node: OrgNode;
   org: OrgNode[];
   genres: string[];
+  effectiveProfile: EffectiveProfile | undefined;
   workload: Workload | undefined;
   tasks: TaskSummary[];
   standingRules: StandingRule[];
@@ -608,6 +634,16 @@ function OrgNodeDetail({
           </Link>
         </div>
 
+        <EffectiveProfileView profile={effectiveProfile} />
+
+        <details className="group">
+          <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-sm text-fg shadow-xs hover:bg-surface-2">
+            <Icon name="sparkles" className="size-4" />
+            profile を編集
+          </summary>
+          <ProfileEditForm key={node.id} node={node} genres={genres} fetcher={fetcher} submitting={submitting} />
+        </details>
+
         <details className="group">
           <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-sm text-fg shadow-xs hover:bg-surface-2">
             <Icon name="settings" className="size-4" />
@@ -749,6 +785,463 @@ function OrgNodeDetail({
         </details>
       </CardBody>
     </div>
+  );
+}
+
+/** そのノードの `knowledge[]` を人が読む 1 行に（`profile-admin` の `label()` と同じ考え方。表示だけ）。 */
+function knowledgeMountLine(m: {
+  kind: string;
+  scope?: string | null;
+  name?: string | null;
+  path?: string | null;
+  docs?: string | null;
+}) {
+  const parts = [m.scope, m.name, m.path].filter((p): p is string => Boolean(p));
+  const head = parts.length > 0 ? `${knowledgeKindLabel(m.kind)}: ${parts.join(":")}` : knowledgeKindLabel(m.kind);
+  return m.docs ? `${head}（docs: ${m.docs}）` : head;
+}
+
+/**
+ * ADR-0046 D1（Phase 59 / G21）: 実効 profile（根→葉で継いだ結果）の読み取り専用の表示。
+ * `GET /org` の `effective_profiles[]` をそのまま出す（GUI は継承を再計算しない。§4-1）。
+ */
+function EffectiveProfileView({ profile }: { profile: EffectiveProfile | undefined }) {
+  const isTrivial =
+    !profile ||
+    ((profile.skills?.length ?? 0) === 0 &&
+      (profile.knowledge?.length ?? 0) === 0 &&
+      (profile.harnesses_allowed?.length ?? 0) === 0 &&
+      !profile.harness_default &&
+      (profile.tools?.length ?? 0) === 0 &&
+      (profile.deny_tools?.length ?? 0) === 0 &&
+      !profile.run &&
+      !profile.tier &&
+      (profile.policy?.length ?? 0) === 0 &&
+      !profile.review_harness &&
+      !profile.review_tier &&
+      (profile.approvals?.length ?? 0) === 0);
+
+  return (
+    <div data-testid="org-node-profile">
+      <p className={labelClass}>実効 profile（組織の木から継いだもの）</p>
+      {isTrivial || !profile ? (
+        <p className={cn(hintClass, "mt-1")} data-testid="org-node-profile-empty">
+          まだ何も設定していません（下の「profile を編集」から足せます）。
+        </p>
+      ) : (
+        <dl
+          className="mt-1.5 grid grid-cols-1 gap-x-4 gap-y-3 text-sm sm:grid-cols-2"
+          data-testid="org-node-profile-body"
+        >
+          {profile.chain && profile.chain.length > 0 && (
+            <DataItem label={profileFieldLabel("chain")} wide>
+              {profile.chain.join(" → ")}
+            </DataItem>
+          )}
+          {profile.skills && profile.skills.length > 0 && (
+            <DataItem label={profileFieldLabel("skills")} wide>
+              <div className="flex flex-wrap gap-1">
+                {profile.skills.map((s) => (
+                  <Badge key={s} tone="neutral">
+                    {s}
+                  </Badge>
+                ))}
+              </div>
+            </DataItem>
+          )}
+          {(profile.harnesses_allowed?.length ?? 0) > 0 && (
+            <DataItem label={profileFieldLabel("harnesses_allowed")}>
+              {profile.harnesses_allowed?.join("、")}
+              {profile.harness_default && (
+                <span className="ml-1 text-xs text-fg-subtle">（既定: {profile.harness_default}）</span>
+              )}
+            </DataItem>
+          )}
+          {!profile.harnesses_allowed?.length && profile.harness_default && (
+            <DataItem label={profileFieldLabel("harness_default")}>{profile.harness_default}</DataItem>
+          )}
+          {profile.knowledge && profile.knowledge.length > 0 && (
+            <DataItem label={profileFieldLabel("knowledge")} wide>
+              <ul className="space-y-0.5">
+                {profile.knowledge.map((k, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: マウントは同じ内容が重複しないので並びで十分
+                  <li key={i}>{knowledgeMountLine(k)}</li>
+                ))}
+              </ul>
+            </DataItem>
+          )}
+          {(profile.tools?.length ?? 0) > 0 && (
+            <DataItem label={profileFieldLabel("tools")}>{profile.tools?.join("、")}</DataItem>
+          )}
+          {(profile.deny_tools?.length ?? 0) > 0 && (
+            <DataItem label={profileFieldLabel("deny_tools")}>{profile.deny_tools?.join("、")}</DataItem>
+          )}
+          {profile.run && <DataItem label={profileFieldLabel("run")}>{profileRunLabel(profile.run)}</DataItem>}
+          {profile.tier && (
+            <DataItem label={profileFieldLabel("tier")}>
+              {tierLabel(profile.tier)}
+              {(profile.allowed_tiers?.length ?? 0) > 0 && (
+                <span className="ml-1 text-xs text-fg-subtle">
+                  （許可: {profile.allowed_tiers?.map(tierLabel).join("、")}）
+                </span>
+              )}
+            </DataItem>
+          )}
+          {profile.review_harness && (
+            <DataItem label={profileFieldLabel("review_harness")}>{profile.review_harness}</DataItem>
+          )}
+          {profile.review_tier && (
+            <DataItem label={profileFieldLabel("review_tier")}>{tierLabel(profile.review_tier)}</DataItem>
+          )}
+          {(profile.approvals?.length ?? 0) > 0 && (
+            <DataItem label={profileFieldLabel("approvals")} wide>
+              {profile.approvals?.join("、")}
+            </DataItem>
+          )}
+          {profile.policy && profile.policy.length > 0 && (
+            <DataItem label={profileFieldLabel("policy")} wide>
+              <ul className="list-disc space-y-0.5 pl-4">
+                {profile.policy.map((p, i) => (
+                  // biome-ignore lint/suspicious/noArrayIndexKey: 方針は根→葉の連結で重複しうる。並びが意味を持つ
+                  <li key={i}>{p}</li>
+                ))}
+              </ul>
+            </DataItem>
+          )}
+        </dl>
+      )}
+    </div>
+  );
+}
+
+/** 知識のマウントを編集する行の数（既存の行 + 追加用の空行）。ADR-0046 D1。 */
+const KNOWLEDGE_EXTRA_ROWS = 3;
+
+/**
+ * ADR-0046 D1（Phase 59 / G21）: profile の編集フォーム。名前・種類等のフォーム（`org-edit-form`）とは
+ * **別に送る**（`~/celeris/org-admin.server.ts` の `buildOrgPatchInput` の規律。片方だけ変えられる）。
+ * `profile` は丸ごと差し替えなので、このフォームは常にそのノード自身の `profile`（継ぐ前）を初期値にする
+ * （`node.profile`。継いだ後の値は上の「実効 profile」に出るだけで、ここには入れない）。
+ */
+function ProfileEditForm({
+  node,
+  genres,
+  fetcher,
+  submitting,
+}: {
+  node: OrgNode;
+  genres: string[];
+  fetcher: FetcherWithComponents<OrgOpOutcome>;
+  submitting: boolean;
+}) {
+  const profile: Profile = node.profile ?? {};
+  const harnesses = harnessOptions(genres);
+  const knowledgeRows = [...(profile.knowledge ?? []), ...Array(KNOWLEDGE_EXTRA_ROWS).fill(null)].slice(
+    0,
+    Math.max((profile.knowledge?.length ?? 0) + KNOWLEDGE_EXTRA_ROWS, KNOWLEDGE_EXTRA_ROWS),
+  );
+  const uid = (suffix: string) => `profile-${node.id}-${suffix}`;
+
+  return (
+    <fetcher.Form
+      method="post"
+      data-testid="org-profile-edit-form"
+      className="mt-3 space-y-4 rounded-lg border border-border bg-surface-2/40 p-3"
+    >
+      <input type="hidden" name="intent" value="org_patch" />
+      <input type="hidden" name="id" value={node.id} />
+      {/* 丸ごと差し替え（§3.44）の印。これが無ければ `profile` は本文に入らず、今の値のまま。 */}
+      <input type="hidden" name="profile_present" value="1" />
+
+      <div>
+        <label className={labelClass} htmlFor={uid("skills")}>
+          能力タグ（skills）
+        </label>
+        <input
+          id={uid("skills")}
+          name="profile_skills"
+          type="text"
+          defaultValue={profile.skills?.join(", ") ?? ""}
+          className={cn(inputClass, "mt-1.5 w-full")}
+        />
+        <p className={hintClass}>空白かカンマ区切り（例: rust, sqlite）。小文字の `[a-z0-9._-]` だけ。</p>
+      </div>
+
+      <div>
+        <p className={labelClass}>受けられるハーネス（harnesses.allowed）</p>
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {harnesses.map((h) => (
+            <label key={h} className={chipLabelClass}>
+              <input
+                type="checkbox"
+                name="profile_harnesses_allowed"
+                value={h}
+                defaultChecked={profile.harnesses?.allowed?.includes(h) ?? false}
+                className={checkboxClass}
+              />
+              {h}
+            </label>
+          ))}
+        </div>
+        <label className={cn(labelClass, "mt-3 block")} htmlFor={uid("harness-default")}>
+          既定のハーネス（harnesses.default）
+        </label>
+        <select
+          id={uid("harness-default")}
+          name="profile_harness_default"
+          defaultValue={profile.harnesses?.default ?? ""}
+          className={cn(selectClass, "mt-1.5 w-full sm:w-64")}
+        >
+          <option value="">（子が決める・無し）</option>
+          {harnesses.map((h) => (
+            <option key={h} value={h}>
+              {h}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div>
+        <p className={labelClass}>使ってよい道具（tools）</p>
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {PROFILE_TOOLS.map((t) => (
+            <label key={t} className={chipLabelClass}>
+              <input
+                type="checkbox"
+                name="profile_tools"
+                value={t}
+                defaultChecked={profile.tools?.includes(t) ?? false}
+                className={checkboxClass}
+              />
+              {t}
+            </label>
+          ))}
+        </div>
+        <input
+          name="profile_tools_extra"
+          type="text"
+          defaultValue={
+            profile.tools?.filter((t) => !(PROFILE_TOOLS as readonly string[]).includes(t)).join(", ") ?? ""
+          }
+          placeholder="cluster:pegasus"
+          className={cn(inputClass, "mt-1.5 w-full")}
+        />
+        <p className={hintClass}>{PROFILE_TOOLS_EXTRA_HINT}</p>
+      </div>
+
+      <div>
+        <p className={labelClass}>禁止する道具（deny_tools。常に勝つ）</p>
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {PROFILE_TOOLS.map((t) => (
+            <label key={t} className={chipLabelClass}>
+              <input
+                type="checkbox"
+                name="profile_deny_tools"
+                value={t}
+                defaultChecked={profile.deny_tools?.includes(t) ?? false}
+                className={checkboxClass}
+              />
+              {t}
+            </label>
+          ))}
+        </div>
+        <input
+          name="profile_deny_tools_extra"
+          type="text"
+          defaultValue={
+            profile.deny_tools?.filter((t) => !(PROFILE_TOOLS as readonly string[]).includes(t)).join(", ") ?? ""
+          }
+          placeholder="cluster:pegasus"
+          className={cn(inputClass, "mt-1.5 w-full")}
+        />
+      </div>
+
+      <div>
+        <p className={labelClass}>知識（knowledge）</p>
+        <div className="mt-1.5 space-y-2">
+          {knowledgeRows.map((row, i) => (
+            <div
+              // biome-ignore lint/suspicious/noArrayIndexKey: 行は固定数の並行配列で並びに意味がある
+              key={i}
+              className="grid grid-cols-2 gap-2 rounded-lg border border-border bg-surface p-2 sm:grid-cols-5"
+            >
+              <select
+                name="profile_knowledge_kind"
+                defaultValue={row?.kind ?? ""}
+                aria-label="種類"
+                className={cn(selectClass, "h-8 text-xs")}
+              >
+                <option value="">（未使用）</option>
+                {KNOWLEDGE_KINDS.map((k) => (
+                  <option key={k} value={k}>
+                    {knowledgeKindLabel(k)}
+                  </option>
+                ))}
+              </select>
+              <input
+                name="profile_knowledge_scope"
+                type="text"
+                defaultValue={row?.scope ?? ""}
+                placeholder="scope（kb 用）"
+                aria-label="scope"
+                className={cn(inputClass, "h-8 text-xs")}
+              />
+              <input
+                name="profile_knowledge_name"
+                type="text"
+                defaultValue={row?.name ?? ""}
+                placeholder="name（repo/memory 用）"
+                aria-label="name"
+                className={cn(inputClass, "h-8 text-xs")}
+              />
+              <input
+                name="profile_knowledge_path"
+                type="text"
+                defaultValue={row?.path ?? ""}
+                placeholder="path"
+                aria-label="path"
+                className={cn(inputClass, "h-8 text-xs")}
+              />
+              <input
+                name="profile_knowledge_docs"
+                type="text"
+                defaultValue={row?.docs ?? ""}
+                placeholder="docs（repo 用）"
+                aria-label="docs"
+                className={cn(inputClass, "h-8 text-xs")}
+              />
+            </div>
+          ))}
+        </div>
+        <p className={hintClass}>種類を選んだ行だけが保存されます（空の行は無視されます）。</p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div>
+          <label className={labelClass} htmlFor={uid("run")}>
+            実行場所（run）
+          </label>
+          <select
+            id={uid("run")}
+            name="profile_run"
+            defaultValue={profile.run ?? ""}
+            className={cn(selectClass, "mt-1.5 w-full")}
+          >
+            <option value="">（子が決める・無し）</option>
+            {PROFILE_RUNS.map((r) => (
+              <option key={r} value={r}>
+                {profileRunLabel(r)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className={labelClass} htmlFor={uid("model-tier")}>
+            モデルの段（tier）
+          </label>
+          <select
+            id={uid("model-tier")}
+            name="profile_model_tier"
+            defaultValue={profile.model?.tier ?? ""}
+            className={cn(selectClass, "mt-1.5 w-full")}
+          >
+            <option value="">（子が決める・無し）</option>
+            {TIERS.map((t) => (
+              <option key={t} value={t}>
+                {tierLabel(t)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="col-span-2">
+          <p className={labelClass}>許すモデルの段（allowed_tiers。交わり）</p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {TIERS.map((t) => (
+              <label key={t} className={chipLabelClass}>
+                <input
+                  type="checkbox"
+                  name="profile_model_allowed_tiers"
+                  value={t}
+                  defaultChecked={profile.model?.allowed_tiers?.includes(t) ?? false}
+                  className={checkboxClass}
+                />
+                {tierLabel(t)}
+              </label>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className={labelClass} htmlFor={uid("review-harness")}>
+            レビューのハーネス（review.harness）
+          </label>
+          <select
+            id={uid("review-harness")}
+            name="profile_review_harness"
+            defaultValue={profile.review?.harness ?? ""}
+            className={cn(selectClass, "mt-1.5 w-full")}
+          >
+            <option value="">（子が決める・無し）</option>
+            {harnesses.map((h) => (
+              <option key={h} value={h}>
+                {h}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className={labelClass} htmlFor={uid("review-tier")}>
+            レビューのモデルの段（review.tier）
+          </label>
+          <select
+            id={uid("review-tier")}
+            name="profile_review_tier"
+            defaultValue={profile.review?.tier ?? ""}
+            className={cn(selectClass, "mt-1.5 w-full")}
+          >
+            <option value="">（子が決める・無し）</option>
+            {TIERS.map((t) => (
+              <option key={t} value={t}>
+                {tierLabel(t)}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label className={labelClass} htmlFor={uid("policy")}>
+          組織の方針（policy。根→葉の順に連結。1 行 1 件）
+        </label>
+        <textarea
+          id={uid("policy")}
+          name="profile_policy"
+          rows={3}
+          defaultValue={profile.policy?.join("\n") ?? ""}
+          className={cn(textareaClass, "mt-1.5 w-full")}
+        />
+      </div>
+
+      <div>
+        <label className={labelClass} htmlFor={uid("approvals")}>
+          認可が要る操作（permissions.approvals。1 行 1 件）
+        </label>
+        <textarea
+          id={uid("approvals")}
+          name="profile_approvals"
+          rows={2}
+          defaultValue={profile.permissions?.approvals?.join("\n") ?? ""}
+          className={cn(textareaClass, "mt-1.5 w-full")}
+        />
+      </div>
+
+      <Button type="submit" variant="primary" size="sm" disabled={submitting} data-testid="org-profile-edit-submit">
+        <Icon name="check" />
+        profile を保存
+      </Button>
+    </fetcher.Form>
   );
 }
 

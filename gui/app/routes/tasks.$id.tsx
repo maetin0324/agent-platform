@@ -23,6 +23,7 @@ import type {
   ArtifactList,
   ArtifactView,
   CommentList,
+  ConfigView,
   Event,
   EventsPage,
   MilestoneView,
@@ -76,8 +77,11 @@ import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { isValidLabel, MAX_LABELS, PRIORITY_LABELS } from "~/lib/board";
 import { defaultPromotePath, docsHref, isMarkdownName } from "~/lib/docs";
 import {
+  ASSIGNED_WHY_LABEL,
+  assignedScoreLabel,
   commentAuthorLabel,
   docsErrorHint,
+  harnessOptions,
   milestoneStatusLabel,
   PROMOTE_OVERWRITE_LABEL,
   PROMOTE_TO_DOC_LABEL,
@@ -85,10 +89,12 @@ import {
   parseTaskTab,
   priorityFullLabel,
   TASK_CATEGORIES,
+  TASK_MODES,
   TASK_TABS,
   type TaskTab,
   TIERS,
   taskCategoryLabel,
+  taskModeLabel,
   taskTabLabel,
   tierLabel,
   timelineKindLabel,
@@ -165,6 +171,18 @@ export interface TaskDetailData {
   /** ADR-0044 D1: 編集フォームの「途中目標」プルダウン（そのタスクの案件のものだけ）。 */
   milestones: MilestoneView[];
   /**
+   * ADR-0046 D3（Phase 59）: 編集フォームの「ハーネス」プルダウンの選択肢（`GET /config` の
+   * `genres[].id` = ハーネスのレジストリの射影）。空なら自由記述の欄にする（celeris 側で検証しない
+   * 最小構成。`~/routes/org.tsx` の「分野」欄と同じ考え方）。落ちても画面は出す。
+   */
+  genres: string[];
+  /**
+   * ADR-0046 D5（Phase 59 / G21）: matching が担当を決めた理由（「なぜこの担当か」）。
+   * `GET /tasks/{id}/events` に載っている最新の `assigned` イベント。無ければ null
+   * （明示の `assignee` で作られた・組織を使っていない構成 等）。
+   */
+  assignedEvent: { node: string; score: number; reason: string } | null;
+  /**
    * ADR-0043 D6 + ADR-0044 D5（Phase 52 + 53 のマージ）: 「ファイル」タブの中身。
    * **`?tab=files` のときだけ**引く（他のタブで毎回 `GET /tasks/{id}/tree` を叩かないため）。
    * 作業ツリーが無いタスク（404 `file_not_found`）やリポジトリを使わないタスクでは `error` に
@@ -215,17 +233,24 @@ export async function loadTaskDetail(client: CelerisClient, taskId: string, requ
     client.get<Timeline>(`/tasks/${taskId}/timeline`, { signal: request.signal }),
     client.get<CommentList>(`/tasks/${taskId}/comments`, { signal: request.signal }),
   ]);
-  // 案件・途中目標・担当の名前（監査 M2）と、編集フォームの選択肢（ADR-0044 D1）。
+  // 案件・途中目標・担当の名前（監査 M2）と、編集フォームの選択肢（ADR-0044 D1、ADR-0046 D3 の「ハーネス」）。
   const assigneeId = detail.task.assignee ?? null;
   const projectId = detail.task.project_id ?? null;
-  const [project, org] = await Promise.all([
+  const [project, org, config] = await Promise.all([
     projectId
       ? client
           .get<ProjectDetail>(`/projects/${encodeURIComponent(projectId)}`, { signal: request.signal })
           .catch(() => null)
       : Promise.resolve(null),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => null),
+    client.get<ConfigView>("/config", { signal: request.signal }).catch(() => null),
   ]);
+  // ADR-0046 D5（Phase 59 / G21）: 「なぜこの担当か」。`assigned` は matching が決めたときに 1 件だけ
+  // 付く（明示の assignee で作られたタスクには無い）。複数走っていれば直近を出す。
+  const assignedEvent = events.items
+    .map((row) => row.event)
+    .filter((e): e is Extract<Event, { type: "assigned" }> => e.type === "assigned")
+    .at(-1);
   // ADR-0043 D6: 「ファイル」タブを見ているときだけ作業ツリーを引く。403 / 404 は画面に出す
   // （兄弟のルート `/tasks/:id/files` はページ自体を落とすが、タブでは他のタブが見えていてほしい）。
   let files: TaskDetailData["files"] = null;
@@ -257,6 +282,10 @@ export async function loadTaskDetail(client: CelerisClient, taskId: string, requ
     comments,
     org: org?.items ?? [],
     milestones: project?.milestones ?? [],
+    genres: (config?.genres ?? []).map((g) => g.id),
+    assignedEvent: assignedEvent
+      ? { node: assignedEvent.node, score: assignedEvent.score, reason: assignedEvent.reason }
+      : null,
     files,
     changes,
     place: {
@@ -317,7 +346,20 @@ export async function action({ request, params }: Route.ActionArgs) {
 }
 
 export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
-  const { detail, events, artifacts, timeline, comments, org, milestones, files, changes, place } = loaderData;
+  const {
+    detail,
+    events,
+    artifacts,
+    timeline,
+    comments,
+    org,
+    milestones,
+    genres,
+    assignedEvent,
+    files,
+    changes,
+    place,
+  } = loaderData;
   const { task } = detail;
   const [searchParams] = useSearchParams();
   const tab = parseTaskTab(searchParams.get("tab"));
@@ -401,6 +443,17 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                     >
                       {place.assigneeName ?? place.assigneeId}
                     </Link>
+                    {/* ADR-0046 D5（Phase 59 / G21）: 「なぜこの担当か」。matching が決めたタスクにだけ出る
+                        （`Event::Assigned`。明示の assignee で作られたタスクには無い）。 */}
+                    {assignedEvent && assignedEvent.node === place.assigneeId && (
+                      <span
+                        className="ml-1.5 text-xs text-fg-subtle"
+                        data-testid="task-assigned-why"
+                        title={`${ASSIGNED_WHY_LABEL}: ${assignedEvent.reason}（${assignedScoreLabel(assignedEvent.score)}）`}
+                      >
+                        （{ASSIGNED_WHY_LABEL}: {assignedEvent.reason}）
+                      </span>
+                    )}
                   </p>
                 )}
                 {place.milestoneTitle && <p data-testid="task-milestone">途中目標: {place.milestoneTitle}</p>}
@@ -479,6 +532,7 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
           artifactCount={artifacts.items.length}
           org={org}
           milestones={milestones}
+          genres={genres}
           fetcher={fetcher}
           submitting={submitting}
           retryFetcher={retryFetcher}
@@ -623,6 +677,7 @@ function OverviewTab({
   artifactCount,
   org,
   milestones,
+  genres,
   fetcher,
   submitting,
   retryFetcher,
@@ -632,6 +687,7 @@ function OverviewTab({
   artifactCount: number;
   org: OrgNode[];
   milestones: MilestoneView[];
+  genres: string[];
   fetcher: ReturnType<typeof useFetcher<TransitionOutcome>>;
   submitting: boolean;
   retryFetcher: ReturnType<typeof useFetcher<RetryOutcome>>;
@@ -681,7 +737,7 @@ function OverviewTab({
 
       {/* ADR-0044 D1（Phase 53）: 人がタスクを細かく直せる。終端のタスクは celeris が 409 を返すので出さない。 */}
       {detail.actions.includes("edit") && (
-        <TaskEditSection key={task.updated_at} detail={detail} org={org} milestones={milestones} />
+        <TaskEditSection key={task.updated_at} detail={detail} org={org} milestones={milestones} genres={genres} />
       )}
 
       <section data-testid="relations-section">
@@ -1181,12 +1237,16 @@ function TaskEditSection({
   detail,
   org,
   milestones,
+  genres,
 }: {
   detail: TaskDetail;
   org: OrgNode[];
   milestones: MilestoneView[];
+  /** ADR-0046 D3（Phase 59）: ハーネス（`genre` 列）の選択肢。空なら自由記述にする。 */
+  genres: string[];
 }) {
   const { task } = detail;
+  const harnesses = harnessOptions(genres);
   const fetcher = useFetcher<TaskEditOutcome>({ key: `task-edit-${task.id}` });
   const busy = fetcher.state !== "idle";
   const [labels, setLabels] = useState<string[]>(task.labels ?? []);
@@ -1366,6 +1426,76 @@ function TaskEditSection({
                     ))}
                 </select>
                 {milestones.length === 0 && <p className={cn(hintClass, "mt-1")}>この案件には途中目標がありません。</p>}
+              </div>
+
+              {/* ADR-0046 D3（Phase 59）: ハーネス（`Task.genre` 列がそのまま harness id）。空の選択肢を
+                  選べば `null`（外す）を送る（`NULLABLE_FIELDS`。§3.74）。 */}
+              <div>
+                <label htmlFor="edit-harness" className={labelClass}>
+                  ハーネス
+                </label>
+                {harnesses.length > 0 ? (
+                  <select
+                    id="edit-harness"
+                    name="harness"
+                    defaultValue={task.genre ?? ""}
+                    data-testid="edit-harness"
+                    className={cn(selectClass, "mt-1.5")}
+                  >
+                    <option value="">（決めない）</option>
+                    {harnesses.map((h) => (
+                      <option key={h} value={h}>
+                        {h}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    id="edit-harness"
+                    name="harness"
+                    type="text"
+                    defaultValue={task.genre ?? ""}
+                    data-testid="edit-harness"
+                    className={cn(inputClass, "mt-1.5")}
+                  />
+                )}
+                <p className={hintClass}>担当が無ければ、これと能力タグの重なりで決まります（ADR-0046 D5）。</p>
+              </div>
+
+              {/* ADR-0046 D2（Phase 59）: 必要な能力タグ（開いた語彙。空白/カンマ区切り）。 */}
+              <div>
+                <label htmlFor="edit-skills" className={labelClass}>
+                  能力タグ
+                </label>
+                <input
+                  id="edit-skills"
+                  name="skills"
+                  type="text"
+                  defaultValue={(task.skills ?? []).join(", ")}
+                  data-testid="edit-skills"
+                  className={cn(inputClass, "mt-1.5")}
+                />
+                <p className={hintClass}>空白かカンマ区切り（例: rust, benchmark）。小文字の `[a-z0-9._-]` だけ。</p>
+              </div>
+
+              {/* ADR-0046 D4（Phase 59）: 進め方。前置きの規則とレビューの厳しさが変わる。 */}
+              <div>
+                <label htmlFor="edit-mode" className={labelClass}>
+                  進め方
+                </label>
+                <select
+                  id="edit-mode"
+                  name="mode"
+                  defaultValue={task.mode ?? "production"}
+                  data-testid="edit-mode"
+                  className={cn(selectClass, "mt-1.5")}
+                >
+                  {TASK_MODES.map((m) => (
+                    <option key={m} value={m}>
+                      {taskModeLabel(m)}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
 
