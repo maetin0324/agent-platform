@@ -9559,3 +9559,15 @@ Git worktree のコミットは Codex 0.154.0 の --approve-for-me で個別審�
 Qwen は接続先 bnode150 の /v1/models が200だがローカル18000番は未接続だった。
 celeris-qwen-tunnel ユーザーサービス（transient、失敗時再接続）で設定済みSSH転送を復旧。
 本番適用と再実行の結果は続報へ記録する。
+
+### 上記修正の本番適用結果（2026-09-20 18:33 UTC）
+
+- リリース **4a5a708a4130** を release 全7 gates、snapshot verify（ok/live_okともtrue）経由で live promote。daemon/GUIとも同一版で稼働。
+- DBバックアップ: `~/.local/celeris/backups/20260920-183317-pre-4a5a708a4130.sqlite3`。
+- 全体検証で検出した生成schema更新漏れを反映し、コンテナ検出テストのETXTBSY競合も既存ヘルパー利用へ修正。worker全292テスト成功。
+- 既存タスク `01M3000W211ER7RBDDFCFWY8PD` を reopen し、worktree/途中成果を保持。
+  run `01M301HD43PK3NMPT5FSVE252S` は正規成果物保存に成功して worker done、Codex reviewerも実行完了。
+- レビューはSSH未確認と描画未検証を理由に差し戻し。成果物保存の障害は解消したが、調査条件の完了は未確認。
+- 自動承認レビューの恒久設定 `--approve-for-me` は自動審査で明示的なユーザー承認が必要として拒否。
+  この設定を含まない安全な適用のみ実施し、設定変更への質問は保留中。sandbox/approval設定は変更していない。
+- Qwenトンネルの復旧後、ローカル `/v1/models` HTTP200を確認。transientなユーザーサービスであり、永続的な自動起動設定は追加していない。
