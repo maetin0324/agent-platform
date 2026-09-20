@@ -5957,7 +5957,7 @@
       "type": "object"
     },
     "NotificationKind": {
-      "description": "知らせる理由（ADR-0037 D1 の 5 種）。**どれも「人の判断が要る」ときだけ**。\n`result` / `progress` は入れない（SPEC §3.5 の数時間単位の流れは GUI の報告の仕事）。",
+      "description": "判断待ち・返事・成果の引き渡し（ADR-0037 / ADR-0050）。進行中の細かな更新は通知しない。",
       "oneOf": [
         {
           "const": "milestone_ready",
@@ -5971,7 +5971,7 @@
         },
         {
           "const": "question_blocked",
-          "description": "タスクが `blocked`（人への質問）。`key` = タスク id。",
+          "description": "タスクが `blocked`（人への質問）。`key` = task id:遷移番号。",
           "type": "string"
         },
         {
@@ -5981,7 +5981,7 @@
         },
         {
           "const": "secretary_reply",
-          "description": "`proposed` の案件に秘書の返事が付いた（人の返事待ち）。`key` = 案件 id。",
+          "description": "全体対話・継続中の案件に返事が付いた。`key` = message:message id。",
           "type": "string"
         },
         {

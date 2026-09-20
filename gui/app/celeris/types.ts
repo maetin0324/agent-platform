@@ -488,8 +488,7 @@ export type TaskMode = "prototype" | "production" | "research";
  */
 export type PriorityInput = ("P0" | "P1" | "P2" | "P3") | number;
 /**
- * 知らせる理由（ADR-0037 D1 の 5 種）。**どれも「人の判断が要る」ときだけ**。
- * `result` / `progress` は入れない（SPEC §3.5 の数時間単位の流れは GUI の報告の仕事）。
+ * 判断待ち・返事・成果の引き渡し（ADR-0037 / ADR-0050）。進行中の細かな更新は通知しない。
  */
 export type NotificationKind =
   "milestone_ready" | "approval_pending" | "question_blocked" | "bad_news" | "secretary_reply" | "task_ready";
