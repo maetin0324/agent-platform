@@ -14,7 +14,7 @@ SD_PROG=promote
 
 usage() {
   cat >&2 <<'EOF'
-usage: promote.sh <sha12>
+usage: promote.sh <sha12> [--pre-start <script>]
 
   verify.sh が `ok` を出したリリースだけを昇格できる。`--force` は無い（ADR-0040 D2）。
   systemd の unit が要る: scripts/selfdeploy/install-units.sh を一度だけ実行しておくこと。
@@ -22,7 +22,17 @@ EOF
   exit 2
 }
 
-[ $# -eq 1 ] || usage
+# `--pre-start <script>`: 停止→起動のとき、旧が止まり DB のバックアップを取った**後**、新を起こす**前**に 1 度だけ実行する
+# （ADR-0046 D7 の `celerisctl org migrate-v2` のように、デーモンが止まっている間に DB を直接触る移行のため）。
+# 引数は `<sha12> <release dir> <db path> <config path>`。失敗したら DB をバックアップから戻し、旧 unit を起こし直して止まる。
+# ライブ引き継ぎ（live）では実行できない（デーモンが動いている）ので、指定があれば停止→起動に倒す。
+PRE_START=""
+if [ $# -eq 3 ] && [ "$2" = "--pre-start" ]; then
+  PRE_START="$3"
+  [ -x "$PRE_START" ] || { echo "promote.sh: --pre-start script is not executable: $PRE_START" >&2; exit 2; }
+elif [ $# -ne 1 ]; then
+  usage
+fi
 SHA12="$1"
 
 sd_require_json_tool
@@ -69,7 +79,8 @@ if [ "$LIVE_RELEASE" = "$SHA12" ]; then
 fi
 
 MODE=stop-start
-if [ "$LIVE_OK" = true ] && [ -n "$LIVE_ROLE" ]; then MODE=live; fi
+if [ "$LIVE_OK" = true ] && [ -n "$LIVE_ROLE" ] && [ -z "$PRE_START" ]; then MODE=live; fi
+if [ -n "$PRE_START" ]; then sd_log "--pre-start given ($PRE_START): forcing stop-start"; fi
 sd_log "promotion mode: $MODE"
 
 # ---- 道具 ------------------------------------------------------------------
@@ -248,6 +259,18 @@ promote_stop_start() {
 
   # 旧が止まってからバックアップを取る（ADR-0040 D4 の順。引き継ぎ中の仕事も入る）。
   backup_db
+
+  if [ -n "$PRE_START" ]; then
+    sd_log "pre-start hook: $PRE_START $SHA12 $REL $SD_DB $SD_CONFIG"
+    if ! "$PRE_START" "$SHA12" "$REL" "$SD_DB" "$SD_CONFIG" >>"$SD_LOG_FILE" 2>&1; then
+      sd_log "pre-start hook failed; restoring the DB from $BACKUP"
+      rm -f "$SD_DB-wal" "$SD_DB-shm"
+      cp -p "$BACKUP" "$SD_DB" || sd_log "warning: could not restore $SD_DB from $BACKUP"
+      restore_old_daemon
+      sd_die "pre-start hook failed (see $SD_LOG_FILE). The DB was restored from the pre-promotion backup and the old unit was restarted"
+    fi
+    sd_log "pre-start hook ok"
+  fi
 
   sd_log "systemctl --user start celeris@$SHA12"
   if ! systemctl --user start "celeris@$SHA12"; then
