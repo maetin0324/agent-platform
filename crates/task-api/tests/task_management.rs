@@ -716,6 +716,7 @@ async fn the_timeline_shows_the_knowledge_maintenance_run() {
                 ingested: 1,
                 inbox: 1,
                 discarded: 0,
+                discarded_reasons: Vec::new(),
             }),
         )
         .expect("finish run");

@@ -1151,6 +1151,11 @@ impl ApplyOutcome {
             ingested: self.committed.len() as u32,
             inbox: self.inboxed.len() as u32,
             discarded: self.dropped.len() as u32,
+            discarded_reasons: self
+                .dropped
+                .iter()
+                .map(|(path, why)| format!("{path}: {why}"))
+                .collect(),
         }
     }
 }

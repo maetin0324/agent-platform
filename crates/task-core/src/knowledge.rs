@@ -843,19 +843,60 @@ pub const SECRET_PATTERNS: [(&str, &str); 10] = [
     ("ANTHROPIC_API_KEY=", "環境変数に書かれた API キー"),
 ];
 
-/// 秘密が含まれていればその説明（ADR-0047 D4。決定的。大文字小文字は `sk-` などの前置きだけ
-/// 区別しない）。
+/// 秘密が含まれていればその説明（ADR-0047 D4。決定的）。
+///
+/// 実機 2026-09-20: 前置きの**部分文字列**だけで見ていたため、`vm-100-disk-0.raw` の「di**sk-**0」が OpenAI の
+/// キー扱いになり、正しい候補が捨てられた。トークンの形で見る: 前置きの**直前が英数字でない**（語の途中でない）こと、
+/// **直後にトークンらしい文字（英数字・`_`・`-`）が 6 文字以上**続くこと。PEM と `…_API_KEY=` は部分文字列のまま。
 pub fn secret_finding(text: &str) -> Option<&'static str> {
+    const MIN_TOKEN_TAIL: usize = 6;
     for (needle, why) in SECRET_PATTERNS {
-        if needle.chars().any(|c| c.is_ascii_uppercase()) {
-            if text.contains(needle) {
+        let substring_only = needle.starts_with("-----") || needle.ends_with('=');
+        let case_sensitive = needle.chars().any(|c| c.is_ascii_uppercase());
+        let hay = if case_sensitive {
+            text.to_string()
+        } else {
+            text.to_ascii_lowercase()
+        };
+        let mut from = 0;
+        while let Some(found) = hay[from..].find(needle) {
+            let at = from + found;
+            if substring_only {
                 return Some(why);
             }
-        } else if text.to_ascii_lowercase().contains(needle) {
-            return Some(why);
+            let boundary = hay[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_ascii_alphanumeric());
+            let tail = hay[at + needle.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .count();
+            if boundary && tail >= MIN_TOKEN_TAIL {
+                return Some(why);
+            }
+            from = at + needle.len();
         }
     }
     None
+}
+
+#[cfg(test)]
+mod secret_shape_tests {
+    use super::secret_finding;
+
+    #[test]
+    fn a_disk_image_name_is_not_a_secret_but_a_real_key_is() {
+        assert_eq!(
+            secret_finding("/mnt/pve/truenas/images/100/vm-100-disk-0.raw は loop0 の実体"),
+            None
+        );
+        assert_eq!(secret_finding("task-runner と risk-based の話"), None);
+        assert!(secret_finding("鍵は sk-abcdefghijklmnopqrstuvwxyz012345 です").is_some());
+        assert!(secret_finding("ghp_0123456789abcdefghijABCDEFGHIJ").is_some());
+        assert!(secret_finding("-----BEGIN OPENSSH PRIVATE KEY-----").is_some());
+        assert!(secret_finding("ANTHROPIC_API_KEY=x").is_some());
+    }
 }
 
 // ---------------------------------------------------------------------------

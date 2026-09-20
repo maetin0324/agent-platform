@@ -394,6 +394,7 @@ async fn knowledge_blocks_show_the_applied_summary_and_respect_scope() {
                 ingested: 1,
                 inbox: 2,
                 discarded: 0,
+                discarded_reasons: Vec::new(),
             }),
         )
         .expect("finish run");

@@ -61,6 +61,9 @@ pub struct KnowledgeRunSummary {
     /// 検査で落とした件数（境界違反・秘密・出典なし等）。
     #[serde(default)]
     pub discarded: u32,
+    /// 落とした候補の `path` と理由（実機 2026-09-20: 件数だけでは、なぜ捨てられたかを後から追えなかった）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discarded_reasons: Vec<String>,
 }
 
 impl KnowledgeRunSummary {
@@ -334,6 +337,7 @@ mod tests {
             ingested: 1,
             inbox: 2,
             discarded: 0,
+            discarded_reasons: Vec::new(),
         };
         let applied_at = now + time::Duration::minutes(5);
         store
