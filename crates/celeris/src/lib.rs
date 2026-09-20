@@ -365,7 +365,10 @@ pub fn secret_usage(config: &Config) -> HashMap<String, Vec<task_api::types::Sec
             LdrAdapter::ID,
             &config.adapters.local_deep_research.env_from_secrets,
         ),
-        (LangMemAdapter::ID, &config.adapters.langmem.env_from_secrets),
+        (
+            LangMemAdapter::ID,
+            &config.adapters.langmem.env_from_secrets,
+        ),
     ];
     for (name, from_secrets) in adapters {
         let mut env_keys: Vec<&String> = from_secrets.keys().collect();
@@ -1207,11 +1210,15 @@ async fn tick_loop(
             {
                 let store = dispatcher.store();
                 let now = OffsetDateTime::now_utc();
-                let memory_dir = config.memory.as_ref().map(|m| task_worker::MemoryDir::new(&m.dir));
+                let memory_dir = config
+                    .memory
+                    .as_ref()
+                    .map(|m| task_worker::MemoryDir::new(&m.dir));
                 match knowledge_maint::schedule(
                     store.as_ref(),
                     &config.knowledge.root,
                     config.knowledge.langmem.enabled,
+                    notify_started_at,
                     config.knowledge.langmem.max_related_pages,
                     memory_dir.as_ref(),
                     &config.role_specs(),
@@ -1219,7 +1226,10 @@ async fn tick_loop(
                     now,
                 ) {
                     Ok(created) if !created.is_empty() => {
-                        tracing::info!(count = created.len(), "knowledge: maintenance runs scheduled");
+                        tracing::info!(
+                            count = created.len(),
+                            "knowledge: maintenance runs scheduled"
+                        );
                     }
                     Ok(_) => {}
                     Err(e) => {

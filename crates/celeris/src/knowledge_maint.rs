@@ -56,6 +56,9 @@ pub fn schedule(
     store: &dyn TaskStore,
     knowledge_root: &Path,
     enabled: bool,
+    // backfill 禁止（ADR-0037 D5 と同じ規則。実機 2026-09-20: 有効にした瞬間に過去の終端タスク 49 件ぶんの
+    // 知識整理 run が起きるところだった）: この時刻より前に終端になったタスクは対象にしない。daemon の起動時刻を渡す。
+    not_before: OffsetDateTime,
     max_related_pages: usize,
     memory_dir: Option<&MemoryDir>,
     roles: &[RoleSpec],
@@ -73,6 +76,9 @@ pub fn schedule(
     for task in page.items {
         // 裏方（対話・計画・圧縮・承認・合成レビュー・途中目標レビュー・知識整理自身）は対象外。
         if support_kind(&task).is_some() {
+            continue;
+        }
+        if task.updated_at < not_before {
             continue;
         }
         // 検証の煙試験（ADR-0041 D5）も対象外（tick が動く通常運用では基本的に出てこないが、念のため）。
@@ -104,13 +110,20 @@ pub fn schedule(
             .comments_for(task.id)?
             .into_iter()
             .map(|c| {
-                let who = c.author.clone().unwrap_or_else(|| c.author_kind.as_str().to_string());
+                let who = c
+                    .author
+                    .clone()
+                    .unwrap_or_else(|| c.author_kind.as_str().to_string());
                 format!("{who}: {}", c.body.trim())
             })
             .collect::<Vec<_>>();
 
-        let query = [task.title.as_str(), &task.labels.join(" "), &task.skills.join(" ")]
-            .join(" ");
+        let query = [
+            task.title.as_str(),
+            &task.labels.join(" "),
+            &task.skills.join(" "),
+        ]
+        .join(" ");
         let related_pages: Vec<RelatedPage> =
             task_ops::knowledge::search(knowledge_root, &query, None, max_related_pages)
                 .into_iter()
@@ -127,11 +140,8 @@ pub fn schedule(
 
         let notes_excerpt = memory_dir
             .map(|m| {
-                m.load(
-                    &assignee,
-                    task.project_id.map(|p| p.to_string()).as_deref(),
-                )
-                .notes
+                m.load(&assignee, task.project_id.map(|p| p.to_string()).as_deref())
+                    .notes
             })
             .unwrap_or_default();
 
@@ -244,8 +254,11 @@ pub fn apply_finished(
             .and_then(|text| serde_json::from_str::<CandidatesFile>(&text).ok())
             .map(|f| f.candidates)
             .unwrap_or_default();
-        let outcome =
-            task_ops::knowledge::apply_candidates(knowledge_root, &run.task_id.to_string(), &candidates);
+        let outcome = task_ops::knowledge::apply_candidates(
+            knowledge_root,
+            &run.task_id.to_string(),
+            &candidates,
+        );
         tracing::info!(
             task_id = %run.task_id,
             run_task_id = %run.run_task_id,
@@ -394,6 +407,34 @@ mod tests {
         (dir, root)
     }
 
+    /// backfill 禁止: `not_before` より前に終端になったタスクからは作らない（実機 2026-09-20）。
+    #[test]
+    fn tasks_finished_before_the_daemon_started_are_not_backfilled() {
+        let store = store_with_node();
+        let (_dir, root) = kb_dir();
+        let task = terminal_task(Status::Done, Some("coding"), None, None, false);
+        store.insert(&task).expect("insert");
+        add_report(&store, &task);
+        let now = OffsetDateTime::now_utc();
+        let later = task.updated_at + time::Duration::hours(1);
+        let created =
+            schedule(&store, &root, true, later, 10, None, &[], &[], now).expect("schedule");
+        assert!(created.is_empty(), "古い終端タスクは対象外");
+        let created = schedule(
+            &store,
+            &root,
+            true,
+            task.updated_at,
+            10,
+            None,
+            &[],
+            &[],
+            now,
+        )
+        .expect("schedule");
+        assert_eq!(created.len(), 1, "起動後に終端になったものは対象");
+    }
+
     /// ADR-0047 D4: 終端タスク（担当あり・報告あり）から知識整理タスクを 1 件作り、
     /// `knowledge_runs` に `scheduled` を残す。2 回目は同じタスクからは作らない。
     #[test]
@@ -405,14 +446,32 @@ mod tests {
         add_report(&store, &task);
 
         let now = OffsetDateTime::now_utc();
-        let created = schedule(&store, &root, true, 10, None, &[], &[], now).expect("schedule");
+        let created = schedule(
+            &store,
+            &root,
+            true,
+            OffsetDateTime::UNIX_EPOCH,
+            10,
+            None,
+            &[],
+            &[],
+            now,
+        )
+        .expect("schedule");
         assert_eq!(created.len(), 1);
         let run_task = store.get(created[0]).expect("get").expect("some");
         assert_eq!(run_task.role.as_deref(), Some(report::KNOWLEDGE_ROLE));
-        assert_eq!(run_task.worker_hint.adapter.as_deref(), Some(LANGMEM_ADAPTER));
+        assert_eq!(
+            run_task.worker_hint.adapter.as_deref(),
+            Some(LANGMEM_ADAPTER)
+        );
         assert_eq!(run_task.worker_hint.tier, Tier::Cheap);
         assert_eq!(run_task.assignee.as_deref(), Some("coding"));
-        assert!(run_task.objective.contains(&task.id.to_string()), "{}", run_task.objective);
+        assert!(
+            run_task.objective.contains(&task.id.to_string()),
+            "{}",
+            run_task.objective
+        );
         assert!(
             run_task.objective.contains("pjsub の投げ方を確認した"),
             "{}",
@@ -432,9 +491,19 @@ mod tests {
 
         // 2 回目は同じタスクからはもう作らない（既に `knowledge_runs` がある）。
         assert!(
-            schedule(&store, &root, true, 10, None, &[], &[], now)
-                .expect("schedule again")
-                .is_empty()
+            schedule(
+                &store,
+                &root,
+                true,
+                OffsetDateTime::UNIX_EPOCH,
+                10,
+                None,
+                &[],
+                &[],
+                now
+            )
+            .expect("schedule again")
+            .is_empty()
         );
     }
 
@@ -448,16 +517,36 @@ mod tests {
         add_report(&store, &task);
         let now = OffsetDateTime::now_utc();
         assert!(
-            schedule(&store, &root, false, 10, None, &[], &[], now)
-                .expect("schedule")
-                .is_empty(),
+            schedule(
+                &store,
+                &root,
+                false,
+                OffsetDateTime::UNIX_EPOCH,
+                10,
+                None,
+                &[],
+                &[],
+                now
+            )
+            .expect("schedule")
+            .is_empty(),
             "enabled = false"
         );
         let missing_root = root.join("does-not-exist");
         assert!(
-            schedule(&store, &missing_root, true, 10, None, &[], &[], now)
-                .expect("schedule")
-                .is_empty(),
+            schedule(
+                &store,
+                &missing_root,
+                true,
+                OffsetDateTime::UNIX_EPOCH,
+                10,
+                None,
+                &[],
+                &[],
+                now
+            )
+            .expect("schedule")
+            .is_empty(),
             "KB 未初期化"
         );
     }
@@ -488,14 +577,30 @@ mod tests {
         add_report(&store, &unassigned);
 
         let archived_project = seed_project(&store, true);
-        let archived = terminal_task(Status::Done, Some("coding"), None, Some(archived_project), false);
+        let archived = terminal_task(
+            Status::Done,
+            Some("coding"),
+            None,
+            Some(archived_project),
+            false,
+        );
         store.insert(&archived).expect("insert");
         add_report(&store, &archived);
 
         assert!(
-            schedule(&store, &root, true, 10, None, &[], &[], now)
-                .expect("schedule")
-                .is_empty()
+            schedule(
+                &store,
+                &root,
+                true,
+                OffsetDateTime::UNIX_EPOCH,
+                10,
+                None,
+                &[],
+                &[],
+                now
+            )
+            .expect("schedule")
+            .is_empty()
         );
     }
 
@@ -508,9 +613,19 @@ mod tests {
         store.insert(&task).expect("insert");
         let now = OffsetDateTime::now_utc();
         assert!(
-            schedule(&store, &root, true, 10, None, &[], &[], now)
-                .expect("schedule")
-                .is_empty()
+            schedule(
+                &store,
+                &root,
+                true,
+                OffsetDateTime::UNIX_EPOCH,
+                10,
+                None,
+                &[],
+                &[],
+                now
+            )
+            .expect("schedule")
+            .is_empty()
         );
     }
 
@@ -527,7 +642,13 @@ mod tests {
         add_report(&store, &source);
 
         // done の run: `<workspace_root>/<run_task_id>/artifacts/knowledge-candidates.json` を用意する。
-        let done_run_task = terminal_task(Status::Done, Some("coding"), Some(report::KNOWLEDGE_ROLE), None, false);
+        let done_run_task = terminal_task(
+            Status::Done,
+            Some("coding"),
+            Some(report::KNOWLEDGE_ROLE),
+            None,
+            false,
+        );
         store.insert(&done_run_task).expect("insert");
         let artifacts_dir = workspace_root
             .path()
