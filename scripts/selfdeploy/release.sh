@@ -48,6 +48,11 @@ trap 'rm -f "$GATE_TSV"' EXIT
 # **待たない**（同じ sha を 2 度ビルドしても結果は同じなので、待つ意味が無い）→ exit 75。
 sd_lock_or_tempfail 9 "$SD_BUILD_ROOT/.lock-$SHA12" 0 "release.sh of $SHA12"
 
+# 異なるSHAも同じCargo成果物を使う。Cargo自身のロックはテスト実行中には
+# 外れるため、別SHAのビルドがdoctestのrlibや梱包前のバイナリを上書きできる。
+# worktreeの変更から梱包・掃除まで、release全体を同じロックで保護する。
+sd_lock_or_tempfail 8 "$SD_RELEASES/.lock-release" "${SD_RELEASE_LOCK_WAIT:-1800}" "release.sh sharing Cargo artifacts"
+
 CUR="$(sd_current_sha)"
 PREV="$(sd_previous_sha)"
 if [ -d "$REL" ]; then
