@@ -43,3 +43,7 @@ CoS の一時作業領域は Git リポジトリではない。Codex の全 work
 `--skip-git-repo-check` を渡し、管理された作業領域で実行可能にする。
 結果ファイルを書けるよう `-c sandbox_mode="workspace-write"` を既定値として渡す。
 明示的な extra_args の sandbox 指定で上書きでき、承認設定は変更しない。
+
+Codex は対話に最終テキストだけを返す場合もある。conversation が設定された execute のみ、
+正常 exit + turn.completed + 非空の最終 agent_message + result.json 不在なら返答を Done に正規化する。
+通常の仕事、失敗、壊れた結果ファイルは救済しない。結果ファイルがあれば従来契約を優先する。

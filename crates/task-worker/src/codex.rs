@@ -223,6 +223,7 @@ async fn run_codex(
     let start = Instant::now();
     let mut last_activity = Instant::now();
     let mut last_signal: Option<TurnSignal> = None;
+    let mut conversation_reply: Option<String> = None;
     // `{"type":"error","message":...}` を観測したら保持する（ADR-0010 D5: `turn.*` を一度も観測できずに
     // exit した場合の分類材料に使う）。
     let mut last_error_message: Option<String> = None;
@@ -276,6 +277,19 @@ async fn run_codex(
                 let text = String::from_utf8_lossy(&bytes);
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
+                    if let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        if event["type"] == "item.completed"
+                            && event["item"]["type"] == "agent_message"
+                            && event["item"]["phase"] != "commentary"
+                        {
+                            conversation_reply = event["item"]["text"]
+                                .as_str()
+                                .filter(|text| !text.trim().is_empty())
+                                .map(str::to_owned);
+                        } else if event["type"] == "item.started" {
+                            conversation_reply = None;
+                        }
+                    }
                     handle_line(trimmed, sink, &mut last_signal, &mut last_error_message);
                 }
             }
@@ -334,10 +348,25 @@ async fn run_codex(
                 pf,
             )
         }
-        (None, Some(TurnSignal::Completed { usage })) => (
-            terminal_from_result(&req.artifacts_dir, &artifacts_rel, *usage).await,
-            None,
-        ),
+        (None, Some(TurnSignal::Completed { usage })) => {
+            // A conversation can answer directly; work orders still require their artifacts.
+            let terminal = if exit_status.success()
+                && req.task.conversation.is_some()
+                && req.task.kind == task_core::TaskKind::Execute
+                && matches!(tokio::fs::metadata(&result_path).await,
+                    Err(ref error) if error.kind() == std::io::ErrorKind::NotFound)
+                && let Some(summary) = conversation_reply
+            {
+                Terminal::Done {
+                    summary,
+                    evidence: Vec::new(),
+                    usage: *usage,
+                }
+            } else {
+                terminal_from_result(&req.artifacts_dir, &artifacts_rel, *usage).await
+            };
+            (terminal, None)
+        }
     };
 
     forward_delegate_file(&req.artifacts_dir, sink).await;
@@ -736,6 +765,54 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
                 assert_eq!(summary, "added usage example")
             }
             other => panic!("expected done in result.json, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_reply_is_only_accepted_for_successful_conversations() {
+        for (conversation, ending, file, done) in [
+            (true, "echo '{\"type\":\"turn.completed\"}'", "", true),
+            (false, "echo '{\"type\":\"turn.completed\"}'", "", false),
+            (
+                true,
+                "echo '{\"type\":\"turn.failed\",\"error\":\"failed\"}'",
+                "",
+                false,
+            ),
+            (
+                true,
+                "echo '{\"type\":\"turn.completed\"}'; exit 1",
+                "",
+                false,
+            ),
+            (
+                true,
+                "echo '{\"type\":\"turn.completed\"}'",
+                "mkdir -p artifacts; echo invalid > artifacts/result.json",
+                false,
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let config = stub_codex(
+                dir.path(),
+                &format!(
+                    "{file}\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"接続確認OK\"}}}}'\n{ending}"
+                ),
+            );
+            let mut req = sample_req(dir.path().to_path_buf());
+            if conversation {
+                req.task.conversation = Some(task_core::MessageId::new());
+            }
+            let outcome = CodexAdapter::new(config)
+                .run(req, "reply", default_limits(), &RecordingSink::default())
+                .await
+                .unwrap();
+            assert_eq!(
+                matches!(outcome.terminal, Terminal::Done { .. }),
+                done,
+                "{:?}",
+                outcome.terminal
+            );
         }
     }
 
