@@ -9571,3 +9571,28 @@ celeris-qwen-tunnel ユーザーサービス（transient、失敗時再接続）
 - 自動承認レビューの恒久設定 `--approve-for-me` は自動審査で明示的なユーザー承認が必要として拒否。
   この設定を含まない安全な適用のみ実施し、設定変更への質問は保留中。sandbox/approval設定は変更していない。
 - Qwenトンネルの復旧後、ローカル `/v1/models` HTTP200を確認。transientなユーザーサービスであり、永続的な自動起動設定は追加していない。
+
+### 承認された実行権限の適用（2026-09-20）
+
+- ユーザーが自動承認レビューと読み取り専用SSH確認を明示承認。
+  `[adapters.codex].extra_args = ["--approve-for-me"]` をバックアップ付きで適用、`POST /reload` 成功。
+  設定バックアップ: `~/.config/celeris/config.toml.before-approved-review-52em9nrp`。
+- Software Engineering の DB profile に `cluster:pegasus` と読み取り専用の制約を追加。
+  続く「終了後にもとに戻す必要はありません」の指示により、両設定を維持する。
+  リモート書き込み・ジョブ投入・サービス変更は許可に含めない。
+- Pegasus/Sirius は TOTP 認証。切断時は人がGUIでTOTPを入力して再接続する運用をユーザーが確認。
+  コードやログへTOTPを保存せず、認証失敗を自動再試行し続けないことをprofileの方針へ記録。
+- 今回のPegasus接続は当初keyboard-interactiveで拒否されたが、GUI接続済み確認後にホスト・workerとも
+  `hostname; pwd` が成功した。
+
+### 権限適用後の再開完了（2026-09-20 18:52 UTC）
+
+タスク `01M3000W211ER7RBDDFCFWY8PD` は **done**。worker `01M302A48TT6W2B01H3MJFSVQ5`、
+reviewer `01M302GY4DJ0QP4WD6GSP3T0AG` が成功し、受け入れ条件3件とも合格。
+7画面×5幅（360/393/412/1024/1440 CSS px）の35描画、53 PNG、61証拠ファイルのハッシュをレビューで照合。
+Pegasusの読み取り専用接続も成功。調査書はタスクのブランチ
+`celeris/01M3000W211ER7RBDDFCFWY8PD` のコミット `1cbe488d2469b772e0bd5d6c234e3f1bd13f018e` に保存。
+成果物は同タスクworkspaceの `artifacts/mobile-gui/` とworktreeの
+`docs/gui/mobile-gui-investigation-2026-09-20.md`。
+今回完了した範囲は調査・改善案であり、UI本体の実装やNothing 2a実機検証は含まない。
+Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus許可はユーザー指示で維持。
