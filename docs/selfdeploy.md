@@ -35,6 +35,7 @@ release.sh <ref>  →  verify.sh <sha12>  →  promote.sh <sha12>        （戻�
                         promote.lock      昇格中の pid
   releases/.build/      release.sh が生やす detached の作業ツリー（成功したら消える）
   releases/.build/.lock-<sha12>  同じ sha の二重ビルドを止める flock（ADR-0041 D2）
+  releases/.lock-release  異なる sha も含め、検査から成果物のコピーまでを直列化する flock
   releases/.cargo-target/  CARGO_TARGET_DIR（リリース間で共有。ビルドを速くするだけ）
   staging/              verify.sh の作業場所（毎回作り直す。`.lock` だけは残る）
   staging/.lock         verify.sh を 1 本に直列化する flock（ADR-0041 D2）
@@ -88,8 +89,12 @@ scripts/selfdeploy/release.sh celeris/01M2XXX # 自己改善の案件の実装�
 - `~/.local/celeris/releases/.build/<sha12>` に **detached worktree** を生やして、そこでだけビルドする。
   作業チェックアウト（`~/workspace/agent-platform`）が汚れていても、その中身は使われない。
 - gate（この順。1 つでも非 0 ならリリースを作らない）:
-  `cargo test --workspace` → `cargo clippy --workspace -- -D warnings` → `cargo build --release -p celeris -p celerisctl`
+  自前のworkspaceパッケージの `cargo clean -p …`（外部依存のキャッシュは保持）
+  → `cargo test --workspace` → `cargo clippy --workspace -- -D warnings` → `cargo build --release -p celeris -p celerisctl`
   → GUI `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → `pnpm build`
+- 異なるSHAのビルドも共有出力を上書きしないよう直列化する。待ち時間の上限は
+  `SD_RELEASE_LOCK_WAIT`（既定1800秒）。Cargo自身のロックだけでは、doctestや成果物コピーまで保護できない。
+  別worktreeの相対dep-info・mtimeによる古いメタデータの再利用も防ぐため、自前パッケージを先に掃除する。
 - 成功したら `~/.local/celeris/releases/<sha12>/` に `bin/`（celeris, celerisctl）、`gui/`（build/ server.js package.json
   pnpm-lock.yaml pnpm-workspace.yaml と `pnpm install --prod` の node_modules）、`manifest.json`、`gate.json`、
   `gate-logs/`、`scripts/` を置き、ビルド用の worktree を消す。

@@ -9630,3 +9630,14 @@ Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus
 - `node scripts/check-delivery.mjs`: 393/1440px × 6状態、12表示成功。横はみ出し・JS例外なし、候補から既存のデプロイ操作へ到達。実際のPOSTは行わない。証跡 `/tmp/celeris-delivery-gui-M70657/`。
 - GUI全体lintで検出した既存のモバイルナビARIAとimportsを修正。ユーザーによるrun-phases.sh/run-gphases.sh削除は取り込まない。
 - 本番適用と直近プロバイダ修正の引き渡し結果は続報へ記録する。
+
+### 部署レビュー・自動引き渡しの実機結果（同日23:03 UTC）
+
+- 運用基盤 `3d66bb5de620` を本番反映し、自己改善案件 `01M2WTS3DKNZBSZ2JMVB4CZMBW` で `delivery_projects` を有効化。設定のバックアップは `~/.config/celeris/config.toml.before-department-delivery`。工程中に停止した案件はactiveへ復帰済み。
+- プロバイダ修正 `01M305NG9QRX7HE59VF6K3FZ7H` はEngineeringの独立レビューで、直接CLIが固定account_idと残量調整を無視する不備を検出。実装担当へ戻して修正・回帰テストを追加した。CoSによる実装再レビューのタスクは作成していない。
+- 最終判定run `01M30GEPG0H1XEZ2ZRTVB6KRDE` が条件0〜6を合格とし、deliveryは `ready`。実際のrequestのassignee/nodeはengineering。候補 `cb12721858a6` はmain上、gate/verifyともok、live_ok=true、promoted_atなし。本番は運用基盤 `3d66bb5de620` のまま。プロバイダ修正の昇格はGUIで人が行う。
+- 最終候補のゲート: Rust 1533 passed / 0 failed / 3 ignored、Clippy成功、GUI 841 passed、typecheck/build成功。ステージングではDB件数・タスクdigest一致、主要API/GUI成功、旧版互換成功、smokeが5.1秒でdone。
+- CoSにはデプロイ待ちの短いメッセージだけを記録。通知 `message:01M30GEPG0H1X8QVMMQYG0S4YQ` は23:03:49 UTCに送信成功（attempts=1, ok=true）。本番GUIの393/1440pxで変更画面から候補へ到達し、SHA確認後の昇格ボタンが有効かつポインタ操作可能と確認。ログイン以外の変更系要求は送っていない。証跡 `/tmp/celeris-final-delivery-proof.json`、`/tmp/celeris-delivery-live-result.json`、`/tmp/celeris-delivery-live-{393,1440}.png`。
+- 工程中に検出した運用不備も修正: コンテナビルドログのflush、元repoの非衝突なユーザー変更を拒否しないレビュー条件、GUI切替時の新応答確認→旧停止→全応答確認、draining時の二重レビュー抑止、判定保存までのレビュー排他、異なるSHAのrelease直列化、workspaceの古いCargo出力の掃除。排他の回帰を含むdispatcher 93テストとClippy成功。
+- 最後のasyncロック解放とworkspace掃除は候補に含む。今回のrelease用共有キャッシュは、同じ自前8パッケージの掃除を共有ロック下で先行実施してから既存7ゲートを実行した。次回から候補に含まれるrelease.sh自身が掃除も記録する。
+- 登録元 `run-phases.sh` / `run-gphases.sh` の既存削除は保持。プロバイダ実装の旧HEADは `backup/provider-before-delivery` に保存。実サービス上の全モデルIDとNothing 2a実機/IMEは未検証。Pegasusは最終確認時に未接続で、再利用時は既存方針どおりGUIからTOTP再接続する。
