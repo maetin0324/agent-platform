@@ -189,6 +189,7 @@ impl AccountsRuntimeConfig {
 /// ディスパッチャの設定（`config.toml` から組み立てる。ADR-0005 D7）。
 #[derive(Debug, Clone)]
 pub struct DispatchConfig {
+    pub delivery: task_ops::delivery::DeliveryPolicy,
     /// 全体の並列度上限。
     pub max_concurrency: usize,
     /// ADR-0002 D7: リース ttl = `max_wall_secs` + この猶予。
@@ -1052,6 +1053,10 @@ impl Dispatcher {
         } else {
             self.connect_pending_clusters.remove(id);
         }
+    }
+
+    pub fn set_delivery_policy(&mut self, policy: task_ops::delivery::DeliveryPolicy) {
+        self.config.delivery = policy;
     }
 
     pub fn config(&self) -> &DispatchConfig {
@@ -2085,6 +2090,7 @@ impl Dispatcher {
     ) -> Result<(), DispatchError> {
         let entry = self.reviewing.remove(&task_id);
         // ADR-0014 D1: Reviewer run の終わりを WorkerFinished{role: reviewer} として残す（判定の適用・延期・破棄のどれでも）。
+        let completed_review_run = outcome.reviewer_run.as_ref().map(|r| r.run_id.clone());
         let mut reviewer_finished = outcome.reviewer_run.take().map(|r| Event::WorkerFinished {
             run_id: r.run_id,
             outcome: r.outcome,
@@ -2183,6 +2189,39 @@ impl Dispatcher {
             outcome.verdicts.sort_by_key(|v| v.criterion_idx);
         }
         let all_pass = outcome.all_pass();
+        if let Some(old) = self.store.delivery_get(task_id)?
+            && old.worker_run == run_id
+            && completed_review_run.as_deref() == Some(old.review_run.as_str())
+            && old.state == task_core::DeliveryState::Reviewing
+            && let Some(verdict) = outcome
+                .verdicts
+                .iter()
+                .find(|v| v.criterion_idx == old.criterion_idx)
+        {
+            let mut next = old.clone();
+            next.decision = Some(all_pass && verdict.pass);
+            next.state = if all_pass && verdict.pass {
+                task_core::DeliveryState::MergeQueued
+            } else {
+                task_core::DeliveryState::Blocked
+            };
+            next.detail = outcome
+                .verdicts
+                .iter()
+                .filter(|v| !v.pass || v.criterion_idx == old.criterion_idx)
+                .map(|v| v.reason.clone())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let review_reason = verdict
+                .reason
+                .strip_prefix(&format!("reviewer({}): ", old.review_run))
+                .unwrap_or(&verdict.reason);
+            if review_reason.trim_start().starts_with("[needs-human]") {
+                next.detail = format!("{}\n{}", review_reason, next.detail);
+            }
+            self.store.delivery_save(Some(&old), &next)?;
+        }
+
         // ADR-0034 D2（監査 M-1〜M-3）: レビュー不合格の理由（この run が `Status::Failed` に直結した場合の
         // bad_news の材料。`Status::Ready` に戻るだけの途中の失敗では使わない）。
         let review_fail_message = if all_pass {
@@ -3733,7 +3772,7 @@ impl Dispatcher {
         run_id: String,
         subject: &ReviewSubject,
     ) -> Result<bool, DispatchError> {
-        let Some(task) = self.store.get(task_id)? else {
+        let Some(mut task) = self.store.get(task_id)? else {
             return Ok(true);
         };
         let Some(dir) = self.task_dir(&task) else {
@@ -3774,6 +3813,17 @@ impl Dispatcher {
             .as_ref()
             .map(|(p, _, r)| (p.clone(), r.run_id.clone(), r.adapter.id().to_string()));
         let reviewer_run = reviewer.map(|(_, _, r)| r);
+        if let Some(run) = &reviewer_run {
+            task_ops::delivery::begin(
+                self.store.as_ref(),
+                &mut task,
+                &self.config.workspace_root,
+                &self.config.delivery,
+                &run_id,
+                &run.run_id,
+            )
+            .map_err(DispatchError::from)?;
+        }
 
         let plan = if task.kind == TaskKind::Plan {
             Some(PlanCheck {
@@ -4004,7 +4054,27 @@ impl Dispatcher {
             return None;
         }
         // ADR-0012 D2: ワーカー run と同じ手順（上限のプロバイダを飛ばして次へ、候補なしは warn）で選ぶ。
-        let hint = self.config.reviewer_hint.clone();
+        let org = self.store.org_list().ok()?;
+        let department = task
+            .assignee
+            .as_deref()
+            .and_then(|id| task_core::department_of(&org, id));
+        let node = department
+            .as_deref()
+            .and_then(|id| org.iter().find(|n| n.id == id))
+            .map(|n| NodeContext {
+                id: n.id.clone(),
+                name: n.name.clone(),
+                brief: n.brief.clone(),
+            });
+        let profile = department
+            .as_deref()
+            .map(|id| task_core::profile::resolve(&org, id));
+        let mut hint = self.config.reviewer_hint.clone();
+        if let Some(tier) = profile.as_ref().and_then(|p| p.review_tier) {
+            hint.tier = tier;
+        }
+
         let mut full = std::collections::HashSet::new();
         let (adapter_id, provider_id, selected_account) =
             self.select_provider(&hint, Instant::now(), task.id, &mut full)?;
@@ -4043,6 +4113,8 @@ impl Dispatcher {
             provider_id,
             selected_account,
             ReviewerRun {
+                node,
+                profile,
                 adapter,
                 run_id: review_run_id,
                 limits: RunLimits {
@@ -4051,7 +4123,7 @@ impl Dispatcher {
                     kill_grace: self.config.kill_grace,
                 },
                 sink: Box::new(sink),
-                hint: self.config.reviewer_hint.clone(),
+                hint,
                 // Phase 38（ADR-0028 追記）: レビュー対象の分野の manifest（決定的。設定を引くだけ）。
                 subject_genre: task
                     .genre
@@ -5381,6 +5453,7 @@ mod tests {
             adapters,
             std::collections::HashSet::new(),
             DispatchConfig {
+                delivery: Default::default(),
                 max_concurrency,
                 lease_grace: Duration::from_secs(60),
                 idle_timeout: Duration::from_secs(5),
@@ -8763,6 +8836,7 @@ mod tests {
             adapters,
             account_pool_providers,
             DispatchConfig {
+                delivery: Default::default(),
                 max_concurrency,
                 lease_grace: Duration::from_secs(60),
                 idle_timeout: Duration::from_secs(5),

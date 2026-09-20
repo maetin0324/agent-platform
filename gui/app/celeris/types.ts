@@ -38,6 +38,15 @@ export type Action = ("approve" | "reject" | "answer" | "cancel") | "retry" | "e
  */
 export type TaskKind = "plan" | "execute" | "review" | "approval";
 /**
+ * 対話の 1 行の識別子（ULID）。
+ */
+export type MessageId = string;
+/**
+ * リポジトリの一意識別子（ULID）。`TaskId` / `ProjectId` と同じ形。
+ */
+export type RepoId = string;
+export type DeliveryState = "reviewing" | "merge_queued" | "merging" | "preparing" | "ready" | "blocked";
+/**
  * 取り込みの記録の一意識別子（ULID）。
  */
 export type IntegrationId = string;
@@ -45,10 +54,6 @@ export type IntegrationId = string;
  * 取り込みの方法（ADR-0043 D5）。
  */
 export type IntegrationMethod = "merge" | "pr" | "discard";
-/**
- * リポジトリの一意識別子（ULID）。`TaskId` / `ProjectId` と同じ形。
- */
-export type RepoId = string;
 /**
  * 取り込みの行方（ADR-0043 D5）。
  */
@@ -383,10 +388,6 @@ export type Check =
   | {
       type: "human";
     };
-/**
- * 対話の 1 行の識別子（ULID）。
- */
-export type MessageId = string;
 /**
  * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
  * celeris はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
@@ -1040,6 +1041,10 @@ export interface ChangeDiffView {
  */
 export interface ChangesView {
   /**
+   * 上司の取り込み判定とリリース準備（ADR-0051）。
+   */
+  delivery?: Delivery | null;
+  /**
    * `gh` が PATH にあって認証済みか（GUI が「PR を作る」を出すかどうか）。
    */
   gh: boolean;
@@ -1052,6 +1057,26 @@ export interface ChangesView {
    */
   repos: RepoChangesView[];
   task_id: string;
+}
+export interface Delivery {
+  base: string;
+  branch: string;
+  criterion_idx: number;
+  decision?: boolean | null;
+  default_branch: string;
+  department: string;
+  detail: string;
+  head: string;
+  notification?: MessageId | null;
+  prepare_pid?: number | null;
+  project_id: ProjectId;
+  release?: string | null;
+  repo: string;
+  repo_id: RepoId;
+  review_run: string;
+  state: DeliveryState;
+  task_id: TaskId;
+  worker_run: string;
 }
 /**
  * `ChangesView.repos[]` の 1 件。

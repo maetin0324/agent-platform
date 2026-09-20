@@ -3166,3 +3166,18 @@ pub struct ConsoleProgressLine {
 - celeris は `[api]` の `token_file` が読めない・空なら exit 2。DB が知らない新しい版数でも exit 2。
 - API の DB 接続を開けない・bind できない場合は起動に失敗する（API 無しで動き続けない）。
 - `celeris_version` は celeris crate の版（現在 `"0.1.0"`）。
+
+
+### 部署レビューからデプロイ準備への引き渡し（ADR-0051）
+
+`GET /tasks/{id}/changes` の省略可能な `delivery` は自己改善案件の進行状態。
+`state` は `reviewing | merge_queued | merging | preparing | ready | blocked`。
+`task_id, project_id, repo_id, repo, branch, base, head, default_branch, department,
+review_run, worker_run, criterion_idx, decision, detail, release, prepare_pid, notification` を保持する。
+`decision` は既存Reviewer runのマージ判定。`release` は検証対象sha12。
+`ready` はビルドとsnapshot検証の成功であり、本番昇格とは異なる。
+既存 `/releases/{sha12}/promote` だけが人のデプロイ操作を受け付ける。
+
+管理系 `POST /tasks/{id}/rereview` は `ReopenBody {expected_status?: "done"}` を受け取り、
+Reviewer条件がある通常のdone仕事をreviewingへ戻す。返却は `TransitionResult`。
+実装runは再実行せず、既存成果のレビューを再実行する。認証、404、409、422は他の管理操作と同じ。

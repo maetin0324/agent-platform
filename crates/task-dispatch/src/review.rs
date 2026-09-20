@@ -44,6 +44,8 @@ pub struct ReviewSubject {
 
 /// `Reviewer` 条件のためにディスパッチャが選んだ run（ADR-0007 D5 1./3.）。
 pub struct ReviewerRun {
+    pub node: Option<task_worker::NodeContext>,
+    pub profile: Option<task_core::EffectiveProfile>,
     pub adapter: Arc<dyn WorkerAdapter>,
     pub run_id: String,
     pub limits: RunLimits,
@@ -609,9 +611,13 @@ async fn run_reviewer_inner(
     // 前回のレビュー run の出力を今回の結果と誤読しない（ADR-0007 D1）。
     let _ = std::fs::remove_file(&review_path);
 
+    let mut review_task = synthetic_review_task(task, &run.run_id, &run.hint);
+    if let Some(node) = &run.node {
+        review_task.assignee = Some(node.id.clone());
+    }
     let req = RunRequest {
         protocol: PROTOCOL_VERSION,
-        task: synthetic_review_task(task, &run.run_id, &run.hint),
+        task: review_task,
         workspace: workspace_dir.to_path_buf(),
         // ADR-0041 D1: Reviewer run は判定だけで編集しないので、worktree ではなく対象タスクの
         // ディレクトリ（成果物と `tree/` がある場所）で動かす。
@@ -620,6 +626,8 @@ async fn run_reviewer_inner(
         // （`review.json` もその中に書かせる）。
         artifacts_dir: artifacts_dir.to_path_buf(),
         context: RunContext {
+            node: run.node.clone(),
+            profile: run.profile.clone(),
             prior_review: vec![],
             inputs: produced.to_vec(),
             answers: vec![],
@@ -973,6 +981,8 @@ mod tests {
 
     fn reviewer_run(adapter: Arc<StubReviewer>) -> ReviewerRun {
         ReviewerRun {
+            node: None,
+            profile: None,
             adapter,
             run_id: "rev-1".into(),
             limits: RunLimits {
@@ -984,6 +994,61 @@ mod tests {
             hint: reviewer_hint(),
             subject_genre: None,
         }
+    }
+
+    #[tokio::test]
+    async fn reviewer_uses_department_identity_and_profile_in_the_same_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = LocalWorkspace::new(dir.path());
+        let mut task = task_with(vec![Check::Reviewer], dir.path());
+        task.assignee = Some("software-engineering".into());
+        let adapter = Arc::new(StubReviewer {
+            review_json: Some(
+                r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"mergeable"}]}"#.into(),
+            ),
+            terminal: Terminal::Done {
+                summary: "reviewed".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            seen: Mutex::new(vec![]),
+        });
+        let mut run = reviewer_run(adapter.clone());
+        run.node = Some(task_worker::NodeContext {
+            id: "engineering".into(),
+            name: "Engineering".into(),
+            brief: "部署の実装品質とマージ判断を担当".into(),
+        });
+        run.profile = Some(task_core::EffectiveProfile {
+            node_id: "engineering".into(),
+            policy: vec!["互換性を検査する".into()],
+            ..Default::default()
+        });
+        let out = review_task(
+            &task,
+            &ws,
+            dir.path(),
+            &dir.path().join("artifacts"),
+            &[],
+            Duration::from_secs(5),
+            ReviewExtras {
+                reviewer: Some(run),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(out.all_pass());
+        let seen = adapter.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let req = &seen[0];
+        assert_eq!(req.task.assignee.as_deref(), Some("engineering"));
+        assert_eq!(req.context.node.as_ref().unwrap().id, "engineering");
+        assert!(req.context.conversation.is_empty());
+        assert!(req.context.organization.is_empty());
+        let prompt =
+            task_worker::claude_code::build_prompt(&req.task, &req.context, "review", "artifacts");
+        assert!(prompt.contains("互換性を検査する"));
+        assert!(prompt.contains("Engineering"));
     }
 
     /// 常に供給側失敗を返すレビュー用アダプタ。
@@ -1023,6 +1088,8 @@ mod tests {
             dir.path(),
         );
         let run = ReviewerRun {
+            node: None,
+            profile: None,
             adapter: Arc::new(ThrottledReviewer),
             run_id: "rev-x".into(),
             limits: RunLimits {

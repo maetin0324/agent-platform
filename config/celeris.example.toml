@@ -321,12 +321,13 @@ interval_secs = 30                                # 判定と送信の間隔（�
 # ADR-0045 D2: 既定は `~/.local/celeris/releases`（書けば従来どおり。相対は設定ファイルのディレクトリ基準）。
 #
 # `repo` は**人の作業チェックアウト**。`GET /releases` の `on_main`
-# （`git -C <repo> merge-base --is-ancestor <sha> main`）を出すためだけに**読む**。
-# celeris がこのリポジトリを checkout / fetch / merge することは無い（main への反映は人がやる）。
+# （`git -C <repo> merge-base --is-ancestor <sha> main`）の判定に使う。
+# delivery_projectsを有効化した案件だけ、レビュー済みSHAをこのrepoへfast-forwardする。
 # `~` は celeris の $HOME で展開する。無ければ `on_main` が null になるだけ。
 # [selfdeploy]
+# delivery_projects = [] # 許可した自己改善案件ID。部署レビュー合格後にmerge・release・verify（本番デプロイは人）
 # releases_dir = "~/.local/celeris/releases"   # 既定
-# repo = "~/workspace/agent-platform"  # 既定。on_main を出すためだけに読む
+# repo = "~/workspace/agent-platform"  # 既定。on_mainと自動取り込みの対象
 
 # HTTP API（ADR-0013、docs/gui/api.md）。listen を書いたときだけ celeris のプロセス内で動く（既定は無効）。celeris-gui はこれを使う。
 # loopback 以外で listen するなら token_file が必須（中身 1 行が Bearer トークン。読めない・空なら起動時に exit 2）。

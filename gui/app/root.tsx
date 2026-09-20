@@ -291,6 +291,7 @@ function Sidebar({
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const menuNav = useRef<HTMLElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: close the mobile menu when navigation changes.
   useEffect(() => setMenuOpen(false), [pathname]);
   useEffect(() => {
     if (menuOpen) menuNav.current?.querySelector<HTMLAnchorElement>("a")?.focus();
@@ -318,7 +319,7 @@ function Sidebar({
           </a>
         </div>
 
-        <div className="order-3 mt-2 grid w-full grid-cols-4 gap-1 px-2 pb-2 lg:hidden" aria-label="よく使う画面">
+        <nav className="order-3 mt-2 grid w-full grid-cols-4 gap-1 px-2 pb-2 lg:hidden" aria-label="よく使う画面">
           {primary.map((item) => (
             <a
               key={item.href}
@@ -347,9 +348,14 @@ function Sidebar({
             className="min-h-11 rounded-lg px-1 text-sm font-medium text-fg hover:bg-surface-2"
           >
             {menuOpen ? "閉じる" : "メニュー"}
-            {(reportsLive?.unread_secretary ?? 0) + approvals > 0 && <span aria-label="未読あり"> •</span>}
+            {(reportsLive?.unread_secretary ?? 0) + approvals > 0 && (
+              <span role="img" aria-label="未読あり">
+                {" "}
+                •
+              </span>
+            )}
           </button>
-        </div>
+        </nav>
 
         <nav
           id="main-navigation"

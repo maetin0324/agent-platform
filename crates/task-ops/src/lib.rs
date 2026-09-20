@@ -17,6 +17,7 @@ pub mod console;
 pub mod conversation;
 pub mod daemon;
 pub mod delegate;
+pub mod delivery;
 pub mod derive;
 /// ADR-0044 D7（Phase 57）: 文書（git が正本）の足回り。
 pub mod docs;

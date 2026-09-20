@@ -203,6 +203,40 @@ fn scan_at(
     out.extend(scan_bad_news(store, started_at, base_url)?);
     out.extend(scan_secretary_reply(store, &org, started_at, base_url)?);
     out.extend(scan_task_ready(store, started_at, base_url)?);
+    // リリースの引き渡しは最新の対話・途中目標・走査時刻に隠されない。
+    for delivery in store.delivery_list()? {
+        if let Some(id) = delivery.notification {
+            let ready = delivery.state == task_core::DeliveryState::Ready;
+            if !ready
+                && (delivery.state != task_core::DeliveryState::Blocked
+                    || !delivery.detail.trim_start().starts_with("[needs-human]"))
+            {
+                continue;
+            }
+            out.push(Candidate {
+                kind: NotificationKind::SecretaryReply,
+                key: format!("message:{id}"),
+                body: format!(
+                    "{}: {}{}",
+                    if ready {
+                        "デプロイ準備完了"
+                    } else {
+                        "CoSから確認が必要です"
+                    },
+                    excerpt(&delivery.detail, REVIEW_EXCERPT_CHARS),
+                    link(
+                        base_url,
+                        &if ready {
+                            "/releases".into()
+                        } else {
+                            format!("/tasks/{}?tab=changes", delivery.task_id)
+                        }
+                    )
+                ),
+                project_id: Some(delivery.project_id),
+            });
+        }
+    }
     Ok(out)
 }
 
@@ -420,6 +454,14 @@ fn scan_secretary_reply(
             if reply.role != MessageRole::Node || reply.created_at < since {
                 continue;
             }
+            // 自動引き渡しの機械的メッセージは専用の判定で通知する。
+            if let Some(id) = reply.task_id
+                && let Some(delivery) = store.delivery_get(id)?
+                && (delivery.notification == Some(reply.id)
+                    || reply.run_id.as_deref() == Some(delivery.review_run.as_str()))
+            {
+                continue;
+            }
             // 途中目標レビューは milestone_ready が内容付きで通知する。
             if let Some(id) = reply.task_id
                 && store.get(id)?.is_some_and(|t| t.milestone_id.is_some())
@@ -491,12 +533,17 @@ fn scan_task_ready(
                 _ => None,
             })
             .unwrap_or("");
+        // 部署内の取り込み中には人の判断を求めない。検証後のdelivery通知にまとめる。
+        if store.delivery_get(task.id)?.is_some() {
+            continue;
+        }
         out.push(Candidate {
             kind: NotificationKind::TaskReady,
             key: transition_key(&task, &events),
             body: format!(
-                "仕事『{}』が完了しました。成果を確認してください。{}{}",
+                "仕事『{}』{}{}{}",
                 excerpt(&task.title, EXCERPT_CHARS),
+                "が完了しました。成果を確認してください。",
                 excerpt(summary, REVIEW_EXCERPT_CHARS),
                 link(base_url, &format!("/tasks/{}", task.id))
             ),

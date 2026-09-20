@@ -303,6 +303,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rereview_reuses_done_output_without_starting_an_implementation() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut task = sample_task(Status::Done);
+        task.acceptance[0].check = Check::Reviewer;
+        store.insert(&task).unwrap();
+        let result = rereview(&store, task.id, Some(Status::Done)).unwrap();
+        assert_eq!(result.to, Status::Reviewing);
+        assert_eq!(store.get(task.id).unwrap().unwrap().attempts, task.attempts);
+        assert!(rereview(&store, task.id, Some(Status::Done)).is_err());
+        assert!(
+            !store
+                .events_for(task.id)
+                .unwrap()
+                .iter()
+                .any(|(_, e)| matches!(e, Event::WorkerStarted { .. }))
+        );
+    }
+
     /// `running` のタスクは**必ずリースを持つ**（`acquire_lease` がそう作る）。割り込みの
     /// `WorkerFinished` はそのリースの run にだけ付くので、テストでも同じ形にする。
     fn store_with(status: Status) -> (SqliteStore, TaskId) {
@@ -530,4 +549,39 @@ mod tests {
             "消化済み"
         );
     }
+}
+
+/// 既存成果を部署のレビュアーで再判定する。新しい実装runは作らない。
+pub fn rereview(
+    store: &dyn TaskStore,
+    id: TaskId,
+    expected: Option<Status>,
+) -> Result<TransitionResult, OpsError> {
+    let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
+    if let Some(exp) = expected
+        && exp != task.status
+    {
+        return Err(OpsError::Conflict {
+            expected: exp,
+            actual: task.status,
+        });
+    }
+    if !task
+        .acceptance
+        .iter()
+        .any(|c| matches!(c.check, task_core::Check::Reviewer))
+        || task_core::support_kind(&task).is_some()
+    {
+        return Err(OpsError::Validation(
+            "reviewer条件を持つ通常タスクだけを再レビューできます".into(),
+        ));
+    }
+    let outcome = store.apply_transition(id, Trigger::Rereview, None)?;
+    Ok(TransitionResult {
+        id,
+        from: task.status,
+        to: outcome.next,
+        reason: outcome.reason.into(),
+        cascaded: Vec::new(),
+    })
 }

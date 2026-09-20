@@ -204,7 +204,22 @@ fn append_with_escalation(
 ) -> Result<Report, StoreError> {
     let mut batch = vec![report.clone()];
     if report.kind == report::ReportKind::BadNews {
-        batch.extend(report::bad_news_chain(&report, org, report.created_at));
+        let technical_delivery = match report.task_id {
+            Some(id) => store
+                .delivery_get(id)?
+                .is_some_and(|d| !d.detail.trim_start().starts_with("[needs-human]")),
+            None => false,
+        };
+        batch.extend(
+            report::bad_news_chain(&report, org, report.created_at)
+                .into_iter()
+                .filter(|r| {
+                    !technical_delivery
+                        || !org
+                            .iter()
+                            .any(|n| n.id == r.node_id && n.kind == task_core::OrgKind::Secretary)
+                }),
+        );
     }
     store.report_append_all(&batch)?;
     Ok(report)

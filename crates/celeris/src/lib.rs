@@ -4,6 +4,7 @@
 mod accounts_admin;
 mod cluster_admin;
 pub mod config;
+pub mod delivery;
 /// ADR-0040 D4（Phase 47）: インスタンスの役割（active / standby / draining / verify）とライブ引き継ぎ。
 pub mod instance;
 /// ADR-0047 D4（Phase 62）: 知識の自動メンテナンス（決定的なトリガと適用。LLM は `langmem` アダプタの中）。
@@ -1184,6 +1185,12 @@ async fn tick_loop(
                     }
                 }
             }
+            {
+                let store = dispatcher.store();
+                if let Err(e) = delivery::tick(store.as_ref(), config, OffsetDateTime::now_utc()) {
+                    tracing::warn!(error=%e, "delivery tick failed");
+                }
+            }
             // ADR-0038 D1 / B1（Phase 41）: 途中目標の仕事が止まったら、秘書の「途中目標レビュー」の対話を
             // 1 回だけ起こす（**通知の前に**）。ここも判断は決定的で、ストアを見て対話用タスクを 1 件作るだけ
             // （LLM もワーカーも起動しない。起動するのは次の tick の dispatch）。
@@ -1652,6 +1659,11 @@ fn reload_providers(dispatcher: &mut Dispatcher, config: &mut Config) -> Result<
     config.reports = new_config.reports;
     config.notify = new_config.notify;
     config.conversation = new_config.conversation;
+    config.selfdeploy.delivery_projects = new_config.selfdeploy.delivery_projects;
+    dispatcher.set_delivery_policy(task_ops::delivery::DeliveryPolicy {
+        projects: config.selfdeploy.delivery_projects.clone(),
+        repo: config.selfdeploy.repo.clone(),
+    });
     Ok(())
 }
 

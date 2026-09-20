@@ -3550,3 +3550,10 @@ GUI 側はこの celeris の変更に**追従しただけ**で、新しい画面
   確認する 1 本を追加）/ `pnpm build` はいずれも exit 0。`bash scripts/sync-gui-docs.sh --check` は
   `up to date`。DOM を描画する unit テストは無い方針（G10-U1）のまま、`e2e` は実行していない
   （実 celeris バイナリが要る。既存の理由と同じ）。
+
+
+### 部署レビュー・デプロイ準備の表示（2026-09-20）
+
+- ADR-0051のdeliveryを変更タブに表示し、部署内レビューから検証済みリリースへの導線と処理中の再検証を追加。CoSの技術レビュー段階は設けない。
+- API拡張はRust側の正本・生成schema/typesを更新し同期。既存のデプロイ管理APIを使い、ブラウザへAPIトークンは渡さない。
+- lint/typecheck/test（839件）/build成功。`node scripts/check-delivery.mjs` で12状態・幅の表示とデプロイ画面への導線を確認（外部ネットワーク・本番POSTなし）。

@@ -24,7 +24,7 @@
 //! ADR-0041 D3 で `[selfdeploy] repo`（人の作業チェックアウト）を**読むだけ**使うようになった:
 //! `git -C <repo> merge-base --is-ancestor <sha> main` で `on_main` を出す。git が無い・遅い・
 //! リポジトリが無い・その sha を知らない、のどれでも `null` を出すだけで、一覧は落とさない
-//! （**celeris がリポジトリを書き換えることは無い**。`main` への反映は人がやる）。
+//! （このモジュールは読むだけ。ADR-0051のdeliveryは別途レビュー済みSHAを取り込む）。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

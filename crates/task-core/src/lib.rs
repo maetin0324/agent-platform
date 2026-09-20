@@ -1,6 +1,8 @@
 //! task-core: ドメインモデル、状態機械、イベント、SQLiteストア。
 //! DESIGN.md §4-§5.1 のスコープ。LLM呼び出し・サブプロセス起動は行わない（ADR-0001 D2）。
 
+pub mod delivery;
+pub use delivery::{Delivery, DeliveryState, DeliveryStore};
 pub mod accounts;
 pub mod approval;
 pub mod artifacts;

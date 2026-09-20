@@ -1178,6 +1178,17 @@
     "ChangesView": {
       "description": "`GET /tasks/{id}/changes` の応答（ADR-0043 D5。読み取り。トークンは要らない）。\n\ngit のリポジトリだけを並べる（`dir` のリポジトリは対象外）。PR の状態の同期（`gh pr view`）は\n**この API を呼んだときだけ**行う（ADR-0043 D5: 常時同期はしない）。",
       "properties": {
+        "delivery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Delivery"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "上司の取り込み判定とリリース準備（ADR-0051）。"
+        },
         "gh": {
           "description": "`gh` が PATH にあって認証済みか（GUI が「PR を作る」を出すかどうか）。",
           "type": "boolean"
@@ -3062,6 +3073,112 @@
         "on_child_failure"
       ],
       "type": "object"
+    },
+    "Delivery": {
+      "properties": {
+        "base": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "criterion_idx": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "decision": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "default_branch": {
+          "type": "string"
+        },
+        "department": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "head": {
+          "type": "string"
+        },
+        "notification": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MessageId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "prepare_pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "release": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "type": "string"
+        },
+        "repo_id": {
+          "$ref": "#/$defs/RepoId"
+        },
+        "review_run": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/DeliveryState"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "worker_run": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "project_id",
+        "repo_id",
+        "repo",
+        "branch",
+        "base",
+        "head",
+        "default_branch",
+        "department",
+        "review_run",
+        "worker_run",
+        "criterion_idx",
+        "state",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "DeliveryState": {
+      "enum": [
+        "reviewing",
+        "merge_queued",
+        "merging",
+        "preparing",
+        "ready",
+        "blocked"
+      ],
+      "type": "string"
     },
     "DiffStat": {
       "description": "ファイル数と ± の合計。",

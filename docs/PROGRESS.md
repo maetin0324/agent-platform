@@ -9617,3 +9617,16 @@ Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus
 - 実際に利用中の config.toml の conversation 指示と org.toml/DBのCoS briefも更新・reload済み。バックアップは各ファイルの `.before-workflow-repair`。Codex `--approve-for-me`、Software EngineeringのPegasus許可とTOTP運用方針は維持。元の調査タスクに、実装・検証・本番反映まで終えたコメントを記録。
 - 追加確認でQwenトンネルの認証反復（旧transient unitのNRestarts=150）を検出し停止。`~/.config/systemd/user/celeris-qwen-tunnel.service` を `ssh -O check pegasus` が成功した場合だけ起動する形にし、minutely timerでGUI接続後の復旧を行う。TOTP認証そのものを自動反復しない。制御ソケットが無い場合はローカルチェックで終了することを確認。
 - その後Pegasus `connected=true`、Qwen `/v1/models` HTTP200、トンネルactive/NRestarts=0を確認。Siriusは未接続のまま（使う際は既存方針どおりGUIからTOTP入力）。Nothing 2a実機のソフトキーボード動作は未検証。
+
+
+### 部署のレビュアーからマージ・デプロイ準備へ（2026-09-20、ADR-0051）
+
+- ユーザー方針を反映: 既存の独立Reviewer runを部署をまとめる担当のnode/profile/review.tierで実行する。Engineeringの実装をCoSで再レビューする工程は追加しない。
+- 許可した自己改善案件では同じレビューに固定SHAのマージ可否を追加。全条件合格・done後にfast-forward、release、verifyまで自動実行し、本番promoteは人がGUIで行う。
+- schema20のdeliveryに部署・review run・worker run・対象SHA・状態・根拠を保持。CASで判定の上書きを防ぎ、再起動時は外部操作を重複実行しない。元リポジトリの無関係な未コミット変更を保持する。
+- 技術的差し戻しは部署内の修正経路へ戻す。取り込み・ビルド失敗の自動再開は一度まで。CoSには検証済み候補と明示的なユーザーへの確認事項だけを伝え、実装詳細の集約再送を抑止。
+- done成果を実装せず再レビューする管理API `/tasks/{id}/rereview` を追加。GUI変更タブにレビュー部署・準備状態・リリースへのリンクを表示。
+- 検証: `cargo test --workspace` 1516 passed / 3 ignored、追加した準備ゲート・一度だけの再開・再レビューを含む関連3 crateのlibテスト成功。`cargo clippy --workspace -- -D warnings` 成功。GUI lint/typecheck/test（839 passed）/build成功、生成schema/types同期。
+- `node scripts/check-delivery.mjs`: 393/1440px × 6状態、12表示成功。横はみ出し・JS例外なし、候補から既存のデプロイ操作へ到達。実際のPOSTは行わない。証跡 `/tmp/celeris-delivery-gui-M70657/`。
+- GUI全体lintで検出した既存のモバイルナビARIAとimportsを修正。ユーザーによるrun-phases.sh/run-gphases.sh削除は取り込まない。
+- 本番適用と直近プロバイダ修正の引き渡し結果は続報へ記録する。

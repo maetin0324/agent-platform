@@ -6,8 +6,7 @@
 //! - `POST /tasks/{id}/changes/{repo}/pr/merge` — **管理系**。`gh pr merge`
 //! - `GET  /projects/{id}/integrations` — 案件の PR と取り込みの一覧（読み取り）
 //!
-//! **取り込みを押せるのは人だけ**（SPEC §3.6 / ADR-0043 D5）。ワーカーのプロトコル（`docs/protocol/`）には
-//! この経路を出さない ＝ 組織の「人」が `main` を動かす道は無い。
+//! この管理APIは人が操作する。ADR-0051の自動取り込みは部署のReviewer判定を制御プレーンが適用する別経路。
 //!
 //! 境界について（ADR-0013 は「API はワーカーの起動・コマンドの実行をしない」と決めている）:
 //! ここは **`git` と `gh` だけ**を、上限付きで、人が押したときと画面を開いたときに起こす
@@ -22,8 +21,8 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use task_core::{
-    IntegrationMethod, IntegrationState, ProjectId, RepoId, ReportFilter, ReportStore, Task,
-    TaskId, TaskIntegration, TaskStore,
+    DeliveryStore, IntegrationMethod, IntegrationState, ProjectId, RepoId, ReportFilter,
+    ReportStore, Task, TaskId, TaskIntegration, TaskStore,
 };
 use task_ops::changes::{self as ops_changes, MergeOutcome};
 use time::OffsetDateTime;
@@ -243,6 +242,7 @@ async fn changes(
                 .first()
                 .is_some_and(|t| ops_changes::gh_authenticated(&github.gh, &t.source));
             Ok(ChangesView {
+                delivery: store.delivery_get(task_id).map_err(store_problem)?,
                 task_id: task_id.to_string(),
                 repos,
                 gh,

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Link, useFetcher } from "react-router";
+import { useEffect, useState } from "react";
+import { Link, useFetcher, useRevalidator } from "react-router";
 import type { ActionError, IntegrateOutcome } from "~/celeris/action-types";
 import type { ChangeDiffView, ChangesView, RepoChangesView, TaskIntegration } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
@@ -59,11 +59,53 @@ export interface TaskChangesProps {
 }
 
 export function TaskChanges({ taskId, changes, diff, diffError, diffRepo, diffPath }: TaskChangesProps) {
+  const revalidator = useRevalidator();
+  const inProgress = changes.delivery != null && !["ready", "blocked"].includes(changes.delivery.state);
+  useEffect(() => {
+    if (!inProgress) return;
+    const timer = setInterval(() => {
+      if (revalidator.state === "idle") revalidator.revalidate();
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [inProgress, revalidator]);
   // 差分の相手が一覧に無いとき（知らないリポジトリ名で来た等）も文言は見せる。
   const orphanDiff = diffPath !== null && !changes.repos.some((r) => r.repo === diffRepo);
 
   return (
     <div className="space-y-4" data-testid="task-changes">
+      {changes.delivery && (
+        <Card data-testid="delivery-status">
+          <CardHeader
+            icon="gitBranch"
+            title={
+              {
+                reviewing: "部署内レビュー・マージ判定中",
+                merge_queued: "レビュー合格・取り込み待ち",
+                merging: "取り込み中",
+                preparing: "リリース検証中",
+                ready: "デプロイ準備完了",
+                blocked: "取り込み・リリース準備の確認が必要",
+              }[changes.delivery.state]
+            }
+          />
+          <CardBody className="space-y-3">
+            <p className="text-sm break-words">{changes.delivery.detail}</p>
+            <p className="text-xs text-fg-muted">実装 → 部署内レビュー・マージ判定 → マージ → 検証 → 人がデプロイ</p>
+            <p className="text-sm">レビュー担当: {changes.delivery.department}</p>
+            <Link className="text-sm underline" to={`/tasks/${taskId}?tab=runs`}>
+              実装・レビューの実行記録を見る
+            </Link>
+            {changes.delivery.release && (
+              <Link
+                className="inline-flex min-h-11 items-center rounded-md bg-primary px-4 text-sm font-medium text-primary-fg"
+                to={`/releases#release-${changes.delivery.release}`}
+              >
+                リリース {shortSha(changes.delivery.release)} を確認してデプロイ
+              </Link>
+            )}
+          </CardBody>
+        </Card>
+      )}
       {changes.repos.length === 0 ? (
         <EmptyState icon="gitBranch" title="git のリポジトリがありません" data-testid="task-changes-empty">
           このタスクは git のリポジトリで作業していないので、取り込むものがありません。

@@ -111,6 +111,7 @@ fn dispatcher(
         adapters,
         HashSet::new(),
         DispatchConfig {
+            delivery: Default::default(),
             max_concurrency: 2,
             lease_grace: Duration::from_secs(60),
             idle_timeout: Duration::from_secs(30),

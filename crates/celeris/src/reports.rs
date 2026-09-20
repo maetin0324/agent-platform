@@ -190,7 +190,16 @@ pub fn schedule_report_compaction(
     let org = store.org_list()?;
     let mut created = Vec::new();
     for node in parents(&org) {
-        let pending = store.report_unreviewed_children(&node.id)?;
+        let mut pending = Vec::new();
+        for report in store.report_unreviewed_children(&node.id)? {
+            // 配送対象の実装詳細は部署内で扱う。CoSへはdeliveryの人向け引き渡しだけを送る。
+            if let Some(id) = report.task_id
+                && store.delivery_get(id)?.is_some()
+            {
+                continue;
+            }
+            pending.push(report);
+        }
         if pending.is_empty() {
             continue;
         }

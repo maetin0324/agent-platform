@@ -180,11 +180,13 @@ fn default_drain_timeout_secs() -> u64 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SelfdeployConfig {
+    /// ADR-0051: 自動取り込みを許可する自己改善案件。空なら無効。
+    #[serde(default)]
+    pub delivery_projects: Vec<String>,
     #[serde(default = "default_releases_dir")]
     pub releases_dir: PathBuf,
     /// ADR-0041 D3: **作業チェックアウト**の場所（`~/workspace/agent-platform`）。
-    /// `GET /releases` の `on_main`（`git merge-base --is-ancestor <sha> main`）を出すためだけに読む。
-    /// celeris はこのリポジトリを**読むだけ**（checkout も fetch も merge もしない。反映は人がやる）。
+    /// `GET /releases` の `on_main` 判定と、delivery_projects有効時のレビュー済みSHAの取り込みに使う。
     /// `~` は celeris の `$HOME` で展開する。無くても構わない（その場合 `on_main` は `null`）。
     #[serde(default = "default_selfdeploy_repo")]
     pub repo: PathBuf,
@@ -194,6 +196,7 @@ impl Default for SelfdeployConfig {
     fn default() -> Self {
         Self {
             releases_dir: default_releases_dir(),
+            delivery_projects: Vec::new(),
             repo: default_selfdeploy_repo(),
         }
     }
@@ -1549,6 +1552,22 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.selfdeploy.delivery_projects.is_empty()
+            && (self
+                .selfdeploy
+                .delivery_projects
+                .iter()
+                .any(|p| p.parse::<task_core::ProjectId>().is_err())
+                || self
+                    .selfdeploy
+                    .releases_dir
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    != Some("releases"))
+        {
+            return Err(ConfigError::Invalid("delivery_projects requires project IDs and the standard <state>/releases directory".into()));
+        }
+
         if self.max_concurrency == 0 {
             return Err(ConfigError::Invalid("max_concurrency must be >= 1".into()));
         }
@@ -2120,6 +2139,10 @@ impl Config {
 
     pub fn dispatch_config(&self) -> DispatchConfig {
         DispatchConfig {
+            delivery: task_ops::delivery::DeliveryPolicy {
+                projects: self.selfdeploy.delivery_projects.clone(),
+                repo: self.selfdeploy.repo.clone(),
+            },
             max_concurrency: self.max_concurrency,
             lease_grace: Duration::from_secs(self.lease_grace_secs),
             idle_timeout: Duration::from_secs(self.idle_timeout_secs),

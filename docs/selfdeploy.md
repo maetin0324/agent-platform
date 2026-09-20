@@ -520,3 +520,17 @@ scripts/selfdeploy/migrate-to-celeris.sh --rollback
 新 unit を止め、ディレクトリを逆に移し、`backups/pre-celeris/taskd.toml` と旧テンプレート unit を戻して
 `taskd@<previous>` を起こす。DB は **schema が変わっていない**ので、そのまま読める
 （`SCHEMA_VERSION` は据え置き。ADR-0045 D4）。
+
+
+## 部署レビューから自動で候補を準備する（ADR-0051）
+
+`[selfdeploy] delivery_projects = ["案件ID"]` を指定してreloadすると、
+その案件の登録済み自己リポジトリに対する次のReviewer runでマージ可否も判定する。
+部署長の別runが既存レビューを担当するため、CoSに技術的な再承認は求めない。
+合格した固定SHAだけをfast-forwardし、release/verify成功後にCoSからデプロイ候補を通知する。
+本番昇格は引き続きリリース画面から行う。空配列が既定（手動取り込み）。
+
+完了済みの仕事を引き渡すには、管理API `POST /tasks/{id}/rereview` に
+`{"expected_status":"done"}` を送る。実装をやり直さず、現在のコミットを再判定する。
+競合・承認後の変更は部署へ差し戻し、既存の再開・修正経路を使う。マージ・ビルドの技術的失敗は一度だけ自動で実装担当へ戻し、同じタスクで無限に修正を繰り返さない。
+準備のログは `<releases_dir>/.deliveries/<task-id>/<sha>/prepare.log` に残る。

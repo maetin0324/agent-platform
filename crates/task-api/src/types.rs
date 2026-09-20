@@ -1142,6 +1142,9 @@ pub struct TreeFileView {
 /// **この API を呼んだときだけ**行う（ADR-0043 D5: 常時同期はしない）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ChangesView {
+    /// 上司の取り込み判定とリリース準備（ADR-0051）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<task_core::Delivery>,
     pub task_id: String,
     /// git のリポジトリごとの差分（順番はタスクの `repos` の順）。
     pub repos: Vec<RepoChangesView>,

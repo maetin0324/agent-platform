@@ -228,7 +228,12 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
   const shaInputId = useId();
 
   return (
-    <Card data-testid="release-row" data-release-sha12={item.sha12} className="hover:shadow-md">
+    <Card
+      id={`release-${item.sha12}`}
+      data-testid="release-row"
+      data-release-sha12={item.sha12}
+      className="hover:shadow-md"
+    >
       <CardHeader
         icon="layers"
         tone={releaseVerifyTone(item)}

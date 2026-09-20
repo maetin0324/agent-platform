@@ -45,6 +45,8 @@ pub enum Trigger {
     /// ADR-0044 D2（Phase 53）: 終端のタスクの再開（`POST /tasks/{id}/reopen`）。
     /// `done`/`failed → ready`、attempts は 0 に戻す。`cancelled` は再開しない（worktree が無い）。
     Reopen,
+    /// ADR-0051: 完了成果の再レビュー（実装runを再実行しない）。
+    Rereview,
     /// ADR-0044 D6（Phase 55）: 案件の中止による連鎖。遷移は `Cancel` と同じ（非終端 → `cancelled`、
     /// attempts 据え置き）で、`Event::Transitioned.reason` だけが `"project_cancelled"` になる
     /// （タイムラインで「自分が止めたのか、案件ごと止まったのか」が読めるように）。
@@ -80,6 +82,7 @@ impl Trigger {
             Trigger::ChildFailed => "child_failed",
             Trigger::Interrupt => "interrupt",
             Trigger::Reopen => "reopen",
+            Trigger::Rereview => "rereview",
             Trigger::ProjectCancelled => "project_cancelled",
             Trigger::MilestoneCancelled => "milestone_cancelled",
             Trigger::Unroutable => "unroutable",
@@ -221,6 +224,17 @@ pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransiti
         }
 
         // ADR-0044 D2: 終端のタスクの再開。`done`/`failed` からだけ（`cancelled` は worktree が無い）。
+        Trigger::Rereview => {
+            if s.status == Status::Done && s.kind == TaskKind::Execute {
+                Ok(Outcome {
+                    next: Status::Reviewing,
+                    attempts: s.attempts,
+                    reason: t.reason(),
+                })
+            } else {
+                Err(invalid(s, t))
+            }
+        }
         Trigger::Reopen => {
             if matches!(s.status, Status::Done | Status::Failed) {
                 Ok(Outcome {
@@ -448,6 +462,13 @@ mod tests {
                 }
             }
             // ADR-0044 D2: 再開は `done`/`failed` からだけ（`cancelled` は不可）。
+            Trigger::Rereview => {
+                if status == Status::Done && kind == TaskKind::Execute {
+                    expect_ok(Status::Reviewing)
+                } else {
+                    expect_err()
+                }
+            }
             Trigger::Reopen => {
                 if matches!(status, Status::Done | Status::Failed) {
                     expect_ok(Status::Ready)
@@ -542,6 +563,7 @@ mod tests {
             // ADR-0044 D2（Phase 53）: 割り込みと再開も attempts を絡めない（据え置き / 0 に戻す）。
             Trigger::Interrupt,
             Trigger::Reopen,
+            Trigger::Rereview,
             // ADR-0046 D5（Phase 59）: 担当が決まらない `ready` → `blocked`（attempts 据え置き）。
             Trigger::Unroutable,
         ];
@@ -588,7 +610,7 @@ mod tests {
             }
         }
         // 4 kinds * 8 statuses * 15 triggers（Phase 53 で Interrupt / Reopen、Phase 59 で Unroutable を追加）
-        assert_eq!(count, 4 * 8 * 15);
+        assert_eq!(count, 4 * 8 * 16);
     }
 
     /// ADR-0044 D2（Phase 53）: 割り込みは attempts を消費せず理由は `comment`、再開は attempts を 0 に戻す。

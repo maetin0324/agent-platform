@@ -80,6 +80,7 @@ pub(crate) fn router(state: ApiState) -> Router {
             get(list_comments).post(create_comment),
         )
         .route("/api/v1/tasks/{id}/reopen", post(reopen))
+        .route("/api/v1/tasks/{id}/rereview", post(rereview))
         .route("/api/v1/tasks/{id}/events", get(task_events))
         .route("/api/v1/tasks/{id}/runs", get(task_runs))
         .route("/api/v1/tasks/{id}/runs/{run_id}/request", get(run_request))
@@ -1614,6 +1615,26 @@ async fn reopen(
         .blocking(move |store| {
             task_ops::comment::reopen(store, id, expected_status)
                 .map_err(|e| ops_problem(store, e, Some("reopen")))
+        })
+        .await?;
+    Ok(json_response(StatusCode::OK, &result))
+}
+
+async fn rereview(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let id = parse_task_id(&id)?;
+    let ReopenBody { expected_status } = read_json(body, true).await?;
+    let result = state
+        .blocking(move |store| {
+            task_ops::comment::rereview(store, id, expected_status)
+                .map_err(|e| ops_problem(store, e, Some("rereview")))
         })
         .await?;
     Ok(json_response(StatusCode::OK, &result))

@@ -1,4 +1,3 @@
-import { cn } from "~/lib/utils";
 import { useId, useState } from "react";
 import { data, Form, isRouteErrorResponse, Link, redirect, useFetcher } from "react-router";
 import type { CreateFailure } from "~/celeris/action-types";
@@ -33,6 +32,7 @@ import { WorkspaceFields } from "~/components/WorkspaceFields";
 import { ARCHIVED_BADGE_LABEL, projectStatusLabel, SHOW_ARCHIVED_LABEL } from "~/lib/labels";
 import { archivedQuery, projectIsArchived, readArchivedParam } from "~/lib/lifecycle";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
+import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/projects";
 
