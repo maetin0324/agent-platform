@@ -8577,3 +8577,22 @@ scripts/selfdeploy/migrate-to-celeris.sh --rollback
 ```
 
 以後の昇格は従来どおり（環境変数は要らない）: `release.sh main` → `verify.sh <sha12>` → `promote.sh <sha12>`。
+
+### Phase 58 実機: Celeris への移行（停止→起動。2026-09-20 00:37–00:40 UTC）
+
+- `CELERIS_STATE_DIR=~/.local/celeris release.sh main` → `926e19c0b408`（`bin/celeris` / `bin/celerisctl`）。
+  `CELERIS_CONFIG=~/taskd/taskd.toml CELERIS_DB=~/taskd/taskd.sqlite3 verify.sh` → 検査 1〜4・6 true、5 は current 無しで偽 → ok。
+- `migrate-to-celeris.sh 926e19c0b408 --dry-run` → 52 件の mv、知らないパス 0、`.build` / `.cargo-target` は新側にあるので `-pre-celeris` へ。
+- **本番の実行は 3 回目で完了**（本番停止 00:37:46〜00:40:03、約 2 分 17 秒）:
+  1. 1 回目: 事前検査が `~/.local/celeris/backups`（verify.sh が残した空ディレクトリ）と `staging`（使い捨て）の衝突で止まった → 検査で片付けるよう修正。
+  2. 2 回目: DB とリリースを動かした後、`mkdir -p "$PRE"`（`backups/pre-celeris`）が `backups/` の行き先を先に作っていて `mv` が失敗
+     （事前検査の後に自分で作っていた）。**本番は止まった状態で途中終了**。→ 行き先のディレクトリには合流する・`$PRE` は移動の後に作る・
+     DB が新側にあっても再実行できる、に修正。
+  3. 3 回目（再実行）: `backups/` の合流でスクリプト自身のログ（旧側）が動いて `sd_log` が落ちた → ログを最初から新側に書くよう修正。
+  4. 4 回目: 42 件を移し、`config.toml` を書き、`celeris@926e19c0b408` が 1 秒で health 200、GUI `name=celeris-gui`。
+- 事後: `GET /health` = release `926e19c0b408` / active / schema 15 / `celeris_version` 0.1.0、問題型 `urn:celeris:*`、`GET /releases` の current /
+  previous、containers runtime docker、`config.toml` に `taskd` の語は 0（実装者の指示文は `celeris/<task-id>`）。`~/taskd` は空になったので削除。
+  旧テンプレート unit の `.bak` も削除。`~/.local/celeris/releases/.cargo-target-pre-celeris`（41 GB、旧 crate 名のキャッシュ）は人が消す。
+- 教訓（P-58-d）: 移行の脚本は「事前検査 → 何も作らずに移す → 作る」の順を守り、ログは行き先側に書き、途中で止まっても再実行できる
+  こと（今回の 3 つの修正はすべてそれ）。一度の本番停止で 3 回直すのは避けたい: 次からは偽の `OLD_HOME` に本番の写しを作って
+  **通しで 1 回**リハーサルする（`--dry-run` は mv を実行しないので、この種の順序の穴は見えない）。
