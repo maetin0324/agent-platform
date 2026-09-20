@@ -7232,7 +7232,7 @@
       "type": "object"
     },
     "ProviderLive": {
-      "description": "プロバイダ（`[[providers]]` の行 = アカウント）の稼働状況。`env` の値は含めない。",
+      "description": "プロバイダ（`[[providers]]` の行。認証アカウントは別参照）の稼働状況。`env` の値は含めない。",
       "properties": {
         "account_id": {
           "default": null,

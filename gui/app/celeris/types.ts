@@ -1946,7 +1946,7 @@ export interface InFlight {
   task_id: TaskId;
 }
 /**
- * プロバイダ（`[[providers]]` の行 = アカウント）の稼働状況。`env` の値は含めない。
+ * プロバイダ（`[[providers]]` の行。認証アカウントは別参照）の稼働状況。`env` の値は含めない。
  */
 export interface ProviderLive {
   account_id?: string | null;

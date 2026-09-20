@@ -1,7 +1,8 @@
+# 認証アカウントの分離と階層・残量によるモデル実行
+
 ---
 tasks: [01M305NG9QRX7HE59VF6K3FZ7H]
 ---
-# 認証アカウントの分離と階層・残量によるモデル実行
 
 ## 実装と反映範囲
 
@@ -62,3 +63,15 @@ GUI再現: `cd gui && ./node_modules/.bin/react-router build` の後、リポジ
 [スマホのプロバイダー画面](gui/model-routing/providers-393.png)／[PCのプロバイダー画面](gui/model-routing/providers-1440.png)／[スマホのアカウント画面](gui/model-routing/accounts-393.png)。360／393／412／1440pxで確認。プロバイダー入力欄は44px以上、画面の横はみ出しなし。保存したIDがAPIに届くこととJSエラーなしを確認。
 
 このベースには記憶にある `docs/gui/mobile-gui-investigation-2026-09-20.md` は無かった。現在のナビ・Console実装を維持し、設定画面だけ変更した。Nothing 2a実機・IME・実アカウントでの6モデル利用可否は未検証。運用への取り込み後、実行IDの確認・設定と実機確認が必要。
+
+## 再試行での修正・再検証（run 01M3083Y5XE4N3TFJH63ZE5ZF0）
+
+前回レビューでは `schema::tests::committed_schema_matches_generated` が失敗し、受け入れ項目は未評価だった。原因は `ProviderLive` のRust説明を「認証アカウントは別参照」に変更した後、コミット済みAPIスキーマとGUI生成型の説明が旧「行 = アカウント」のまま残っていたこと。既存実装 `042d024`・`02c29ad` を保持し、両生成物の説明を再生成して同期した。
+
+- `UPDATE_SCHEMA=1 cargo test -p task-api schema::tests::committed_schema_matches_generated` で生成後、**UPDATE_SCHEMAなし**の `cargo test --workspace` を実行。終了コード0、1,522件成功、0件失敗、3件ignore。移行、モデル解決、委譲と残量選択、CLI実引数、スキーマ整合性を含む。
+- `cargo clippy --workspace -- -D warnings`: 終了コード0。
+- インストール済み `json2ts` を `gui/scripts/gen-types.mjs` と同じ引数・ヘッダーで直接実行し、GUI型を再生成。pnpm経由は環境のストアDBを開けなかったため、追加インストールせず既存ツールを使用。
+- GUI `react-router typegen`、`tsc -b`、`react-router build`: 終了コード0。関連4ファイルのVitest 42件成功。最初の制限環境ではモックAPIの待受けに失敗したため、ローカル待受けを許可して再実行した。
+- `node scripts/check-model-routing.mjs /tmp/model-routing-retry-images /tmp/model-routing-retry-measurements.json`: 終了コード0。両設定画面を360／393／412／1440pxで再描画、全8画面で文書幅＝ビューポート幅。実行IDの保存とJSエラー0件を確認。プロバイダーの入力高44px、既存アカウント入力高は約36px。既存の画面画像は上記リンクに保持。
+
+このrunの機械向けログと測定JSONはワークスペースの `artifacts/model-routing-retry/` に保存。実装の運用取り込み・サービス反映、実サービスの6モデルID確認、Nothing 2a実機／IME確認は未実施であり、再検証の完了には含めない。
