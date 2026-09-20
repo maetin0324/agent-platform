@@ -32,6 +32,14 @@ use crate::docs::DocCommit;
 pub const INDEX_STALE_SECS: i64 = 6 * 60 * 60;
 /// `grep` にかける上限（`git` が使えないときのフォールバック）。
 const GREP_TIMEOUT: std::time::Duration = GIT_TIMEOUT;
+/// ADR-0047 D4（Phase 62）: `op = retire` の取り込み先（`_inbox` accept が動かす。P-61-k の答え:
+/// `DELETE /knowledge/page` は足さず、「捨てる」は retire 一本にする。`docs/knowledge.md` に明記）。
+/// `_inbox` と同じく索引にも検索にも出ない。
+pub const RETIRED_DIR: &str = "_retired";
+
+fn is_retired(path: &str) -> bool {
+    path == RETIRED_DIR || path.starts_with(&format!("{RETIRED_DIR}/"))
+}
 
 // ---------------------------------------------------------------------------
 // 根の解決（ADR-0047 D3: `--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/knowledge`）
@@ -184,6 +192,7 @@ fn seed_files() -> Vec<(String, String)> {
                 updated: Some(today.clone()),
                 confidence: Some(Confidence::Medium),
                 path: None,
+                op: None,
             },
             body,
         )
@@ -276,6 +285,7 @@ fn cluster_page(today: &str, id: &str) -> String {
             updated: Some(today.to_string()),
             confidence: Some(Confidence::Low),
             path: None,
+            op: None,
         },
         &format!(
             "# {id} の使い方\n\n\
@@ -821,6 +831,7 @@ pub fn record(root: &Path, request: &RecordRequest) -> Result<RecordOutcome, Rec
             updated: Some(today()),
             confidence: request.confidence,
             path: target,
+            op: None,
         },
         body,
     );
@@ -956,6 +967,12 @@ pub fn inbox_accept(root: &Path, id: &str, path: Option<&str>, overwrite: bool) 
     let Some(item) = inbox_get(root, id) else {
         return InboxOutcome::Missing;
     };
+    // ADR-0047 D4（Phase 62）: `op = retire` は候補の中身を書くのではなく、`target`（対象の既存ページ）を
+    // `_retired/` へ動かす。`op = merge` は候補の本文（= 書き直した完全な版）で `target` を**必ず上書き**する
+    // （P-61-k: `DELETE /knowledge/page` は足さず、捨てるのは retire に一本化。`docs/knowledge.md` に明記）。
+    if item.op == Some(kb::CandidateOp::Retire) {
+        return inbox_accept_retire(root, &item);
+    }
     let target = match path.map(str::trim).filter(|p| !p.is_empty()) {
         Some(p) => match kb::page_path(p) {
             Ok(p) => p,
@@ -967,11 +984,12 @@ pub fn inbox_accept(root: &Path, id: &str, path: Option<&str>, overwrite: bool) 
         },
         None => item.target.clone(),
     };
-    if kb::is_inbox(&target) {
+    if kb::is_inbox(&target) || is_retired(&target) {
         return InboxOutcome::Failed {
-            detail: "取り込み先を `_inbox/` にはできません".to_string(),
+            detail: "取り込み先を `_inbox/`・`_retired/` にはできません".to_string(),
         };
     }
+    let overwrite = overwrite || item.op == Some(kb::CandidateOp::Merge);
     if !overwrite && root.join(&target).exists() {
         return InboxOutcome::Exists { path: target };
     }
@@ -1019,6 +1037,68 @@ pub fn inbox_accept(root: &Path, id: &str, path: Option<&str>, overwrite: bool) 
     }
 }
 
+/// ADR-0047 D4（Phase 62）: `op = retire` の accept。候補の本文は書かず、`item.target`
+/// （退役させる既存ページ）を `_retired/<target>` へ動かす。`target` が無ければ何もできない。
+fn inbox_accept_retire(root: &Path, item: &InboxItem) -> InboxOutcome {
+    if !root.join(&item.target).exists() {
+        return InboxOutcome::Failed {
+            detail: format!("退役させるページがありません: {}", item.target),
+        };
+    }
+    let Some(raw) = std::fs::read_to_string(root.join(&item.target)).ok() else {
+        return InboxOutcome::Failed {
+            detail: format!("{} を読めませんでした", item.target),
+        };
+    };
+    let retired_path = format!("{RETIRED_DIR}/{}", item.target);
+    let retired_file = root.join(&retired_path);
+    if let Some(parent) = retired_file.parent()
+        && std::fs::create_dir_all(parent).is_err()
+    {
+        return InboxOutcome::Failed {
+            detail: format!("{retired_path} を作れませんでした"),
+        };
+    }
+    if std::fs::write(&retired_file, raw.as_bytes()).is_err() {
+        return InboxOutcome::Failed {
+            detail: format!("{retired_path} を書けませんでした"),
+        };
+    }
+    if std::fs::remove_file(root.join(&item.target)).is_err() {
+        return InboxOutcome::Failed {
+            detail: format!("{} を消せませんでした", item.target),
+        };
+    }
+    if std::fs::remove_file(root.join(&item.path)).is_err() {
+        return InboxOutcome::Failed {
+            detail: format!("{} を消せませんでした", item.path),
+        };
+    }
+    match commit_paths(
+        root,
+        &format!(
+            "knowledge: retire {}（候補 {} を取り込む）",
+            item.target, item.id
+        ),
+        (kb::HUMAN_AUTHOR_NAME, kb::HUMAN_AUTHOR_EMAIL),
+        &[
+            retired_path.as_str(),
+            item.target.as_str(),
+            item.path.as_str(),
+        ],
+    ) {
+        Ok(sha) => {
+            let _ = reindex(root);
+            InboxOutcome::Accepted {
+                etag: None,
+                path: retired_path,
+                sha,
+            }
+        }
+        Err(detail) => InboxOutcome::Failed { detail },
+    }
+}
+
 /// ADR-0047 D5: 候補を捨てる（`_inbox` から消してコミットする。git に履歴は残る）。
 pub fn inbox_reject(root: &Path, id: &str) -> InboxOutcome {
     let Ok(path) = inbox_path(id) else {
@@ -1041,6 +1121,198 @@ pub fn inbox_reject(root: &Path, id: &str) -> InboxOutcome {
         Ok(sha) => InboxOutcome::Rejected { sha },
         Err(detail) => InboxOutcome::Failed { detail },
     }
+}
+
+// ---------------------------------------------------------------------------
+// 候補の適用（ADR-0047 D4。Phase 62）。`crates/celeris` が知識整理 run の終端で 1 度だけ呼ぶ。
+// ---------------------------------------------------------------------------
+
+/// [`apply_candidates`] の結果。`task_core::KnowledgeRunSummary` と対になる件数を持つ。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApplyOutcome {
+    /// KB へ直接コミットした KB 相対パス。
+    pub committed: Vec<String>,
+    /// `_inbox/` へ送った候補の KB 相対パス（`_inbox/<id>.md`）。
+    pub inboxed: Vec<String>,
+    /// 検査で落とした候補（元の `candidate.path` と理由）。
+    pub dropped: Vec<(String, String)>,
+}
+
+impl ApplyOutcome {
+    /// `knowledge_runs.summary_json` に書く形（Console・タイムラインが読む）。
+    pub fn summary(&self) -> task_core::KnowledgeRunSummary {
+        task_core::KnowledgeRunSummary {
+            candidates: (self.committed.len() + self.inboxed.len() + self.dropped.len()) as u32,
+            ingested: self.committed.len() as u32,
+            inbox: self.inboxed.len() as u32,
+            discarded: self.dropped.len() as u32,
+        }
+    }
+}
+
+/// ADR-0047 D4: 知識整理 run（`langmem` アダプタ）が書いた候補を適用する。
+///
+/// - 検査を通らない候補（path 境界・`.md`・題名/出典/本文なし・サイズ超過・秘密。
+///   [`kb::validate_candidate`]）は**落とす**（どこにも書かない。`dropped` に理由を残す）。
+/// - `confidence = high` かつ `op ∈ {create, update}` で、対象に人の未コミット編集が無ければ
+///   KB へ**直接**コミットする（author [`kb::AGENT_AUTHOR_NAME`]、message
+///   `knowledge: <op> <path> (task <task_id>)`。`update` は既存の `sources`/`created` を引き継ぐ）。
+/// - それ以外（`merge`/`retire`/`medium`/`low`/人の編集と衝突/`create` なのに既にある/`update` なのに
+///   まだ無い）は `_inbox/` へ（front matter に取り込み先 `path` と `op` を持たせる。人が GUI で
+///   accept/reject する）。
+///
+/// 適用のあとに 1 度だけ [`reindex`] する。
+pub fn apply_candidates(root: &Path, task_id: &str, candidates: &[kb::Candidate]) -> ApplyOutcome {
+    let mut out = ApplyOutcome::default();
+    for candidate in candidates {
+        let path = match kb::validate_candidate(candidate) {
+            Ok(p) => p,
+            Err(e) => {
+                out.dropped.push((candidate.path.clone(), e.to_string()));
+                continue;
+            }
+        };
+        let eligible = candidate.confidence == Confidence::High
+            && candidate.op.direct_commit_eligible()
+            && direct_commit_fits(root, &path, candidate.op);
+        if eligible && commit_candidate_directly(root, task_id, candidate, &path).is_ok() {
+            out.committed.push(path);
+            continue;
+        }
+        match write_inbox_candidate(root, task_id, candidate, &path) {
+            Ok(inbox_path) => out.inboxed.push(inbox_path),
+            Err(detail) => out.dropped.push((candidate.path.clone(), detail)),
+        }
+    }
+    let _ = reindex(root);
+    out
+}
+
+/// 直接コミットしてよい形か: `create` は対象がまだ無いこと、`update` は対象があって
+/// 人の未コミット編集が無いこと（[`has_uncommitted_changes`]）。それ以外の組は `_inbox/` へ。
+fn direct_commit_fits(root: &Path, path: &str, op: kb::CandidateOp) -> bool {
+    let exists = root.join(path).exists();
+    match op {
+        kb::CandidateOp::Create => !exists,
+        kb::CandidateOp::Update => exists && !has_uncommitted_changes(root, path),
+        kb::CandidateOp::Merge | kb::CandidateOp::Retire => false,
+    }
+}
+
+/// 対象ページに人の未コミット編集（変更・未追跡）があるか。無ければ `false`（`git` が使えない
+/// 環境でも安全側＝直接コミットを妨げない）。
+fn has_uncommitted_changes(root: &Path, path: &str) -> bool {
+    match git(root, &["status", "--porcelain", "--", path], GIT_TIMEOUT) {
+        Some(o) if o.ok => !o.stdout.trim().is_empty(),
+        _ => false,
+    }
+}
+
+/// `confidence = high` の `create`/`update` を KB へ直接コミットする。
+fn commit_candidate_directly(
+    root: &Path,
+    task_id: &str,
+    candidate: &kb::Candidate,
+    path: &str,
+) -> Result<(), ()> {
+    let current_etag = etag(root, path);
+    let existing_front = read_page(root, path).map(|raw| kb::front_matter(&raw).0);
+    let mut sources: Vec<String> = existing_front
+        .as_ref()
+        .map(|f| f.sources.clone())
+        .unwrap_or_default();
+    for s in &candidate.sources {
+        let s = s.trim().to_string();
+        if !s.is_empty() && !sources.contains(&s) {
+            sources.push(s);
+        }
+    }
+    let created = existing_front
+        .as_ref()
+        .and_then(|f| f.created.clone())
+        .unwrap_or_else(today);
+    let front = FrontMatter {
+        title: Some(candidate.title.trim().to_string()),
+        tags: candidate.tags.clone(),
+        scope: Some(candidate.scope.trim().to_string()).filter(|s| !s.is_empty()),
+        sources,
+        created: Some(created),
+        updated: Some(today()),
+        confidence: Some(candidate.confidence),
+        path: None,
+        op: None,
+    };
+    let page = kb::render_page(&front, candidate.body.trim());
+    let edit = PageEdit {
+        path: path.to_string(),
+        body: Some(page),
+        etag: current_etag,
+        message: format!("knowledge: {} {path} (task {task_id})", candidate.op),
+        author: (
+            kb::AGENT_AUTHOR_NAME.to_string(),
+            kb::AGENT_AUTHOR_EMAIL.to_string(),
+        ),
+    };
+    match commit_page(root, &edit) {
+        WriteOutcome::Written { .. } => Ok(()),
+        _ => Err(()),
+    }
+}
+
+/// `_inbox/` へ候補を書く（[`record`] と同じファイル名の作り方。front matter に取り込み先 `path` と
+/// `op` を持たせる）。
+fn write_inbox_candidate(
+    root: &Path,
+    task_id: &str,
+    candidate: &kb::Candidate,
+    target_path: &str,
+) -> Result<String, String> {
+    let now = OffsetDateTime::now_utc();
+    let stamp = format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        now.year(),
+        u8::from(now.month()),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    );
+    let slug = kb::slugify(&candidate.title).unwrap_or_else(|| "candidate".to_string());
+    let mut id = format!("{stamp}-{slug}");
+    let mut n = 2;
+    while root.join(INBOX_DIR).join(format!("{id}.md")).exists() {
+        id = format!("{stamp}-{slug}-{n}");
+        n += 1;
+    }
+    let path = format!("{INBOX_DIR}/{id}.md");
+    let mut sources = candidate.sources.clone();
+    let task_source = format!("task:{task_id}");
+    if !sources.iter().any(|s| s == &task_source) {
+        sources.push(task_source);
+    }
+    let front = FrontMatter {
+        title: Some(candidate.title.trim().to_string()),
+        tags: candidate.tags.clone(),
+        scope: Some(candidate.scope.trim().to_string()).filter(|s| !s.is_empty()),
+        sources,
+        created: Some(today()),
+        updated: Some(today()),
+        confidence: Some(candidate.confidence),
+        path: Some(target_path.to_string()),
+        op: Some(candidate.op.as_str().to_string()),
+    };
+    let page = kb::render_page(&front, candidate.body.trim());
+    let dir = root.join(INBOX_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{INBOX_DIR} を作れませんでした: {e}"))?;
+    std::fs::write(dir.join(format!("{id}.md")), page.as_bytes())
+        .map_err(|e| format!("{path} を書けませんでした: {e}"))?;
+    commit_paths(
+        root,
+        &format!("knowledge: 候補 {path}（task {task_id}）"),
+        (kb::AGENT_AUTHOR_NAME, kb::AGENT_AUTHOR_EMAIL),
+        &[path.as_str()],
+    )
+    .map(|_| path)
 }
 
 #[cfg(test)]

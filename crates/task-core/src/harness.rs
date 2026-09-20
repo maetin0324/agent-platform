@@ -20,13 +20,16 @@ pub const BUILTIN_CONVERSATION: &str = "conversation";
 pub const BUILTIN_PLAN: &str = "plan";
 pub const BUILTIN_REVIEWER: &str = "reviewer";
 pub const BUILTIN_SMOKE: &str = "smoke";
+/// ADR-0047 D4（Phase 62）: 知識整理 run（LangMem による抽出）。
+pub const BUILTIN_KNOWLEDGE: &str = "knowledge";
 
 /// 組み込みのハーネス id の一覧（並びは決定的）。
-pub const BUILTIN_HARNESSES: [&str; 4] = [
+pub const BUILTIN_HARNESSES: [&str; 5] = [
     BUILTIN_CONVERSATION,
     BUILTIN_PLAN,
     BUILTIN_REVIEWER,
     BUILTIN_SMOKE,
+    BUILTIN_KNOWLEDGE,
 ];
 
 /// ADR-0046 D3: ハーネスの予算。
@@ -157,6 +160,20 @@ pub fn builtin_harnesses() -> Vec<HarnessSpec> {
                 max_turns: Some(1),
                 max_wall_secs: Some(60),
                 max_retries: None,
+            },
+            ..HarnessSpec::default()
+        },
+        HarnessSpec {
+            id: BUILTIN_KNOWLEDGE.into(),
+            description: "終端になったタスクから知識の候補を抽出し整理する（ADR-0047 D4）".into(),
+            adapter: Some("langmem".into()),
+            tier: Some(Tier::Cheap),
+            input_artifacts: vec!["報告".into(), "関連する知識ベースのページ".into()],
+            output_artifacts: vec!["artifacts/knowledge-candidates.json".into()],
+            budget: HarnessBudget {
+                max_turns: Some(4),
+                max_wall_secs: Some(900),
+                max_retries: Some(1),
             },
             ..HarnessSpec::default()
         },

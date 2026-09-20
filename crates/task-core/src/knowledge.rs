@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_ROOT: &str = "~/knowledge";
 /// ADR-0047 D1: 候補の置き場（索引には入らない）。
 pub const INBOX_DIR: &str = "_inbox";
+/// ADR-0047 D4（Phase 62）: `op = retire` を accept したときの行き先（索引にも検索にも入らない）。
+pub const RETIRED_DIR: &str = "_retired";
 /// ADR-0047 D1: 派生物の索引。
 pub const INDEX_FILE: &str = "index.json";
 /// ADR-0047 D2: 前置きに出す索引の上限。
@@ -77,6 +79,10 @@ pub struct FrontMatter {
     /// accept はこれ（無ければ `scope` と `title` から決めた既定）へ移す。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// **`_inbox/` の候補にだけ意味がある**（ADR-0047 D4。Phase 62）: `create` / `update` / `merge` /
+    /// `retire`。`record`（Phase 61）が書く候補には無い（`None` は「素の accept/reject」= 従来どおり）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub op: Option<String>,
 }
 
 /// ADR-0047 D1 / D4。
@@ -178,6 +184,10 @@ pub fn front_matter(raw: &str) -> (FrontMatter, &str) {
                 front.path = non_empty(unquote(value));
                 current = None;
             }
+            "op" => {
+                front.op = non_empty(unquote(value));
+                current = None;
+            }
             "created" => {
                 front.created = non_empty(unquote(value));
                 current = None;
@@ -258,6 +268,9 @@ pub fn render_page(front: &FrontMatter, body: &str) -> String {
         .filter(|s| !s.is_empty())
     {
         out.push_str(&format!("path: {}\n", yaml_scalar(path)));
+    }
+    if let Some(op) = front.op.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        out.push_str(&format!("op: {}\n", yaml_scalar(op)));
     }
     out.push_str("---\n");
     let body = body.trim_start_matches(['\n', '\r']);
@@ -835,6 +848,240 @@ pub fn secret_finding(text: &str) -> Option<&'static str> {
     None
 }
 
+// ---------------------------------------------------------------------------
+// 知識整理 run の候補（ADR-0047 D4。Phase 62）。純粋なデータと検証だけ（I/O・git・LLM 無し）。
+// git を起こす適用は `task_ops::knowledge::apply_candidates`。
+// ---------------------------------------------------------------------------
+
+/// `artifacts/knowledge-candidates.json` の候補 1 件がとる操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateOp {
+    Create,
+    Update,
+    Merge,
+    Retire,
+}
+
+impl CandidateOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CandidateOp::Create => "create",
+            CandidateOp::Update => "update",
+            CandidateOp::Merge => "merge",
+            CandidateOp::Retire => "retire",
+        }
+    }
+
+    /// `confidence = high` のとき、KB へ**直接**コミットしてよい操作か（ADR-0047 D4）。
+    /// `merge` / `retire` は常に `_inbox/` に置く。
+    pub fn direct_commit_eligible(self) -> bool {
+        matches!(self, CandidateOp::Create | CandidateOp::Update)
+    }
+}
+
+impl std::fmt::Display for CandidateOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for CandidateOp {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "create" => Ok(CandidateOp::Create),
+            "update" => Ok(CandidateOp::Update),
+            "merge" => Ok(CandidateOp::Merge),
+            "retire" => Ok(CandidateOp::Retire),
+            other => Err(format!(
+                "op must be create | update | merge | retire (got {other:?})"
+            )),
+        }
+    }
+}
+
+/// `langmem` アダプタが `artifacts/knowledge-candidates.json` に書く候補 1 件
+/// （ADR-0047 D4: `{op, path, title, tags, scope, body, sources, confidence}`）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct Candidate {
+    pub op: CandidateOp,
+    /// KB の根からの相対パス（`retire`/`merge` は対象ページ、`create`/`update` は書き込み先）。
+    pub path: String,
+    pub title: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// `user` / `environment` / `project:<slug>` / `experience`。
+    #[serde(default)]
+    pub scope: String,
+    /// `create`/`update`/`merge` の本文。`retire` は空でもよい（理由を書いてもよい）。
+    #[serde(default)]
+    pub body: String,
+    /// `task:<id>` / `message:<id>` / `human` / `url:<…>`。空は許さない（出典の無い知識は入れない）。
+    #[serde(default)]
+    pub sources: Vec<String>,
+    pub confidence: Confidence,
+}
+
+/// [`validate_candidate`] が弾く「保存に値しない」理由（ADR-0047 D4「保存しないもの」＋ D1 の境界）。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CandidateProblem {
+    #[error("title must not be blank")]
+    NoTitle,
+    #[error("at least one source is required")]
+    NoSources,
+    #[error("body must not be blank")]
+    NoBody,
+    #[error("path: {0}")]
+    Path(#[from] PathError),
+    #[error("body exceeds {MAX_PAGE_BYTES} bytes")]
+    TooLarge,
+    #[error("refused: the candidate contains a secret（{0}）")]
+    Secret(&'static str),
+}
+
+/// ADR-0047 D4: 候補の決定的な検査（LLM の判断は経ない）。通れば KB 相対の正規化パスを返す。
+///
+/// - パスは KB の根に収まる `*.md`（[`page_path`]）
+/// - `title` は空でない
+/// - `sources` は 1 件以上（`retire` も対象ページの理由づけとして要る）
+/// - `body` は `retire` を除き空でない（対象ページを退役させるだけなら理由は必須ではない）
+/// - `body` は [`MAX_PAGE_BYTES`] 以下
+/// - `title` / `body` / `sources` に秘密が無い（[`secret_finding`]）
+pub fn validate_candidate(candidate: &Candidate) -> Result<String, CandidateProblem> {
+    let path = page_path(&candidate.path)?;
+    if candidate.title.trim().is_empty() {
+        return Err(CandidateProblem::NoTitle);
+    }
+    let sources: Vec<&str> = candidate
+        .sources
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if sources.is_empty() {
+        return Err(CandidateProblem::NoSources);
+    }
+    if candidate.op != CandidateOp::Retire && candidate.body.trim().is_empty() {
+        return Err(CandidateProblem::NoBody);
+    }
+    if candidate.body.len() > MAX_PAGE_BYTES {
+        return Err(CandidateProblem::TooLarge);
+    }
+    let haystack = format!(
+        "{}\n{}\n{}",
+        candidate.title,
+        candidate.body,
+        sources.join("\n")
+    );
+    if let Some(why) = secret_finding(&haystack) {
+        return Err(CandidateProblem::Secret(why));
+    }
+    Ok(path)
+}
+
+// ---------------------------------------------------------------------------
+// 知識整理 run の依頼文（ADR-0047 D4。Phase 62）。決定的な組み立て（LLM は呼ばない）。
+// `crates/celeris/src/knowledge_maint.rs` が集めた入力から、langmem アダプタに渡す
+// タスクの `objective` を組む（`task_core::report::compaction_objective` と同じ考え方）。
+// ---------------------------------------------------------------------------
+
+/// 関連する既存の KB ページ 1 件（決定的な検索の上位。ADR-0047 D3 の `search`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedPage {
+    pub path: String,
+    pub title: String,
+    /// 本文の抜粋（front matter を除く）。
+    pub excerpt: String,
+}
+
+/// 知識整理 run の入力（`crates/celeris/src/knowledge_maint.rs` が集める）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaintenanceInput {
+    pub task_id: String,
+    pub task_title: String,
+    pub task_objective: String,
+    pub report_headline: String,
+    pub report_body: String,
+    pub result_summary: String,
+    /// 人・ワーカーのコメント（`"<誰か>: <本文>"` の形に整形済み）。
+    pub comments: Vec<String>,
+    pub related_pages: Vec<RelatedPage>,
+    /// そのノードの手帳（`memory/<node>/notes.md`）の抜粋。
+    pub notes_excerpt: String,
+    /// 既存の索引の題名（`"<path> — <title>"`）。近い重複を作らないための手掛かり。
+    pub existing_titles: Vec<String>,
+}
+
+/// ADR-0047 D4 の抽出指示（決定的な文面。langmem 自身の抽出プロンプトはこれを踏まえて python 側が組む）。
+pub fn maintenance_objective(input: &MaintenanceInput) -> String {
+    let mut out = format!(
+        "あなたは知識ベース（ADR-0047）の整理役です。次の 1 タスクの終端から、\
+         将来も使える事実だけを抽出し、候補として `artifacts/knowledge-candidates.json` に書いてください。\n\n\
+         タスク: {}（id: {}）\n目的: {}\n",
+        input.task_title,
+        input.task_id,
+        input.task_objective.trim()
+    );
+    if !input.report_headline.trim().is_empty() || !input.report_body.trim().is_empty() {
+        out.push_str("\n---- 報告 ----\n");
+        if !input.report_headline.trim().is_empty() {
+            out.push_str(&format!("{}\n", input.report_headline.trim()));
+        }
+        if !input.report_body.trim().is_empty() {
+            out.push_str(&format!("{}\n", input.report_body.trim()));
+        }
+    }
+    if !input.result_summary.trim().is_empty() {
+        out.push_str(&format!(
+            "\n---- 結果（result.json summary）----\n{}\n",
+            input.result_summary.trim()
+        ));
+    }
+    if !input.comments.is_empty() {
+        out.push_str("\n---- コメント ----\n");
+        for c in &input.comments {
+            out.push_str(&format!("- {c}\n"));
+        }
+    }
+    if !input.notes_excerpt.trim().is_empty() {
+        out.push_str(&format!(
+            "\n---- 担当ノードの手帳の抜粋 ----\n{}\n",
+            input.notes_excerpt.trim()
+        ));
+    }
+    if !input.related_pages.is_empty() {
+        out.push_str("\n---- 関連する既存の知識ベースのページ（検索の上位）----\n");
+        for p in &input.related_pages {
+            out.push_str(&format!(
+                "\n[{}] {}\n{}\n",
+                p.path,
+                p.title,
+                p.excerpt.trim()
+            ));
+        }
+    }
+    if !input.existing_titles.is_empty() {
+        out.push_str("\n---- 既存の索引（重複を避ける手掛かり）----\n");
+        for t in &input.existing_titles {
+            out.push_str(&format!("- {t}\n"));
+        }
+    }
+    out.push_str(
+        "\n---- 抽出の規則（ADR-0047 D4）----\n\
+         - 将来も使える事実だけを候補にする。一時的な情報・雑談・重複・信頼性の低い推測は候補にしない\n\
+         - 秘密（API キー・パスワード・トークン・秘密鍵）は絶対に候補に含めない\n\
+         - 出典（`sources`。`task:{task_id}` を少なくとも 1 つ）を必ず付ける\n\
+         - 近い既存ページがあれば `update`（`op = update`、対象の `path`）を優先し、`create` で近い重複を作らない\n\
+         - 既存ページが古い・誤っていると分かったら `merge`（本文をあなたが書き直した完全な版にする）か\n\
+           `retire`（そのページはもう使えない）を使う\n\
+         - 確信度は `confidence`（`high` / `medium` / `low`）で正直に書く。`high` の `create`/`update` は\n\
+           そのまま知識ベースに入る（他は人が確認してから入る）\n\
+         - 何も抽出するものが無ければ、空の `candidates` を書いてよい\n",
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -850,6 +1097,7 @@ mod tests {
             updated: Some("2026-09-20".into()),
             confidence: Some(Confidence::High),
             path: None,
+            op: None,
         };
         let page = render_page(&front, "# pegasus\n\npjsub で投げる。\n");
         let (again, body) = front_matter(&page);
@@ -862,6 +1110,23 @@ mod tests {
             title_of(&page, "environment/clusters/pegasus.md"),
             "pegasus の使い方"
         );
+    }
+
+    /// ADR-0047 D4（Phase 62）: `_inbox` 専用の `op` も往復する。
+    #[test]
+    fn front_matter_round_trips_the_op_key() {
+        let front = FrontMatter {
+            title: Some("退役候補".into()),
+            scope: Some("environment".into()),
+            sources: vec!["task:01J2".into()],
+            path: Some("environment/tools/old.md".into()),
+            op: Some("retire".into()),
+            ..FrontMatter::default()
+        };
+        let page = render_page(&front, "古くなった。\n");
+        assert!(page.contains("op: retire"), "{page}");
+        let (again, _) = front_matter(&page);
+        assert_eq!(again, front);
     }
 
     #[test]
@@ -1049,5 +1314,119 @@ mod tests {
         // 大文字の AKIA は小文字の `akia` とは違う（誤検知を避ける）。
         assert!(secret_finding("akiaiosfodnn7example").is_none());
         assert!(secret_finding("pegasus は pjsub で投げる").is_none());
+    }
+
+    fn ok_candidate(op: CandidateOp) -> Candidate {
+        Candidate {
+            op,
+            path: "environment/clusters/pegasus.md".into(),
+            title: "pegasus の使い方".into(),
+            tags: vec!["hpc".into()],
+            scope: "environment".into(),
+            body: "pjsub -L node=1 で投げる。".into(),
+            sources: vec!["task:01J1".into()],
+            confidence: Confidence::High,
+        }
+    }
+
+    /// ADR-0047 D4: 候補の決定的な検査。`retire` だけ本文が空でもよい。
+    #[test]
+    fn validate_candidate_checks_path_title_sources_body_size_and_secrets() {
+        assert_eq!(
+            validate_candidate(&ok_candidate(CandidateOp::Create)).expect("ok"),
+            "environment/clusters/pegasus.md"
+        );
+
+        let mut retiring = ok_candidate(CandidateOp::Retire);
+        retiring.body = String::new();
+        assert_eq!(
+            validate_candidate(&retiring).expect("retire may have an empty body"),
+            "environment/clusters/pegasus.md"
+        );
+
+        let mut escapes = ok_candidate(CandidateOp::Create);
+        escapes.path = "../../etc/passwd".into();
+        assert!(matches!(
+            validate_candidate(&escapes),
+            Err(CandidateProblem::Path(PathError::Forbidden))
+        ));
+
+        let mut no_title = ok_candidate(CandidateOp::Create);
+        no_title.title = "  ".into();
+        assert_eq!(
+            validate_candidate(&no_title),
+            Err(CandidateProblem::NoTitle)
+        );
+
+        let mut no_sources = ok_candidate(CandidateOp::Create);
+        no_sources.sources = vec![];
+        assert_eq!(
+            validate_candidate(&no_sources),
+            Err(CandidateProblem::NoSources)
+        );
+
+        let mut no_body = ok_candidate(CandidateOp::Update);
+        no_body.body = "   ".into();
+        assert_eq!(validate_candidate(&no_body), Err(CandidateProblem::NoBody));
+
+        let mut too_large = ok_candidate(CandidateOp::Create);
+        too_large.body = "x".repeat(MAX_PAGE_BYTES + 1);
+        assert_eq!(
+            validate_candidate(&too_large),
+            Err(CandidateProblem::TooLarge)
+        );
+
+        let mut secret = ok_candidate(CandidateOp::Create);
+        secret.body = "API キーは sk-abc123def456 です".into();
+        assert!(matches!(
+            validate_candidate(&secret),
+            Err(CandidateProblem::Secret(_))
+        ));
+
+        assert!(CandidateOp::Create.direct_commit_eligible());
+        assert!(CandidateOp::Update.direct_commit_eligible());
+        assert!(!CandidateOp::Merge.direct_commit_eligible());
+        assert!(!CandidateOp::Retire.direct_commit_eligible());
+        assert_eq!("update".parse::<CandidateOp>(), Ok(CandidateOp::Update));
+        assert!("bogus".parse::<CandidateOp>().is_err());
+    }
+
+    /// ADR-0047 D4: 依頼文は入力の各節を含み、出典に `task:<id>` を促す（決定的。LLM は呼ばない）。
+    #[test]
+    fn maintenance_objective_includes_every_section() {
+        let input = MaintenanceInput {
+            task_id: "01J1".into(),
+            task_title: "pegasus の初期セットアップ".into(),
+            task_objective: "pegasus に pjsub の使い方を確認する".into(),
+            report_headline: "pjsub の投げ方を確認した".into(),
+            report_body: "pjsub -L node=1 で投げられる。".into(),
+            result_summary: "pjsub -L node=1 -L elapse=01:00 で動作確認済み".into(),
+            comments: vec!["human: 良さそう".into()],
+            related_pages: vec![RelatedPage {
+                path: "environment/clusters/pegasus.md".into(),
+                title: "pegasus の使い方".into(),
+                excerpt: "既存の使い方メモ".into(),
+            }],
+            notes_excerpt: "- 2026-09-10: pegasus は pjsub".into(),
+            existing_titles: vec!["environment/clusters/pegasus.md — pegasus の使い方".into()],
+        };
+        let text = maintenance_objective(&input);
+        assert!(text.contains("01J1"), "{text}");
+        assert!(text.contains("pjsub の投げ方を確認した"), "{text}");
+        assert!(text.contains("pjsub -L node=1 -L elapse=01:00"), "{text}");
+        assert!(text.contains("human: 良さそう"), "{text}");
+        assert!(text.contains("既存の使い方メモ"), "{text}");
+        assert!(text.contains("2026-09-10: pegasus は pjsub"), "{text}");
+        assert!(text.contains("pegasus の使い方"), "{text}");
+        assert!(text.contains("sources"), "{text}");
+
+        let minimal = maintenance_objective(&MaintenanceInput {
+            task_id: "01J2".into(),
+            task_title: "x".into(),
+            task_objective: "y".into(),
+            ..MaintenanceInput::default()
+        });
+        assert!(!minimal.contains("---- 報告"), "{minimal}");
+        assert!(!minimal.contains("---- コメント"), "{minimal}");
     }
 }

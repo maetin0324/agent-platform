@@ -26,10 +26,17 @@ use crate::store::{SqliteStore, StoreError, format_rfc3339, parse_rfc3339};
 /// ディスパッチャはこの値で「まとめの run」を見分け、その `done` を親ノードの報告にする。
 pub const COMPACTION_ROLE: &str = "report-compressor";
 
+/// ADR-0047 D4（Phase 62）: 知識整理 run に付ける役割名（= `harness::BUILTIN_KNOWLEDGE`）。
+/// `crates/celeris/src/knowledge_maint.rs` が `NewTaskSpec.role` に、`adapter`/`tier` は直接指定して
+/// 作る（役割・分野の解決に頼らない。knowledge harness が `[[harnesses]]`/`[[genres]]` に射影されない
+/// 組み込みのままでも、langmem アダプタ・cheap tier で必ず走るようにするため）。
+pub const KNOWLEDGE_ROLE: &str = "knowledge";
+
 /// GUI 監査 H4（Phase 29）: 裏方タスクの印。`TaskSummary.support` / `ProjectTaskView.support` に写す。
 /// 判定は決定的で優先順あり: 途中目標レビュー（対話 + `milestone_id`。ADR-0038 D1）> 対話 >
 /// 計画（`kind == plan`。ADR-0038 D1 / Phase 42）> 圧縮（`role == report-compressor`）>
-/// 承認（`kind == approval`）> 合成レビュー（`kind == review`）。どれでもなければ `None`
+/// 知識整理（`role == knowledge`。ADR-0047 D4 / Phase 62）> 承認（`kind == approval`）>
+/// 合成レビュー（`kind == review`）。どれでもなければ `None`
 /// （人が見る「仕事の木」の本体）。
 ///
 /// Phase 42（実機 2026-09-18）: 計画 run（`kind = plan`）は裏方。人が見る仕事の木にも
@@ -46,6 +53,8 @@ pub fn support_kind(task: &Task) -> Option<&'static str> {
         Some("plan")
     } else if task.role.as_deref() == Some(COMPACTION_ROLE) {
         Some("compaction")
+    } else if task.role.as_deref() == Some(KNOWLEDGE_ROLE) {
+        Some("knowledge")
     } else if task.kind == TaskKind::Approval {
         Some("approval")
     } else if task.kind == TaskKind::Review {
@@ -1269,6 +1278,11 @@ mod tests {
         let mut compaction = plain_task(TaskKind::Execute);
         compaction.role = Some(COMPACTION_ROLE.to_string());
         assert_eq!(support_kind(&compaction), Some("compaction"));
+
+        // ADR-0047 D4（Phase 62）: 知識整理 run も裏方。
+        let mut knowledge = plain_task(TaskKind::Execute);
+        knowledge.role = Some(KNOWLEDGE_ROLE.to_string());
+        assert_eq!(support_kind(&knowledge), Some("knowledge"));
 
         let approval = plain_task(TaskKind::Approval);
         assert_eq!(support_kind(&approval), Some("approval"));

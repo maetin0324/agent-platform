@@ -16,6 +16,8 @@ pub mod instance;
 pub mod integrations;
 /// ADR-0047（Phase 61）: 知識ベース（front matter・索引・検索・マウント。純粋関数だけ）。
 pub mod knowledge;
+/// ADR-0047 D4（Phase 62）: 知識整理 run の追跡（`knowledge_runs`）。
+pub mod knowledge_run;
 pub mod message;
 pub mod model;
 pub mod notify;
@@ -48,8 +50,9 @@ pub use delegate::{
 pub use instance::{DaemonInstance, DaemonMode, InstanceRole, SharedRole};
 // ---- ADR-0046 D3（Phase 59）: ハーネスのレジストリ ----
 pub use harness::{
-    BUILTIN_CONVERSATION, BUILTIN_HARNESSES, BUILTIN_PLAN, BUILTIN_REVIEWER, BUILTIN_SMOKE,
-    HarnessBudget, HarnessRegistry, HarnessSpec, builtin_harnesses, known_harness_ids,
+    BUILTIN_CONVERSATION, BUILTIN_HARNESSES, BUILTIN_KNOWLEDGE, BUILTIN_PLAN, BUILTIN_REVIEWER,
+    BUILTIN_SMOKE, HarnessBudget, HarnessRegistry, HarnessSpec, builtin_harnesses,
+    known_harness_ids,
 };
 // ---- ADR-0046 D1（Phase 59）: profile の継承木 ----
 // `KnowledgeMount` は ADR-0047（Phase 61）の型をそのまま使う（Phase 59 追記）。
@@ -64,6 +67,8 @@ pub use knowledge::{
     Confidence, Index as KnowledgeIndex, IndexItem as KnowledgeItem, KnowledgeMount, MountKind,
     SearchHit as KnowledgeHit, merge_mounts,
 };
+// ---- ADR-0047 D4（Phase 62）: 知識整理 run の追跡 ----
+pub use knowledge_run::{KnowledgeRun, KnowledgeRunState, KnowledgeRunStore, KnowledgeRunSummary};
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use integrations::{IntegrationId, IntegrationMethod, IntegrationState, TaskIntegration};
 pub use message::{
