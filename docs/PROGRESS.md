@@ -9517,3 +9517,13 @@ environment/hosts/home-dev.md (task 01M2ZFBS5JSYSH6XAF73HG8M4K)`（front matter 
   既存タスクに保存された adapter 固定は書き換えない。移行後の新しい依頼から自動選択になる。
 - 任意のモデルを他社専用ハーネスへ注入する全面的な供給層の置換は行っていない。
   この変更は、既存の共通ワーカープロトコルを使う汎用ハーネスの供給元選択と残量観測を修正するもの。
+
+### Phase 63 本番移行追記（2026-09-20）
+
+ユーザーの移行指示により ad516f322de2 を release → verify → promote で反映。
+7 release gates と DB snapshot verification、旧版互換・live handoff が成功。
+4 汎用ハーネスの固定を移行ツールで外し、設定・DB は既存機構でバックアップした。
+本番で Claude 2 アカウントの枯渇と Codex 長期枠 95% 残量表示、自動選択を確認。
+実 CoS テストで非 Git 作業領域による起動拒否を発見し、この追補で
+Git 所在確認の省略と workspace-write 既定値を追加する。
+実 Codex CLI を隔離した非 Git 一時領域で起動し、結果 JSON の書き込み成功を確認した。

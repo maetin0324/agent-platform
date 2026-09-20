@@ -36,3 +36,10 @@
 [OpenAI Codex App Server](https://learn.chatgpt.com/docs/app-server) の account/rateLimits/read と
 ローカルの codex-cli 0.154.0 の `app-server generate-json-schema` で契約を確認。
 Codex の任意のモデルを任意の他社専用ハーネスへ注入する変更はこの修正には含めない。
+
+## 実機移行で確認した実行契約
+
+CoS の一時作業領域は Git リポジトリではない。Codex の全 worker 起動に
+`--skip-git-repo-check` を渡し、管理された作業領域で実行可能にする。
+結果ファイルを書けるよう `-c sandbox_mode="workspace-write"` を既定値として渡す。
+明示的な extra_args の sandbox 指定で上書きでき、承認設定は変更しない。

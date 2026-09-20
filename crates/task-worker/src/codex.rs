@@ -166,7 +166,14 @@ async fn run_codex(
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
 
     let mut command = Command::new(&config.command);
-    command.arg("exec").arg("--json");
+    // CoS and standalone task workspaces need not be Git repositories.
+    command
+        .arg("exec")
+        .arg("--json")
+        .arg("--skip-git-repo-check")
+        // The result.json contract needs writes; explicit extra_args override this default.
+        .arg("-c")
+        .arg("sandbox_mode=\"workspace-write\"");
     if let Some(model) = &config.model {
         command.arg("--model").arg(model);
     }
@@ -1122,12 +1129,23 @@ echo '{"type":"turn.completed"}'
         let args: Vec<&str> = args_log.split('\0').filter(|s| !s.is_empty()).collect();
         assert_eq!(
             args.len(),
-            7,
+            10,
             "expected exactly one trailing prompt arg, got {args:?}"
         );
-        assert_eq!(&args[..4], ["exec", "--json", "--model", "gpt-5-codex"]);
-        assert_eq!(&args[4..6], ["--sandbox", "read-only"]);
-        let prompt = args[6];
+        assert_eq!(
+            &args[..7],
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-c",
+                "sandbox_mode=\"workspace-write\"",
+                "--model",
+                "gpt-5-codex"
+            ]
+        );
+        assert_eq!(&args[7..9], ["--sandbox", "read-only"]);
+        let prompt = args[9];
         assert!(
             prompt.contains("# Task:"),
             "prompt should be the last arg: {prompt}"

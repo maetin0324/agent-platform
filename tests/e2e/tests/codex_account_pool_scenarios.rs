@@ -151,16 +151,9 @@ if [ "${1:-}" = "app-server" ]; then
 fi
 printf '{"type":"token_count","rate_limits":{"primary":{"used_percent":%s,"window_minutes":300,"resets_in_seconds":3600},"secondary":{"used_percent":10.0,"window_minutes":10080,"resets_in_seconds":432000}}}\n' "$percent"
 
-case " $* " in
-  *" --skip-git-repo-check "*)
-    echo '{"type":"turn.completed"}'
-    ;;
-  *)
-    mkdir -p artifacts
-    printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
-    echo '{"type":"turn.completed"}'
-    ;;
-esac
+mkdir -p artifacts
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+echo '{"type":"turn.completed"}'
 "#,
         )
         .unwrap();
