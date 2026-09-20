@@ -67,6 +67,7 @@ fn message(node_id: &str, project_id: Option<ProjectId>, role: MessageRole, text
         text: text.to_string(),
         run_id: None,
         task_id: None,
+        metadata: None,
         created_at: OffsetDateTime::now_utc(),
     }
 }
@@ -209,6 +210,69 @@ async fn a_fake_run_becomes_one_task_progress_and_report_stream() {
     assert_eq!(items[2]["task"]["reason"], "worker_done");
     assert_eq!(items[3]["report"]["headline"], "直した");
     assert!(page["next_cursor"].is_string());
+}
+
+/// ADR-0048 D3（Phase 60b）: `reply` ブロックは `Message.metadata`（CoS の `actions` の実行結果）を
+/// `actions_result` として運ぶ。metadata の無い返事は `actions_result` を出さない。
+#[tokio::test]
+async fn reply_blocks_carry_the_actions_result() {
+    let env = TestEnv::new();
+    let now = OffsetDateTime::now_utc();
+    let with_actions = Message {
+        id: MessageId::new(),
+        node_id: "cos".into(),
+        project_id: None,
+        role: MessageRole::Node,
+        text: "タスクを作りました".into(),
+        run_id: Some(RUN.into()),
+        task_id: None,
+        metadata: Some(task_core::MessageMetadata {
+            actions_executed: vec![task_core::MessageActionResult {
+                kind: "create_task".into(),
+                summary: "→ タスクを作りました: 直す".into(),
+                task_id: None,
+                project_id: None,
+                milestone_id: None,
+            }],
+            actions_failed: vec![task_core::MessageActionFailure {
+                kind: "add_milestone".into(),
+                reason: "project x does not exist".into(),
+            }],
+        }),
+        created_at: now,
+    };
+    env.store.message_append(&with_actions).unwrap();
+    let plain = Message {
+        id: MessageId::new(),
+        node_id: "cos".into(),
+        project_id: None,
+        role: MessageRole::Node,
+        text: "了解しました".into(),
+        run_id: Some(RUN.into()),
+        task_id: None,
+        metadata: None,
+        created_at: now + time::Duration::seconds(1),
+    };
+    env.store.message_append(&plain).unwrap();
+
+    let app = env.router();
+    let page = send(&app, get("/api/v1/console")).await.json();
+    let items = page["items"].as_array().expect("items");
+    assert_eq!(items.len(), 2);
+    let result = &items[0]["actions_result"];
+    assert_eq!(
+        result["actions_executed"][0]["summary"],
+        "→ タスクを作りました: 直す"
+    );
+    assert_eq!(
+        result["actions_failed"][0]["reason"],
+        "project x does not exist"
+    );
+    assert!(
+        items[1].get("actions_result").is_none(),
+        "metadata の無い返事には出ない: {:?}",
+        items[1]
+    );
 }
 
 /// 受け入れ 1: 範囲の 3 種（`all` / `project:<id>` / `node:<id>`）。

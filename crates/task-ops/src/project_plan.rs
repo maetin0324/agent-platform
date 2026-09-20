@@ -284,6 +284,7 @@ mod tests {
                 text: "この案件をお願いします".into(),
                 run_id: None,
                 task_id: None,
+                metadata: None,
                 created_at: now(),
             },
             Message {
@@ -294,6 +295,7 @@ mod tests {
                 text: "承知しました。方針を検討します。".into(),
                 run_id: Some("run-1".into()),
                 task_id: None,
+                metadata: None,
                 created_at: now(),
             },
         ];
@@ -431,6 +433,7 @@ mod tests {
                     text: format!("message {i}"),
                     run_id: None,
                     task_id: None,
+                    metadata: None,
                     created_at: now() - time::Duration::minutes(25 - i),
                 })
                 .expect("append");

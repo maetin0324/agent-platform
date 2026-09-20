@@ -7910,6 +7910,129 @@ main（`ef639ea`）に `git merge --no-ff` で合わせた。衝突は **12 か�
 - 逸脱: ADR-0048「Phase 60a 追記」に 11 件（`error` 欄の追加、`comment` は kind にしない、`thinking` は detail 無し、カーソルは 3 つ組 など）。
 - 未解決: D3（`POST /console/instruct` と CoS の actions）と D4（GUI）は Phase 60b。`knowledge` ブロックは予約のみ（Phase 62）。
 
+## Phase 60b / G22 — Console: 指示・CoS の actions・画面（ADR-0048 D3/D4。2026-09-20）
+
+- 完了日: 2026-09-20
+- 変更（celeris 側。D3 + §3 受け入れ条件 3）:
+  - migration `0017_console_actions.sql`（`SCHEMA_VERSION = 17`）: `messages.metadata_json`（CoS の `actions`
+    の実行結果。`Message.metadata: Option<MessageMetadata>`）と `console_action_runs`（`run_id` 一意。
+    `TaskStore::console_action_run_claim` が冪等性の目印）。
+  - `task_core::ConsoleAction`（新モジュール `console_action.rs`。`create_task` / `propose_project` /
+    `add_milestone` / `ask_human` の宣言的な形。`task-worker` と `task-ops` の両方が依存できるよう
+    `task-core` に置いた。循環依存を避けるための判断で、当初 `task-worker` に置いていたものを移した）。
+  - `task_worker::{read_result_actions, actions_from_result_json, ParsedActions}`（`result_report.rs` を拡張。
+    `milestone_proposal` と同じ「読んで写すだけ」の流儀。`ParsedActions{valid, malformed}` — JSON としては
+    読めたが `ConsoleAction` の形に合わない要素は理由付きで分ける）。
+  - `task_ops::actions`（新規）: `execute(store, org, roles, genres, task, run_id, valid, malformed, now)` が
+    検証つきで決定的に実行する。`create_task` は既存の `task_ops::add::create_task_with_roles` をそのまま呼ぶ
+    （harness / repos / project / milestone / skills / mode / assignee の検証を再利用。**status は
+    `ready`**）。`assignee` 省略時の担当決定はここではやらない（ディスパッチャの `assign_if_needed` が次 tick
+    で ADR-0046 D5 の matching を通す。既存の経路をそのまま使うだけで新しいコードは書いていない）。
+    `propose_project` は `proposed` の案件 ＋ `repos[]`（**絶対パスとして読む**。名前は `default_repo_name`、
+    種類は `detect_repo_kind` から決める。相対パスが 1 つでもあれば action 全体を実行しない）。
+    `add_milestone` は既存案件の末尾に `proposed` の途中目標。`ask_human` は何も作らず「実行できた」として
+    記録するだけ（人への問いかけ自体が返事の本文）。検証に落ちた action は実行せず `FailedAction{kind, reason}`
+    に積む。`ActionsOutcome::failure_note()` が返事に足す「実行できなかった action: …」の節、
+    `to_metadata()` が `Message.metadata` を組む。
+  - `task-dispatch::Dispatcher::absorb_console_actions` / `record_conversation_reply`: 対話 run が `done` で
+    終わり、担当が CoS（`OrgKind::Secretary` の根ノード）のときだけ、結果ファイルの `actions` を実行し、
+    失敗の節を返事の本文に足し、実行結果を `Message.metadata` に残す（`task_ops::conversation::
+    record_reply_with_metadata` を新設。`record_reply` は `metadata: None` で呼ぶ薄い委譲に変えた）。
+    `absorb_milestone_proposal` と同じ場所・同じ「run 完了ごとに 1 回」の規律（`lease_matches` の
+    ガードで自然に一度だけになる）に加え、`console_action_run_claim` で明示的にも冪等にした（テストで
+    直接 2 回呼んでも 2 回目は `None` になることを確認できるように）。
+  - `POST /console/instruct`（`crates/task-api/src/console.rs`。管理系）: `{text, scope?}` → 202
+    `ConsoleInstructAccepted{message_id, task_id, node_id}`。`scope=node:<id>` か `@<node-id> ` 始まりの文
+    （mention は本文から取り除く）はそのノードとの対話（既存の `task_ops::conversation::start` をそのまま
+    使う）、`scope=project:<id>` で mention が無ければ CoS にその案件を紐づけ、それ以外は CoS（案件なし）。
+    CoS は `org_list()` から `OrgKind::Secretary` を探す（見つからなければ 404 `org_node_not_found("cos")`）。
+  - CoS の対話 run の前置き（`task-worker::preamble`）に **進行中の案件（`proposed`/`active`）とその途中目標**
+    （`RunContext::active_projects`。`is_cos_conversation` のときだけディスパッチャが決定的に組む）と、
+    **`actions` の JSON の形と目安**（`preamble::actions_instructions`。「1 タスクで 1 時間以内・承認不要なら
+    `create_task`、儀式を求めていれば `propose_project`/`add_milestone`、迷ったら `ask_human`」）を追加。
+    どちらも CoS 以外の run・案件が無い CoS 対話では前置きを 1 バイトも変えない（既存の Secretary 節の
+    ガード `conversation_addressee == Some(Secretary)` を流用）。
+  - `GET /console` の `reply` ブロックに `actions_result: Option<MessageMetadata>`（`message_block` が
+    `Message.metadata` をそのまま写す）。
+- 変更（GUI 側。D4 + P-59-a。詳細・逸脱の一覧・証拠は `gui/docs/PROGRESS.md` の `## Phase G22 — Console:
+  指示・CoS の actions・画面（ADR-0048 D4 + P-59-a。2026-09-20）`）:
+  - `/` が Console（`scope=all`。`?scope=project:<id>`/`node:<id>` の深リンク対応）になり、`/org/{id}`
+    （CoS = `cos` を含む）も同じ `Console` 部品を `scope=node:<id>` で使う。旧 `/org/secretary` は
+    celeris に問い合わせない 302 リダイレクトに変えた（P-59-a）。
+  - 新規: `app/lib/console.ts`（純粋関数。scope 決定・`@mention` 補完・返信先・SSE の積み上げ・
+    待ち件数の算出など）、`app/celeris/console.server.ts`（`GET /console` / `POST /console/instruct` の
+    中継）、`app/hooks/useConsoleStream.ts` + `app/routes/console.stream.ts`（`GET /console/stream` の
+    SSE 中継とクライアント側フック）、`app/routes/tasks.$id.runs.$runId.events.ts`（「すべて見る」の
+    中継）、`app/components/Console.tsx` / `ConsoleBlockItem.tsx`（画面本体・9 種のブロック描画）。
+  - 認可・途中目標の判定・タスクへのコメント／回答は Console 専用の action を作らず、既存の
+    `/approvals` / `/projects/:id` / `/tasks/:id` の action をクロスルート fetcher で再利用。
+  - 旧 `Conversation` 部品（202 → ポーリングで返事を待つ画面）と `app/lib/conversation.ts` /
+    `app/celeris/conversation.server.ts` は使う場所が無くなったため削除。
+  - P-59-a: 画面の言葉「秘書」→「Chief of Staff（CoS）」/「CoS」に改名（`app/root.tsx` のナビ、
+    `app/routes/help.tsx` の用語集と画面説明、`app/routes/{org,reports,projects,projects.$id,inbox}.tsx`、
+    `app/components/{Flash,ReportsList}.tsx`、`app/lib/notify.ts`）。
+  - 逸脱 8 件（G22-1〜G22-8。例: CoS 専用ルートを削除し `/org/:id` に統合、Console の入力欄が
+    「いま見ている範囲」を既定の宛先にする GUI 側の補完規則、SSE の積み上げは `progress` を run 単位で
+    置き換え上限 300 件、待ち件数は読み込み済みブロックからだけ数える）は `gui/docs/PROGRESS.md` に明記。
+  - 証拠: `pnpm lint` exit 0、`pnpm typecheck` exit 0、`pnpm test` **59 files / 836 tests passed**
+    （このワークツリーで独立に再実行して確認。基準 816 件から純増）、`pnpm build` exit 0（`Console-*.js`
+    ほか新チャンク）、`bash scripts/sync-gui-docs.sh --check` up to date、`pnpm gen:types` を連続 2 回
+    実行しても `app/celeris/types.ts` の sha256 が同一（`fb220503…`。独立に再現確認済み）で生成は冪等。
+    `git diff --exit-code app/celeris/types.ts` だけは非ゼロで終わる（**手編集ではない**: このフェーズを
+    始める前に celeris 側 Phase 60b の schema がまだ未コミットの状態で `types.ts` を再生成していたため、
+    HEAD（Phase 60a まで）との比較で差分が出るのは自然な帰結。実際に「`gen:types` の前後で working tree の
+    `types.ts` が変わらない」ことを別途確認済み。celeris 側をこの Phase の一部として一緒にコミットすれば
+    この差分は解消する）。`pnpm e2e` は指示どおり未実行。
+- 逸脱:
+  - **`ConsoleAction` の置き場**: ADR 本文は「task-worker が読む」としか書いていないが、`task-ops` の
+    `actions::execute` も同じ型を扱う必要があり、`task-ops → task-worker` の依存は既存の依存グラフに無い
+    向き（`task-dispatch` が両方に依存する形は既存どおり）。型そのものを `task-core` に置き、
+    `task-worker::result_report` は `pub use task_core::ConsoleAction;` で読み口だけを提供する形にした
+    （`milestone_proposal` は文字列 2 つだけなので同じ問題が起きなかった）。
+  - **`propose_project.repos[]` の形**: ADR は「repos by name/path」としか書いていない。案件を今から作る
+    ので既存の名前で引けず、**絶対パスだけ**を受け付けることにした（相対パス・裸の名前は 422 相当のエラーで
+    action 全体を実行しない）。名前・種類は `POST /projects/{id}/repos` の既定推定ロジック
+    （`default_repo_name` / `detect_repo_kind`）を再利用。
+  - **`ask_human` の実行**: taskd 側では何も作らない（テキストの非空だけを検証し「実行できた」に数える）。
+    質問そのものは CoS の返事の Markdown に既に書かれている前提（構造化した `actions_result` に
+    `ask_human` の summary を残すのは、Console 画面が質問の宣言を判別しやすくするため）。
+  - **冪等性のテスト方針**: ADR は「run ごとに actions は 1 回だけ実行」とだけ書いている。ディスパッチャの
+    `lease_matches` ガードで実運用上は自然に一度きりだが（`absorb_milestone_proposal` はこれだけに頼って
+    いる）、`console_action_run_claim`（migration 0017 の新テーブル）で**明示的にも**保証し、
+    `task_ops::actions` 単体で「同じ `run_id` を 2 回渡しても 2 回目は `Ok(None)`」を直接テストできるように
+    した（`actions::tests::the_same_run_id_executes_actions_only_once`、
+    `dispatcher::tests::absorb_console_actions_executes_the_declared_actions_for_the_cos_only`）。
+- 証拠（celeris 側。このワークツリーで実行）:
+  - `cargo test --workspace --no-fail-fast` → exit 0、`grep -c "^test result: FAILED"` = 0、
+    passed 合計 **1466**（Phase 60a の 1438 起点 + このフェーズの新規テスト 28）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` → exit 0（警告 0）。
+  - `UPDATE_SCHEMA=1 cargo test -p task-core -p task-api -p task-worker --lib` → ok。
+    `docs/api/v1/api-v1.schema.json` / `docs/protocol/worker-protocol.schema.json` は生成し直したものと差分ゼロ
+    （`schema::tests::committed_schema_matches_generated` が確認）。
+  - `pnpm gen:types` → `gui/app/celeris/types.ts` 更新（`ConsoleInstructAccepted` / `InstructBody` /
+    `MessageMetadata` / `MessageActionResult` / `MessageActionFailure`、`reply` ブロックの `actions_result`、
+    `Message.metadata` を追加）。`bash scripts/sync-gui-docs.sh` → `gui/docs/celeris-api-v1.md` を更新。
+  - GUI 側のゲート（`pnpm lint` / `pnpm typecheck` / `pnpm test` / `pnpm build` /
+    `bash scripts/sync-gui-docs.sh --check`）は `gui/docs/PROGRESS.md` の `## Phase G22` を参照。
+  - 新規テストの内訳: `task-worker::result_report::actions_tests`（5）、`task-core::store::tests::
+    migration_0017_…`（1）、`task-ops::actions::tests`（10）、`task-worker::preamble::tests::
+    cos_conversations_show_active_projects_…`（1）、`task-dispatch::dispatcher::tests::
+    cos_conversations_carry_active_projects_…` / `absorb_console_actions_…` /
+    `record_conversation_reply_runs_actions_…`（3）、`task-api::tests::console_instruct`（7）、
+    `task-api::tests::console::reply_blocks_carry_the_actions_result`（1）。
+- 未解決:
+  - **実機はまだ**（§3 受け入れ条件 5「Console から『〜を直して』と 1 行入れる」の実演）。本番環境
+    （`~/.config/celeris` / `~/.local/celeris` / ポート 7710・7700・`systemctl`）はこのセッションから
+    触れない（CLAUDE.md の禁止）。手順: Console（または `POST /console/instruct`）に「@〜を直して」等の
+    1 行を送る → CoS の返事に `actions` の `create_task` が現れ `ready` のタスクができる → 次 tick の
+    matching で担当が決まる → 進行が Console に流れる → `report` ブロックで終わる、を確認する。
+  - `knowledge` ブロックは引き続き予約のみ（Phase 62 / ADR-0047 側）。
+  - GUI の未解決事項は `gui/docs/PROGRESS.md` の `## Phase G22` を参照。
+- 提案:
+  - **P-60b-a**: `propose_project.repos[]` の「名前」入力（既存の他案件の慣用名を流用する運用）に需要が
+    出れば、`~/workspace/<name>` のような既定の探索規則を足すことを検討する（今回はスコープを絞って
+    絶対パスのみ）。
+
 ## Phase 51 — 検証に煙試験（ADR-0041 D5。2026-09-19）
 
 - 完了日: 2026-09-19
@@ -9007,8 +9130,9 @@ releases/$SHA12/bin/celerisctl --db ~/.local/celeris/celeris.sqlite3 org migrate
 
 - **実機はまだ**（上の「本番の手順」1〜7）。認証が要る本番環境（`~/.config/celeris` / `~/.local/celeris` /
   ポート 7710・7700・`systemctl`）はこのセッションから触れない（CLAUDE.md の禁止）。
-- **GUI の全面的な CoS 改名が未着手**（`/org/secretary` → `/org/cos`、「秘書」→「Chief of Staff」等の表示）。
-  今回は `SECRETARY_NODE_ID` の値だけを直した（上の「既知の逸脱」）。
+- ~~**GUI の全面的な CoS 改名が未着手**（`/org/secretary` → `/org/cos`、「秘書」→「Chief of Staff」等の表示）。
+  今回は `SECRETARY_NODE_ID` の値だけを直した（上の「既知の逸脱」）。~~ → **Phase 60b / G22 で解消**
+  （`gui/docs/PROGRESS.md` の `## Phase G22`）。
 - **`celerisctl org migrate-v2` は D7 の固定 3 階層（secretary/department/section）専用**（`--rollback` の
   並べ替えも `next.sort_by_key` も kind 3 値の決め打ち）。組織がこの形を超えて深くなったら見直しが要る。
 - 前段 agent が書いた `docs/gui/api.md` §3.6 の `types` の語彙が 15 種のまま（`edited` / `assigned` が
@@ -9016,12 +9140,14 @@ releases/$SHA12/bin/celerisctl --db ~/.local/celeris/celeris.sqlite3 org migrate
 
 ### 提案
 
-- **P-59-a**: GUI の CoS 全面改名（`/org/cos`、「Chief of Staff」表示、ナビ）を別 Phase として起こす。
+- ~~**P-59-a**: GUI の CoS 全面改名（`/org/cos`、「Chief of Staff」表示、ナビ）を別 Phase として起こす。
   影響ファイルは `gui/app/lib/conversation.ts`（`SECRETARY_NODE_ID`）、`gui/app/routes/org.secretary.tsx`
   （→ `org.cos.tsx` にリネームし `/org/secretary` は 302 で残す）、`gui/app/routes.ts`、`gui/app/root.tsx`、
   `gui/app/routes/home.tsx`、`gui/app/components/Conversation.tsx`、`gui/app/routes/{tasks.$id,org.$id,
   projects,projects.$id,inbox}.tsx`、`gui/app/components/ReportsList.tsx`。既存の GUI 単体テスト（`secretary`
-  という文字列を直接使っているもの）の更新も伴う。
+  という文字列を直接使っているもの）の更新も伴う。~~ → **Phase 60b / G22 で実施**（`/org/secretary` は
+  `org.cos.tsx` へのリネームではなく `/org/cos` への 302 リダイレクトに、CoS 専用ページ自体は `/org/:id`
+  の Console 部品へ統合。詳細は `gui/docs/PROGRESS.md` の `## Phase G22`）。
 - **P-59-b**: `celerisctl org migrate-v2` は 1 回きりの決め打ちの写像（Phase 58→59）。次に組織の形を変える
   ときのための「一般化した組織の再編（rename/merge/split）」コマンドがあると、今回のような使い捨てコードを
   毎回書かずに済む。

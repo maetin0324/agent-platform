@@ -384,6 +384,7 @@ fn append_user_note(
         text: note.to_string(),
         run_id: None,
         task_id: None,
+        metadata: None,
         created_at: now,
     })?;
     Ok(())

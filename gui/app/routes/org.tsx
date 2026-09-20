@@ -182,7 +182,7 @@ export async function action({ request }: Route.ActionArgs) {
 const ORG_KINDS: OrgKind[] = ["secretary", "department", "section"];
 
 /** 役職の種類の日本語（画面には英語の `kind` を出さない。監査 4/5）。 */
-const ORG_KIND_LABEL: Record<OrgKind, string> = { secretary: "秘書", department: "部", section: "課" };
+const ORG_KIND_LABEL: Record<OrgKind, string> = { secretary: "CoS", department: "部", section: "課" };
 
 export default function OrgPage({ loaderData }: Route.ComponentProps) {
   const {
@@ -215,7 +215,7 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="秘書を根にした、たった一つの組織です。誰が何を抱えているかを見て、担当を選ぶとその担当に直接話せます。"
+        description="Chief of Staff（CoS）を根にした、たった一つの組織です。誰が何を抱えているかを見て、担当を選ぶとその担当に直接話せます。"
       />
 
       <OrgActionFlash outcome={fetcher.data} />

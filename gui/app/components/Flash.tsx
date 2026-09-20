@@ -360,7 +360,7 @@ const PROJECT_OP_LABEL: Record<string, string> = {
   project_workspace: "作業場所を変更",
   milestone_create: "途中目標を追加",
   milestone_status: "途中目標の状態を変更",
-  project_plan: "分解を秘書に頼みました",
+  project_plan: "分解を CoS に頼みました",
   // 案件のリポジトリ（ADR-0043 D1、Phase 52 / G16）。
   repo_create: "リポジトリを追加",
   repo_patch: "リポジトリを変更",
@@ -393,9 +393,9 @@ const LIFECYCLE_OPS: readonly string[] = [
 
 /** 途中目標の判定（`ok`/`discuss`/`ng`）ごとの文言（ADR-0038 D2/D3、Phase 41 / G13j）。 */
 const MILESTONE_DECIDE_LABEL: Record<string, string> = {
-  ok: "達成にして、次の途中目標を承認し、分解を秘書に頼みました",
-  discuss: "議論を秘書に伝えました。秘書の対話画面で返事を待ってください",
-  ng: "達成にせず、再設計を秘書に頼みました",
+  ok: "達成にして、次の途中目標を承認し、分解を CoS に頼みました",
+  discuss: "議論を CoS に伝えました。Console で返事を待ってください",
+  ng: "達成にせず、再設計を CoS に頼みました",
 };
 
 /**

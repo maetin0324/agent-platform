@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use ulid::Ulid;
 
 use crate::model::{Task, TaskId};
-use crate::org::ProjectId;
+use crate::org::{MilestoneId, ProjectId};
 
 /// 対話の 1 行の識別子（ULID）。
 #[derive(
@@ -90,9 +90,53 @@ pub struct Message {
     /// `role = user` の行にも `role = node` の行にも**同じ id** が入る。導入前の行は `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<TaskId>,
+    /// ADR-0048 D3（Phase 60b。migration 0017）: CoS の返事に添える `actions` の実行結果
+    /// （実行できた / できなかった）。actions を伴わない返事・導入前の行は `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<MessageMetadata>,
     #[serde(with = "time::serde::rfc3339")]
     #[schemars(with = "String")]
     pub created_at: OffsetDateTime,
+}
+
+/// `Message.metadata`（ADR-0048 D3。Phase 60b）: CoS の対話 run が結果ファイルで宣言した `actions`
+/// を taskd が決定的に実行した結果。Console の `reply` ブロックが `actions_result` として表示する。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MessageMetadata {
+    /// 実行できた action（「→ タスクを作りました: …」のような 1 行と、作った物の id）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions_executed: Vec<MessageActionResult>,
+    /// 検証に落ちて実行しなかった action と理由。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions_failed: Vec<MessageActionFailure>,
+}
+
+impl MessageMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.actions_executed.is_empty() && self.actions_failed.is_empty()
+    }
+}
+
+/// `Message.metadata.actions_executed[]`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MessageActionResult {
+    /// `create_task` / `propose_project` / `add_milestone` / `ask_human`。
+    pub kind: String,
+    /// 人が読む 1 行（「タスクを作りました: 〜」）。
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<TaskId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone_id: Option<MilestoneId>,
+}
+
+/// `Message.metadata.actions_failed[]`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct MessageActionFailure {
+    pub kind: String,
+    pub reason: String,
 }
 
 /// 分野を持たないノードが対話するときに使う分野（ADR-0033 D4 の「秘書の対話用分野」）。

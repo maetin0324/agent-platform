@@ -125,6 +125,7 @@ impl Env {
                 text: text.to_string(),
                 run_id: Some("run-review".into()),
                 task_id: Some(review.id),
+                metadata: None,
                 created_at: at(5),
             })
             .unwrap_or_else(|e| panic!("message: {e}"));
@@ -641,6 +642,7 @@ fn secretary_reply_fires_once_when_a_proposed_project_gets_a_node_message() {
         text: "お願いします".into(),
         run_id: None,
         task_id: None,
+        metadata: None,
         created_at: at(0),
     };
     env.store

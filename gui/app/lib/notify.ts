@@ -16,7 +16,7 @@ export const NOTIFY_KIND_LABEL: Record<NotificationKind, string> = {
   approval_pending: "認可の要求が来た",
   question_blocked: "質問で止まっている",
   bad_news: "悪い知らせが届いた",
-  secretary_reply: "秘書から方針の提案が届いた",
+  secretary_reply: "CoS から方針の提案が届いた",
 };
 
 export function notifyKindLabel(kind: NotificationKind): string {

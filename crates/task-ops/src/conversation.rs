@@ -126,6 +126,7 @@ pub fn start_with_milestone(
         run_id: None,
         // R4（migration 0007）: 人の発言も返事も、同じ対話用タスクの id を持つ。
         task_id: Some(task.id),
+        metadata: None,
         created_at: now,
     };
     store.message_append(&message)?;
@@ -245,6 +246,19 @@ pub fn record_reply(
     text: &str,
     now: OffsetDateTime,
 ) -> Result<Option<Message>, OpsError> {
+    record_reply_with_metadata(store, task, run_id, text, None, now)
+}
+
+/// ADR-0048 D3（Phase 60b）: `record_reply` と同じだが、CoS の `actions` の実行結果
+/// （`Message.metadata`）を一緒に残す。
+pub fn record_reply_with_metadata(
+    store: &dyn TaskStore,
+    task: &Task,
+    run_id: &str,
+    text: &str,
+    metadata: Option<task_core::MessageMetadata>,
+    now: OffsetDateTime,
+) -> Result<Option<Message>, OpsError> {
     if !task_core::is_conversation(task) {
         return Ok(None);
     }
@@ -265,6 +279,7 @@ pub fn record_reply(
         run_id: Some(run_id.to_string()),
         // R4（migration 0007）: 人の発言の行と同じ対話用タスクの id。
         task_id: Some(task.id),
+        metadata,
         created_at: now,
     };
     store.message_append(&message)?;

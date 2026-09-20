@@ -148,7 +148,7 @@ export async function action({ request }: Route.ActionArgs) {
 
 const LEVEL_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "すべて" },
-  { value: "0", label: "秘書" },
+  { value: "0", label: "CoS" },
   { value: "1", label: "部" },
   { value: "2", label: "課" },
 ];
@@ -337,7 +337,7 @@ function DiscordSection({
         通知（Discord）
       </SectionTitle>
       <p className="text-xs text-fg-subtle">
-        途中目標の仕事が終わった・認可の要求が来た・質問で止まっている・悪い知らせが届いた・秘書から方針の提案が 届いた
+        途中目標の仕事が終わった・認可の要求が来た・質問で止まっている・悪い知らせが届いた・CoS から方針の提案が 届いた
         — この 5 つ、人の判断が要るときだけ Discord にも 1 通届きます。結果が出たことは知らせません
         （それはこの「報告」の流れで見ます）。
       </p>

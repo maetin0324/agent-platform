@@ -100,7 +100,8 @@ pub use docs::{
 };
 // ---- ADR-0048 D1/D2（Phase 60a）: Console ----
 pub use console::{
-    ConsoleHello, EVENT_WINDOW as CONSOLE_EVENT_WINDOW, MAX_LIMIT as CONSOLE_MAX_LIMIT,
+    ConsoleHello, ConsoleInstructAccepted, EVENT_WINDOW as CONSOLE_EVENT_WINDOW, InstructBody,
+    MAX_LIMIT as CONSOLE_MAX_LIMIT,
 };
 pub use types::{ConsoleBlock, ConsolePage};
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----

@@ -6,6 +6,7 @@ pub mod approval;
 pub mod artifacts;
 /// ADR-0044 D2（Phase 53）: タスク単位のコメント。
 pub mod comment;
+pub mod console_action;
 pub mod delegate;
 /// ADR-0046 D3（Phase 59）: ハーネス = 実行契約（`[[harnesses]]`。旧 `[[genres]]` + `[[roles]]`）。
 pub mod harness;
@@ -39,6 +40,7 @@ pub use artifacts::{
 pub use comment::{
     CommentAuthorKind, CommentId, MAX_COMMENT_CHARS, PREAMBLE_COMMENTS, TaskComment,
 };
+pub use console_action::ConsoleAction;
 pub use delegate::{
     DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, WorkspaceContext,
     materialize_delegated, validate_each,
@@ -65,8 +67,9 @@ pub use knowledge::{
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use integrations::{IntegrationId, IntegrationMethod, IntegrationState, TaskIntegration};
 pub use message::{
-    CONVERSATION_GENRE, Message, MessageId, MessageRole, conversation_origin, conversation_title,
-    failure_reply, is_conversation, is_milestone_review, milestone_review_of,
+    CONVERSATION_GENRE, Message, MessageActionFailure, MessageActionResult, MessageId,
+    MessageMetadata, MessageRole, conversation_origin, conversation_title, failure_reply,
+    is_conversation, is_milestone_review, milestone_review_of,
 };
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, DEFAULT_PRIORITY, Event, GenreSpec, HARNESS_ADAPTERS,

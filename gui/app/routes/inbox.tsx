@@ -100,7 +100,7 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="裏方の画面です。人間の対応が要る項目（承認待ち・質問・受け入れ待ちの draft・注意）だけを集めています。普段は「秘書」から始めてください。"
+        description="裏方の画面です。人間の対応が要る項目（承認待ち・質問・受け入れ待ちの draft・注意）だけを集めています。普段は「Console」から始めてください。"
       />
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

@@ -8,6 +8,7 @@ import type {
   ClusterConnectResult,
   ClusterConnectStart,
   CommentResult,
+  ConsoleInstructAccepted,
   DocPageResult,
   DocsInitResult,
   EditResult,
@@ -366,3 +367,14 @@ export type KnowledgeOpOutcome =
   | { ok: true; op: "knowledge_reject"; id: string; result: KnowledgeRejectResult }
   | { ok: false; op: "knowledge_put"; error: ActionError }
   | { ok: false; op: "knowledge_accept" | "knowledge_reject"; id: string; error: ActionError };
+
+/**
+ * Console の入力欄（ADR-0048 D3/D4、celeris Phase 60b / GUI Phase G22）: `POST /console/instruct` の結果
+ * （202 `ConsoleInstructAccepted`）。返事は同期では返らない（`GET /console` / `GET /console/stream` で拾う）ので、
+ * 画面はこの `message_id` / `task_id` / `node_id` を「送った」表示にだけ使う。celeris のエラーは例外にせず
+ * `{ok:false, error}` にする（404 `org_node_not_found` / 422 `validation`（空白のみ） / 400 `bad_request`
+ * （`scope` の形） / 401 `unauthorized` を含む）。
+ */
+export type ConsoleInstructOutcome =
+  | { ok: true; op: "instruct"; accepted: ConsoleInstructAccepted }
+  | { ok: false; op: "instruct"; error: ActionError };

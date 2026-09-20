@@ -1847,6 +1847,17 @@
         {
           "description": "CoS または部署ノードの返事（`messages` の `role = node`。本文は Markdown）。",
           "properties": {
+            "actions_result": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MessageMetadata"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0048 D3（Phase 60b）: CoS の返事が `actions` を宣言していれば、taskd が実行した結果\n（実行できた / できなかった）。GUI は「→ タスクを作りました: …」をここから出す。"
+            },
             "at": {
               "type": "string"
             },
@@ -2198,6 +2209,29 @@
         "cursor",
         "scope",
         "now"
+      ],
+      "type": "object"
+    },
+    "ConsoleInstructAccepted": {
+      "description": "`POST /console/instruct` の応答（202）。`POST /org/{id}/messages` と同じ形に `node_id` を添える。",
+      "properties": {
+        "message_id": {
+          "description": "入った `role = \"user\"` の行の id。",
+          "type": "string"
+        },
+        "node_id": {
+          "description": "実際に話しかけた相手（`node:<id>` / `@<node-id>` ならそのノード、それ以外は CoS の id）。",
+          "type": "string"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId",
+          "description": "そのノードの run を起こすために作られた対話用タスク。"
+        }
+      },
+      "required": [
+        "message_id",
+        "task_id",
+        "node_id"
       ],
       "type": "object"
     },
@@ -4386,6 +4420,28 @@
         }
       ]
     },
+    "InstructBody": {
+      "additionalProperties": false,
+      "description": "`POST /console/instruct` の要求本文。",
+      "properties": {
+        "scope": {
+          "default": null,
+          "description": "省略・`all` は CoS。`node:<id>` はそのノード。`project:<id>` は CoS にその案件を紐づける\n（`text` が `@<node-id> ` で始まればそちらが勝つ）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "description": "本文（空白だけは 422。判定は `task_ops::conversation::start` に任せる）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "type": "object"
+    },
     "IntegrateBody": {
       "additionalProperties": false,
       "description": "`POST /tasks/{id}/changes/{repo}/integrate` の要求本文（**管理系。人だけ**。ADR-0043 D5）。",
@@ -4983,6 +5039,17 @@
         "id": {
           "$ref": "#/$defs/MessageId"
         },
+        "metadata": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MessageMetadata"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0048 D3（Phase 60b。migration 0017）: CoS の返事に添える `actions` の実行結果\n（実行できた / できなかった）。actions を伴わない返事・導入前の行は `None`。"
+        },
         "node_id": {
           "description": "話し相手（`org_nodes.id`）。",
           "type": "string"
@@ -5050,6 +5117,70 @@
       ],
       "type": "object"
     },
+    "MessageActionFailure": {
+      "description": "`Message.metadata.actions_failed[]`。",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "MessageActionResult": {
+      "description": "`Message.metadata.actions_executed[]`。",
+      "properties": {
+        "kind": {
+          "description": "`create_task` / `propose_project` / `add_milestone` / `ask_human`。",
+          "type": "string"
+        },
+        "milestone_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MilestoneId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "project_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "summary": {
+          "description": "人が読む 1 行（「タスクを作りました: 〜」）。",
+          "type": "string"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "summary"
+      ],
+      "type": "object"
+    },
     "MessageId": {
       "description": "対話の 1 行の識別子（ULID）。",
       "type": "string"
@@ -5067,6 +5198,26 @@
       "required": [
         "items"
       ],
+      "type": "object"
+    },
+    "MessageMetadata": {
+      "description": "`Message.metadata`（ADR-0048 D3。Phase 60b）: CoS の対話 run が結果ファイルで宣言した `actions`\nを taskd が決定的に実行した結果。Console の `reply` ブロックが `actions_result` として表示する。",
+      "properties": {
+        "actions_executed": {
+          "description": "実行できた action（「→ タスクを作りました: …」のような 1 行と、作った物の id）。",
+          "items": {
+            "$ref": "#/$defs/MessageActionResult"
+          },
+          "type": "array"
+        },
+        "actions_failed": {
+          "description": "検証に落ちて実行しなかった action と理由。",
+          "items": {
+            "$ref": "#/$defs/MessageActionFailure"
+          },
+          "type": "array"
+        }
+      },
       "type": "object"
     },
     "MessagePostBody": {
@@ -10207,6 +10358,12 @@
       "$ref": "#/$defs/ConsoleHello",
       "description": "`GET /console/stream` の最初のフレーム（`event: hello`）。ブロックは `console_block` と同じ形で\n`event: console.block` として流れる。"
     },
+    "console_instruct": {
+      "$ref": "#/$defs/InstructBody"
+    },
+    "console_instruct_accepted": {
+      "$ref": "#/$defs/ConsoleInstructAccepted"
+    },
     "daemon": {
       "$ref": "#/$defs/DaemonView"
     },
@@ -10555,6 +10712,8 @@
     "console",
     "console_block",
     "console_hello",
+    "console_instruct",
+    "console_instruct_accepted",
     "changes",
     "change_diff",
     "integrate",

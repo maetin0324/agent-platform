@@ -1262,6 +1262,10 @@ pub enum ConsoleBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
         text: String,
+        /// ADR-0048 D3（Phase 60b）: CoS の返事が `actions` を宣言していれば、taskd が実行した結果
+        /// （実行できた / できなかった）。GUI は「→ タスクを作りました: …」をここから出す。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actions_result: Option<task_core::MessageMetadata>,
     },
     /// タスクの開始・終了・失敗・中止・割り込み（`Event::Transitioned` の 1 行）。
     Task {

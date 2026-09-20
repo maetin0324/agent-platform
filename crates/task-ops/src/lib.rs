@@ -6,6 +6,7 @@
 //! 依存は `task-core` のみ（`task-worker` / `task-dispatch` / `tokio` には依存しない）。
 //! ワーカープロトコルの型（`task_worker::{PriorReview, Answer}`）への写像は呼び出し側で行う。
 
+pub mod actions;
 pub mod add;
 pub mod approval;
 /// ADR-0043 D5（Phase 54）: 変更の取り込み（差分・merge・PR・衝突タスク）の足回り。

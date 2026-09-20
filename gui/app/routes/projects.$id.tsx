@@ -426,7 +426,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
               </p>
             </DataItem>
             {project.secretary_summary && (
-              <Alert tone="info" title="秘書の理解の確認・方針" data-testid="project-secretary-summary">
+              <Alert tone="info" title="CoS の理解の確認・方針" data-testid="project-secretary-summary">
                 <p className="whitespace-pre-wrap">{project.secretary_summary}</p>
               </Alert>
             )}
@@ -582,7 +582,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                       ) : (
                         milestoneIsStalled(tasks, m.id) && (
                           <Alert tone="info" data-testid="milestone-review-pending">
-                            秘書が結果をまとめています…
+                            CoS が結果をまとめています…
                           </Alert>
                         )
                       )}
@@ -683,8 +683,8 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         <Card>
           <CardHeader
             icon="sparkles"
-            title="分解を秘書に頼む"
-            description="秘書が、依頼文・途中目標・ここまでのやり取りとあなたの一言をまとめて、仕事に分解します。返事は待ちません（仕事の木が増えていきます）。"
+            title="分解を CoS に頼む"
+            description="CoS が、依頼文・途中目標・ここまでのやり取りとあなたの一言をまとめて、仕事に分解します。返事は待ちません（仕事の木が増えていきます）。"
           />
           <CardBody>
             <fetcher.Form method="post" data-testid="project-plan-form" className="space-y-3">
@@ -787,7 +787,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           報告
         </SectionTitle>
         <p className="text-xs text-fg-subtle">
-          この案件について、各段から上がってきた報告です。全体の未読（秘書まで上がったもの）は
+          この案件について、各段から上がってきた報告です。全体の未読（CoS まで上がったもの）は
           <Link to="/reports" className="mx-1 underline underline-offset-2">
             報告
           </Link>
@@ -1177,11 +1177,11 @@ function AddTaskForm({
 }
 
 /**
- * 途中目標のレビューカード（ADR-0038 D3、Phase 41 / G13j）。秘書のまとめ（Markdown）と提案された次の
+ * 途中目標のレビューカード（ADR-0038 D3、Phase 41 / G13j）。CoS のまとめ（Markdown）と提案された次の
  * 途中目標を出し、「ok」「議論」「ng」の 3 ボタン＋自由記述欄を持つ。この画面全体の `fetcher`
  * （project 単位の intent）とは別に、途中目標ごとの専用 `fetcher`（`WorkTreeTaskRow` と同じ考え方）を持つ。
- * `discuss` が通ったら秘書の対話画面（`/org/secretary?project=<id>`）へ遷移して返事を待つ
- * （`~/lib/conversation.ts` の「考え中」の仕組みにそのまま乗る。`waiting=1` は新しい案件を作った直後と同じ扱い）。
+ * `discuss` が通ったら Console（`/?scope=project:<id>`、ADR-0048 D4）へ遷移する（この案件の流れに CoS の
+ * 返事も含めて出る。Console は SSE で自動更新するので、旧来の「考え中」ポーリングは不要）。
  */
 function MilestoneReviewPanel({ milestone, projectId }: { milestone: MilestoneView; projectId: string }) {
   const fetcher = useFetcher<ProjectOpOutcome>({ key: `milestone-decide-${milestone.id}` });
@@ -1193,7 +1193,7 @@ function MilestoneReviewPanel({ milestone, projectId }: { milestone: MilestoneVi
 
   useEffect(() => {
     if (fetcher.data?.ok && fetcher.data.op === "milestone_decide" && fetcher.data.decided.decision === "discuss") {
-      navigate(`/org/secretary?project=${encodeURIComponent(projectId)}&waiting=1`);
+      navigate(`/?scope=${encodeURIComponent(`project:${projectId}`)}`);
     }
   }, [fetcher.data, navigate, projectId]);
 
@@ -1212,7 +1212,7 @@ function MilestoneReviewPanel({ milestone, projectId }: { milestone: MilestoneVi
 
   return (
     <div className="space-y-3" data-testid="milestone-review">
-      <Alert tone="info" title="秘書のまとめ">
+      <Alert tone="info" title="CoS のまとめ">
         <div data-testid="milestone-review-text">
           <MarkdownViewer content={review.text} />
         </div>

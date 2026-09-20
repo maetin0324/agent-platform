@@ -23,9 +23,9 @@ use task_core::plan::{PlanLimits, PlanOutput, materialize};
 use task_core::report::{HEADLINE_MAX_CHARS, first_line, truncate_chars};
 use task_core::{
     AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec,
-    ListFilter, ListOrder, OnChildFailure, OrgKind, ProjectId, RateLimitObservation, RoleSpec,
-    RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger, WorkspaceSpec,
-    support_kind,
+    ListFilter, ListOrder, OnChildFailure, OrgKind, ProjectId, ProjectStatus, RateLimitObservation,
+    RoleSpec, RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Trigger,
+    WorkspaceSpec, support_kind,
 };
 use task_ops::daemon::{
     AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot,
@@ -38,12 +38,13 @@ use task_ops::derive::{
     last_run_id, prior_review_from_events, retry_backoff,
 };
 use task_worker::{
-    AdapterError, Answer, ChildSummary, CommentContext, ConversationAddressee, ConversationTurn,
-    EventSink, GenreContext, LocalWorkspace, MemoryContext, MemoryDir, MilestoneBrief,
-    MilestoneReviewContext, MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION,
-    PriorReview, RecentWork, RoleContext, RunContext, RunLimits, RunOutcome, RunRequest,
-    SshSettings, SshWorkspace, SyncMode, Terminal, WorkerAdapter, WorkerMessage, Workspace,
-    control_master_alive_blocking, remote_exec_instructions,
+    ActiveMilestoneContext, ActiveProjectContext, AdapterError, Answer, ChildSummary,
+    CommentContext, ConversationAddressee, ConversationTurn, EventSink, GenreContext,
+    LocalWorkspace, MemoryContext, MemoryDir, MilestoneBrief, MilestoneReviewContext,
+    MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, RecentWork,
+    RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace,
+    SyncMode, Terminal, WorkerAdapter, WorkerMessage, Workspace, control_master_alive_blocking,
+    remote_exec_instructions,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -368,6 +369,9 @@ const RECENT_WORK_SCAN: usize = 100;
 /// Phase 33（ADR-0033 D4 追記）: `context.recent_work` に渡す件数の上限。
 const RECENT_WORK_LIMIT: usize = 10;
 
+/// ADR-0048 D3（Phase 60b）: CoS の対話 run に渡す進行中の案件の件数の上限。
+const ACTIVE_PROJECTS_SCAN: usize = 200;
+
 /// Phase 41（ADR-0038 D1）: レビューの前置きに載せる、その途中目標の仕事の件数の上限。
 const MILESTONE_REVIEW_TASK_LIMIT: usize = 20;
 /// Phase 41: 途中目標の仕事を探すときに `list_page` から読む候補の上限。
@@ -499,6 +503,8 @@ struct RunExtras {
     mode: Option<task_core::TaskMode>,
     /// ADR-0047 D2（Phase 61）: マウントされた知識の索引（本文は入れない）。
     knowledge: Option<task_worker::protocol::KnowledgeContext>,
+    /// ADR-0048 D3（Phase 60b）: **CoS の対話 run** にだけ渡す、進行中の案件と途中目標。
+    active_projects: Vec<ActiveProjectContext>,
 }
 
 struct ReviewEntry {
@@ -1964,8 +1970,18 @@ impl Dispatcher {
         if !task_core::is_conversation(task) {
             return;
         }
+        let mut metadata = None;
         let text = if let Some(summary) = outcome_str.strip_prefix("done: ") {
-            summary.to_string()
+            let mut text = summary.to_string();
+            // ADR-0048 D3（Phase 60b）: CoS が `done` で返ってきたときだけ、結果ファイルの `actions` を
+            // 決定的に実行する。実行できなかった action があれば返事に節を足し、実行結果は metadata に残す。
+            if let Some(outcome) = self.absorb_console_actions(task, run_id) {
+                if let Some(note) = outcome.failure_note() {
+                    text.push_str(&note);
+                }
+                metadata = outcome.to_metadata();
+            }
+            text
         } else if let Some(question) = outcome_str.strip_prefix("question: ") {
             // 質問は人への問いかけそのものなので、返事としてもそのまま見せる（`approvals` にも 1 行入る）。
             question.to_string()
@@ -1974,14 +1990,58 @@ impl Dispatcher {
         } else {
             return;
         };
-        if let Err(e) = task_ops::conversation::record_reply(
+        if let Err(e) = task_ops::conversation::record_reply_with_metadata(
             self.store.as_ref(),
             task,
             run_id,
             &text,
+            metadata,
             OffsetDateTime::now_utc(),
         ) {
             tracing::warn!(task_id = %task.id, error = %e, "failed to record the conversation reply");
+        }
+    }
+
+    /// ADR-0048 D3（Phase 60b）: CoS（根ノード。`OrgKind::Secretary`）の対話 run の結果ファイルの
+    /// `actions` を決定的に実行する。CoS 以外の対話・対話でない run・宣言が無い run では何もしない
+    /// （`None`）。冪等（`task_ops::actions::execute` が `run_id` を記録し、2 回目は `None`）。
+    /// 失敗しても run は壊さない。
+    fn absorb_console_actions(
+        &self,
+        task: &Task,
+        run_id: &str,
+    ) -> Option<task_ops::actions::ActionsOutcome> {
+        if !task_core::is_conversation(task) {
+            return None;
+        }
+        let assignee = task.assignee.as_deref()?;
+        let org = self.store.org_list().ok()?;
+        let node = org.iter().find(|n| n.id == assignee)?;
+        if node.kind != OrgKind::Secretary {
+            return None;
+        }
+        let workspace = self.task_dir(task)?;
+        let artifacts_dir = self.artifacts_dir(task, &workspace);
+        let parsed = task_worker::read_result_actions(&artifacts_dir);
+        if parsed.is_empty() {
+            return None;
+        }
+        match task_ops::actions::execute(
+            self.store.as_ref(),
+            &org,
+            &self.config.roles,
+            &self.config.genres,
+            task,
+            run_id,
+            &parsed.valid,
+            &parsed.malformed,
+            OffsetDateTime::now_utc(),
+        ) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, %run_id, error = %e, "failed to execute console actions");
+                None
+            }
         }
     }
 
@@ -3229,6 +3289,14 @@ impl Dispatcher {
             .unwrap_or_default();
         let knowledge =
             self.knowledge_context(task, assigned.map(|n| n.id.as_str()), &profile_knowledge);
+        // ADR-0048 D3（Phase 60b）: CoS の対話 run にだけ、進行中の案件とその途中目標を渡す
+        // （`actions` の `create_task.project` / `add_milestone.project` を選ぶ材料。決定的にストアを
+        // 読むだけ。CoS 以外の run では常に空で、前置きは Phase 60a までとバイト単位で同じ）。
+        let active_projects = if is_cos_conversation {
+            self.active_projects_context()?
+        } else {
+            Vec::new()
+        };
         Ok(RunExtras {
             role,
             children,
@@ -3248,7 +3316,35 @@ impl Dispatcher {
             comments,
             interrupt,
             knowledge,
+            active_projects,
         })
+    }
+
+    /// ADR-0048 D3（Phase 60b）: CoS の対話 run に渡す「進行中の案件とその途中目標」（`proposed` /
+    /// `active` の案件だけ。決定的にストアを読むだけ。LLM も判断も無い）。
+    fn active_projects_context(&self) -> Result<Vec<ActiveProjectContext>, DispatchError> {
+        let mut projects = self.store.project_list()?;
+        projects.retain(|p| matches!(p.status, ProjectStatus::Proposed | ProjectStatus::Active));
+        projects.sort_by_key(|p| p.id);
+        let mut out = Vec::new();
+        for project in projects.into_iter().take(ACTIVE_PROJECTS_SCAN) {
+            let mut milestones = self.store.milestone_list(project.id)?;
+            milestones.sort_by_key(|m| m.id);
+            out.push(ActiveProjectContext {
+                id: project.id.to_string(),
+                title: project.title.clone(),
+                status: project.status.as_str().to_string(),
+                milestones: milestones
+                    .into_iter()
+                    .map(|m| ActiveMilestoneContext {
+                        id: m.id.to_string(),
+                        title: m.title,
+                        status: m.status.as_str().to_string(),
+                    })
+                    .collect(),
+            });
+        }
+        Ok(out)
     }
 
     /// ADR-0047 D2（Phase 61）: この run が読める知識の**索引だけ**を組む（純粋に近い: 設定・DB・
@@ -4958,6 +5054,8 @@ async fn run_worker(
             comments_enabled: writes_comments,
             // Phase 38（ADR-0028 追記）: レビュー run（`review.rs` が組む）だけに入る。
             subject_genre: None,
+            // ADR-0048 D3（Phase 60b）: CoS の対話 run だけに入る。
+            active_projects: extras.active_projects,
         },
     };
     // ADR-0043 D3（Phase 56）: コンテナで走らせる run は、ここでアダプタを包んだ複製に差し替える
@@ -9966,6 +10064,90 @@ mod tests {
         assert_eq!(extras.conversation_addressee, None);
     }
 
+    /// ADR-0048 D3（Phase 60b）: CoS の対話 run にだけ、進行中の案件（`proposed` / `active`）と
+    /// その途中目標を渡す。`done` / `cancelled` の案件は出さない。CoS 以外の対話・通常タスクには付かない。
+    #[test]
+    fn cos_conversations_carry_active_projects_and_their_milestones() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let mut active = titled_project("進行中の案件");
+        active.status = ProjectStatus::Active;
+        store.project_create(&active).unwrap();
+        let milestone = store
+            .milestone_create(
+                active.id,
+                "最初の途中目標",
+                "d",
+                MilestoneStatus::InProgress,
+            )
+            .unwrap();
+
+        let mut done = titled_project("終わった案件");
+        done.status = ProjectStatus::Done;
+        store.project_create(&done).unwrap();
+
+        let to_secretary = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "hi",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
+        let to_survey = task_ops::conversation::start(
+            store.as_ref(),
+            "research-survey",
+            None,
+            "hi",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
+
+        let adapter = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
+        let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
+
+        let extras = d.run_extras(&to_secretary, None).unwrap();
+        assert_eq!(
+            extras.active_projects.len(),
+            1,
+            "{:?}",
+            extras.active_projects
+        );
+        let project = &extras.active_projects[0];
+        assert_eq!(project.id, active.id.to_string());
+        assert_eq!(project.title, "進行中の案件");
+        assert_eq!(project.status, "active");
+        assert_eq!(project.milestones.len(), 1);
+        assert_eq!(project.milestones[0].id, milestone.id.to_string());
+        assert_eq!(project.milestones[0].title, "最初の途中目標");
+        assert_eq!(project.milestones[0].status, "in_progress");
+
+        // CoS 以外の対話には渡さない。
+        let extras = d.run_extras(&to_survey, None).unwrap();
+        assert!(extras.active_projects.is_empty());
+
+        // 通常タスクにも渡さない。
+        let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
+        let extras = d.run_extras(&ordinary, None).unwrap();
+        assert!(extras.active_projects.is_empty());
+    }
+
     /// Phase 43（ADR-0039 D3）: 案件が作業場所を決めていれば、その run の前置きに出す 1 行が `RunExtras` に
     /// 入る。決めていない案件・案件に属さないタスク・対話 run には入らない（従来どおりのプロンプト）。
     #[test]
@@ -10643,6 +10825,155 @@ mod tests {
             all.iter().find(|m| m.id == proposal.id).map(|m| m.status),
             Some(MilestoneStatus::Redesigned)
         );
+    }
+
+    /// ADR-0048 D3（Phase 60b）: CoS（`secretary` = `OrgKind::Secretary`）の対話 run の結果ファイルの
+    /// `actions` から `create_task` が実行され、担当なし・`ready` のタスクができる。実行できなかった
+    /// action があれば理由が `failed` に残り、`ActionsOutcome::to_metadata` が `Some` になる。
+    /// CoS 以外の対話・対話でない run では何もしない。
+    #[test]
+    fn absorb_console_actions_executes_the_declared_actions_for_the_cos_only() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("console");
+        std::fs::create_dir_all(ws.join("artifacts")).unwrap();
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
+        let mut d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
+        d.config.genres.push(GenreSpec {
+            id: "coding".into(),
+            description: "コードを直す".into(),
+            ..GenreSpec::default()
+        });
+
+        let mut task = work_task(
+            "対話",
+            Status::Done,
+            "secretary",
+            None,
+            OffsetDateTime::now_utc(),
+        );
+        task.workspace = WorkspaceSpec::Local {
+            path: ws.clone(),
+            mode: None,
+        };
+        task.conversation = Some(task_core::MessageId::new());
+        store.insert(&task).unwrap();
+
+        // 結果ファイルが無ければ何もしない。
+        assert!(d.absorb_console_actions(&task, "run-1").is_none());
+        assert_eq!(store.list(None).unwrap().len(), 1, "対話タスク自身だけ");
+
+        // 有効な action ＋ 検証に落ちる action の混在。
+        std::fs::write(
+            ws.join("artifacts/result.json"),
+            r#"{"summary":"やります","actions":[
+                {"type":"create_task","title":"直す","objective":"直して","acceptance":["直った"],"harness":"coding"},
+                {"type":"add_milestone","project":"01ZZZZZZZZZZZZZZZZZZZZZZZZ","title":"存在しない案件"}
+            ]}"#,
+        )
+        .unwrap();
+        let outcome = d
+            .absorb_console_actions(&task, "run-1")
+            .expect("actions were declared");
+        assert_eq!(outcome.executed.len(), 1);
+        assert_eq!(outcome.failed.len(), 1);
+        let created = outcome.executed[0].task_id.expect("task id");
+        let stored = store.get(created).unwrap().expect("task");
+        assert_eq!(stored.status, Status::Ready);
+        assert_eq!(stored.assignee, None, "matching は別経路（次 tick）");
+        assert!(outcome.to_metadata().is_some());
+        assert!(
+            outcome
+                .failure_note()
+                .expect("failure note")
+                .contains("実行できなかった action")
+        );
+
+        // 同じ run の 2 回目は何もしない（冪等）。
+        assert!(d.absorb_console_actions(&task, "run-1").is_none());
+        assert_eq!(
+            store.list(None).unwrap().len(),
+            2,
+            "重複してタスクが増えない"
+        );
+
+        // CoS 以外（`research-survey`）宛ての対話には何もしない。
+        let mut other = work_task(
+            "対話",
+            Status::Done,
+            "research-survey",
+            None,
+            OffsetDateTime::now_utc(),
+        );
+        other.workspace = WorkspaceSpec::Local {
+            path: ws.clone(),
+            mode: None,
+        };
+        other.conversation = Some(task_core::MessageId::new());
+        assert!(d.absorb_console_actions(&other, "run-2").is_none());
+
+        // 対話でない run には何もしない。
+        let mut ordinary = other.clone();
+        ordinary.conversation = None;
+        assert!(d.absorb_console_actions(&ordinary, "run-3").is_none());
+    }
+
+    /// ADR-0048 D3: `record_conversation_reply` は `done` な CoS の返事に actions を実行し、
+    /// 実行できなかった action を本文に足し、実行結果を `Message.metadata` に残す。
+    #[test]
+    fn record_conversation_reply_runs_actions_and_attaches_the_result() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("console");
+        std::fs::create_dir_all(ws.join("artifacts")).unwrap();
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
+        let mut d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
+        d.config.genres.push(GenreSpec {
+            id: "coding".into(),
+            description: "コードを直す".into(),
+            ..GenreSpec::default()
+        });
+
+        let mut task = work_task(
+            "対話",
+            Status::Done,
+            "secretary",
+            None,
+            OffsetDateTime::now_utc(),
+        );
+        task.workspace = WorkspaceSpec::Local {
+            path: ws.clone(),
+            mode: None,
+        };
+        task.conversation = Some(task_core::MessageId::new());
+        store.insert(&task).unwrap();
+
+        std::fs::write(
+            ws.join("artifacts/result.json"),
+            r#"{"summary":"やります","actions":[{"type":"create_task","title":"直す","objective":"直して","acceptance":["直った"],"harness":"coding"}]}"#,
+        )
+        .unwrap();
+
+        d.record_conversation_reply(&task, "run-1", "done: やります", Status::Done);
+        let messages = store.message_list("secretary", None, 10).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].text.starts_with("やります"));
+        let metadata = messages[0].metadata.as_ref().expect("metadata");
+        assert_eq!(metadata.actions_executed.len(), 1);
+        assert!(metadata.actions_executed[0].summary.contains("直す"));
+        assert!(metadata.actions_failed.is_empty());
     }
 
     /// Phase 33 受け入れ 1: 通常の run（対話でない）では `recent_work` は常に空

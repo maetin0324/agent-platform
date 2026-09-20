@@ -2,16 +2,18 @@ import { index, type RouteConfig, route } from "@react-router/dev/routes";
 
 // 明示的なルート定義（docs/DESIGN.md §6.2、docs/adr/0002 D1）。fs-routes は使わない。
 export default [
-  // 最初の画面は秘書（Phase G13f-1、監査 2）。受信箱は裏方の `/inbox` に残す。
+  // 最初の画面は Console（ADR-0048 D4、GUI Phase G22）。受信箱は裏方の `/inbox` に残す。
   index("routes/home.tsx"),
   route("inbox", "routes/inbox.tsx"),
   route("healthz", "routes/healthz.ts"),
   route("login", "routes/login.tsx"),
   route("logout", "routes/logout.ts"),
-  // SPEC §4 の画面（Phase G13a、ADR-0033 D8）。秘書・報告・認可・成果物は G13b まではプレースホルダ
+  // SPEC §4 の画面（Phase G13a、ADR-0033 D8）。
+  // `/org/secretary` は旧 URL（P-59-a）。302 で `/org/cos` へ（`org/:id` と同じ Console）。
   route("org/secretary", "routes/org.secretary.tsx"),
   route("org", "routes/org.tsx"),
-  // 組織の木から選んだ「人」との対話（SPEC §3.4、Phase G13b-2）。静的な org/secretary を先に置く
+  // 組織の木から選んだ「人」の Console（ADR-0048 D4、Phase G13b-2 → G22）。CoS もここで受ける
+  // （`id === "cos"`）。静的な org/secretary を先に置く
   route("org/:id", "routes/org.$id.tsx"),
   route("projects", "routes/projects.tsx"),
   route("projects/:id", "routes/projects.$id.tsx"),
@@ -35,6 +37,9 @@ export default [
   // タスクの変更の取り込み（ADR-0043 D5、Phase 54 / G18）。「変更」タブと同じ部品を出す兄弟のルート
   route("tasks/:id/changes", "routes/tasks.$id.changes.tsx"),
   route("tasks/:id/runs/:runId", "routes/tasks.$id.runs.$runId.tsx"),
+  // run の全行（ADR-0048 D1、GUI Phase G22）。Console の progress ブロックの「すべて見る」が
+  // 開いたときだけ取りに行く（`tasks/:id/runs/:runId` の兄弟の resource route）
+  route("tasks/:id/runs/:runId/events", "routes/tasks.$id.runs.$runId.events.ts"),
   route("plans/new", "routes/plans.new.tsx"),
   route("daemon", "routes/daemon.tsx"),
   route("providers", "routes/providers.tsx"),
@@ -45,6 +50,8 @@ export default [
   route("graph", "routes/graph.tsx"),
   route("help", "routes/help.tsx"),
   route("events", "routes/events.ts"),
+  // Console の SSE 中継（ADR-0048 D1、GUI Phase G22）。`~/routes/events.ts` と同じ作り
+  route("console/stream", "routes/console.stream.ts"),
   route("files/tasks/:id/runs/:runId/:name", "routes/files.runs.ts"),
   route("files/tasks/:id/artifacts/:idx", "routes/files.artifacts.ts"),
   // 未定義パスも root middleware を通す（docs/adr/0008 D15）。必ず最後に置く

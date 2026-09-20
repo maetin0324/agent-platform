@@ -416,6 +416,33 @@ pub struct RunContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge: Option<KnowledgeContext>,
     // ---- ADR-0047 D2（Phase 61）: ここまで ----
+    // ---- ADR-0048 D3（Phase 60b）: CoS の対話に渡す進行中の案件。ここから ----
+    /// ADR-0048 D3: **CoS の対話 run** にだけ渡す、進行中の案件（`proposed` / `active`）とその
+    /// 途中目標の一覧。`actions` の `create_task.project` / `add_milestone.project` を選ぶ材料
+    /// （決定的にストアを読むだけ。CoS 以外の run では常に空）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub active_projects: Vec<ActiveProjectContext>,
+    // ---- ADR-0048 D3（Phase 60b）: ここまで ----
+}
+
+/// `context.active_projects[]`（ADR-0048 D3。Phase 60b）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ActiveProjectContext {
+    pub id: String,
+    pub title: String,
+    /// `proposed` / `active`。
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub milestones: Vec<ActiveMilestoneContext>,
+}
+
+/// `context.active_projects[].milestones[]`（ADR-0048 D3。Phase 60b）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ActiveMilestoneContext {
+    pub id: String,
+    pub title: String,
+    /// `proposed` / `approved` / `in_progress` / `reached` / `redesigned`。
+    pub status: String,
 }
 
 /// ADR-0047 D2（Phase 61）: 前置きに出す知識の索引（`preamble::knowledge_section` が読む）。

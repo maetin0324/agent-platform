@@ -4,25 +4,34 @@
 //!   （時刻順、カーソル付き）。
 //! - `GET /console/stream?scope=…` — SSE。同じブロックの形を、起きた順に流す。
 //!
-//! 読み取りだけで、状態は変えない（入力 `POST /console/instruct` は D3 = Phase 60b）。
-//! 引くのは `events` / `messages` / `approvals` / `reports` / `milestones` の 5 つで、
-//! どれも上限付き（`EVENT_WINDOW` / `limit`）。LLM も判断も無い（DESIGN 原則 1〜4）。
+//! `POST /console/instruct`（D3。Phase 60b）: 素の文の入力口。`@<node-id> ` で始まる文か
+//! `scope=node:<id>` はそのノードとの対話（既存の `POST /org/{id}/messages` と同じ経路）に、
+//! それ以外は CoS（根ノード）との対話 run になる。ここは**入口を選ぶだけ**（判断は
+//! `task_ops::conversation::start`。LLM は呼ばない）。
+//!
+//! 読み取りは状態を変えない。引くのは `events` / `messages` / `approvals` / `reports` / `milestones`
+//! の 5 つで、どれも上限付き（`EVENT_WINDOW` / `limit`）。LLM も判断も無い（DESIGN 原則 1〜4）。
 //!
 //! ブロックの束ね方・1 行の作り方・カーソルは `task_ops::console` にある（`GET /tasks/{id}/timeline`
 //! と同じ「時刻で 1 本に並べる」規則を共有する）。
 
 use std::collections::{HashMap, HashSet};
 
+use axum::body::Body;
 use axum::extract::{RawQuery, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use task_core::{
     ApprovalStore, Event, EventRow, ListFilter, ListOrder, Message, MessageRole, MilestoneStatus,
-    ProjectId, ReportFilter, ReportStore, SqliteStore, Status, Task, TaskId, TaskStore,
+    OrgKind, ProjectId, ReportFilter, ReportStore, SqliteStore, Status, Task, TaskId, TaskStore,
 };
 use task_ops::console::{ConsoleCursor, at_nanos, group_progress, task_line};
+use time::OffsetDateTime;
 
-use crate::handlers::{ApiResult, json_response, rfc3339};
-use crate::problem::{ApiProblem, store_problem};
+use crate::handlers::{ApiResult, json_response, no_query, read_json, rfc3339};
+use crate::middleware::require_admin;
+use crate::problem::{ApiProblem, ops_problem, store_problem};
 use crate::query::{QueryParams, parse_task_id};
 use crate::state::ApiState;
 use crate::types::{ConsoleBlock, ConsolePage, MilestoneReviewView};
@@ -40,11 +49,140 @@ pub(crate) fn routes() -> axum::Router<ApiState> {
     axum::Router::new()
         .route("/api/v1/console", axum::routing::get(console))
         .route("/api/v1/console/stream", axum::routing::get(stream))
+        .route("/api/v1/console/instruct", axum::routing::post(instruct))
         // ADR-0048 D2: 折り畳んだ `progress` を開いたときに取る、その run の全行。
         .route(
             "/api/v1/tasks/{id}/runs/{run_id}/events",
             axum::routing::get(run_events),
         )
+}
+
+// ---- POST /console/instruct（ADR-0048 D3）----
+
+/// `POST /console/instruct` の要求本文。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InstructBody {
+    /// 本文（空白だけは 422。判定は `task_ops::conversation::start` に任せる）。
+    pub text: String,
+    /// 省略・`all` は CoS。`node:<id>` はそのノード。`project:<id>` は CoS にその案件を紐づける
+    /// （`text` が `@<node-id> ` で始まればそちらが勝つ）。
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
+/// `POST /console/instruct` の応答（202）。`POST /org/{id}/messages` と同じ形に `node_id` を添える。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ConsoleInstructAccepted {
+    /// 入った `role = "user"` の行の id。
+    pub message_id: String,
+    /// そのノードの run を起こすために作られた対話用タスク。
+    pub task_id: TaskId,
+    /// 実際に話しかけた相手（`node:<id>` / `@<node-id>` ならそのノード、それ以外は CoS の id）。
+    pub node_id: String,
+}
+
+/// 誰に話しかけるか（ADR-0048 D3）。判断は決定的（`@` の有無と `scope` の形だけを見る）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InstructTarget {
+    /// 明示のノード（`scope=node:<id>` か `@<node-id> ` 始まりの文）。
+    Node(String),
+    /// CoS（根ノード）。`Some` なら案件に紐づける。
+    Cos(Option<ProjectId>),
+}
+
+/// 文が `@<node-id> ` で始まっていれば `(node_id, 残りの本文)`。空白の無い `@node` だけ・
+/// 先頭の `@` の直後が空白のときは対象なし（`None`）。
+fn mention(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim_start();
+    let rest = trimmed.strip_prefix('@')?;
+    let (node_id, remainder) = rest.split_once(char::is_whitespace)?;
+    if node_id.is_empty() {
+        return None;
+    }
+    Some((node_id, remainder.trim_start()))
+}
+
+/// `scope` と本文の `@` から、話しかける相手と実際に送る本文を決める（ADR-0048 D3）。
+fn resolve_target(scope: Option<&str>, text: &str) -> Result<(InstructTarget, String), ApiProblem> {
+    match Scope::parse(scope)? {
+        Scope::Node(id) => Ok((InstructTarget::Node(id), text.to_string())),
+        Scope::Project(id) => match mention(text) {
+            Some((node_id, rest)) => {
+                Ok((InstructTarget::Node(node_id.to_string()), rest.to_string()))
+            }
+            None => Ok((InstructTarget::Cos(Some(id)), text.to_string())),
+        },
+        Scope::All => match mention(text) {
+            Some((node_id, rest)) => {
+                Ok((InstructTarget::Node(node_id.to_string()), rest.to_string()))
+            }
+            None => Ok((InstructTarget::Cos(None), text.to_string())),
+        },
+    }
+}
+
+/// `POST /console/instruct`（管理系。`POST /org/{id}/messages` と同じ規律）。
+async fn instruct(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let post: InstructBody = read_json(body, false).await?;
+    let (target, text) = resolve_target(post.scope.as_deref(), &post.text)?;
+    let roles = state.inner.roles.clone();
+    let genres = state.inner.genres.clone();
+    let conversation_genre = state.inner.conversation_genre.clone();
+    let started = state
+        .blocking(move |store| {
+            let (node_id, project_id) = match target {
+                InstructTarget::Node(node_id) => {
+                    if store.org_get(&node_id).map_err(store_problem)?.is_none() {
+                        return Err(ApiProblem::org_node_not_found(&node_id));
+                    }
+                    (node_id, None)
+                }
+                InstructTarget::Cos(project_id) => {
+                    let cos = store
+                        .org_list()
+                        .map_err(store_problem)?
+                        .into_iter()
+                        .find(|n| n.kind == OrgKind::Secretary)
+                        .ok_or_else(|| ApiProblem::org_node_not_found("cos"))?;
+                    (cos.id, project_id)
+                }
+            };
+            task_ops::conversation::start(
+                store,
+                &node_id,
+                project_id,
+                &text,
+                &roles,
+                &genres,
+                &conversation_genre,
+                OffsetDateTime::now_utc(),
+            )
+            .map_err(|e| ops_problem(store, e, None))
+        })
+        .await?;
+    tracing::info!(
+        who = "admin",
+        op = "console_instruct",
+        node_id = %started.message.node_id,
+        task_id = %started.task.id,
+        "admin: instructed the console"
+    );
+    Ok(json_response(
+        StatusCode::ACCEPTED,
+        &ConsoleInstructAccepted {
+            message_id: started.message.id.to_string(),
+            task_id: started.task.id,
+            node_id: started.message.node_id,
+        },
+    ))
 }
 
 // ---- 範囲 ----
@@ -458,6 +596,7 @@ fn message_block(message: &Message) -> ConsoleBlock {
             task_id: message.task_id,
             run_id: message.run_id.clone(),
             text: message.text.clone(),
+            actions_result: message.metadata.clone(),
         },
     }
 }

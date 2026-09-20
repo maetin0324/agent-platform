@@ -155,7 +155,7 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="案件は秘書が受け取り、組織の上から下へ分解されて流れます。一覧から案件を開くと、途中目標と仕事の木が見られます。"
+        description="案件は CoS（Chief of Staff）が受け取り、組織の上から下へ分解されて流れます。一覧から案件を開くと、途中目標と仕事の木が見られます。"
       />
 
       <section aria-labelledby="projects-heading" data-testid="projects-section" className="space-y-4">
@@ -241,14 +241,14 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
           <CardHeader
             icon="plus"
             title="案件を投げる"
-            description="曖昧なままでかまいません。投げるとすぐ秘書が、理解の確認・大まかな方針・最初の途中目標を返します。"
+            description="曖昧なままでかまいません。投げるとすぐ CoS が、理解の確認・大まかな方針・最初の途中目標を返します。"
           />
           <CardBody>
             <p className={`${hintClass} mb-3`} data-testid="project-new-secretary-hint">
-              <Link to="/org/secretary" className="underline underline-offset-2">
-                秘書に話しかけても同じです
+              <Link to="/" className="underline underline-offset-2">
+                Console から CoS に話しかけても、「案件として」と伝えれば同じです
               </Link>
-              。そちらは本文だけ書けば、先頭 40 字が題名になります。
+              。
             </p>
             <ErrorFlash error={error} />
             {/* 案件は作れたが「追加のリポジトリ」で失敗した場合（ADR-0043 D1、Phase G16）。

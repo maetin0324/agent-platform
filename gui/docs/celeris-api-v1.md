@@ -2165,8 +2165,8 @@ fast-forward** する（ADR-0043 D5 の `merge` と同じやり方）。author /
 ### 3.98〜3.100 Console（ADR-0048 D1/D2、Phase 60a。**87〜89。すべて読み取り**）
 
 Console は「全案件の流れが一本で見える画面」。celeris は**正規化したブロック**だけを返し、GUI は
-イベントの種類やアダプタごとの差を知らない。**読み取りだけ**で状態は変えない（入力 `POST /console/instruct`
-は ADR-0048 D3 = Phase 60b）。
+イベントの種類やアダプタごとの差を知らない。**読み取りだけ**で状態は変えない。入力（`POST /console/instruct`）と
+CoS の `actions` は ADR-0048 D3（Phase 60b。§3.107）。
 
 #### 3.98 `GET /console?scope=&since=&limit=` → 200 `ConsolePage`
 
@@ -2189,7 +2189,7 @@ Console は「全案件の流れが一本で見える画面」。celeris は**�
 | `kind` | 中身 | 由来 |
 |---|---|---|
 | `human` | 人の発言（`text` / `node_id` / `project_id` / `task_id`） | `messages`（`role = user`） |
-| `reply` | CoS・部署ノードの返事（Markdown。`run_id` 付き） | `messages`（`role = node`） |
+| `reply` | CoS・部署ノードの返事（Markdown。`run_id` 付き）。CoS が `actions`（§3.107）を宣言していれば `actions_result`（`MessageMetadata`: `actions_executed[]` / `actions_failed[]`） | `messages`（`role = node`） |
 | `task` | 開始・終了・失敗・中止・割り込みの 1 行（`task`: `from` / `to` / `reason` / `assignee` / `harness` / `tier` / `mode` / `elapsed_secs`） | `Event::Transitioned` |
 | `progress` | run ごとに束ねたワーカーの進行。`progress`: `run_id` / `count` / `tool_count` / `last_status` / `started_at` / `updated_at` / `first[]` / `last[]` / `truncated`。見出し用に `title` / `assignee` / `harness` / `tier` | `Event::WorkerProgress`（ADR-0048 D2 の正規化） |
 | `question` | ディスパッチャの質問（`text` / `answered` / `answer` / `run_id`） | `Event::QuestionRaised` + `Event::Answered` |
@@ -2327,6 +2327,45 @@ author / committer は `Celeris (human) <celeris@local>`（`celerisctl knowledge
 
 - `_inbox/<id>.md` を消してコミットする（履歴には残る）。応答は `{"id": "…", "sha": "…"}`
 - 知らない id は 404 `candidate_not_found`
+
+### 3.107 `POST /console/instruct`（ADR-0048 D3、Phase 60b。**96。管理系**）→ 202 `ConsoleInstructAccepted`
+
+Console の入力欄の文の入口。`POST /org/{id}/messages`（§3.47）と同じ経路に載せるだけで、返事は待たない
+（`GET /console` / `GET /console/stream` で拾う）。
+
+```json
+{"text": "@software-engineering このバグを直して", "scope": null}
+```
+
+`InstructBody`: `text`（必須。空白だけは 422 `validation`）、`scope`（省略可。`all` / `node:<id>` /
+`project:<id>`。形が違えば 400 `bad_request`）。
+
+- **相手の決め方**（決定的。LLM は関与しない）:
+  1. `scope = node:<id>` → そのノード。
+  2. それ以外で `text` が `@<node-id> `（`@` の直後に空白でない 1 語、その後ろに空白）で始まる → その
+     ノード。**`@<node-id> ` は送る本文から取り除く**（残りの本文だけがそのノードへの発言になる）。
+  3. `scope = project:<id>` で `@mention` が無い → **CoS**（組織の根。`OrgKind::Secretary`）への対話を
+     その案件に紐づける（`Message.project_id` / `Task.project_id` がその案件）。
+  4. それ以外（省略・`all`、`@mention` 無し）→ CoS への対話（案件に紐づかない）。
+- ノード宛て（1・2）は知らない id なら 404 `org_node_not_found`。CoS 宛て（3・4）は組織に CoS
+  （`OrgKind::Secretary` のノード）が無ければ 404 `org_node_not_found`（`id: "cos"`）。
+- 応答 `ConsoleInstructAccepted`: `message_id`（入った `role = "user"` の行）、`task_id`（起こした対話用
+  タスク）、`node_id`（実際に話しかけた相手。ノード宛てならそのノード、CoS 宛てなら CoS の id）。
+- CoS への対話 run の前置きには、通常の CoS 対話（§3.47 のノード一覧）に加えて**進行中の案件とその途中目標**
+  （`proposed` / `active` の案件だけ）と、`actions` の宣言の仕方（JSON の形と目安）が入る。CoS が結果ファイルに
+  `actions`（`create_task` / `propose_project` / `add_milestone` / `ask_human`）を宣言すると、taskd が**決定的に**
+  実行する（LLM はしない）:
+  - `create_task`: **`ready`**（人の Go 済み）のタスクを作る。`assignee` を省けば次 tick の matching（ADR-0046 D5）が
+    決める。`project` / `milestone` は id（省略可）、`harness` はハーネス id（`[[harnesses]]` を設定していれば検証）、
+    `acceptance` は 1 件以上必須。
+  - `propose_project`: `proposed` の案件を作る。`repos[]` は**絶対パス**（1 件目が primary。名前・種類は
+    `POST /projects/{id}/repos` と同じ既定から決める）。
+  - `add_milestone`: 既存の案件の末尾に `proposed` の途中目標を足す。
+  - `ask_human`: taskd 側では何も作らない（人への問いかけ自体が返事の本文）。「実行できた」として記録するだけ。
+  - 検証に落ちた action（知らない harness / repos / 案件など）は**実行されない**。CoS の返事の Markdown に
+    「実行できなかった action: …」の節が付き、`reply` ブロックの `actions_result.actions_failed[]` にも理由が残る。
+  - 実行結果は `Message.metadata`（`MessageMetadata`）に残り、`GET /console` の `reply` ブロックが
+    `actions_result` として運ぶ（§3.98 の表）。**同じ run の actions は 1 回だけ実行される**（冪等）。
 
 ---
 

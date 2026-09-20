@@ -7,9 +7,8 @@ import type { WorkspaceKind } from "~/lib/workspace-form";
 
 /**
  * 案件の作業場所（ADR-0039 D1、Phase G13k）の入力欄。「手元」（パス）／「クラスタ」（`GET /clusters` から
- * 選ぶ + リモートのパス）／「まだ決めない」を切り替える。`/projects` の新規フォーム、秘書の
- * 「新しい案件として」（`~/components/Conversation.tsx`）、`/projects/:id` の編集カードが共有する
- * （読み手は `~/lib/workspace-form.ts::readWorkspaceFromForm`）。
+ * 選ぶ + リモートのパス）／「まだ決めない」を切り替える。`/projects` の新規フォームと `/projects/:id` の
+ * 編集カードが共有する（読み手は `~/lib/workspace-form.ts::readWorkspaceFromForm`）。
  * GUI 側では検証しない: 空のパス・知らないクラスタもそのまま送り、celeris の 422（`errors[].field =
  * "workspace.cluster"`）を `FieldErrors` でそのまま出す。
  */

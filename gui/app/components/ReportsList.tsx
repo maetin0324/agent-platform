@@ -64,11 +64,7 @@ function ReportLinks({ report, projects }: { report: Report; projects: Project[]
         </Link>
       )}
       <Link
-        to={
-          report.node_id === "secretary"
-            ? `/org/secretary${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`
-            : `/org/${encodeURIComponent(report.node_id)}${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`
-        }
+        to={`/org/${encodeURIComponent(report.node_id)}`}
         data-testid="report-talk-link"
         className="underline underline-offset-2"
       >

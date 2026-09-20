@@ -61,16 +61,17 @@ pub use memory::{MEMORY_MAX_CHARS, MemoryDir, MemoryUpdate, read_result_memory};
 pub use paperqa::{AcquireConfig, PaperQaAdapter, PaperQaConfig, PaperQaEvidence};
 pub use process_group::{ProcessGroup, kill_tree, kill_tree_with};
 pub use protocol::{
-    Answer, ChildSummary, CommentContext, ConversationAddressee, ConversationTurn, Evidence,
-    GenreContext, GenreRoleContext, MemoryContext, MilestoneBrief, MilestoneReviewContext,
-    MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview,
-    ProviderFailure, RecentWork, ReviewOutput, ReviewRequest, ReviewVerdictOut, RoleContext,
-    RunContext, RunRequest, WorkerMessage,
+    ActiveMilestoneContext, ActiveProjectContext, Answer, ChildSummary, CommentContext,
+    ConversationAddressee, ConversationTurn, Evidence, GenreContext, GenreRoleContext,
+    MemoryContext, MilestoneBrief, MilestoneReviewContext, MilestoneTaskResult, NodeContext,
+    OrgNodeContext, PROTOCOL_VERSION, PriorReview, ProviderFailure, RecentWork, ReviewOutput,
+    ReviewRequest, ReviewVerdictOut, RoleContext, RunContext, RunRequest, WorkerMessage,
 };
 pub use provider::classify_provider_failure;
 pub use result_report::{
-    MilestoneProposal, ReportDeclaration, milestone_proposal_from_result_json,
-    read_result_milestone_proposal, read_result_report_kind, report_kind_from_result_json,
+    ConsoleAction, MilestoneProposal, ParsedActions, ReportDeclaration, actions_from_result_json,
+    milestone_proposal_from_result_json, read_result_actions, read_result_milestone_proposal,
+    read_result_report_kind, report_kind_from_result_json,
 };
 pub use ssh::{
     SYNC_ALWAYS_EXCLUDED, SshSettings, SshWorkspace, SyncMode, WorktreeSettings,

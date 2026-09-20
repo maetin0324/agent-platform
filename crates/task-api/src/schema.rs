@@ -146,6 +146,9 @@ pub struct ApiV1Schema {
     /// `GET /console/stream` の最初のフレーム（`event: hello`）。ブロックは `console_block` と同じ形で
     /// `event: console.block` として流れる。
     pub console_hello: crate::console::ConsoleHello,
+    // ---- ADR-0048 D3（Phase 60b）: `POST /console/instruct` ----
+    pub console_instruct: crate::console::InstructBody,
+    pub console_instruct_accepted: crate::console::ConsoleInstructAccepted,
     /// Phase 54（ADR-0043 D5）: 変更の取り込み（差分・merge・PR・衝突タスク）。
     pub changes: crate::types::ChangesView,
     pub change_diff: crate::types::ChangeDiffView,

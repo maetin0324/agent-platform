@@ -3319,3 +3319,208 @@ production の `node server.js` 2 プロセスと `taskd`（`/home/rmaeda/taskd/
 - **P-G21-3: `GET /knowledge/tree` に `?q=` を付けたときの `scopes` の扱い。** 絞った結果に合わせて
   減るのか、KB 全体のままなのかが書かれていない。GUI は `?q=` のときツリーを束ねない（G21-4）ので
   実害は無いが、絞り込みの `<select>` には `scopes` をそのまま出している。
+
+## Phase G22 — Console: 指示・CoS の actions・画面（ADR-0048 D4 + P-59-a。2026-09-20）
+
+- 完了日: 2026-09-20
+- 目的: celeris Phase 60b（ADR-0048 D3、`POST /console/instruct` と CoS の宣言的 `actions`）を受けて、
+  `docs/adr/0048-console.md` D4 の GUI（`/` = Console、`/org/:id` も同じ部品）を作る。あわせて P-59-a
+  （`docs/PROGRESS.md` の提案。CoS への改名の GUI 側の仕上げ）を同じフェーズで片づける（対象ファイルが
+  ほぼ重なるため。指示は「Node page /org/{id} … CoS もここで受ける」で、結局 CoS 専用ページを無くす形に
+  なったので、まとめた方が手戻りが少ないと判断した）。
+- 使う API: `docs/gui/api.md` §3.98〜3.100（`GET /console` / `GET /console/stream` /
+  `GET /tasks/{id}/runs/{run_id}/events`。読み取り）、§3.107（`POST /console/instruct`。**管理系**）。
+
+### 作ったもの（新規ファイル）
+
+- `app/lib/console.ts`（**純粋関数**。`~/lib/reports.ts` / `~/lib/approvals.ts` と同じ方針。HTTP も React も
+  持たない）: `ConsoleData` 型、`normalizeScope` / `parseScope` / `scopeForProject` / `scopeForNode`、
+  `findMentionQuery` / `matchMentionCandidates` / `applyMention`（`@node` 補完）、
+  `replyTargetForMessageBlock` / `buildInstructBody`（返信先・既定範囲・`@mention` の優先順位）、
+  `progressSummaryLine` / `taskLineSummary`、`consoleWaitingCounts`（上部の帯の件数）、
+  `appendConsoleBlock`（SSE の積み上げ。`progress` は run 単位で置き換え、それ以外は `cursor` で重複排除、
+  上限を超えたら古い方から落とす）、`formatRunEventRow`（「すべて見る」の行整形）。
+- `app/celeris/console.server.ts`（中継）: `loadConsole`（`GET /console` + `GET /org` + `GET /projects` を束ねる。
+  org/projects は落ちても Console 自体は出す）、`sendInstruct`（`POST /console/instruct`）、
+  `buildInstructBodyFromForm`。
+- `app/hooks/useConsoleStream.ts`: `createConsoleStreamController`（`EventSource` に依存しない JSON 解釈 +
+  カーソル追跡。`~/hooks/useCelerisStream.ts` の `createStreamController` と同じ切り出し方）と、それを
+  `EventSource` に配線する `useConsoleStream`（切断時は既定の自動再接続に任せず、自前で閉じて最新の
+  カーソルから張り直す）。
+- `app/routes/console.stream.ts`（`/console/stream` の SSE 中継。`~/routes/events.ts` と同じ作り）。
+- `app/routes/tasks.$id.runs.$runId.events.ts`（`/tasks/:id/runs/:runId/events` の resource route。
+  Console の `progress` ブロックの「すべて見る」が `useFetcher().load()` から呼ぶ。`~/routes/reports.$id.tsx`
+  と同じ作り）。
+- `app/components/Console.tsx`（画面本体）: 上部の待ち件数の帯（`consoleWaitingCounts`）、左の範囲ピッカー
+  （全体／案件／ノード。`useNavigate` で `/`・`/?scope=project:<id>`・`/org/:id` へ行き来する）、中央の流れ
+  （sticky-to-bottom スクロール: 下端付近を見ているときだけ新着で自動スクロール）、下の入力欄
+  （`@` 補完、Enter 送信・Shift+Enter 改行、「返信」で選んだ先を上に表示）。
+- `app/components/ConsoleBlockItem.tsx`（ブロック 1 件、`kind` で 9 分岐）。**状態変更のロジックは持たない**:
+  認可・途中目標の判定・タスクへのコメント／回答は、既存の画面（`/approvals`・`/projects/:id`・`/tasks/:id`）
+  の action をそのまま React Router のクロスルート fetcher（`fetcher.Form action="/…"`。
+  `~/routes/inbox.tsx` の `retryFetcher.Form action={`/tasks/${id}`}` と同じ作法）で叩くだけ。
+- テスト: `test/unit/console.test.ts`（27 件。`~/lib/console.ts` の純粋関数）、
+  `test/unit/console.server.test.ts`（9 件。`loadConsole` / `sendInstruct` を mock celeris で）、
+  `test/unit/useConsoleStream.test.ts`（6 件。`createConsoleStreamController`。`EventSource` は使わない）、
+  `test/unit/console.stream.route.test.ts`（4 件。SSE 中継。`test/unit/events.route.test.ts` と同じ作り）、
+  `test/unit/tasks.runs.events.route.test.ts`（3 件。run の全行の中継）。
+
+### 変更したもの
+
+- `app/routes.ts`: `console/stream` と `tasks/:id/runs/:runId/events` を追加。`org/secretary` は残したまま
+  コメントを更新（P-59-a）。
+- `app/routes/home.tsx`（全面書き換え）: 「`/` は秘書へ 302」（Phase G13f-1）をやめ、`/` 自身が
+  `scope=all`（既定）の Console になった。`?scope=project:<id>` / `?scope=node:<id>` の深リンクを受ける
+  （`normalizeScope` で不正な形は `all` に丸める）。celeris 停止中も 200 で開く契約
+  （docs/DESIGN.md §10 Phase G0 受け入れ条件 4）はここが引き継ぐ。
+- `app/routes/org.$id.tsx`（全面書き換え）: 旧 `Conversation` 部品（202 → ポーリングで返事を待つ）をやめ、
+  `scope=node:<id>` の Console を描く。CoS（`id: "cos"`）もこのルートで受ける。
+- `app/routes/org.secretary.tsx`（全面書き換え）: celeris に問い合わせない、`/org/cos` への 302 だけの
+  ルートにした（P-59-a）。
+- `app/celeris/action-types.ts`: `ConsoleInstructOutcome` を追加。
+- `app/celeris/client.server.ts`: `CelerisClient.consoleStream()`（`GET /console/stream`）を追加
+  （既存の `stream()` と同じ作り。タイムアウト無し、`signal` で切断）。
+- `app/celeris/types.ts`: 手では触っていない（`pnpm gen:types` で再生成しただけ。下記「gen:types」参照）。
+- P-59-a（画面の言葉「秘書」→「Chief of Staff（CoS）」。コード上の判断・ADR の歴史を指すコメントは変えていない）:
+  `app/lib/notify.ts`（Discord 通知の種別ラベル）、`app/root.tsx`（ナビ先頭を「秘書 → `/org/secretary`」から
+  「Console → `/`」に。エラー画面の「秘書へ戻る」を「Console へ戻る」に）、`app/routes/org.tsx`
+  （`ORG_KIND_LABEL.secretary` と見出しの説明文）、`app/routes/help.tsx`（用語集の「秘書」項目を
+  「CoS（Chief of Staff）」に改名し Console を指すよう本文を更新。SCREENS の先頭を「秘書」から「Console」の
+  説明に差し替え。他の項目内の「秘書」表記も CoS に）、`app/routes/reports.tsx`（level セレクトの選択肢と
+  Discord 通知の説明文）、`app/routes/projects.$id.tsx`（Alert のタイトル 3 箇所・カードの説明文・
+  「議論」の遷移先を `/org/secretary?project=…` から `/?scope=project:<id>` に変更。途中目標の対話は
+  もう「待つ」UI を持たない専用ページではなく Console の SSE で自然に流れてくるため）、
+  `app/routes/projects.tsx`（説明文とヒント。「秘書に話しかけても同じです」のリンク先を `/org/secretary`
+  から `/`〈Console〉に）、`app/routes/inbox.tsx`（説明文）、`app/components/Flash.tsx`
+  （`project_plan` / `milestone_decide` の結果文言 4 箇所）、`app/components/ReportsList.tsx`
+  （「担当に話す」リンクを `/org/secretary?project=…` の分岐を無くして単純化。Console の `node:<id>` 範囲は
+  案件で絞る仕組みを持たないため、`?project=` は元々効いていなかった）。
+
+### 削除したもの
+
+- `app/components/Conversation.tsx` / `app/celeris/conversation.server.ts` / `app/lib/conversation.ts` /
+  `test/unit/conversation.test.ts`: `org.$id.tsx` と `org.secretary.tsx` の両方が Console に置き換わり、
+  これらを使う場所が無くなったため削除した（他のどの画面もこれらを import していないことを grep で確認
+  済み。`SECRETARY_NODE_ID` 等は `~/lib/console.ts` の `COS_NODE_ID` に引き継いだ）。
+
+### 決めたこと・逸脱（明示）
+
+- **G22-1: 「Node page は同じ部品」を文字どおり取り、専用の CoS ルートを削除した。** ADR-0048 D4 と
+  今回の指示は「`/org/{id}` は同じ Console 部品を `scope=node:<id>` で使う（latitude あり）」だったが、
+  それを機に旧 `~/routes/org.secretary.tsx`（`Conversation` を使う独立ページ）と
+  `~/components/Conversation.tsx`・`~/celeris/conversation.server.ts` を丸ごと削除した。理由: (1) CoS の
+  node id は既に `cos`（ADR-0046 D6）で、`/org/:id` は元から `id === "cos"` を素通りで受けていた（`org.tsx`
+  の `node.id === "secretary"` 分岐は既に到達しないデッドコードだった）。(2) Conversation の「新しい案件として」
+  チェックボックスは、CoS が `propose_project` action を宣言する経路（ADR-0048 D3）と `/projects` の
+  新規フォームの二重に機能が被っていた。**`/org/secretary` は 302 リダイレクトとして残した**（旧リンク・
+  ブックマークが壊れないように）。
+- **G22-2: Console の入力欄が「いま見ている画面の範囲」を既定の宛先にする（ADR-0048 D3 を GUI 側で補う）。**
+  `POST /console/instruct` の相手の決め方（§3.107）は「`scope` 省略・`@mention` 無し → CoS（案件に紐づかない）」
+  だけで、「いま `/org/coding-poc` を開いているから既定でそのノードへ」という規則は無い。これだと
+  ノードの Console ページで無地の文を打つと（意図に反して）CoS へ飛んでしまう。GUI 側で
+  `buildInstructBody(text, replyTarget, defaultScope)` の第 3 引数として「範囲が `node:<id>` /
+  `project:<id>` に絞られた画面なら、その scope を既定にする」ロジックを足した。ただし
+  **`@<node-id> ` で本文が始まるときは `scope` を付けない**（celeris の規則は「`scope` が `@mention` より
+  先勝ち」なので、既定の scope を付けると打った `@mention` が無視されてしまうため。優先順位は
+  `~/lib/console.ts` の `buildInstructBody` のコメントに明記した）。celeris 側の契約を変える提案ではなく、
+  純粋に GUI 側のデフォルト値の付け方の話。
+- **G22-3: 認可・途中目標・タスクのコメント／回答は「その場で答える」を React Router のクロスルート
+  fetcher で実装し、Console 専用の action は書いていない。** 各ブロックの `fetcher.Form` は
+  `action="/approvals"`・`action={`/projects/${projectId}`}`・`action={`/tasks/${taskId}`}` へ直接投げ、
+  既存の action（`approval_decide` / `milestone_decide` / `answer` / `comment`）をそのまま再利用する
+  （`~/routes/inbox.tsx` に既に同じパターンがある）。celeris への要求の形・検証はすべて既存コードのまま。
+- **G22-4: SSE の積み上げは `progress` を run 単位で「置き換え」、それ以外は `cursor` で重複排除、
+  上限（既定 300 件）を超えたら古い方から落とす。** D1「Console は progress を run ごとに束ねる」に
+  合わせ、同じ `run_id` の `progress` ブロックが SSE で届くたびに一覧内の既存行を置き換える（積み増さない）。
+  上限を超えたらブラウザのメモリを無限に増やさないため古い方から捨てる（`GET /console?since=` による
+  「もっと見る」的な遡りページングは今回は作っていない。§未解決事項 U1）。
+- **G22-5: 「すべて見る」は `progress` ブロックの `first[]`/`last[]` とは独立に、開いたときだけ
+  `GET /tasks/{id}/runs/{run_id}/events` を 1 回引く。** `ProgressBlockView` は折り畳み（既定）→ 展開
+  （`first`/`last` を表示。追加のネットワークは無し）→「すべて見る」（`useFetcher().load()`。
+  `~/components/ReportsList.tsx` の `ReportRow` と同じ「開いたときだけ取りに行く」パターン）の 3 段。
+- **G22-6: sticky-to-bottom は「下端から 96px 以内なら自動スクロール」のしきい値で判定。** `scroll` イベントで
+  `scrollHeight - scrollTop - clientHeight` を見て、新着ブロックが来たときにその値が閾値未満なら
+  `scrollTop = scrollHeight` にする、というだけの単純な実装（DOM 直操作。ライブラリは足していない）。
+- **G22-7: 上部の待ち件数の帯は、いま読み込んでいるブロックから数える。** 新しい API 呼び出しは足していない
+  （`GET /inbox` 等を別途叩かない）。`question` は `answered=false`、`approval` は `decision` 未設定、
+  `milestone` は celeris が `proposed` のものしか流さない（Phase 60a 追記 7）ので出ているだけ数える —
+  ただし SSE 接続前（初期表示 100 件）に収まらない古い待ちは数えない（§未解決事項 U2）。
+- **G22-8: `knowledge` ブロックは最小限。** ADR-0048 D1 / Phase 60a が「予約・誰も作らない」としている
+  とおり、「知識: `<title>`（`<state>`）」の 1 行だけを出す実装にした（過剰投資しない、との指示どおり）。
+
+### 実行したコマンドと出力の要点
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint` | exit 0。`Checked 219 files in ~90ms. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（`react-router typegen && tsc -b`、出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 59 passed (59) / Tests 836 passed (836)**（フェーズ開始時点の基準 816 件以上。
+  新規 5 ファイルで 49 件 + `home.route.test.ts` 差し替えで +5 件、`conversation.test.ts` 削除で -34 件、
+  旧 `home.route.test.ts` の -2 件を差し引いて 816 → 836） |
+| build | `pnpm build` | exit 0。client / SSR とも成功。新チャンク `Console-*.js`（24.87 kB / gzip 7.33 kB）、
+  `console.stream-*.js` / `tasks._id.runs._runId.events-*.js`（resource route、ほぼ空）、`org._id-*.js`・`home-*.js` |
+| gen:types（生成が冪等か） | `pnpm gen:types` を 2 回連続 | 2 回とも exit 0。`app/celeris/types.ts` の sha256 が
+  2 回目も同一（`fb220503…`）＝**生成は冪等で、手編集していないことの傍証** |
+| gen:types と HEAD の差分 | `git diff --exit-code app/celeris/types.ts` | **exit 1（非ゼロ）**。理由は下記「gen:types の差分について」 |
+| gui ⇔ celeris の API 文書の同期 | `bash scripts/sync-gui-docs.sh --check`（リポジトリ根） | exit 0。`sync-gui-docs: up to date` |
+
+#### gen:types の差分について（重要。G21 と同じ状況）
+
+`git diff --exit-code app/celeris/types.ts` は非ゼロで終わる。**手で編集したからではない**: このフェーズを
+始めた時点で `git status`（リポジトリ根）は `crates/task-api/src/console.rs`・`crates/task-core/src/
+console_action.rs`（新規）・`crates/task-core/migrations/0017_console_actions.sql`（新規）・
+`docs/api/v1/api-v1.schema.json` など celeris 側 Phase 60b の変更が**未コミットのまま**このワークツリーに
+存在しており（celeris 側は「実装済み・テスト済み・コミット準備済み」という前提で渡された）、
+`gui/app/celeris/types.ts` も**その未コミットのスキーマから既にこのセッション開始前に再生成された状態**
+だった（`ConsoleBlock.actions_result`・`InstructBody`・`ConsoleInstructAccepted`・`MessageMetadata` 等は、
+このフェーズの最初の読み取りの時点で既に入っていたことをトランスクリプトで確認できる）。
+`git diff`（HEAD 比較）が指しているのは「HEAD＝最後にコミットされた版（celeris 側 Phase 60a まで）」と
+「未コミットの Phase 60b 込みの作業ツリー」の差であり、**`pnpm gen:types` を実行する前から存在していた差分**
+である。実際に確認したこと:
+1. `pnpm gen:types` を連続 2 回実行しても `types.ts` の sha256 は変わらない（決定的な生成）。
+2. 差分の中身（`MilestoneId` の並び順の移動を含む）は、このフェーズの最初に `types.ts` を読んだときの内容と
+   一致する（新しく増えた行ではなく、HEAD が古いだけ）。
+3. `docs/api/v1/api-v1.schema.json` 自体、celeris 側で `git status` に `M` として出ている（未コミット）。
+
+celeris 側の Phase 60b の変更一式（`crates/` と `docs/api/v1/`・`docs/adr/`・`docs/PROGRESS.md`・
+`docs/gui/api.md`）がコミットされれば、この差分は自然に解消する。GUI 側では `types.ts` を一切手編集して
+いない（`gui/CLAUDE.md` の禁止事項を守っている）ので、このフェーズの範囲では対処のしようがない
+（celeris 側のコミットを待つだけ）。
+
+### 未解決事項
+
+- **U1: `GET /console?since=` を使った過去への遡り（無限スクロール的な「もっと見る」）は未実装。**
+  初期表示は `GET /console?scope=&limit=100`（既定）だけで、SSE の上限（既定 300 件）を超えて古い方から
+  落ちたブロックを画面から再度呼び戻す手段が無い。頻度の高い画面で長時間開きっぱなしにすると、
+  古いやり取りは再読み込み（`GET /console` をもう一度呼ぶ）でしか戻れない。
+- **U2: 上部の帯の待ち件数は「いま読み込んでいる分だけ」。** 初期表示 100 件・SSE 接続後の積み上げの
+  範囲でしか数えないので、それより古い未回答の質問・未決の認可・提案中の途中目標は帯に出ない
+  （`/approvals` 等の専用画面では正しく全件出る）。より正確にするなら `GET /inbox` 等を別途叩く必要があるが、
+  「新しい API 呼び出しは足さない」方針（G22-7）とトレードオフになるため見送った。
+- **U3: e2e は未実行。** タスク指示どおり `pnpm e2e` は走らせていない（実 celeris のバイナリと fake
+  ワーカーの起動が要る枝で、時間内に最優先すべきユニット/型/ビルドの緑化を優先した）。特に「実機:
+  Console から『〜を直して』と 1 行入れる → CoS の返事と `create_task` → matching → progress → report」
+  （ADR-0048 §3 受け入れ条件 5）は e2e か手動確認でしか検証できていない。
+- **U4: `@node` 補完はローカルの部分一致だけで、選ばれた候補が実在するかを事前検証しない。**
+  celeris 側が 404 `org_node_not_found` を返せば `ErrorFlash` にそのまま出る（GUI 側で二重に判定しない
+  という方針どおり）が、候補一覧自体は `GET /org` のスナップショットなので、組織が変わった直後は
+  ズレる可能性がある（他の画面の `GET /org` キャッシュと同程度のリスクで、新しい問題ではない）。
+- **U5: 途中目標ブロックの「議論」を選んだ後の遷移先を `/?scope=project:<id>` にしたが、旧
+  `Conversation` の「考え中」表示（送った直後から返事が来るまでの明示的なインジケータ）に相当するものが
+  Console には無い。** Console は SSE で新着が自然に流れてくる前提の UI なので「考え中」を出していない。
+  返事が来るまでの間、待っていることが分かりにくい可能性がある（追加のローディング表示は今回は作らなかった）。
+
+### 提案
+
+- **P-G22-1: `docs/gui/api.md` §3.107 に「GUI が既定の `scope` を補うときの優先順位」の注記が欲しい。**
+  celeris の規則自体は 1〜4 の順で決定的だが、GUI 側で「いま見ている画面の範囲」を既定にする発想（G22-2）
+  が自然に思いつくかどうかは実装者次第。`@mention` が常に最優先であることを明記しておくと、
+  次に同じ機能を作る実装者が同じ落とし穴（既定 scope で `@mention` を潰してしまう）を踏まずに済む。
+- **P-G22-2: `GET /console` に「もっと古い方へ」ページングする軽い規則が欲しい（U1 の解消）。**
+  いまの `since` は「前回の `next_cursor` から前へ」の一方向（新しい方へ）しか想定していないように読める。
+  逆向き（`before=` のような）のクエリがあると、SSE で溢れて捨てたブロックを取り戻せる。
+- **P-G22-3: `milestone` ブロックに、次の途中目標の提案（`MilestoneView.proposal` 相当）が乗っていない。**
+  `docs/gui/api.md` §3.98 の `milestone` は生の `Milestone` + `review?: MilestoneReviewView`だけで、
+  `/projects/:id` 側で使っている「次の途中目標の提案」（`proposal.title` / `proposal.description`）に
+  相当する情報が無い。Console の `milestone` ブロックのレビューカードは、そのため提案の見出しを
+  出していない（`review` の Markdown 本文には書かれているはずだが、構造化はされていない）。

@@ -49,6 +49,9 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
     out.push_str(&profile_section(context));
     out.push_str(&mode_section(context));
     out.push_str(&organization_section(context));
+    // ADR-0048 D3（Phase 60b）: CoS の対話 run にだけ、進行中の案件とその途中目標。
+    // `context.active_projects` が空の run（CoS 以外）の前置きは Phase 60a までとバイト単位で同じ。
+    out.push_str(&active_projects_section(context));
     out.push_str(&workspace_section(context));
     // ADR-0047 D2（Phase 61）: マウントされた知識の**索引だけ**（本文は入れない。道具で読む）。
     // `context.knowledge` が無い run の前置きは Phase 60 までと 1 バイトも変わらない。
@@ -392,6 +395,31 @@ pub fn organization_section(context: &RunContext) -> String {
     out
 }
 
+/// ADR-0048 D3（Phase 60b）: CoS の対話 run にだけ出す「進行中の案件」の節（id / 題名 / 状態と、
+/// その途中目標）。`actions` の `create_task.project` / `add_milestone.project` を選ぶ材料。
+fn active_projects_section(context: &RunContext) -> String {
+    if context.conversation_addressee != Some(ConversationAddressee::Secretary)
+        || context.active_projects.is_empty()
+    {
+        return String::new();
+    }
+    let mut out = String::from("## 進行中の案件 (active projects)\n");
+    for project in &context.active_projects {
+        out.push_str(&format!(
+            "- `{}` {}（{}）\n",
+            project.id, project.title, project.status
+        ));
+        for milestone in &project.milestones {
+            out.push_str(&format!(
+                "  - 途中目標 `{}` {}（{}）\n",
+                milestone.id, milestone.title, milestone.status
+            ));
+        }
+    }
+    out.push('\n');
+    out
+}
+
 /// ADR-0039 D3: 案件の作業場所から、前置きに出す 1 行を組む（純粋関数。ディスパッチャがこれを
 /// `RunContext::workspace_note` に入れる）。`Remote` は ADR-0018 D1 の「クラスタ側が正、手元は写し」を書く。
 pub fn workspace_note(spec: &task_core::WorkspaceSpec) -> String {
@@ -687,13 +715,16 @@ fn memory_instructions(context: &RunContext, artifacts: &str) -> String {
 fn conversation_instructions(context: &RunContext) -> String {
     match context.conversation_addressee {
         Some(ConversationAddressee::Secretary) => {
-            "## これは対話です (this is a conversation, not a work order)\n\
-             この返事では作業を始めないでください。委譲・実装・調査は、人が方針と途中目標を承認してから \
-             始まります。返事には次を、人が数十秒で読める分量で書いてください: \
-             (a) 理解の確認 (b) 方針 (c) 最初の途中目標の提案 (d) 判断を仰ぎたいこと。\
-             ファイルの作成や大きな探索は不要です。\
-             自分の直近の仕事とその結果は上に書いてある。人に聞き返す前に、まずそれを見て答えること。\n\n"
-                .to_string()
+            format!(
+                "## これは対話です (this is a conversation, not a work order)\n\
+                 この返事では作業を始めないでください。委譲・実装・調査は、人が方針と途中目標を承認してから \
+                 始まります。返事には次を、人が数十秒で読める分量で書いてください: \
+                 (a) 理解の確認 (b) 方針 (c) 最初の途中目標の提案 (d) 判断を仰ぎたいこと。\
+                 ファイルの作成や大きな探索は不要です。\
+                 自分の直近の仕事とその結果は上に書いてある。人に聞き返す前に、まずそれを見て答えること。\n\n\
+                 {}",
+                actions_instructions()
+            )
         }
         Some(ConversationAddressee::Other) => {
             "## これは対話です (this is a conversation, not a work order)\n\
@@ -705,6 +736,27 @@ fn conversation_instructions(context: &RunContext) -> String {
         }
         None => String::new(),
     }
+}
+
+/// ADR-0048 D3（Phase 60b）: CoS の対話にだけ足す「動く」経路の説明（結果ファイルの宣言的な `actions`
+/// を taskd が決定的に実行する。指示文はこれを説明するだけで、実行そのものはコードの仕事）。
+fn actions_instructions() -> String {
+    "## 人からの頼みを動かす (declaring actions)\n\
+     人の発言から具体的な仕事や案件が要りそうなら、返事の `summary` とは別に、結果ファイルに \
+     `\"actions\": [...]` を宣言してください（taskd が決定的に実行します。あなた自身がタスクを \
+     作ったり道具を使ったりはしません）。\n\
+     - `{\"type\": \"create_task\", \"title\": \"…\", \"objective\": \"…\", \"acceptance\": [\"…\"], \
+     \"harness\": \"coding\", \"skills\": [\"rust\"], \"mode\": \"prototype\", \"repos\": [\"agent-platform\"], \
+     \"project\": \"<案件の id か null>\", \"milestone\": \"<途中目標の id か null>\", \"assignee\": null}`\n\
+     - `{\"type\": \"propose_project\", \"title\": \"…\", \"request\": \"…\", \"repos\": [\"/abs/path\"]}`\n\
+     - `{\"type\": \"add_milestone\", \"project\": \"<案件の id>\", \"title\": \"…\", \"description\": \"…\"}`\n\
+     - `{\"type\": \"ask_human\", \"text\": \"…\"}`\n\
+     目安: **1 つのタスクで 1 時間以内に終わり、承認が要らない変更**なら `create_task` を 1 つ書けば \
+     十分です。「案件として」「途中目標に」のように人が儀式を求めていれば `propose_project` /\
+     `add_milestone`。判断に迷うときは `ask_human`。案件・担当が分かっていれば `project` / `assignee` \
+     を書いてください（`assignee` を省けば celeris が skills と harness から決定的に選びます）。\
+     検証に落ちた action（知らない harness / repos / 案件など）は実行されず、理由が人に見えます。\n\n"
+        .to_string()
 }
 
 /// 節 4.5: 途中目標のここまでの結果（Phase 41 / ADR-0038 D1）。レビューの対話 run にだけ出す。
@@ -1029,6 +1081,53 @@ mod tests {
 
         // 対話でない run（既定値の `None`）では何も足さない。
         assert_eq!(render(&RunContext::default(), "artifacts"), "");
+    }
+
+    /// ADR-0048 D3（Phase 60b）: CoS の対話にだけ「進行中の案件」の節と `actions` の説明が付く。
+    /// CoS 以外の対話・通常の run には出ない。
+    #[test]
+    fn cos_conversations_show_active_projects_and_the_actions_instructions() {
+        let secretary = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Secretary),
+            active_projects: vec![crate::protocol::ActiveProjectContext {
+                id: "01PROJECT".into(),
+                title: "Pluvio".into(),
+                status: "active".into(),
+                milestones: vec![crate::protocol::ActiveMilestoneContext {
+                    id: "01MILESTONE".into(),
+                    title: "隣接領域の調査".into(),
+                    status: "in_progress".into(),
+                }],
+            }],
+            ..RunContext::default()
+        };
+        let out = render(&secretary, "artifacts");
+        assert!(out.contains("## 進行中の案件"), "{out}");
+        assert!(out.contains("01PROJECT"), "{out}");
+        assert!(out.contains("Pluvio"), "{out}");
+        assert!(out.contains("隣接領域の調査"), "{out}");
+        assert!(out.contains("actions"), "{out}");
+        assert!(out.contains("create_task"), "{out}");
+        assert!(out.contains("propose_project"), "{out}");
+        assert!(out.contains("add_milestone"), "{out}");
+        assert!(out.contains("ask_human"), "{out}");
+
+        // CoS 以外の対話には「進行中の案件」も `actions` の説明も出ない。
+        let other = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Other),
+            active_projects: secretary.active_projects.clone(),
+            ..RunContext::default()
+        };
+        let out = render(&other, "artifacts");
+        assert!(!out.contains("## 進行中の案件"), "{out}");
+        assert!(!out.contains("create_task"), "{out}");
+
+        // 案件が無ければ節ごと出ない（既存の出力を変えない）。
+        let empty = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Secretary),
+            ..RunContext::default()
+        };
+        assert!(!render(&empty, "artifacts").contains("## 進行中の案件"));
     }
 
     /// 記憶が空（ファイルが無い）なら記憶の節は出ないが、書き方の指示は出る（次から覚えられるように）。

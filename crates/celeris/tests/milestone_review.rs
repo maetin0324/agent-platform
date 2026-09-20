@@ -112,6 +112,7 @@ impl Env {
                 text: text.to_string(),
                 run_id: Some("run-1".into()),
                 task_id: Some(task_id),
+                metadata: None,
                 created_at: at(100),
             })
             .unwrap_or_else(|e| panic!("message: {e}"));

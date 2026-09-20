@@ -134,3 +134,45 @@ D3（`POST /console/instruct` と CoS の `actions`）と D4（GUI）は Phase 6
     （`count` / `tool_count` はその run の合計）。対話・認可・報告・途中目標は 1 秒ごとに見に行く。
     `Last-Event-ID` は使わない（再開は `since`）。
 11. **`knowledge` ブロック**は形だけ予約した（Phase 60a では誰も作らない）。中身は ADR-0047 側が決める。
+
+## Phase 60b 追記（2026-09-20。D3/D4 の実装で決めたこと）
+
+Phase 60b で D3（`POST /console/instruct` と CoS の `actions`）と D4（GUI）を入れた。本文に明示が
+無かった点、実装が本文と食い違っていた点を記録する（`docs/PROGRESS.md` の Phase 60b 節に証跡がある）。
+
+1. **`ConsoleAction` の置き場は `task-core`**。D3 は「CoS の結果ファイルに宣言的な `actions`」としか
+   書いておらず、読む側（`task-worker::result_report`）に置くのが自然に見えるが、実行する側
+   （`task_ops::actions`）も同じ形を必要とする。`task-ops` は `task-worker` に依存していない（依存グラフは
+   `task-dispatch` が両方の下流）ので、そのまま置くと新しい依存の向きが生まれる。`ConsoleAction` の**型
+   定義だけ**を `task_core::console_action` に置き、`task-worker::result_report` はファイル I/O（読む・
+   `malformed` に分ける）だけを担う `pub use task_core::ConsoleAction;` の再エクスポートにした。
+   `ADR-0034 D7` / `milestone_proposal`（文字列 2 つだけ）ではこの問題が起きなかった。
+2. **`create_task` action の担当決定はディスパッチャに任せる**。D3 は「`assignee` が無ければ ADR-0046 D5 の
+   matching」とだけ書いているが、`task_ops::actions::execute` の中では matching を呼ばない。
+   `add::create_task_with_roles` で作った `assignee: None` のタスクは `ready` のまま挿入され、
+   既存の `Dispatcher::assign_if_needed`（ready かつ `assignee` の無いタスクを見るたび実行）が**次 tick**で
+   決定的に担当を決める。二重に matching のコードを持たないための判断で、体感の違いは「即座」ではなく
+   「次 tick（数秒以内）」になるだけ。
+3. **`propose_project.repos[]` は絶対パスとして読む**。D3 の例は `["/abs/path"]` 相当を想定していそうだが
+   本文は「repos by name/path」とだけ書いている。案件をこれから作るので、既存の案件のリポジトリ名（`名前`）
+   では引けない。**絶対パスだけ**を受け付け、名前・種類は `POST /projects/{id}/repos`（ADR-0043 D1）と同じ
+   既定推定（`default_repo_name` / `detect_repo_kind`）で決める。相対パス・裸の名前が 1 つでもあれば
+   action 全体を実行しない（部分的に案件だけ作って repos が欠けた状態を避けるため）。
+4. **`ask_human` は taskd 側で何も作らない**。D3 の一覧には他の 3 つと並んで書かれているが、対話 run は
+   「返事だけをする」（ADR-0033 D4 / Phase 28）ので、`ask_human` は「CoS の返事そのものが人への問いかけ」で
+   あることの宣言に過ぎない。実行は「テキストが空でないことを確かめて `ExecutedAction` として記録するだけ」
+   にした（人が見るのは返事の Markdown 本文と、`actions_result.actions_executed[]` の 1 行）。
+5. **冪等性は 2 段構え**。D3 の「Idempotent per run」は、既存の `absorb_milestone_proposal` と同じ
+   「`Dispatcher::on_worker_finished` の `lease_matches` ガードにより同じ run の完了処理は自然に 1 回しか
+   走らない」という前提に乗せることもできたが、それだと `task_ops::actions` を単体で「2 回呼んでも
+   1 回しか実行しない」とテストできない。migration 0017 に `console_action_runs`（`run_id` 一意）を足し、
+   `TaskStore::console_action_run_claim` で明示的にも保証した。
+6. **`messages.metadata_json`** は `Message.metadata: Option<MessageMetadata>` として型付きで持つ
+   （生の `serde_json::Value` にはしなかった。`ConsoleBlock::Reply.actions_result` にそのまま写せて
+   スキーマも安定するため）。`record_reply` は `record_reply_with_metadata(..., metadata: None, ...)` に
+   委譲する薄いラッパーにして、既存の呼び出し側・テストを壊さないようにした。
+7. **CoS の前置きの `active_projects`** は `proposed` / `active` の案件だけを渡す（`paused` / `done` /
+   `cancelled` は渡さない）。D3 は「進行中の案件」としか書いていないが、`ProjectStatus` の値のうち
+   人が次の指示先として選びうるのはこの 2 つだけと判断した。
+8. **GUI（D4）と P-59-a の詳細**は `gui/docs/PROGRESS.md` の `## Phase G22` を参照（実装は GUI 側の
+   worktree で行い、この ADR には celeris 側の決定だけを残す）。

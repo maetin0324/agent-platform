@@ -223,7 +223,8 @@ type NavItem = { href: string; label: string; icon: IconName; badge?: "approvals
 
 /**
  * ナビゲーションのグループ（docs/adr/0011 D3、Phase G13a で SPEC §4 の順に組み替え。ADR-0033 D8）。
- * 先頭は SPEC §4 の 6 画面の順（秘書・組織・案件・報告・認可・成果物）。成果物は G13c、認可は G13d で実物になった。
+ * 先頭は SPEC §4 の 6 画面の順（Console・組織・案件・報告・認可・成果物）。成果物は G13c、認可は G13d で実物になった。
+ * Console（ADR-0048 D4、Phase G22）が `/` の入口になったので、ナビ先頭は「秘書」ではなく Console 自身を指す。
  * 既存のタスク・プロバイダ・アカウント・クラスタの画面は「裏方」区画にまとめて下げる
  * （人が見る単位は案件と組織になり、タスクは裏方に下がる）。
  */
@@ -231,7 +232,7 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   {
     label: "業務",
     items: [
-      { href: "/org/secretary", label: "秘書", icon: "message" },
+      { href: "/", label: "Console", icon: "message" },
       { href: "/org", label: "組織", icon: "users" },
       { href: "/projects", label: "案件", icon: "folder" },
       // ADR-0044 D4（Phase 53）: 案件のタスクを 6 列で見るボード
@@ -265,7 +266,8 @@ function isActive(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";
   if (href === "/inbox") return pathname === "/inbox";
   if (href === "/tasks") return pathname === "/tasks" || (pathname.startsWith("/tasks/") && pathname !== "/tasks/new");
-  // `/org/secretary` は別のナビ項目（秘書）なので、「組織」は `/org` そのものだけを active にする。
+  // `/org/cos`（旧 `/org/secretary`）は別のナビ項目（Console）ではなく組織の木の 1 ノードなので、
+  // 「組織」ナビは `/org` そのものだけを active にする。
   if (href === "/org") return pathname === "/org";
   return pathname === href || pathname.startsWith(`${href}/`);
 }
@@ -519,7 +521,7 @@ function ErrorPanel({ title, children }: { title: string; children: React.ReactN
       <div className="mt-2 text-sm text-fg-muted">{children}</div>
       <a href="/" className={buttonClass({ variant: "secondary", className: "mt-6" })}>
         <Icon name="arrowLeft" />
-        秘書へ戻る
+        Console へ戻る
       </a>
     </div>
   );

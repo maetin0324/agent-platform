@@ -91,6 +91,11 @@ export type ConsoleBlock =
       text: string;
     }
   | {
+      /**
+       * ADR-0048 D3（Phase 60b）: CoS の返事が `actions` を宣言していれば、taskd が実行した結果
+       * （実行できた / できなかった）。GUI は「→ タスクを作りました: …」をここから出す。
+       */
+      actions_result?: MessageMetadata | null;
       at: string;
       cursor: string;
       kind: "reply";
@@ -177,15 +182,15 @@ export type ConsoleBlock =
       title: string;
     };
 /**
+ * 途中目標の一意識別子（ULID）。
+ */
+export type MilestoneId = string;
+/**
  * ADR-0048 D2（Phase 60a）: ワーカーの進行の種別。アダプタごとの差はアダプタ側で吸収し、
  * Console（ADR-0048 D1）はこの 5 種だけを知る。`comment` はプロトコルの別 type（ADR-0044 D2）の
  * ままなのでここには無い。
  */
 export type ProgressKind = "tool_use" | "tool_result" | "text" | "thinking" | "status";
-/**
- * 途中目標の一意識別子（ULID）。
- */
-export type MilestoneId = string;
 /**
  * 途中目標の状態（ADR-0033 D2。SPEC §7 のアジャイル: 達成ごとに人が判定し、Go か再設計）。
  */
@@ -592,6 +597,8 @@ export interface ApiV1Schema {
   console: ConsolePage;
   console_block: ConsoleBlock;
   console_hello: ConsoleHello;
+  console_instruct: InstructBody;
+  console_instruct_accepted: ConsoleInstructAccepted;
   daemon: DaemonView;
   decision: DecisionBody;
   doc_page: DocPage;
@@ -1406,6 +1413,43 @@ export interface ConsolePage {
   next_cursor?: string | null;
 }
 /**
+ * `Message.metadata`（ADR-0048 D3。Phase 60b）: CoS の対話 run が結果ファイルで宣言した `actions`
+ * を taskd が決定的に実行した結果。Console の `reply` ブロックが `actions_result` として表示する。
+ */
+export interface MessageMetadata {
+  /**
+   * 実行できた action（「→ タスクを作りました: …」のような 1 行と、作った物の id）。
+   */
+  actions_executed?: MessageActionResult[];
+  /**
+   * 検証に落ちて実行しなかった action と理由。
+   */
+  actions_failed?: MessageActionFailure[];
+}
+/**
+ * `Message.metadata.actions_executed[]`。
+ */
+export interface MessageActionResult {
+  /**
+   * `create_task` / `propose_project` / `add_milestone` / `ask_human`。
+   */
+  kind: string;
+  milestone_id?: MilestoneId | null;
+  project_id?: ProjectId | null;
+  /**
+   * 人が読む 1 行（「タスクを作りました: 〜」）。
+   */
+  summary: string;
+  task_id?: TaskId | null;
+}
+/**
+ * `Message.metadata.actions_failed[]`。
+ */
+export interface MessageActionFailure {
+  kind: string;
+  reason: string;
+}
+/**
  * `task` ブロックの中身（ADR-0048 D1: 開始・終了・失敗・中止・割り込みを 1 行で）。
  */
 export interface ConsoleTaskLine {
@@ -1570,6 +1614,37 @@ export interface ConsoleHello {
    * `all` / `project:<id>` / `node:<id>`。
    */
   scope: string;
+}
+/**
+ * `POST /console/instruct` の要求本文。
+ */
+export interface InstructBody {
+  /**
+   * 省略・`all` は CoS。`node:<id>` はそのノード。`project:<id>` は CoS にその案件を紐づける
+   * （`text` が `@<node-id> ` で始まればそちらが勝つ）。
+   */
+  scope?: string | null;
+  /**
+   * 本文（空白だけは 422。判定は `task_ops::conversation::start` に任せる）。
+   */
+  text: string;
+}
+/**
+ * `POST /console/instruct` の応答（202）。`POST /org/{id}/messages` と同じ形に `node_id` を添える。
+ */
+export interface ConsoleInstructAccepted {
+  /**
+   * 入った `role = "user"` の行の id。
+   */
+  message_id: string;
+  /**
+   * 実際に話しかけた相手（`node:<id>` / `@<node-id>` ならそのノード、それ以外は CoS の id）。
+   */
+  node_id: string;
+  /**
+   * タスクの一意識別子（ULID）。DESIGN §4.1。
+   */
+  task_id: string;
 }
 /**
  * `GET /daemon`。
@@ -2647,6 +2722,11 @@ export interface MessageList {
 export interface Message {
   created_at: string;
   id: MessageId;
+  /**
+   * ADR-0048 D3（Phase 60b。migration 0017）: CoS の返事に添える `actions` の実行結果
+   * （実行できた / できなかった）。actions を伴わない返事・導入前の行は `None`。
+   */
+  metadata?: MessageMetadata | null;
   /**
    * 話し相手（`org_nodes.id`）。
    */

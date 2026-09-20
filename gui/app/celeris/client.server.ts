@@ -33,6 +33,14 @@ export interface StreamOptions {
   signal?: AbortSignal;
 }
 
+export interface ConsoleStreamOptions {
+  /** `all` / `project:<id>` / `node:<id>`（省略すれば celeris の既定 `all`）。 */
+  scope?: string | null;
+  /** 前回の `ConsoleHello.cursor` / `ConsoleBlock.cursor`。省略すれば「今」から。 */
+  since?: string | null;
+  signal?: AbortSignal;
+}
+
 export interface FileOptions {
   /** `Range: bytes=a-b` をそのまま転送 */
   range?: string | null;
@@ -177,6 +185,19 @@ export class CelerisClient {
     return this.#send(
       this.url("/stream", { task_id: options.taskId ?? undefined }),
       { method: "GET", headers: this.#headers(extra), signal: options.signal },
+      null,
+    );
+  }
+
+  /**
+   * `GET /console/stream`（SSE、ADR-0048 D1、docs/gui/api.md §3.99）。`stream()` と同じ作り
+   * （応答をそのまま返す・タイムアウトは掛けない・切断は signal で行う）だが、`Last-Event-ID` は使わず
+   * `since` クエリで再開する（celeris 側が `id:` を付けないため）。
+   */
+  async consoleStream(options: ConsoleStreamOptions = {}): Promise<Response> {
+    return this.#send(
+      this.url("/console/stream", { scope: options.scope ?? undefined, since: options.since ?? undefined }),
+      { method: "GET", headers: this.#headers({ Accept: "text/event-stream" }), signal: options.signal },
       null,
     );
   }

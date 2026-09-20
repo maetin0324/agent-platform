@@ -3,8 +3,10 @@ import type { WorkspaceSpec } from "~/celeris/types";
 
 /**
  * 案件の作業場所（ADR-0039 D1、docs/celeris-api-v1.md §3.46〜3.48。Phase G13k）のフォーム入出力。
- * `/projects` の新規フォーム、秘書の「新しい案件として」（`~/components/Conversation.tsx`）、
- * `/projects/:id` の編集カードが共有する（`~/components/WorkspaceFields.tsx` と対になる純粋関数）。
+ * `/projects` の新規フォームと `/projects/:id` の編集カードが共有する（`~/components/WorkspaceFields.tsx`
+ * と対になる純粋関数）。旧「秘書の『新しい案件として』」（`~/components/Conversation.tsx`）は Phase G22 で
+ * Console（ADR-0048 D4）に置き換わり削除された（新しい案件は `/projects` の新規フォームか、CoS への
+ * 対話が `propose_project` action を宣言する経路〈ADR-0048 D3〉で作る）。
  * GUI 側では検証しない: 空の `path` / 知らない `cluster` もそのまま celeris に送り、422 の文言
  * （`errors[].field = "workspace.cluster"`）をそのまま出す（`~/celeris/projects-admin.server.ts` と同じ規律）。
  */

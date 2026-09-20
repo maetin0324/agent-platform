@@ -55,10 +55,11 @@ const MIGRATION_0014: &str = include_str!("../migrations/0014_task_integrations.
 const MIGRATION_0015: &str = include_str!("../migrations/0015_lifecycle.sql");
 /// ADR-0046 D1/D2/D4（Phase 59）: `org_nodes.profile_json` と `tasks.skills_json` / `tasks.mode`。
 const MIGRATION_0016: &str = include_str!("../migrations/0016_org_profiles.sql");
+const MIGRATION_0017: &str = include_str!("../migrations/0017_console_actions.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -756,6 +757,17 @@ pub trait TaskStore:
         limit: usize,
     ) -> Result<Vec<Message>, StoreError>;
 
+    // ---- ADR-0048 D3（Phase 60b）: CoS の actions の冪等性 ----
+
+    /// この `run_id` の actions をまだ実行していなければ記録して `true`、既に実行済みなら
+    /// 何もせず `false`（`console_action_runs.run_id` は一意。ADR-0048 D3「Idempotent per run」）。
+    fn console_action_run_claim(
+        &self,
+        run_id: &str,
+        task_id: TaskId,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
+
     // ---- Phase 31: 失敗した仕事をやり直す（実機の事故、2026-09-18）----
 
     /// `original` は `failed` または `cancelled` でなければ `StoreError::InvalidTransition`（`trigger = "retry"`）。
@@ -1096,6 +1108,7 @@ impl SqliteStore {
             14 => Ok(MIGRATION_0014),
             15 => Ok(MIGRATION_0015),
             16 => Ok(MIGRATION_0016),
+            17 => Ok(MIGRATION_0017),
             other => Err(StoreError::Invalid(format!(
                 "unknown migration version: {other}"
             ))),
@@ -1667,6 +1680,10 @@ impl SqliteStore {
             },
             None => None,
         };
+        // ADR-0048 D3（Phase 60b）: `metadata_json`（actions の実行結果）は補助表示用なので、
+        // 形が壊れていても run は落とさない（`None` として読む）。
+        let metadata_json: Option<String> = row.get(8)?;
+        let metadata = metadata_json.and_then(|raw| serde_json::from_str(&raw).ok());
         Ok((|| {
             Ok(Message {
                 id,
@@ -1676,6 +1693,7 @@ impl SqliteStore {
                 text: row.get(4)?,
                 run_id: row.get(5)?,
                 task_id,
+                metadata,
                 created_at: parse_rfc3339(&created_at)?,
             })
         })())
@@ -3448,9 +3466,14 @@ impl TaskStore for SqliteStore {
 
     fn message_append(&self, message: &Message) -> Result<(), StoreError> {
         let conn = self.lock()?;
+        let metadata_json = message
+            .metadata
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         conn.execute(
-            "INSERT INTO messages (id, node_id, project_id, role, text, run_id, created_at, task_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO messages (id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 message.id.to_string(),
                 message.node_id,
@@ -3460,6 +3483,7 @@ impl TaskStore for SqliteStore {
                 message.run_id,
                 format_rfc3339(message.created_at)?,
                 message.task_id.map(|t| t.to_string()),
+                metadata_json,
             ],
         )?;
         Ok(())
@@ -3475,11 +3499,11 @@ impl TaskStore for SqliteStore {
         // 新しい順に `limit` 件取ってから古い順に戻す（直近のやり取りを時系列で渡すため）。
         let sql = match project_id {
             Some(_) => {
-                "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id FROM messages \
+                "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json FROM messages \
                  WHERE node_id = ?1 AND project_id = ?2 ORDER BY created_at DESC, id DESC LIMIT ?3"
             }
             None => {
-                "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id FROM messages \
+                "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json FROM messages \
                  WHERE node_id = ?1 AND project_id IS NULL ORDER BY created_at DESC, id DESC LIMIT ?3"
             }
         };
@@ -3520,7 +3544,7 @@ impl TaskStore for SqliteStore {
         // `after` 有り = 古い順にその先から、無し = 新しい順に `limit` 件取って戻す。
         let order = if after.is_some() { "ASC" } else { "DESC" };
         let sql = format!(
-            "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id FROM messages \
+            "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json FROM messages \
              WHERE {where_sql} ORDER BY created_at {order}, id {order} LIMIT ?"
         );
         args.push(Box::new(limit as i64));
@@ -3537,6 +3561,23 @@ impl TaskStore for SqliteStore {
             out.reverse();
         }
         Ok(out)
+    }
+
+    // ---- ADR-0048 D3（Phase 60b）: CoS の actions の冪等性 ----
+
+    fn console_action_run_claim(
+        &self,
+        run_id: &str,
+        task_id: TaskId,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let affected = conn.execute(
+            "INSERT OR IGNORE INTO console_action_runs (run_id, task_id, executed_at) \
+             VALUES (?1, ?2, ?3)",
+            params![run_id, task_id.to_string(), format_rfc3339(now)?],
+        )?;
+        Ok(affected == 1)
     }
 
     // ---- ADR-0040 D4（Phase 47）: `daemon_instances` ----
@@ -5673,6 +5714,7 @@ mod tests {
             text: "こんにちは".into(),
             run_id: None,
             task_id: Some(task_id),
+            metadata: None,
             created_at: OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap(),
         };
         store.message_append(&message).unwrap();
@@ -5714,7 +5756,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 16);
+        assert_eq!(SCHEMA_VERSION, 17);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -5977,6 +6019,7 @@ mod tests {
                     None
                 },
                 task_id: Some(task_id),
+                metadata: None,
                 created_at: base + std::time::Duration::from_secs(n as u64),
             };
             store.message_append(&m).unwrap();
@@ -6253,7 +6296,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 16);
+        assert_eq!(SCHEMA_VERSION, 17);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -6744,7 +6787,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 16);
+        assert_eq!(SCHEMA_VERSION, 17);
 
         let project = store.project_get(project_id).unwrap().expect("project");
         assert_eq!(project.status, ProjectStatus::Active);
@@ -6779,6 +6822,91 @@ mod tests {
             .expect("milestone");
         assert_eq!(milestone.status, MilestoneStatus::Cancelled);
         assert_eq!(milestone.paused_from, None);
+    }
+
+    /// ADR-0048 D3（Phase 60b）: migration 0017 が schema 16 の DB に `messages.metadata_json` と
+    /// `console_action_runs` を足す。既存の行は `metadata = None` のまま読める。
+    #[test]
+    fn migration_0017_adds_message_metadata_and_console_action_runs_to_a_schema_16_db() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("legacy.sqlite3");
+        let message_id = MessageId::new();
+        let now = format_rfc3339(OffsetDateTime::now_utc()).unwrap();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            SqliteStore::configure_pragmas(&conn, &StoreOptions::default()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+            )
+            .unwrap();
+            for version in 1..=16 {
+                SqliteStore::apply_migration_version(&mut conn, version).unwrap();
+            }
+            // 16 版の列だけで対話の行を 1 件書く（`metadata_json` はまだ無い）。
+            conn.execute(
+                "INSERT INTO messages (id, node_id, project_id, role, text, run_id, created_at, task_id) \
+                 VALUES (?1, 'secretary', NULL, 'user', '昔の発言', NULL, ?2, NULL)",
+                params![message_id.to_string(), now],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 17);
+
+        // 導入前の行は `metadata = None` として読める。
+        let messages = store.message_list("secretary", None, 10).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, message_id);
+        assert_eq!(messages[0].metadata, None);
+
+        // 新しい行は `metadata` を往復できる。
+        let with_metadata = Message {
+            id: MessageId::new(),
+            node_id: "secretary".into(),
+            project_id: None,
+            role: MessageRole::Node,
+            text: "できました".into(),
+            run_id: Some("run-1".into()),
+            task_id: None,
+            metadata: Some(crate::MessageMetadata {
+                actions_executed: vec![crate::MessageActionResult {
+                    kind: "create_task".into(),
+                    summary: "タスクを作りました: 直す".into(),
+                    task_id: None,
+                    project_id: None,
+                    milestone_id: None,
+                }],
+                actions_failed: vec![],
+            }),
+            created_at: OffsetDateTime::now_utc(),
+        };
+        store.message_append(&with_metadata).unwrap();
+        let messages = store.message_list("secretary", None, 10).unwrap();
+        assert_eq!(messages[1].metadata, with_metadata.metadata);
+
+        // `console_action_runs`: 同じ run の 2 回目の claim は何もしない。
+        let task_id = TaskId::new();
+        let now = OffsetDateTime::now_utc();
+        assert!(
+            store
+                .console_action_run_claim("run-1", task_id, now)
+                .unwrap(),
+            "1 回目は新規に記録する"
+        );
+        assert!(
+            !store
+                .console_action_run_claim("run-1", task_id, now)
+                .unwrap(),
+            "2 回目は既に実行済みなので何もしない"
+        );
+        assert!(
+            store
+                .console_action_run_claim("run-2", task_id, now)
+                .unwrap(),
+            "別の run は新規に記録する"
+        );
     }
 
     // ---- ADR-0044 D2/D3/D4（Phase 53）: コメント・ラベル・種類・ボードのフィルタ ----
@@ -6817,7 +6945,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 16);
+        assert_eq!(SCHEMA_VERSION, 17);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn
