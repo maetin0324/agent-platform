@@ -125,6 +125,20 @@ write_gate_json() {
 
 # ---- gate（D2 の順番どおり） ----------------------------------------------
 
+# Relative dep-info and mtimes from another worktree can leave stale workspace
+# metadata even after serialized builds. Keep third-party dependencies cached.
+run_step cargo-workspace-clean "$BUILD" -- python3 -c '
+import json, subprocess
+metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version=1"]))
+members = set(metadata["workspace_members"])
+args = ["cargo", "clean"]
+for package in metadata["packages"]:
+    if package["id"] in members:
+        args.extend(["-p", package["name"]])
+if len(args) == 2:
+    raise SystemExit("no workspace packages found; refusing an unrestricted clean")
+subprocess.run(args, check=True)
+'
 run_step cargo-test "$BUILD" -- cargo test --workspace
 run_step cargo-clippy "$BUILD" -- cargo clippy --workspace -- -D warnings
 run_step cargo-build "$BUILD" -- cargo build --release -p celeris -p celerisctl
