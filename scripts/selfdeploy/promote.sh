@@ -75,7 +75,11 @@ else
 fi
 
 if [ "$LIVE_RELEASE" = "$SHA12" ]; then
-  sd_die "the running celeris already reports release=$SHA12; nothing to promote"
+  if [ "$OLD" != "$SHA12" ] && [ "$LIVE_OK" = true ] && [ "$LIVE_ROLE" = active ] && [ -z "$PRE_START" ]; then
+    sd_log "celeris already took over; resuming the incomplete GUI/link handoff"
+  else
+    sd_die "the running celeris already reports release=$SHA12; nothing to promote"
+  fi
 fi
 
 MODE=stop-start
@@ -92,16 +96,17 @@ backup_db() {
   sd_log "backup ok: $(du -h "$BACKUP" | cut -f1)"
 }
 
-# `poll_release <url> <json-path-of-release> <want> <role-path|-> <want-role|-> <timeout> ` —
+# `poll_release <url> <json-path-of-release> <want> <role-path|-> <want-role|-> <timeout> [samples]` —
 # SO_REUSEPORT で新旧が同じポートを共有するので、1 回の応答では足りない。
 # 毎秒 5 回サンプルし、**全部**が期待どおりになったら成功（＝旧はもう listener を閉じている）。
 poll_release() {
   local url="$1" rel_path="$2" want="$3" role_path="$4" want_role="$5" timeout="$6"
+  local samples="${7:-5}"
   local waited=0 i all tmp got_rel got_role
   tmp="$(mktemp)"
   while [ "$waited" -lt "$timeout" ]; do
     all=true
-    for i in 1 2 3 4 5; do
+    for ((i=0; i<samples; i++)); do
       if ! sd_http_get "$url" >"$tmp" 2>/dev/null; then all=false; break; fi
       sd_json_valid "$tmp" || { all=false; break; }
       got_rel="$(sd_json_get "$tmp" "$rel_path" 2>/dev/null || echo "")"
@@ -114,9 +119,9 @@ poll_release() {
     if [ "$all" = true ]; then
       rm -f "$tmp"
       if [ "$role_path" != "-" ]; then
-        sd_log "poll $url: release=$want role=$want_role after ${waited}s (5/5 samples)"
+        sd_log "poll $url: release=$want role=$want_role after ${waited}s ($samples/$samples samples)"
       else
-        sd_log "poll $url: release=$want after ${waited}s (5/5 samples)"
+        sd_log "poll $url: release=$want after ${waited}s ($samples/$samples samples)"
       fi
       return 0
     fi
@@ -201,13 +206,19 @@ promote_live() {
 
   sd_log "systemctl --user start celeris-gui@$SHA12"
   systemctl --user start "celeris-gui@$SHA12" || sd_die "failed to start celeris-gui@$SHA12 (celeris is already the new one)"
-  if ! poll_release "http://127.0.0.1:$SD_PROD_GUI_PORT/healthz" release "$SHA12" - - 60; then
+  # GUIは旧も応答し続ける。新からの応答を確認 → 旧を止める → 全応答が新か確認、の順。
+  if ! poll_release "http://127.0.0.1:$SD_PROD_GUI_PORT/healthz" release "$SHA12" - - 60 1; then
     systemctl --user stop "celeris-gui@$SHA12" || true
     sd_die "the new GUI did not take over :$SD_PROD_GUI_PORT within 60s (celeris is already the new one; fix the GUI by hand)"
   fi
   if [ -n "$OLD" ] && systemctl --user is-active --quiet "celeris-gui@$OLD"; then
     sd_log "systemctl --user stop celeris-gui@$OLD"
     systemctl --user stop "celeris-gui@$OLD" || sd_log "warning: stop celeris-gui@$OLD failed"
+  fi
+  if ! poll_release "http://127.0.0.1:$SD_PROD_GUI_PORT/healthz" release "$SHA12" - - 60; then
+    if [ -n "$OLD" ]; then systemctl --user start "celeris-gui@$OLD" || true; fi
+    systemctl --user stop "celeris-gui@$SHA12" || true
+    sd_die "GUI handoff could not be confirmed; restored the old GUI"
   fi
   systemctl --user enable "celeris-gui@$SHA12" || sd_log "warning: enable celeris-gui@$SHA12 failed"
   if [ -n "$OLD" ]; then
