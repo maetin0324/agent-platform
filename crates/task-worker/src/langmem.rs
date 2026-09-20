@@ -346,7 +346,10 @@ async fn run_langmem(
         .await
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|v| v.get("candidates").and_then(|c| c.as_array().map(|a| a.len())));
+        .and_then(|v| {
+            v.get("candidates")
+                .and_then(|c| c.as_array().map(|a| a.len()))
+        });
 
     let (terminal, provider_failure) = if !exit_status.success() {
         let exit_repr = match exit_status.code() {
@@ -356,9 +359,7 @@ async fn run_langmem(
         let pf = classify_provider_failure(&classify_text);
         (
             Terminal::Error {
-                message: format!(
-                    "langmem runner exited with a non-zero status (exit={exit_repr})"
-                ),
+                message: format!("langmem runner exited with a non-zero status (exit={exit_repr})"),
                 retryable: true,
             },
             pf,
@@ -712,7 +713,10 @@ echo 'CELERIS_RESULT {"summary": "", "candidates": 0}'
         }
         let pid_text = std::fs::read_to_string(&pid_file)
             .expect("stub should have recorded its pid before looping");
-        let pid: i32 = pid_text.trim().parse().expect("pid.txt should contain a pid");
+        let pid: i32 = pid_text
+            .trim()
+            .parse()
+            .expect("pid.txt should contain a pid");
         assert!(
             !std::path::Path::new(&format!("/proc/{pid}")).exists(),
             "process {pid} should have been killed"

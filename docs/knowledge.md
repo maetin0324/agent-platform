@@ -17,11 +17,11 @@
 
 ## 2. 置き場と形（D1）
 
-正本は **`[knowledge] root`**（既定 `~/knowledge`）。**バージョン管理下**に置く（`celerisctl knowledge init` が
+正本は **`[knowledge] root`**（既定 `~/.local/share/celeris/knowledge`）。**バージョン管理下**に置く（`celerisctl knowledge init` が
 用意する。変更は 1 件ごとに 1 コミット）。
 
 ```
-~/knowledge/
+~/.local/share/celeris/knowledge/
   user/                 profile.md / expertise.md / preferences.md / goals.md
   environment/          clusters/<name>.md, servers/<name>.md, tools/<name>.md
   projects/<slug>/      design.md / decisions.md / status.md …（slug は ADR-0044 D7 の案件 slug）
@@ -77,7 +77,7 @@ celerisctl knowledge reindex
 
 - **このサブコマンドだけは DB を開かない**。KB のファイルを直接読み書きするので、コンテナの中でも
   KB さえ同じパスにマウントされていれば動く。
-- 根の決め方: `--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/knowledge`。
+- 根の決め方: `--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/.local/share/celeris/knowledge`。
   設定ファイルが読めない環境（コンテナの中）では黙って次の候補に落ちる。
 - `search` の順位（ADR-0047 D3）: **`tags` の一致語数 → `title`（とパス）の一致語数 → 本文の全文一致 →
   `updated` の新しさ → パスの辞書順**。語は空白で切り、大文字小文字は区別しない部分一致。
@@ -133,10 +133,10 @@ celerisctl knowledge reindex
 ## 6. 立ち上げ（人が 1 回だけやること）
 
 ```bash
-celerisctl knowledge init                  # ~/knowledge を用意する（冪等）
+celerisctl knowledge init                  # ~/.local/share/celeris/knowledge を用意する（冪等）
 $EDITOR ~/.config/celeris/config.toml      # [knowledge] を書く（既定でよければ省略できる）
-$EDITOR ~/knowledge/user/profile.md        # 雛形を埋める
-$EDITOR ~/knowledge/environment/clusters/pegasus.md
+$EDITOR ~/.local/share/celeris/knowledge/user/profile.md        # 雛形を埋める
+$EDITOR ~/.local/share/celeris/knowledge/environment/clusters/pegasus.md
 celerisctl knowledge reindex
 ```
 

@@ -110,7 +110,7 @@ dir = "../memory"
 
 # 知識ベース（ADR-0047 D1 / D2、Phase 61）。**正本は root の下の Markdown**（DB でも外部サービスでもない）。
 #
-#   root           — 正本の置き場（既定 "~/knowledge"）。**celeris は作らない**。
+#   root           — 正本の置き場（既定 "~/.local/share/celeris/knowledge"）。**celeris は作らない**。
 #                    人が 1 回だけ `celerisctl knowledge init` で用意する（リポジトリ化 + 骨組み + 雛形 + 索引）。
 #                    無ければ GUI の「知識」は `initialized: false`、前置きの索引は空（エラーにはしない）。
 #   default_mounts — 実効 profile（ADR-0046 D1）の `knowledge` が何も言わないときに全ノードが継ぐマウント。
@@ -121,7 +121,7 @@ dir = "../memory"
 # ワーカーは `celerisctl knowledge search|get|record` で読み書きする（HTTP は使わない）。コンテナ実行では
 # root を同じパスに読み取り専用で、`_inbox` だけ書き込み可でマウントする（ADR-0043 D3 / ADR-0047 D3）。
 [knowledge]
-# root = "~/knowledge"
+# root = "~/.local/share/celeris/knowledge"
 # default_mounts = ["kb:user", "kb:environment"]
 
 # 知識の自動メンテナンス（ADR-0047 D4、Phase 62）。**既定は無効**。終端になったタスクから

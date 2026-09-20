@@ -1,6 +1,6 @@
 //! `celerisctl knowledge`（ADR-0047 D3。Phase 61）— **ワーカーからの共通アクセス**。
 //!
-//! このサブコマンドだけは **DB を開かない**（`~/knowledge` を直接読み書きする）。コンテナの中でも
+//! このサブコマンドだけは **DB を開かない**（`~/.local/share/celeris/knowledge` を直接読み書きする）。コンテナの中でも
 //! KB を同じパスにマウントすればそのまま動く（ADR-0043 D3 / ADR-0047 D3）。
 //!
 //! ```text
@@ -11,7 +11,7 @@
 //! celerisctl knowledge reindex
 //! ```
 //!
-//! 根の決め方（ADR-0047 D3）: `--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/knowledge`。
+//! 根の決め方（ADR-0047 D3）: `--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/.local/share/celeris/knowledge`。
 //! 設定ファイルが読めない環境（コンテナの中）では黙って次の候補に落ちる。
 
 use std::io::Read;
@@ -45,7 +45,7 @@ pub enum KnowledgeCommand {
 /// どのサブコマンドにもある根の指定。
 #[derive(Args, Debug, Default)]
 pub struct RootArgs {
-    /// 知識ベースの根（既定: `CELERIS_KNOWLEDGE_ROOT` → `[knowledge] root` → `~/knowledge`）。
+    /// 知識ベースの根（既定: `CELERIS_KNOWLEDGE_ROOT` → `[knowledge] root` → `~/.local/share/celeris/knowledge`）。
     #[arg(long)]
     pub root: Option<PathBuf>,
     /// 設定ファイル（`[knowledge] root` を読むためだけ。読めなければ無視する）。
@@ -279,7 +279,7 @@ mod tests {
     fn args(root: &Path) -> RootArgs {
         RootArgs {
             root: Some(root.to_path_buf()),
-            // 実ホームの設定を読ませない（テストは `~/knowledge` に触らない）。
+            // 実ホームの設定を読ませない（テストは `~/.local/share/celeris/knowledge` に触らない）。
             config: Some(PathBuf::from("/nonexistent/celeris.toml")),
         }
     }
@@ -338,7 +338,7 @@ mod tests {
         );
     }
 
-    /// `--root` が最優先。設定が読めなければ既定（`~/knowledge`）に落ちる。
+    /// `--root` が最優先。設定が読めなければ既定（`~/.local/share/celeris/knowledge`）に落ちる。
     #[test]
     fn the_root_flag_wins_over_an_unreadable_config() {
         let explicit = PathBuf::from("/tmp/celerisctl-kb-test");

@@ -244,7 +244,7 @@ pub struct DispatchConfig {
 /// `[knowledge]`（ADR-0047 D1 / D2。Phase 61）。
 #[derive(Debug, Clone, Default)]
 pub struct KnowledgeRuntimeConfig {
-    /// 正本の置き場（絶対パス。既定 `~/knowledge`）。**celeris は作らない**。
+    /// 正本の置き場（絶対パス。既定 `~/.local/share/celeris/knowledge`）。**celeris は作らない**。
     pub root: PathBuf,
     /// 実効 profile（ADR-0046 D1）が何も言わないときに全ノードが継ぐマウント。
     pub default_mounts: Vec<task_core::KnowledgeMount>,

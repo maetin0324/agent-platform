@@ -18,7 +18,17 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 /// ADR-0047 D1: `[knowledge] root` を設定しなかったときの正本の置き場。
-pub const DEFAULT_ROOT: &str = "~/knowledge";
+pub const DEFAULT_ROOT: &str = "~/.local/share/celeris/knowledge";
+
+/// 既定の根。XDG Base Directory に従う: `$XDG_DATA_HOME/celeris/knowledge`（絶対パスのときだけ採る）、無ければ
+/// `~/.local/share/celeris/knowledge`（人の指示 2026-09-20: ホームの直下に `knowledge/` を置かない。知識は人が持つ
+/// **データ**なので XDG_DATA_HOME）。
+pub fn default_root() -> std::path::PathBuf {
+    match std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from) {
+        Some(dir) if dir.is_absolute() => dir.join("celeris").join("knowledge"),
+        _ => std::path::PathBuf::from(DEFAULT_ROOT),
+    }
+}
 /// ADR-0047 D1: 候補の置き場（索引には入らない）。
 pub const INBOX_DIR: &str = "_inbox";
 /// ADR-0047 D4（Phase 62）: `op = retire` を accept したときの行き先（索引にも検索にも入らない）。

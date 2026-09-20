@@ -1,6 +1,6 @@
 //! 知識ベースのファイル操作（ADR-0047 D1〜D3。Phase 61）。
 //!
-//! **正本は `~/knowledge/` の Markdown**（`[knowledge] root` で変えられる）で、DB には何も持たない。
+//! **正本は `~/.local/share/celeris/knowledge/` の Markdown**（`[knowledge] root` で変えられる）で、DB には何も持たない。
 //! `task_ops::docs`（ADR-0044 D7）と同じ流儀で **`git` を起こすだけ**（判断も LLM も無い。DESIGN 原則 1）。
 //! 文書との違いは「正本が作業ツリーそのもの」という一点で、読み取りは常にファイルを読み、書き込みは
 //! 作業ツリーに書いてから 1 件ずつコミットする（一時 worktree は要らない。人も同じファイルを直接編集する）。
@@ -42,7 +42,7 @@ fn is_retired(path: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 根の解決（ADR-0047 D3: `--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/knowledge`）
+// 根の解決（ADR-0047 D3: `--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/.local/share/celeris/knowledge`）
 // ---------------------------------------------------------------------------
 
 /// 知識ベースの根を決める。`~` は展開する。
@@ -52,7 +52,7 @@ pub fn resolve_root(explicit: Option<&Path>, configured: Option<&Path>) -> PathB
         .map(Path::to_path_buf)
         .or_else(|| std::env::var_os("CELERIS_KNOWLEDGE_ROOT").map(PathBuf::from))
         .or_else(|| configured.map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from(kb::DEFAULT_ROOT));
+        .unwrap_or_else(kb::default_root);
     task_core::expand_home(&raw, home.as_deref())
 }
 
@@ -124,7 +124,7 @@ pub struct InitOutcome {
     pub added: Vec<String>,
 }
 
-/// ADR-0047 D1: `~/knowledge` を git のリポジトリとして用意する（**冪等**）。
+/// ADR-0047 D1: `~/.local/share/celeris/knowledge` を git のリポジトリとして用意する（**冪等**）。
 ///
 /// 既にあるファイルは 1 バイトも触らない。足りないディレクトリ・雛形・`README.md`・`.gitignore`・
 /// `_inbox/.gitkeep` だけを書き、変わったものがあれば 1 回コミットして `index.json` を作り直す。
@@ -1691,7 +1691,7 @@ mod tests {
         );
     }
 
-    /// 根の決め方（`--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/knowledge`）。
+    /// 根の決め方（`--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/.local/share/celeris/knowledge`）。
     /// 環境変数は他のテストと干渉しないよう、この 1 本の中だけで設定する。
     #[test]
     fn the_root_comes_from_the_flag_then_the_env_then_the_config() {
@@ -1699,7 +1699,7 @@ mod tests {
         let configured = PathBuf::from("/tmp/kb-config");
         assert_eq!(resolve_root(Some(&explicit), Some(&configured)), explicit);
         assert_eq!(resolve_root(None, Some(&configured)), configured);
-        // 既定は `~/knowledge`（`~` は展開される）。
+        // 既定は `~/.local/share/celeris/knowledge`（`~` は展開される）。
         let fallback = resolve_root(None, None);
         assert!(fallback.ends_with("knowledge"), "{}", fallback.display());
         assert!(

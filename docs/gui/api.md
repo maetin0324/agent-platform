@@ -2244,7 +2244,7 @@ data: {"now":"…"}
 
 ### 3.101〜3.106 知識ベース（ADR-0047、Phase 61。**90〜95。変更系は管理系: `token_file` 未設定でも 401**）
 
-**正本は `[knowledge] root`（既定 `~/knowledge`）の Markdown**（DB には何も持たない）。案件の文書（§3.92〜3.97）と
+**正本は `[knowledge] root`（既定 `~/.local/share/celeris/knowledge`）の Markdown**（DB には何も持たない）。案件の文書（§3.92〜3.97）と
 同じ流儀だが、**正本は作業ツリーのファイルそのもの**なので、読み取りは常にファイルを読む（人が編集中の未コミットの
 変更もそのまま見える）。書き込みは作業ツリーに書いてから**そのパスだけを 1 件 1 コミット**する。
 author / committer は `Celeris (human) <celeris@local>`（`celerisctl knowledge record` が作る候補だけ

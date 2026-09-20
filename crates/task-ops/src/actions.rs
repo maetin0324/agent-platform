@@ -223,7 +223,9 @@ fn create_task_action(
         objective: objective.to_string(),
         acceptance: acceptance
             .iter()
-            .map(|text| CriterionSpec::Human { text: text.clone() })
+            // Console からの小さな頼みを毎回人の承認待ちにしない: 受け入れ条件の文はレビュー担当が判定する
+            // （人が見たいときはタスク画面で条件を直せる。ADR-0044 D1）。
+            .map(|text| CriterionSpec::Reviewer { text: text.clone() })
             .collect(),
         kind: task_core::TaskKind::Execute,
         tier: None,

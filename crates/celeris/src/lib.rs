@@ -801,7 +801,7 @@ pub fn api_settings(
         // ADR-0044 D7（Phase 57）: 案件に git のリポジトリが無いときに文書リポジトリを作る場所
         // （SPEC §5: 成果物は `~/workspace/` に）。`$HOME` が無ければ作れない（409）。
         docs_repo_root: task_core::home_dir().map(|home| home.join("workspace")),
-        // ADR-0047 D1（Phase 61）: 知識ベースの正本（既定 `~/knowledge`）。**API は作らない**。
+        // ADR-0047 D1（Phase 61）: 知識ベースの正本（既定 `~/.local/share/celeris/knowledge`）。**API は作らない**。
         knowledge_root: Some(config.knowledge.root.clone()),
     }
 }

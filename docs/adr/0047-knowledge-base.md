@@ -221,3 +221,10 @@
 - 終端になったタスクを 1 本用意し、知識整理 run が起き、`confidence: high` の候補が知識ベースへ
   コミットされ、GUI の Console/タイムライン/`_inbox` から見えることを確認する。
 - 詳しい手順は `docs/PROGRESS.md` の「Phase 62」節の「本番の手順」を参照。
+
+## 置き場の変更（2026-09-20。人の指示）
+
+「home のトップに knowledge ディレクトリを置くのではなく、XDG に従ったほうがお作法がいい」。D1 の既定の根を
+**`$XDG_DATA_HOME/celeris/knowledge`（無ければ `~/.local/share/celeris/knowledge`）**に改める（知識は人が持つデータなので
+XDG_DATA_HOME）。`[knowledge] root` / `CELERIS_KNOWLEDGE_ROOT` / `--root` で変えられるのは従来どおり。本文中の `~/knowledge` は
+この新しい既定に読み替える。本番は `~/knowledge`（雛形だけ）を新しい場所へ `mv` し、`config.toml` の `root` を直した。

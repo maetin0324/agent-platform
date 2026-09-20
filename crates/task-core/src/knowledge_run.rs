@@ -149,7 +149,9 @@ pub trait KnowledgeRunStore: Send + Sync {
     fn knowledge_run_recent(&self, limit: usize) -> Result<Vec<KnowledgeRun>, StoreError>;
 }
 
-fn row_to_knowledge_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<KnowledgeRun, StoreError>> {
+fn row_to_knowledge_run(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<KnowledgeRun, StoreError>> {
     let task_id: String = row.get(0)?;
     let run_task_id: String = row.get(1)?;
     let state: String = row.get(2)?;
@@ -192,7 +194,8 @@ fn row_to_knowledge_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Know
     }))
 }
 
-const SELECT_KNOWLEDGE_RUN: &str = "SELECT task_id, run_task_id, state, created_at, applied_at, summary_json FROM knowledge_runs";
+const SELECT_KNOWLEDGE_RUN: &str =
+    "SELECT task_id, run_task_id, state, created_at, applied_at, summary_json FROM knowledge_runs";
 
 impl KnowledgeRunStore for SqliteStore {
     fn knowledge_run_create(
@@ -316,7 +319,10 @@ mod tests {
             .knowledge_run_get(task_id)
             .expect("get")
             .expect("some");
-        assert_eq!(run.run_task_id, run_task_id, "2 回目の run_task_id は無視される");
+        assert_eq!(
+            run.run_task_id, run_task_id,
+            "2 回目の run_task_id は無視される"
+        );
         assert_eq!(run.state, KnowledgeRunState::Scheduled);
         assert!(run.applied_at.is_none());
         assert!(run.summary.is_none());
@@ -358,9 +364,7 @@ mod tests {
         let store = store();
         assert_eq!(store.knowledge_run_get(TaskId::new()).expect("get"), None);
         assert_eq!(
-            store
-                .knowledge_run_by_run_task(TaskId::new())
-                .expect("get"),
+            store.knowledge_run_by_run_task(TaskId::new()).expect("get"),
             None
         );
         assert!(store.knowledge_run_recent(10).expect("recent").is_empty());

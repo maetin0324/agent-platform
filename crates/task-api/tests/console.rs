@@ -376,8 +376,13 @@ async fn knowledge_blocks_show_the_applied_summary_and_respect_scope() {
         .knowledge_run_create(source.id, run_task.id, OffsetDateTime::now_utc())
         .expect("create run");
     // まだ適用していない（`scheduled`）うちは出ない。
-    let before = send(&env.router(), get("/api/v1/console?scope=all")).await.json();
-    assert!(!kinds(&before).contains(&"knowledge".to_string()), "{before:#}");
+    let before = send(&env.router(), get("/api/v1/console?scope=all"))
+        .await
+        .json();
+    assert!(
+        !kinds(&before).contains(&"knowledge".to_string()),
+        "{before:#}"
+    );
 
     env.store
         .knowledge_run_finish(
@@ -412,15 +417,21 @@ async fn knowledge_blocks_show_the_applied_summary_and_respect_scope() {
     assert_eq!(block["project_id"], pluvio.id.to_string());
 
     // 案件で絞れる。
-    let scoped = send(&app, get(&format!("/api/v1/console?scope=project:{}", pluvio.id)))
-        .await
-        .json();
+    let scoped = send(
+        &app,
+        get(&format!("/api/v1/console?scope=project:{}", pluvio.id)),
+    )
+    .await
+    .json();
     assert!(kinds(&scoped).contains(&"knowledge".to_string()));
     // 別のノードでは出ない。
     let other_node = send(&app, get("/api/v1/console?scope=node:research"))
         .await
         .json();
-    assert!(!kinds(&other_node).contains(&"knowledge".to_string()), "{other_node:#}");
+    assert!(
+        !kinds(&other_node).contains(&"knowledge".to_string()),
+        "{other_node:#}"
+    );
 }
 
 /// 受け入れ 1: `limit` と `since` で続きが読める（同じブロックを 2 回返さない）。

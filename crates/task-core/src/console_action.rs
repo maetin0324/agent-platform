@@ -25,7 +25,7 @@ pub enum ConsoleAction {
     CreateTask {
         title: String,
         objective: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "lenient_acceptance")]
         acceptance: Vec<String>,
         #[serde(default)]
         harness: Option<String>,
@@ -68,5 +68,57 @@ impl ConsoleAction {
             ConsoleAction::AddMilestone { .. } => "add_milestone",
             ConsoleAction::AskHuman { .. } => "ask_human",
         }
+    }
+}
+
+/// 実機 2026-09-20: CoS は `acceptance` をタスクの実際の形（`{"text": "…", "check": {…}}`）で書くことがあり、
+/// 文字列しか受けない型だと action 全体が「invalid type: map, expected a string」で捨てられた（タスクが作られない）。
+/// 文字列でも、`text` を持つオブジェクトでも受け、どちらも受け入れ条件の**文**として扱う（判定の方法は実行側が決める）。
+fn lenient_acceptance<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = Deserialize::deserialize(deserializer)?;
+    let mut out = Vec::with_capacity(raw.len());
+    for item in raw {
+        match item {
+            serde_json::Value::String(text) => out.push(text),
+            serde_json::Value::Object(map) => match map.get("text").and_then(|t| t.as_str()) {
+                Some(text) => out.push(text.to_string()),
+                None => {
+                    return Err(serde::de::Error::custom(
+                        "acceptance の各要素は文字列か、`text` を持つオブジェクト",
+                    ));
+                }
+            },
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "acceptance の各要素は文字列か、`text` を持つオブジェクト",
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod lenient_tests {
+    use super::*;
+
+    #[test]
+    fn acceptance_accepts_strings_and_criterion_objects() {
+        let json = r#"{"type":"create_task","title":"t","objective":"o",
+            "acceptance":["文だけ", {"text":"オブジェクト","check":{"type":"reviewer"}}]}"#;
+        let action: ConsoleAction = serde_json::from_str(json).expect("parse");
+        let ConsoleAction::CreateTask { acceptance, .. } = action else {
+            panic!("create_task")
+        };
+        assert_eq!(
+            acceptance,
+            vec!["文だけ".to_string(), "オブジェクト".to_string()]
+        );
+        let bad =
+            r#"{"type":"create_task","title":"t","objective":"o","acceptance":[{"check":{}}]}"#;
+        assert!(serde_json::from_str::<ConsoleAction>(bad).is_err());
     }
 }

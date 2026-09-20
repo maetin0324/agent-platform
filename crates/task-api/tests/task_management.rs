@@ -696,7 +696,10 @@ async fn the_timeline_shows_the_knowledge_maintenance_run() {
         get_with(&format!("/api/v1/tasks/{}/timeline", task.id), &admin()),
     )
     .await;
-    let items = scheduled.json()["items"].as_array().cloned().expect("items");
+    let items = scheduled.json()["items"]
+        .as_array()
+        .cloned()
+        .expect("items");
     let knowledge: Vec<&Value> = items.iter().filter(|i| i["kind"] == "knowledge").collect();
     assert_eq!(knowledge.len(), 1, "{items:?}");
     assert_eq!(knowledge[0]["state"], "scheduled");

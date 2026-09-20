@@ -350,7 +350,7 @@ fn default_memory_dir() -> PathBuf {
 ///
 /// ```toml
 /// [knowledge]
-/// root = "~/knowledge"
+/// root = "~/.local/share/celeris/knowledge"
 /// default_mounts = ["kb:user", "kb:environment"]
 /// ```
 ///
@@ -359,7 +359,7 @@ fn default_memory_dir() -> PathBuf {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KnowledgeConfig {
-    /// ADR-0047 D1: 既定は `~/knowledge`。相対なら設定ファイル基準。`Config::load` が絶対化する。
+    /// ADR-0047 D1: 既定は `~/.local/share/celeris/knowledge`。相対なら設定ファイル基準。`Config::load` が絶対化する。
     #[serde(default = "default_knowledge_root")]
     pub root: PathBuf,
     /// ADR-0047 D2: 実効 profile（ADR-0046 D1）の `knowledge` に何も無いときに全ノードが継ぐマウント。
@@ -441,7 +441,7 @@ impl KnowledgeConfig {
 }
 
 fn default_knowledge_root() -> PathBuf {
-    PathBuf::from(task_core::knowledge::DEFAULT_ROOT)
+    task_core::knowledge::default_root()
 }
 
 /// ADR-0046 D7 の木が `knowledge` を書くまでの既定（人のことと環境は誰でも読む）。
@@ -1450,7 +1450,7 @@ impl Config {
                 memory.dir = base.join(&memory.dir);
             }
         }
-        // ADR-0047 D1（Phase 61）: `[knowledge] root` も同じ扱い（既定の `~/knowledge` もここで絶対パスになる）。
+        // ADR-0047 D1（Phase 61）: `[knowledge] root` も同じ扱い（既定の `~/.local/share/celeris/knowledge` もここで絶対パスになる）。
         cfg.knowledge.root =
             task_core::expand_home(&cfg.knowledge.root, task_core::home_dir().as_deref());
         if cfg.knowledge.root.is_relative() {
@@ -4537,7 +4537,7 @@ roles = ["lead"]
         assert!(toml::from_str::<Config>("[secrets]\nbogus = 1\n").is_err());
     }
 
-    /// ADR-0047 D1 / D2（Phase 61）: `[knowledge]` は既定でも値を持ち（`~/knowledge`）、
+    /// ADR-0047 D1 / D2（Phase 61）: `[knowledge]` は既定でも値を持ち（`~/.local/share/celeris/knowledge`）、
     /// 相対パスは設定ファイル基準で絶対化され、`default_mounts` の綴り間違いは `validate()` が弾く。
     /// **ディレクトリは作らない**（用意するのは `celerisctl knowledge init` だけ）。
     #[test]
@@ -4568,10 +4568,10 @@ roles = ["lead"]
         assert_eq!(cfg.dispatch_config().knowledge.root, cfg.knowledge.root);
         assert_eq!(cfg.dispatch_config().knowledge.default_mounts.len(), 2);
 
-        // 節を書かなければ既定（`~/knowledge` と `kb:user` / `kb:environment`）。
+        // 節を書かなければ既定（`~/.local/share/celeris/knowledge` と `kb:user` / `kb:environment`）。
         let default: Config =
             toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
-        assert_eq!(default.knowledge.root, PathBuf::from("~/knowledge"));
+        assert_eq!(default.knowledge.root, task_core::knowledge::default_root());
         assert_eq!(
             default.knowledge.default_mounts,
             vec!["kb:user", "kb:environment"]

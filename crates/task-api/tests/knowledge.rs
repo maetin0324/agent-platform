@@ -587,8 +587,7 @@ async fn candidates_with_an_op_show_it_and_accept_behaves_per_op() {
             confidence: task_core::Confidence::Low,
         },
     ];
-    let outcome =
-        task_ops::knowledge::apply_candidates(&env.knowledge_root, "01J9", &candidates);
+    let outcome = task_ops::knowledge::apply_candidates(&env.knowledge_root, "01J9", &candidates);
     assert_eq!(outcome.inboxed.len(), 2, "{outcome:?}");
 
     let app = env.router();
@@ -641,10 +640,7 @@ async fn candidates_with_an_op_show_it_and_accept_behaves_per_op() {
     )
     .await;
     assert_eq!(accepted.status.as_u16(), 200, "{}", accepted.text());
-    assert_eq!(
-        accepted.json()["path"],
-        "_retired/environment/tools/old.md"
-    );
+    assert_eq!(accepted.json()["path"], "_retired/environment/tools/old.md");
     assert!(!env.knowledge_root.join("environment/tools/old.md").exists());
     assert!(
         env.knowledge_root
