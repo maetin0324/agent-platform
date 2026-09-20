@@ -409,6 +409,18 @@ fn active_projects_section(context: &RunContext) -> String {
             "- `{}` {}（{}）\n",
             project.id, project.title, project.status
         ));
+        if !project.repos.is_empty() {
+            out.push_str(&format!(
+                "  - 登録済み repos: {}（使用時の project: `{}`）\n",
+                project
+                    .repos
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                project.id
+            ));
+        }
         for milestone in &project.milestones {
             out.push_str(&format!(
                 "  - 途中目標 `{}` {}（{}）\n",
@@ -746,11 +758,15 @@ fn actions_instructions() -> String {
      `\"actions\": [...]` を宣言してください（taskd が決定的に実行します。あなた自身がタスクを \
      作ったり道具を使ったりはしません）。\n\
      - `{\"type\": \"create_task\", \"title\": \"…\", \"objective\": \"…\", \"acceptance\": [\"…\"], \
-     \"harness\": \"coding\", \"skills\": [\"rust\"], \"mode\": \"prototype\", \"repos\": [\"agent-platform\"], \
+     \"harness\": \"coding\", \"skills\": [\"rust\"], \"mode\": \"prototype\", \"repos\": [], \
      \"project\": \"<案件の id か null>\", \"milestone\": \"<途中目標の id か null>\", \"assignee\": null}`\n\
      - `{\"type\": \"propose_project\", \"title\": \"…\", \"request\": \"…\", \"repos\": [\"/abs/path\"]}`\n\
      - `{\"type\": \"add_milestone\", \"project\": \"<案件の id>\", \"title\": \"…\", \"description\": \"…\"}`\n\
      - `{\"type\": \"ask_human\", \"text\": \"…\"}`\n\
+     `create_task.repos` は案件内の登録名です。指定するときは必ず所属する案件の ID を `project` に書き、\
+     上の登録済み repos から選んでください。`project: null` と非空の `repos` の組み合わせは禁止です。\
+     既存のコードを直す依頼は、そのリポジトリが登録された既存案件に紐づけます。\
+     案件に属さない仕事は `project: null, repos: []`。判断できないときは推測せず質問してください。\n\
      目安: **1 つのタスクで 1 時間以内に終わり、承認が要らない変更**なら `create_task` を 1 つ書けば \
      十分です。「案件として」「途中目標に」のように人が儀式を求めていれば `propose_project` /\
      `add_milestone`。判断に迷うときは `ask_human`。案件・担当が分かっていれば `project` / `assignee` \
@@ -1090,6 +1106,7 @@ mod tests {
         let secretary = RunContext {
             conversation_addressee: Some(ConversationAddressee::Secretary),
             active_projects: vec![crate::protocol::ActiveProjectContext {
+                repos: vec!["agent-platform".into()],
                 id: "01PROJECT".into(),
                 title: "Pluvio".into(),
                 status: "active".into(),
@@ -1105,6 +1122,10 @@ mod tests {
         assert!(out.contains("## 進行中の案件"), "{out}");
         assert!(out.contains("01PROJECT"), "{out}");
         assert!(out.contains("Pluvio"), "{out}");
+        assert!(
+            out.contains("登録済み repos: `agent-platform`（使用時の project: `01PROJECT`）"),
+            "{out}"
+        );
         assert!(out.contains("隣接領域の調査"), "{out}");
         assert!(out.contains("actions"), "{out}");
         assert!(out.contains("create_task"), "{out}");

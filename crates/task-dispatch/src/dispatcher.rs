@@ -3363,6 +3363,12 @@ impl Dispatcher {
             let mut milestones = self.store.milestone_list(project.id)?;
             milestones.sort_by_key(|m| m.id);
             out.push(ActiveProjectContext {
+                repos: self
+                    .store
+                    .repo_list(project.id)?
+                    .into_iter()
+                    .map(|repo| repo.name)
+                    .collect(),
                 id: project.id.to_string(),
                 title: project.title.clone(),
                 status: project.status.as_str().to_string(),
@@ -10257,6 +10263,10 @@ mod tests {
         seed_conversation_org(store.as_ref());
 
         let mut active = titled_project("進行中の案件");
+        active.workspace = Some(WorkspaceSpec::Local {
+            path: dir.path().join("agent-platform"),
+            mode: Default::default(),
+        });
         active.status = ProjectStatus::Active;
         store.project_create(&active).unwrap();
         let milestone = store
@@ -10315,6 +10325,7 @@ mod tests {
         assert_eq!(project.id, active.id.to_string());
         assert_eq!(project.title, "進行中の案件");
         assert_eq!(project.status, "active");
+        assert_eq!(project.repos, vec!["agent-platform"]);
         assert_eq!(project.milestones.len(), 1);
         assert_eq!(project.milestones[0].id, milestone.id.to_string());
         assert_eq!(project.milestones[0].title, "最初の途中目標");

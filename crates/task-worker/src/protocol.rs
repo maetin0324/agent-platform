@@ -428,6 +428,9 @@ pub struct RunContext {
 /// `context.active_projects[]`（ADR-0048 D3。Phase 60b）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ActiveProjectContext {
+    /// Repository names valid for create_task.repos within this project.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
     pub id: String,
     pub title: String,
     /// `proposed` / `active`。

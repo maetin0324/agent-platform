@@ -77,3 +77,20 @@ python3 scripts/portable-providers.py ~/.config/celeris/config.toml --apply
 既存タスクに保存された明示的な adapter 指定は変更しません。移行後に Console から送った依頼から自動選択になります。
 
 設計判断: [ADR-0049](adr/0049-portable-providers-and-codex-usage.md)。
+
+## Codex の worktree と成果物
+
+Codex worker は `workspace-write` を既定とし、dispatcher が選んだ成果物ディレクトリを
+`--add-dir` で追加する。リポジトリの worktree と結果ファイルの保存先が異なっても書き込める。
+
+Git の管理領域への書き込みやブラウザ起動など、sandbox 外の操作が必要な自律タスクでは、
+対応する Codex CLI で自動承認レビューを明示的に設定できる（本環境では 0.154.0 で実機確認）。
+
+```toml
+[adapters.codex]
+extra_args = ["--approve-for-me"]
+```
+
+これは sandbox の無効化ではなく、個々の権限要求を Codex のレビュアーが審査する方式。
+拒否された操作は実行できない。管理設定による制限も維持される。
+[OpenAI の sandbox と承認の説明](https://learn.chatgpt.com/docs/sandboxing) を参照。

@@ -9538,3 +9538,24 @@ Git 所在確認の省略と workspace-write 既定値を追加する。
 - 設定バックアップ: `~/.config/celeris/config.toml.before-portable-jn9gq8sm`。
 - 最終切替前DB: `~/.local/celeris/backups/20260920-170438-pre-5e841393e9de.sqlite3`。移行開始前DBは `20260920-164211-pre-ad516f322de2.sqlite3`。
 - 試験で失敗した対話 2 件は監査履歴として残した。新しい案件や仕事の起票は行っていない（接続確認用の対話タスクのみ）。
+
+### CoS の自己改善依頼が起票されない問題（2026-09-20）
+
+- 対話 `01M2ZXWDB9DJM119BPXK004N3Z` の Codex 実行は成功したが、`create_task` が
+  `repos=["agent-platform"], project=null` を指定し、`repos can only be used on a task that belongs to a project` で拒否。
+  実装タスクは未作成。自己改善案件 `01M2WTS3DKNZBSZ2JMVB4CZMBW` とリポジトリ登録は存在する。
+- CoS に渡す案件情報へ登録済み repo 名を追加し、案件IDとの対応と `repos` 指定時の `project` 必須条件を明記。
+  案件なしの action 例は `repos: []` に変更。検証を緩めたり所属を推測して補ったりはしない。
+- 関連 worker/dispatch テスト各1件成功、`git diff --check` 成功。この追補は作業ツリーのみで本番未反映。
+- 現行版での回避策: CoS に既存の自己改善案件ID・repo名を明示して再起票を依頼する。
+
+### CoS 再依頼の実行失敗修正（2026-09-20）
+
+再依頼は起票できたが `01M3000W211ER7RBDDFCFWY8PD` が3回とも結果ファイル不在で失敗。
+stdout に正規 artifacts/result.json への書き込みが Read-only file system で拒否された証拠があり、
+worktree の外にある artifacts_dir の sandbox 許可不足を修正した。
+Codex worker テスト22件成功。/tmp外の隔離した同型ディレクトリで実 Codex の結果保存成功も確認。
+Git worktree のコミットは Codex 0.154.0 の --approve-for-me で個別審査を経て成功することを実機確認。
+Qwen は接続先 bnode150 の /v1/models が200だがローカル18000番は未接続だった。
+celeris-qwen-tunnel ユーザーサービス（transient、失敗時再接続）で設定済みSSH転送を復旧。
+本番適用と再実行の結果は続報へ記録する。

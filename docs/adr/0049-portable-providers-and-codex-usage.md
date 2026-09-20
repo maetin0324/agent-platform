@@ -47,3 +47,11 @@ CoS の一時作業領域は Git リポジトリではない。Codex の全 work
 Codex は対話に最終テキストだけを返す場合もある。conversation が設定された execute のみ、
 正常 exit + turn.completed + 非空の最終 agent_message + result.json 不在なら返答を Done に正規化する。
 通常の仕事、失敗、壊れた結果ファイルは救済しない。結果ファイルがあれば従来契約を優先する。
+
+## worktree の成果物保存（2026-09-20）
+
+Codex の cwd が worktree のとき、dispatcher の artifacts_dir は cwd の外にある。
+起動前にそのディレクトリを作り、`--add-dir <artifacts_dir>` を渡す。
+許可はこのタスクの成果物ディレクトリだけに限定し、共有親や他タスクには広げない。
+sandbox を無効化せず、誤った場所の result.json を成功結果として回収しない。
+ローカル CLI 0.154.0 `exec --help` の --add-dir と実機ログで確認。

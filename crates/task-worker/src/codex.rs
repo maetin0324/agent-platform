@@ -177,6 +177,10 @@ async fn run_codex(
     if let Some(model) = &config.model {
         command.arg("--model").arg(model);
     }
+    // Worktrees and shared workspaces keep results outside cwd. Grant only the
+    // dispatcher-selected artifact directory, not its parent or other tasks.
+    tokio::fs::create_dir_all(&req.artifacts_dir).await?;
+    command.arg("--add-dir").arg(&req.artifacts_dir);
     command.args(&config.extra_args);
     command.arg(&prompt);
     command
@@ -817,6 +821,46 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
     }
 
     #[tokio::test]
+    async fn worktree_can_write_results_outside_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().join("repos/code");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"
+artifact_root=''
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = '--add-dir' ]; then shift; artifact_root="$1"; fi
+    shift
+done
+[ -n "$artifact_root" ] && [ -d "$artifact_root" ] || exit 10
+[ "$PWD" != "$artifact_root" ] || exit 11
+printf '%s' '{"summary":"worktree result saved","evidence":[]}' > "$artifact_root/result.json"
+echo '{"type":"turn.completed"}'
+"#,
+        );
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.work_dir = Some(work_dir.clone());
+        // Covers shared task-specific artifact directories as well.
+        req.artifacts_dir = dir.path().join(".taskd/artifacts/task-a");
+        let result_path = req.artifact_path("result.json");
+        let outcome = CodexAdapter::new(config)
+            .run(
+                req,
+                "external-artifacts",
+                default_limits(),
+                &RecordingSink::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { summary, .. } if summary == "worktree result saved")
+        );
+        assert!(result_path.is_file());
+        assert!(!work_dir.join("artifacts/result.json").exists());
+    }
+
+    #[tokio::test]
     async fn turn_failed_is_retryable_error() {
         let dir = tempfile::tempdir().unwrap();
         let config = stub_codex(
@@ -1206,7 +1250,7 @@ echo '{"type":"turn.completed"}'
         let args: Vec<&str> = args_log.split('\0').filter(|s| !s.is_empty()).collect();
         assert_eq!(
             args.len(),
-            10,
+            12,
             "expected exactly one trailing prompt arg, got {args:?}"
         );
         assert_eq!(
@@ -1221,8 +1265,10 @@ echo '{"type":"turn.completed"}'
                 "gpt-5-codex"
             ]
         );
-        assert_eq!(&args[7..9], ["--sandbox", "read-only"]);
-        let prompt = args[9];
+        assert_eq!(args[7], "--add-dir");
+        assert_eq!(args[8], dir.path().join("artifacts").to_str().unwrap());
+        assert_eq!(&args[9..11], ["--sandbox", "read-only"]);
+        let prompt = args[11];
         assert!(
             prompt.contains("# Task:"),
             "prompt should be the last arg: {prompt}"
