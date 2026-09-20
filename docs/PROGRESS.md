@@ -9431,3 +9431,33 @@ git -C ~/knowledge log --oneline -5   # confidence: high の create/update が
   `promote.sh 6ea2dcb1b052`（stop-start）: 旧 2 秒で終了 → バックアップ → 新 1 秒で health 200 / schema 18 → GUI 切替。API の停止は約 3 秒。
 - 事後: health `6ea2dcb1b052` active schema 18、`GET /console` 200、`GET /knowledge/inbox` 200、`knowledge_runs` 0 行
   （`[knowledge.langmem] enabled` は既定の false。LangMem の実機確認はこの後）。
+
+### Phase 60b / 62 実機: Console の 1 行から知識の取り込みまで（2026-09-20 12:00–13:21 UTC。3 つの不具合を直して通した）
+
+ADR-0048 §3-5 と ADR-0047 §3（Phase 62）の実機の受け入れ条件。Console に 1 行投げ、CoS の action → matching → 実行 → レビュー →
+報告 → 知識整理 run（LangMem + ローカル Qwen）→ KB へのコミットまでを本番で通した。途中で見つけて直したもの:
+
+1. **LangMem の実パッケージとの食い違い**（`7dbec2b`）: venv は `python -m venv` が ensurepip で落ちる（python3-venv 無し）→ `uv` で作る。
+   `langmem>=0.1` は PyPI に無い（最新 0.0.30）。`create_memory_manager` は `schemas=` を渡さないと自由文しか返さず、返り値は
+   `ExtractedMemory(id, content)` の列 → 候補の pydantic schema を渡して `.content` を開く。手で 1 回通して候補 2 件を確認。
+2. **backfill**（`61c8055`）: 有効にした瞬間に過去の終端タスク 49 件ぶんの抽出 run が起きるところだった → daemon の起動より前に終端に
+   なったタスクは対象外（ADR-0037 D5 と同じ規則）。
+3. **CoS の action が捨てられていた**（`cd8bc9f`。人の指摘「動いてない気がします」）: CoS が `acceptance` を `{text, check}` で書くと
+   `invalid type: map, expected a string` で action 全体が破棄され、タスクが作られなかった → 文字列でも `text` を持つオブジェクトでも受ける。
+   併せて、Console から作るタスクの受け入れ条件は人の承認ではなくレビュー担当の判定にした（小さな頼みが毎回止まらないように）。
+4. **秘密検査の誤検知**（`0c7940a`）: 唯一の候補（home-dev のホスト情報）が `vm-100-disk-0.raw` の「sk-」で秘密扱いになり破棄された →
+   語の境界（直前が英数字でない）とトークンの形（直後に 6 文字以上）で見る。捨てた理由を `summary_json.discarded_reasons` に残す。
+5. **置き場**（人の指示）: `~/knowledge` → `$XDG_DATA_HOME/celeris/knowledge`（既定 `~/.local/share/celeris/knowledge`）。本番は `mv` して
+   `config.toml` の `root` を直した。
+
+昇格: `61c8055d99a9` → `cd8bc9f4cfa1` → `0c7940a1e543`（いずれもライブ引き継ぎ、新が 2 秒で active、API の停止なし）。ゲートは最終で
+`cargo test --workspace --no-fail-fast` exit 0 / FAILED 0 / passed 1500、clippy exit 0、GUI 838 tests。
+
+最終の通し（13:15–13:20）: `POST /console/instruct` 202 → CoS done、`actions_executed: create_task` → 作業タスクは matching で
+`infrastructure`（harness coding）→ done、レビュー pass → 知識整理 run done → `knowledge_runs.summary_json =
+{"candidates":1,"ingested":1,"inbox":0,"discarded":0}` → KB にコミット `240e80f Celeris (knowledge) | knowledge: create
+environment/hosts/home-dev.md (task 01M2ZFBS5JSYSH6XAF73HG8M4K)`（front matter に sources / confidence high）。`GET /knowledge/tree?q=home-dev`
+で引ける。報告の圧縮（「報告のまとめ: Operations」）も起きた。
+
+未解決: 知識整理 run 自体も通常の完了報告を作る（P-62-g）。トンネル（ローカル Qwen）が落ちている間は知識整理 run が失敗する —
+失敗の扱い（再試行の間隔・bad_news に数えない）は実際に落ちたときに見る。
