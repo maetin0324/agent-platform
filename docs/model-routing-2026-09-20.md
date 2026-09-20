@@ -6,6 +6,8 @@ tasks: [01M305NG9QRX7HE59VF6K3FZ7H]
 
 ## 実装と反映範囲
 
+最新状態（再開run `01M30FCRZQTD088GT2GG2ASCCB`）: 人が統合したmain `012904f84334659bcab77001c3c40d2588849a24` 上で再検証完了。元の実装・P1/P2修正はmainに取り込み済み。以下のrebase・未取り込みの記述は当時の履歴であり、現在の引き渡し状況は末尾を参照。
+
 作業ブランチ `celeris/01M305NG9QRX7HE59VF6K3FZ7H` に実装。main `d89015802e102e89d558bb8307149bafa8997ae2` へrebase済み。既存実装は `3b75909`（バックエンド）、`e97f807`（GUI）、`36dfdd3`（スキーマ同期）。運用中の設定・認証ファイル・サービス、元リポジトリ、リモート作業ツリーは変更していない。取り込みとリリースへの反映は未実施。
 
 - アカウント画面: 既存のClaude／GPTログイン、利用枠、APIキーの秘密ストアを認証情報の管理場所として維持。
@@ -93,3 +95,17 @@ main `4444719`（レビュー条件の修正）を取り込み、検証中に進
 今回の検証結果: `cargo test -p celerisctl --test worker_run` は7テスト成功（追加テスト内11条件）。`cargo test --workspace` は1531成功・0失敗・3ignore、`cargo clippy --workspace -- -D warnings` は成功。最初のsandbox内workspace実行は既存socket bindテストのEPERMで停止し、localhost接続を許可した再実行で全件成功した。ログはrun成果物 `artifacts/model-routing-final/` の `worker-run.log`、`workspace-test-unrestricted.log`、`clippy.log`。追加main差分は `scripts/selfdeploy/promote.sh` のみで、検証済みRustコードは同一。
 
 最新main取り込み後も `cargo test -p celerisctl --test worker_run`（7件）、`cargo test --workspace`（1531成功・0失敗・3ignore）、`cargo clippy --workspace -- -D warnings` を再実行し、すべて終了コード0。追加ログは同成果物ディレクトリの `workspace-test-after-rebase.log` / `clippy-after-rebase.log`。`git merge-base main HEAD` は `d89015802e102e89d558bb8307149bafa8997ae2` と一致し、fast-forward可能。
+
+## 検証基盤統合後の再開・引き渡し
+
+人が実装worktreeをmain `012904f84334659bcab77001c3c40d2588849a24` へfast-forwardし、cleanにした状態から検証した。前回完了 `2ec2617` との差分はレビュー所有権の排他・draining中の新規レビュー抑止と、共有Cargo成果物を使うrelease全体の直列化の3ファイル。プロバイダー実装・P1/P2を変更せず維持した。本runのコミットはこの検証記録のみ。
+
+- `cargo test --workspace`: 終了0、**1533成功・0失敗・3ignore**。固定account_id／残量調整の直接CLI回帰7件、新しいレビュー排他・draining回帰2件を含む。最初のsandbox実行はlocalhost bindのEPERMで停止したため、ローカル待受けを許可して全件再実行した。
+- `cargo clippy --workspace -- -D warnings`: 終了0。
+- GUI `react-router typegen` / `tsc -b` / `react-router build`: 終了0。設定・アカウント関連4ファイル42件成功（モックAPI待受けを許可して再実行）。
+- `node scripts/check-model-routing.mjs /tmp/model-routing-resume-012904f <ログディレクトリ>/gui-measurements.json`: 終了0。360/393/412/1440pxの2画面、計8件すべて横はみ出しなし、プロバイダー入力高44px、実行ID保存到達、JSエラー0件。
+- `bash -n scripts/selfdeploy/release.sh scripts/selfdeploy/lib.sh`: 成功。共有ロック関数を一時ディレクトリで検証し、競合中は75、解放後は0。release.sh自体は実行しておらず、異なるSHAの並行releaseを使った結合試験は未実施。
+
+ログディレクトリはワークスペース `artifacts/resume-012904f/`。`workspace-test-localhost.log`、`clippy.log`、`gui-tests.log`、`gui-build.log`、`gui-measurements.json`、`gui-render.log`、`lock-check.json` を保存。画面PNGの再生成先は上記 `/tmp`、既存のコミット済み画像は維持。
+
+既存Engineeringレビューと制御プレーンのrelease/verifyへこの結果を引き渡す。独立レビューの再実行、登録元mainへのmerge、release/verifyの実行、本番deployは本runでは行っていない。プロバイダー機能の本番反映は人のGUI操作待ち。登録元mainの `run-phases.sh` / `run-gphases.sh` の既存削除は読み取り確認のみで保持。Nothing 2a実機／IME、6モデルの実サービス利用可否は引き続き未検証。
