@@ -349,7 +349,8 @@ fi
 
 TS="$(sd_stamp)"
 mkdir -p "$OLD_HOME/backups"
-SD_LOG_FILE="$OLD_HOME/backups/migrate-$TS.log"   # 移動の前は旧側に書く（後で $STATE/backups へ一緒に動く）
+mkdir -p "$STATE/backups"
+SD_LOG_FILE="$STATE/backups/migrate-$TS.log"   # 最初から新しい側に書く（旧 backups/ は後で合流する。旧側に書くと合流の瞬間に消える）
 sd_log "migrate to celeris: new release $SHA12 (log: $SD_LOG_FILE)"
 
 # 前提
