@@ -387,7 +387,17 @@ while IFS=$'\t' read -r src dst; do
   { [ -e "$src" ] || [ -L "$src" ]; } || continue
   case "$src" in "$STATE"/*) continue ;; esac   # 8. の usage.json の改名は動いた後の場所なのでここでは見ない
   if [ -e "$dst" ] || [ -L "$dst" ]; then
-    sd_die "destination already exists: $dst (for $src); nothing was stopped or moved"
+    # verify.sh / release.sh が新しい置き場で先に走っていると `backups/`（空）と `staging/`（使い捨て。
+    # 検証のたびに作り直す）が残っている。空のディレクトリは消す。staging は中身ごと消す。それ以外は止まる。
+    if [ "$dst" = "$STATE/staging" ] && [ -d "$dst" ]; then
+      rm -rf -- "$dst"
+      sd_log "removed the disposable $dst left by verify.sh"
+    elif [ -d "$dst" ] && [ -z "$(ls -A -- "$dst")" ]; then
+      rmdir -- "$dst"
+      sd_log "removed the empty $dst"
+    else
+      sd_die "destination already exists: $dst (for $src); nothing was stopped or moved"
+    fi
   fi
 done < <(plan_moves)
 sd_log "all planned destinations are free"
