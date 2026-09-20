@@ -9596,3 +9596,13 @@ Pegasusの読み取り専用接続も成功。調査書はタスクのブラン�
 `docs/gui/mobile-gui-investigation-2026-09-20.md`。
 今回完了した範囲は調査・改善案であり、UI本体の実装やNothing 2a実機検証は含まない。
 Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus許可はユーザー指示で維持。
+
+## 2026-09-20: 依頼の完了範囲・通知漏れ・スマホGUIの修正（ADR-0050）
+
+- 実機原因: `01M3000W211ER7RBDDFCFWY8PD` はスマホGUI改善依頼を調査・改善案へ縮めたタスクとして done になっていた。案件に途中目標がないため完了通知なし。CoS の「作業を始めない」指示、proposed 案件限定かつ案件単位一度きりの返事通知、再起動前の待ちを除外する判定も修正。
+- CoS は明示された修正を実装・検証まで委譲する。actions の生成内容と独立して元依頼・依頼時点までの対話を仕事へ保存し、レビュー条件を追加。後続の別依頼が混ざらない回帰テストを追加。
+- `task_ready`、全体/active 案件の返事、再質問、既決認可の後の質問に対応。未決認可・質問は再起動後も通知。schema 19 の走査時刻で再起動直前の完了を回収。schema 18 からは最後の通知以降を引き継ぐ。途中目標の CoS レビューが来なくても5分後には引き渡しを通知。
+- GUI: スマホの主要3入口＋全19画面メニュー（Escape/フォーカス復帰）、Console の範囲折り畳み・会話欄の可変高さ・見出し折返し・待ち件数の通常スクロール・IME確定時送信抑止・スマホEnter改行・44px送信。狭い画面のタスク一覧は高さを実測するカード、案件一覧も縦積みに変更。
+- 検証: `cargo test -p celeris --test notify` 23 passed、`cargo test -p task-ops actions::tests` 11 passed、`cargo test -p task-worker preamble::tests`、`cargo test -p task-core migration_0019` 1 passed。API schema/GUI型を再生成。GUI typecheck/build と unit 839 passed。
+- `node scripts/check-mobile.mjs`: 独立した合成API/GUI（17971/17901）、Chromium 153.0.8010.12、7画面×360/393/412/1023/1024/1440px=42描画、HTTP200・pageerror0・文書横はみ出し0。タスク題名幅は294/327/346/933/646/166px（以前360–1024pxで0）、Console見出し232/265/284/879/592/704px。スマホ送信ボタン下端760/812/875pxで各高さ800/852/915px内。全19リンクの到達、Escape、タッチEnter/IMEイベントを検査。API操作はGETのみ。証跡 `/tmp/celeris-mobile-after/`。Nothing 2a実機のソフトキーボードは未検証。
+- 本番反映は既存の release → verify → promote 手順。schema更新のため旧版との同時稼働はできず、バックアップ後の停止切替となる。結果は反映後に追記する。

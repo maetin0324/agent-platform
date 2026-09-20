@@ -59,7 +59,7 @@ impl Env {
             self.as_store(),
             &NotifyConfig::default(),
             self.started_at,
-            OffsetDateTime::now_utc(),
+            self.started_at,
         )
         .unwrap_or_else(|e| panic!("schedule: {e}"));
         created.iter().filter(|n| n.kind == kind).count()
@@ -508,7 +508,7 @@ fn a_task_blocked_after_startup_is_scanned_even_though_it_was_created_long_befor
 
     assert_eq!(
         env.scanned(NotificationKind::QuestionBlocked),
-        vec![old.id.to_string()]
+        vec![format!("{}:0", old.id)]
     );
     assert_eq!(env.schedule(NotificationKind::QuestionBlocked), 1);
 }
@@ -662,10 +662,7 @@ fn secretary_reply_fires_once_when_a_proposed_project_gets_a_node_message() {
 
     assert_eq!(env.schedule(NotificationKind::SecretaryReply), 1);
     assert_eq!(env.schedule(NotificationKind::SecretaryReply), 0);
-    assert_eq!(
-        env.scanned(NotificationKind::SecretaryReply),
-        vec![project.to_string()]
-    );
+    assert_eq!(env.scanned(NotificationKind::SecretaryReply).len(), 1);
 
     // GUI 依頼 G13i-P1（ADR-0037 D6）: 案件自身が project_id に載る。
     let rows = env
@@ -678,7 +675,14 @@ fn secretary_reply_fires_once_when_a_proposed_project_gets_a_node_message() {
         .unwrap_or_else(|| panic!("no secretary_reply row"));
     assert_eq!(row.project_id, Some(project), "{row:?}");
 
-    // 人が返事をして案件が動き出したら（`proposed` でなくなったら）候補から消える。
+    // active でも次の返事は対象。実際の人の返事が来たら候補から消える。
+    env.store
+        .message_append(&Message {
+            id: MessageId::new(),
+            created_at: at(2),
+            ..user
+        })
+        .unwrap();
     env.store
         .project_set_status(project, ProjectStatus::Active)
         .unwrap_or_else(|e| panic!("status: {e}"));
@@ -1152,4 +1156,145 @@ async fn send_test_posts_one_message_to_the_url_in_the_secrets_dir() {
         }
         other => panic!("expected NotConfigured, got {other:?}"),
     }
+}
+
+#[test]
+fn task_completion_survives_a_restart_between_completion_and_the_next_scan() {
+    let env = Env::new();
+    let config = NotifyConfig::default();
+    notify::schedule(env.as_store(), &config, at(0), at(10)).unwrap();
+    let mut done = task(Status::Done);
+    done.updated_at = at(15);
+    env.store.insert(&done).unwrap();
+    let mut support = task(Status::Done);
+    support.updated_at = at(15);
+    support.conversation = Some(MessageId::new());
+    env.store.insert(&support).unwrap();
+    let mut historic = task(Status::Done);
+    historic.updated_at = at(5);
+    env.store.insert(&historic).unwrap();
+    let created = notify::schedule(env.as_store(), &config, at(20), at(21)).unwrap();
+    let completed: Vec<_> = created
+        .iter()
+        .filter(|n| n.kind == NotificationKind::TaskReady)
+        .collect();
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].key, done.id.to_string());
+    assert!(
+        notify::schedule(env.as_store(), &config, at(22), at(23))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(env.store.notification_scan_at().unwrap(), Some(at(23)));
+}
+
+#[test]
+fn unresolved_approval_and_question_survive_restart_and_decided_approval_does_not_hide_question() {
+    let mut env = Env::new();
+    env.started_at = at(100);
+    let blocked = task(Status::Blocked);
+    env.store.insert(&blocked).unwrap();
+    let approval = Approval {
+        id: ApprovalId::new(),
+        node_id: "poc".into(),
+        project_id: None,
+        task_id: Some(blocked.id),
+        question: "接続を許可?".into(),
+        answer: None,
+        decision: None,
+        created_at: at(0),
+        decided_at: None,
+    };
+    env.store.approval_append(&approval).unwrap();
+    assert_eq!(env.schedule(NotificationKind::ApprovalPending), 1);
+    assert!(env.scanned(NotificationKind::QuestionBlocked).is_empty());
+    env.store
+        .approval_decide(approval.id, Decision::Once, None, at(1))
+        .unwrap();
+    assert_eq!(env.schedule(NotificationKind::QuestionBlocked), 1);
+    // 同じ仕事が別の質問で再度止まる。前の通知キーには抑止されない。
+    env.store
+        .append_event(
+            blocked.id,
+            &task_core::Event::Transitioned {
+                from: Status::Running,
+                to: Status::Blocked,
+                reason: "another question".into(),
+            },
+        )
+        .unwrap();
+    env.store
+        .append_event(
+            blocked.id,
+            &task_core::Event::QuestionRaised {
+                run_id: "second".into(),
+                text: "次の質問の本文".into(),
+            },
+        )
+        .unwrap();
+    let rows =
+        notify::schedule(env.as_store(), &NotifyConfig::default(), at(200), at(200)).unwrap();
+    let question = rows
+        .iter()
+        .find(|n| n.kind == NotificationKind::QuestionBlocked)
+        .unwrap();
+    assert!(question.body.contains("次の質問の本文"));
+    assert!(question.key.starts_with(&format!("{}:", blocked.id)));
+    assert_eq!(env.schedule(NotificationKind::QuestionBlocked), 0);
+}
+
+#[test]
+fn active_and_global_conversations_notify_each_new_reply_but_not_answered_replies() {
+    let env = Env::new();
+    env.seed_org();
+    let project = env.seed_project(ProjectStatus::Active);
+    for scope in [None, Some(project)] {
+        let first = Message {
+            id: MessageId::new(),
+            node_id: "secretary".into(),
+            project_id: scope,
+            role: MessageRole::Node,
+            text: "実装を確認してください".into(),
+            run_id: None,
+            task_id: None,
+            metadata: None,
+            created_at: at(1),
+        };
+        env.store.message_append(&first).unwrap();
+        assert_eq!(env.schedule(NotificationKind::SecretaryReply), 1);
+        let second = Message {
+            id: MessageId::new(),
+            created_at: at(2),
+            ..first.clone()
+        };
+        env.store.message_append(&second).unwrap();
+        assert_eq!(env.schedule(NotificationKind::SecretaryReply), 1);
+        assert_eq!(env.schedule(NotificationKind::SecretaryReply), 0);
+        env.store
+            .message_append(&Message {
+                id: MessageId::new(),
+                role: MessageRole::User,
+                created_at: at(3),
+                ..first
+            })
+            .unwrap();
+    }
+    assert!(env.scanned(NotificationKind::SecretaryReply).is_empty());
+}
+
+#[test]
+fn milestone_without_cos_reply_eventually_notifies_the_handoff() {
+    let env = Env::new();
+    let project = env.seed_project(ProjectStatus::Active);
+    let milestone = env
+        .store
+        .milestone_create(project, "実装", "", MilestoneStatus::InProgress)
+        .unwrap();
+    let mut done = task(Status::Done);
+    done.project_id = Some(project);
+    done.milestone_id = Some(milestone.id);
+    done.updated_at = OffsetDateTime::now_utc() - time::Duration::minutes(6);
+    env.store.insert(&done).unwrap();
+    assert_eq!(env.schedule(NotificationKind::MilestoneReady), 1);
+    assert_eq!(env.schedule(NotificationKind::MilestoneReady), 0);
 }

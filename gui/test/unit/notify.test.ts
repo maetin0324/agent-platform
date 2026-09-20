@@ -19,10 +19,11 @@ const KINDS: NotificationKind[] = [
   "question_blocked",
   "bad_news",
   "secretary_reply",
+  "task_ready",
 ];
 
 describe("notifyKindLabel (ADR-0037 D1、SPEC の言葉で)", () => {
-  it("5 種すべてに日本語のラベルがある", () => {
+  it("6 種すべてに日本語のラベルがある", () => {
     for (const kind of KINDS) {
       expect(notifyKindLabel(kind)).not.toBe(kind);
       expect(typeof notifyKindLabel(kind)).toBe("string");
@@ -107,4 +108,10 @@ describe("notifyTargetHref (対象へのリンク)", () => {
   it("key を URI エンコードする", () => {
     expect(notifyTargetHref({ kind: "secretary_reply", key: "p/1 x" })).toBe("/projects/p%2F1%20x");
   });
+});
+
+it("繰り返した質問・成果のキーからタスクへのリンクを作る", () => {
+  expect(notifyTargetHref({ kind: "task_ready", key: "t1:42" })).toBe("/tasks/t1");
+  expect(notifyTargetHref({ kind: "question_blocked", key: "t1:12" })).toBe("/tasks/t1");
+  expect(notifyTargetHref({ kind: "secretary_reply", key: "message:m1" })).toBe("/");
 });

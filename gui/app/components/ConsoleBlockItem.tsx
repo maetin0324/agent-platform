@@ -104,7 +104,7 @@ function ReplyButton({ onClick }: { onClick: () => void }) {
       type="button"
       onClick={onClick}
       data-testid="console-reply-button"
-      className="inline-flex items-center gap-1 text-xs text-fg-subtle underline underline-offset-2 hover:text-fg"
+      className="inline-flex min-h-11 items-center gap-1 px-2 text-sm text-fg-subtle underline underline-offset-2 hover:text-fg"
     >
       <Icon name="send" className="size-3" />
       返信
@@ -615,15 +615,19 @@ function ReportBlockView({
   const r = block.report;
   return (
     <BlockShell testId="console-block-report" className="w-full max-w-none">
-      <button type="button" onClick={() => setOpen((v) => !v)} className="flex w-full items-center gap-2 text-left">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="grid min-h-11 w-full grid-cols-[auto_auto_minmax(0,1fr)] items-center gap-2 text-left"
+      >
         <Icon name={open ? "chevronDown" : "chevronRight"} className="size-3.5 shrink-0 text-fg-subtle" />
         <Icon name="send" className="size-3.5 text-fg-subtle" />
-        <span className="min-w-0 flex-1 font-medium" data-testid="console-report-headline">
+        <span className="min-w-0 break-words font-medium" data-testid="console-report-headline">
           {r.headline}
         </span>
-        <span className="shrink-0 text-xs text-fg-subtle">{orgNodeName(r.node_id, org)}</span>
+        <span className="col-span-3 min-w-0 break-words text-xs text-fg-subtle">{orgNodeName(r.node_id, org)}</span>
         {projectName(r.project_id, projects) && (
-          <Badge tone="neutral" className="shrink-0">
+          <Badge tone="neutral" className="col-span-3 max-w-full justify-self-start truncate">
             {projectName(r.project_id, projects)}
           </Badge>
         )}

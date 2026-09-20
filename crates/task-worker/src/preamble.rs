@@ -728,12 +728,16 @@ fn conversation_instructions(context: &RunContext) -> String {
     match context.conversation_addressee {
         Some(ConversationAddressee::Secretary) => {
             format!(
-                "## これは対話です (this is a conversation, not a work order)\n\
-                 この返事では作業を始めないでください。委譲・実装・調査は、人が方針と途中目標を承認してから \
-                 始まります。返事には次を、人が数十秒で読める分量で書いてください: \
-                 (a) 理解の確認 (b) 方針 (c) 最初の途中目標の提案 (d) 判断を仰ぎたいこと。\
-                 ファイルの作成や大きな探索は不要です。\
-                 自分の直近の仕事とその結果は上に書いてある。人に聞き返す前に、まずそれを見て答えること。\n\n\
+                "## CoS の対話と仕事の開始 (conversation and authorized work)\n\
+                 質問には簡潔に答え、実行・修正・改善の依頼には下記 actions で実際の仕事を作ってください。\
+                 明示された通常の修正と検証は既に依頼された作業です。方針や途中目標を毎回再承認させないでください。\
+                 この短い対話 run では大きな調査や実装を直接せず、実行担当へ委譲します。\
+                 元の依頼が修正なら objective と acceptance に実装・検証・成果の引き渡しまで含め、\
+                 調査や改善案だけに縮小しないでください。調査はその仕事の途中の手順です。\
+                 調査だけを依頼された場合は調査まで。分割する場合も最終成果までの仕事と依存関係を残し、\
+                 中間報告を依頼全体の完了と呼ばないでください。未完了なら不足と継続中の仕事を示してください。\
+                 質問は実行に不可欠な情報の不足、依頼範囲の拡大、未許可の破壊的操作などの場合だけです。\
+                 既存の仕事と結果、承認済みの範囲を確認し、同じ調査や承認要求を繰り返さないでください。\n\n\
                  {}",
                 actions_instructions()
             )
@@ -769,7 +773,7 @@ fn actions_instructions() -> String {
      案件に属さない仕事は `project: null, repos: []`。判断できないときは推測せず質問してください。\n\
      目安: **1 つのタスクで 1 時間以内に終わり、承認が要らない変更**なら `create_task` を 1 つ書けば \
      十分です。「案件として」「途中目標に」のように人が儀式を求めていれば `propose_project` /\
-     `add_milestone`。判断に迷うときは `ask_human`。案件・担当が分かっていれば `project` / `assignee` \
+     `add_milestone`。判断に必要な情報が欠けるときは `ask_human`。通常の実装判断は担当に任せます。案件・担当が分かっていれば `project` / `assignee` \
      を書いてください（`assignee` を省けば celeris が skills と harness から決定的に選びます）。\
      検証に落ちた action（知らない harness / repos / 案件など）は実行されず、理由が人に見えます。\n\n"
         .to_string()
@@ -1074,14 +1078,10 @@ mod tests {
             out.starts_with(&ordinary_out),
             "対話の指示は末尾に足すだけ: {out}"
         );
-        assert!(out.contains("この返事では作業を始めないでください"));
-        assert!(out.contains("(a) 理解の確認"));
-        assert!(out.contains("(d) 判断を仰ぎたいこと"));
-        // Phase 33: 人に聞き返す前に、まず「あなたの直近の仕事」を見るよう促す一文。
-        assert!(
-            out.contains("自分の直近の仕事とその結果は上に書いてある"),
-            "{out}"
-        );
+        assert!(!out.contains("この返事では作業を始めないでください"));
+        assert!(out.contains("実装・検証・成果の引き渡し"));
+        assert!(out.contains("通常の修正と検証は既に依頼された作業"));
+        assert!(out.contains("既存の仕事と結果、承認済みの範囲"));
 
         let other = RunContext {
             conversation_addressee: Some(ConversationAddressee::Other),
@@ -1270,7 +1270,7 @@ mod tests {
         assert!(out.contains("候補 A / 候補 B / 候補 C"), "{out}");
         // 指示は対話の指示の後ろ。
         assert!(
-            at("これは対話です") < at("## 途中目標の判定をお願いする返事です"),
+            at("CoS の対話と仕事の開始") < at("## 途中目標の判定をお願いする返事です"),
             "{out}"
         );
         assert!(out.contains("(c) **次の途中目標の提案**"), "{out}");

@@ -5983,6 +5983,11 @@
           "const": "secretary_reply",
           "description": "`proposed` の案件に秘書の返事が付いた（人の返事待ち）。`key` = 案件 id。",
           "type": "string"
+        },
+        {
+          "const": "task_ready",
+          "description": "途中目標のない通常仕事の成果を引き渡す。key = task id:完了遷移。",
+          "type": "string"
         }
       ]
     },

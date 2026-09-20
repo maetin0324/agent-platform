@@ -70,7 +70,7 @@ export function Console({ data }: { data: ConsoleData }) {
   return (
     <div className="space-y-4" data-testid="console-screen" data-console-scope={scope}>
       <WaitingStrip counts={counts} />
-      <div className="grid gap-4 lg:grid-cols-[16rem_1fr]">
+      <div className="grid gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
         <ScopePicker parsedScope={parsedScope} org={org} projects={projects} />
         <div className="min-w-0 space-y-3">
           <BlockStream blocks={blocks} org={org} projects={projects} onReply={handleReply} />
@@ -92,7 +92,7 @@ function WaitingStrip({ counts }: { counts: { questions: number; approvals: numb
     <div
       data-testid="console-waiting-strip"
       className={cn(
-        "sticky top-0 z-10 flex flex-wrap items-center gap-3 rounded-xl border px-3 py-2 text-xs shadow-xs backdrop-blur",
+        "flex flex-wrap items-center gap-3 rounded-xl border px-3 py-2 text-xs shadow-xs backdrop-blur",
         total > 0 ? "border-warning-border bg-warning-soft/80" : "border-border bg-surface/80",
       )}
     >
@@ -115,84 +115,104 @@ function ScopePicker({
   projects: readonly Project[];
 }) {
   const navigate = useNavigate();
+  const [expanded, setExpanded] = useState(false);
   const [kindDraft, setKindDraft] = useState<ConsoleScopeKind>(parsedScope.kind);
   useEffect(() => setKindDraft(parsedScope.kind), [parsedScope.kind]);
 
   return (
     <Card data-testid="console-scope-picker">
-      <CardBody className="space-y-3">
-        <SectionTitle icon="layers" className="text-sm">
-          範囲
-        </SectionTitle>
-        <div>
-          <label htmlFor="console-scope-kind" className={labelClass}>
-            見る範囲
-          </label>
-          <select
-            id="console-scope-kind"
-            data-testid="console-scope-kind"
-            value={kindDraft}
-            onChange={(e) => {
-              const kind = e.target.value as ConsoleScopeKind;
-              setKindDraft(kind);
-              if (kind === "all") navigate("/");
-            }}
-            className={cn(selectClass, "mt-1.5 w-full")}
-          >
-            <option value="all">全体</option>
-            <option value="project">案件</option>
-            <option value="node">ノード</option>
-          </select>
+      <CardBody className="space-y-3 p-3 xl:p-5">
+        <button
+          type="button"
+          className="flex min-h-11 w-full items-center justify-between gap-2 text-left text-sm xl:hidden"
+          aria-expanded={expanded}
+          aria-controls="console-scope-options"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <span className="min-w-0 break-words">
+            範囲:{" "}
+            {parsedScope.kind === "all"
+              ? "全体"
+              : parsedScope.kind === "project"
+                ? (projects.find((p) => p.id === parsedScope.id)?.title ?? "案件")
+                : (org.find((n) => n.id === parsedScope.id)?.name ?? "ノード")}
+          </span>
+          <span className="shrink-0">{expanded ? "閉じる" : "変更"}</span>
+        </button>
+        <div id="console-scope-options" className={cn("space-y-3 xl:block", expanded ? "block" : "hidden")}>
+          <SectionTitle icon="layers" className="text-sm">
+            範囲
+          </SectionTitle>
+          <div>
+            <label htmlFor="console-scope-kind" className={labelClass}>
+              見る範囲
+            </label>
+            <select
+              id="console-scope-kind"
+              data-testid="console-scope-kind"
+              value={kindDraft}
+              onChange={(e) => {
+                const kind = e.target.value as ConsoleScopeKind;
+                setKindDraft(kind);
+                if (kind === "all") navigate("/");
+              }}
+              className={cn(selectClass, "mt-1.5 w-full")}
+            >
+              <option value="all">全体</option>
+              <option value="project">案件</option>
+              <option value="node">ノード</option>
+            </select>
+          </div>
+          {kindDraft === "project" && (
+            <div>
+              <label htmlFor="console-scope-project" className={labelClass}>
+                どの案件
+              </label>
+              <select
+                id="console-scope-project"
+                data-testid="console-scope-project"
+                value={parsedScope.kind === "project" ? (parsedScope.id ?? "") : ""}
+                onChange={(e) => {
+                  if (e.target.value) navigate(`/?scope=${encodeURIComponent(scopeForProject(e.target.value))}`);
+                }}
+                className={cn(selectClass, "mt-1.5 w-full")}
+              >
+                <option value="">選ぶ…</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          {kindDraft === "node" && (
+            <div>
+              <label htmlFor="console-scope-node" className={labelClass}>
+                どのノード
+              </label>
+              <select
+                id="console-scope-node"
+                data-testid="console-scope-node"
+                value={parsedScope.kind === "node" ? (parsedScope.id ?? "") : ""}
+                onChange={(e) => {
+                  if (e.target.value) navigate(`/org/${encodeURIComponent(e.target.value)}`);
+                }}
+                className={cn(selectClass, "mt-1.5 w-full")}
+              >
+                <option value="">選ぶ…</option>
+                {org.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <p className={hintClass} data-testid="console-scope-current">
+            いま: {scopeLabel(parsedScope, org, projects)}
+          </p>
         </div>
-        {kindDraft === "project" && (
-          <div>
-            <label htmlFor="console-scope-project" className={labelClass}>
-              どの案件
-            </label>
-            <select
-              id="console-scope-project"
-              data-testid="console-scope-project"
-              value={parsedScope.kind === "project" ? (parsedScope.id ?? "") : ""}
-              onChange={(e) => {
-                if (e.target.value) navigate(`/?scope=${encodeURIComponent(scopeForProject(e.target.value))}`);
-              }}
-              className={cn(selectClass, "mt-1.5 w-full")}
-            >
-              <option value="">選ぶ…</option>
-              {projects.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.title}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-        {kindDraft === "node" && (
-          <div>
-            <label htmlFor="console-scope-node" className={labelClass}>
-              どのノード
-            </label>
-            <select
-              id="console-scope-node"
-              data-testid="console-scope-node"
-              value={parsedScope.kind === "node" ? (parsedScope.id ?? "") : ""}
-              onChange={(e) => {
-                if (e.target.value) navigate(`/org/${encodeURIComponent(e.target.value)}`);
-              }}
-              className={cn(selectClass, "mt-1.5 w-full")}
-            >
-              <option value="">選ぶ…</option>
-              {org.map((n) => (
-                <option key={n.id} value={n.id}>
-                  {n.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-        <p className={hintClass} data-testid="console-scope-current">
-          いま: {scopeLabel(parsedScope, org, projects)}
-        </p>
       </CardBody>
     </Card>
   );
@@ -243,7 +263,7 @@ function BlockStream({
     <div
       ref={containerRef}
       data-testid="console-stream"
-      className="h-[60vh] space-y-2.5 overflow-y-auto rounded-xl border border-border bg-surface-2/30 p-3"
+      className="h-[clamp(10rem,calc(100dvh-30rem),36rem)] space-y-2.5 xl:h-[60vh] overflow-y-auto rounded-xl border border-border bg-surface-2/30 p-3"
     >
       {blocks.length === 0 ? (
         <EmptyState icon="message" title="まだ何も流れていません">
@@ -298,7 +318,14 @@ function ConsoleInput({
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === "Enter" && !e.shiftKey && !mention) {
+    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
+    // タッチ端末では Enter は改行。送信は明示ボタンから。
+    if (
+      e.key === "Enter" &&
+      !e.shiftKey &&
+      !mention &&
+      !window.matchMedia("(max-width: 1023px), (pointer: coarse)").matches
+    ) {
       e.preventDefault();
       submit();
     }
@@ -332,7 +359,7 @@ function ConsoleInput({
           <Badge tone="info">
             返信先: {replyTarget.kind === "node" ? orgNodeName(replyTarget.nodeId, org) : "この案件の CoS"}
           </Badge>
-          <button type="button" onClick={onClearReply} className="underline underline-offset-2">
+          <button type="button" onClick={onClearReply} className="min-h-11 px-2 underline underline-offset-2">
             やめる
           </button>
         </p>
@@ -344,9 +371,10 @@ function ConsoleInput({
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder="CoS や @node-id に話しかける（Enter で送信、Shift+Enter で改行）"
+          aria-label="CoS へのメッセージ"
+          placeholder="CoS や @node-id に話しかける"
           data-testid="console-text"
-          className={cn(textareaClass, "w-full")}
+          className={cn(textareaClass, "w-full text-base")}
         />
         {mention && candidates.length > 0 && (
           <ul
@@ -379,6 +407,7 @@ function ConsoleInput({
         disabled={submitting || !text.trim()}
         onClick={submit}
         data-testid="console-send"
+        className="min-h-11 min-w-24"
       >
         <Icon name="send" />
         送る

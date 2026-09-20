@@ -59,8 +59,7 @@ impl std::str::FromStr for NotificationId {
     }
 }
 
-/// 知らせる理由（ADR-0037 D1 の 5 種）。**どれも「人の判断が要る」ときだけ**。
-/// `result` / `progress` は入れない（SPEC §3.5 の数時間単位の流れは GUI の報告の仕事）。
+/// 判断待ち・返事・成果の引き渡し（ADR-0037 / ADR-0050）。進行中の細かな更新は通知しない。
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
@@ -70,12 +69,14 @@ pub enum NotificationKind {
     MilestoneReady,
     /// 未決の認可の要求。`key` = 認可 id。
     ApprovalPending,
-    /// タスクが `blocked`（人への質問）。`key` = タスク id。
+    /// タスクが `blocked`（人への質問）。`key` = task id:遷移番号。
     QuestionBlocked,
     /// 秘書レベル（level 0）の悪い知らせ。`key` = 報告 id。
     BadNews,
-    /// `proposed` の案件に秘書の返事が付いた（人の返事待ち）。`key` = 案件 id。
+    /// 全体対話・継続中の案件に返事が付いた。`key` = message:message id。
     SecretaryReply,
+    /// 途中目標のない通常仕事の成果を引き渡す。key = task id:完了遷移。
+    TaskReady,
 }
 
 impl NotificationKind {
@@ -86,6 +87,7 @@ impl NotificationKind {
             NotificationKind::QuestionBlocked => "question_blocked",
             NotificationKind::BadNews => "bad_news",
             NotificationKind::SecretaryReply => "secretary_reply",
+            NotificationKind::TaskReady => "task_ready",
         }
     }
 
@@ -96,17 +98,19 @@ impl NotificationKind {
             "question_blocked" => Some(NotificationKind::QuestionBlocked),
             "bad_news" => Some(NotificationKind::BadNews),
             "secretary_reply" => Some(NotificationKind::SecretaryReply),
+            "task_ready" => Some(NotificationKind::TaskReady),
             _ => None,
         }
     }
 
     /// 判定の順（GUI と再送の順を決定的にするため）。
-    pub const ALL: [NotificationKind; 5] = [
+    pub const ALL: [NotificationKind; 6] = [
         NotificationKind::MilestoneReady,
         NotificationKind::ApprovalPending,
         NotificationKind::QuestionBlocked,
         NotificationKind::BadNews,
         NotificationKind::SecretaryReply,
+        NotificationKind::TaskReady,
     ];
 }
 
@@ -164,6 +168,10 @@ impl Notification {
 
 /// ADR-0037 D1: `notifications` 表の読み書き。`TaskStore` の supertrait で、実装は `SqliteStore` のみ。
 pub trait NotificationStore: Send + Sync {
+    /// 最後に通知候補の保存を完了した走査の開始時刻。
+    fn notification_scan_at(&self) -> Result<Option<OffsetDateTime>, StoreError>;
+    fn notification_scan_mark(&self, at: OffsetDateTime) -> Result<(), StoreError>;
+
     /// `(kind, key)` がまだ無ければ pending の行を 1 件作り、その行を返す。既にあれば `None`
     /// （**判定は tick ごとに何度走ってもよい**: 2 回目以降は何も起こらない）。
     fn notification_upsert_pending(
@@ -254,6 +262,26 @@ fn row_to_notification(
 }
 
 impl NotificationStore for SqliteStore {
+    fn notification_scan_at(&self) -> Result<Option<OffsetDateTime>, StoreError> {
+        let conn = self.lock()?;
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT scanned_at FROM notification_scan_state WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|s| parse_rfc3339(&s)).transpose()
+    }
+
+    fn notification_scan_mark(&self, at: OffsetDateTime) -> Result<(), StoreError> {
+        self.lock()?.execute(
+            "INSERT INTO notification_scan_state (id, scanned_at) VALUES (1, ?1) ON CONFLICT(id) DO UPDATE SET scanned_at = excluded.scanned_at WHERE julianday(excluded.scanned_at) >= julianday(scanned_at)",
+            params![format_rfc3339(at)?],
+        )?;
+        Ok(())
+    }
+
     fn notification_upsert_pending(
         &self,
         kind: NotificationKind,

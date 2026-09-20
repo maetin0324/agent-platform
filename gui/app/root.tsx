@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Form,
   isRouteErrorResponse,
@@ -103,7 +103,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
     <html lang="ja">
       <head>
         <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />
         <meta name="color-scheme" content="light dark" />
         <Meta />
         <Links />
@@ -288,8 +288,26 @@ function Sidebar({
   logoutEnabled: boolean;
 }) {
   const { pathname } = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const menuNav = useRef<HTMLElement>(null);
+  useEffect(() => setMenuOpen(false), [pathname]);
+  useEffect(() => {
+    if (menuOpen) menuNav.current?.querySelector<HTMLAnchorElement>("a")?.focus();
+  }, [menuOpen]);
+  const primary = NAV_GROUPS.flatMap((group) => group.items).filter((item) =>
+    ["/", "/projects", "/approvals"].includes(item.href),
+  );
   return (
-    <aside className="sticky top-0 z-30 border-b border-border bg-surface/80 backdrop-blur-xl lg:h-screen lg:border-r lg:border-b-0">
+    <aside
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && menuOpen) {
+          setMenuOpen(false);
+          menuButton.current?.focus();
+        }
+      }}
+      className="sticky top-0 z-30 border-b border-border bg-surface/95 backdrop-blur-xl lg:h-screen lg:border-r lg:border-b-0"
+    >
       <div className="flex h-full flex-wrap items-center lg:flex-col lg:flex-nowrap lg:items-stretch lg:px-3 lg:py-5">
         <div className="order-1 px-4 pt-3 lg:order-none lg:px-2 lg:pt-0">
           <a href="/" className="group flex items-center gap-2.5 rounded-lg no-underline">
@@ -300,16 +318,54 @@ function Sidebar({
           </a>
         </div>
 
+        <div className="order-3 mt-2 grid w-full grid-cols-4 gap-1 px-2 pb-2 lg:hidden" aria-label="よく使う画面">
+          {primary.map((item) => (
+            <a
+              key={item.href}
+              href={item.href}
+              aria-current={isActive(pathname, item.href) ? "page" : undefined}
+              className={cn(
+                "flex min-h-11 items-center justify-center gap-1 rounded-lg px-1 text-sm font-medium no-underline",
+                isActive(pathname, item.href)
+                  ? "bg-primary-soft text-primary-soft-fg"
+                  : "text-fg-muted hover:bg-surface-2",
+              )}
+            >
+              {item.label}
+              {item.badge === "org_approvals" && approvalsPending > 0 && (
+                <span className="rounded-full bg-danger px-1 text-xs text-white">{approvalsPending}</span>
+              )}
+            </a>
+          ))}
+          <button
+            ref={menuButton}
+            type="button"
+            aria-expanded={menuOpen}
+            aria-controls="main-navigation"
+            data-testid="mobile-menu"
+            onClick={() => setMenuOpen((open) => !open)}
+            className="min-h-11 rounded-lg px-1 text-sm font-medium text-fg hover:bg-surface-2"
+          >
+            {menuOpen ? "閉じる" : "メニュー"}
+            {(reportsLive?.unread_secretary ?? 0) + approvals > 0 && <span aria-label="未読あり"> •</span>}
+          </button>
+        </div>
+
         <nav
+          id="main-navigation"
+          ref={menuNav}
           aria-label="メイン"
-          className="order-3 mt-2 flex w-full items-center gap-1 overflow-x-auto px-3 pb-2 lg:order-none lg:mt-7 lg:flex-1 lg:flex-col lg:items-stretch lg:gap-5 lg:overflow-visible lg:px-0 lg:pb-0"
+          className={cn(
+            "order-4 max-h-[60dvh] w-full flex-col gap-4 overflow-y-auto px-3 pb-3 lg:order-none lg:mt-7 lg:flex lg:max-h-none lg:flex-1 lg:items-stretch lg:gap-5 lg:overflow-y-auto lg:px-0 lg:pb-0",
+            menuOpen ? "flex" : "hidden",
+          )}
         >
           {NAV_GROUPS.map((group) => (
-            <div key={group.label} className="contents lg:block">
-              <p className="hidden px-3 pb-1.5 text-[0.7rem] font-semibold uppercase tracking-wider text-fg-subtle lg:block">
+            <div key={group.label} className="block">
+              <p className="px-3 pb-1.5 text-[0.7rem] font-semibold uppercase tracking-wider text-fg-subtle">
                 {group.label}
               </p>
-              <ul className="contents lg:flex lg:flex-col lg:gap-0.5">
+              <ul className="grid grid-cols-2 gap-1 lg:flex lg:flex-col lg:gap-0.5">
                 {group.items.map((item) => {
                   const active = isActive(pathname, item.href);
                   const unreadSecretary = reportsLive?.unread_secretary ?? 0;
@@ -319,7 +375,7 @@ function Sidebar({
                         href={item.href}
                         aria-current={active ? "page" : undefined}
                         className={cn(
-                          "group relative flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm font-medium no-underline transition-colors",
+                          "group relative flex min-h-11 items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm lg:min-h-0 font-medium no-underline transition-colors",
                           active
                             ? "bg-primary-soft text-primary-soft-fg"
                             : "text-fg-muted hover:bg-surface-2 hover:text-fg",

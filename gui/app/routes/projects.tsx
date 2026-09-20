@@ -1,3 +1,4 @@
+import { cn } from "~/lib/utils";
 import { useId, useState } from "react";
 import { data, Form, isRouteErrorResponse, Link, redirect, useFetcher } from "react-router";
 import type { CreateFailure } from "~/celeris/action-types";
@@ -187,8 +188,8 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
           </EmptyState>
         ) : (
           <div className="overflow-x-auto rounded-lg border border-border">
-            <table className={tableClass}>
-              <thead className={theadClass}>
+            <table className={cn(tableClass, "max-sm:block")}>
+              <thead className={cn(theadClass, "max-sm:hidden")}>
                 <tr>
                   <th className={thClass}>題名</th>
                   <th className={thClass}>状態</th>
@@ -196,15 +197,33 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
                   <th className={thClass}>途中目標</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="max-sm:block">
                 {rows.map(({ project, milestoneCount }) => (
-                  <tr key={project.id} className={trHoverClass} data-testid="project-row" data-project-id={project.id}>
-                    <td className={tdClass}>
+                  <tr
+                    key={project.id}
+                    className={cn(
+                      trHoverClass,
+                      "max-sm:grid max-sm:grid-cols-2 max-sm:border-t max-sm:border-border max-sm:p-3",
+                    )}
+                    data-testid="project-row"
+                    data-project-id={project.id}
+                  >
+                    <td
+                      className={cn(
+                        tdClass,
+                        "max-sm:block max-sm:border-0 max-sm:px-1 max-sm:first:col-span-2 max-sm:first:pl-1 max-sm:last:pr-1 max-sm:break-words",
+                      )}
+                    >
                       <Link to={`/projects/${project.id}`} className="font-medium underline underline-offset-2">
                         {project.title}
                       </Link>
                     </td>
-                    <td className={tdClass}>
+                    <td
+                      className={cn(
+                        tdClass,
+                        "max-sm:block max-sm:border-0 max-sm:px-1 max-sm:first:col-span-2 max-sm:first:pl-1 max-sm:last:pr-1 max-sm:break-words",
+                      )}
+                    >
                       <span className="flex flex-wrap items-center gap-1.5">
                         <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status">
                           {projectStatusLabel(project.status)}
@@ -217,11 +236,22 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
                         )}
                       </span>
                     </td>
-                    <td className={tdClass}>
-                      <span className="text-fg-subtle">{project.created_at}</span>
+                    <td
+                      className={cn(
+                        tdClass,
+                        "max-sm:block max-sm:border-0 max-sm:px-1 max-sm:first:col-span-2 max-sm:first:pl-1 max-sm:last:pr-1 max-sm:break-words",
+                      )}
+                    >
+                      <span className="break-all text-fg-subtle">{project.created_at}</span>
                     </td>
-                    <td className={tdClass}>
+                    <td
+                      className={cn(
+                        tdClass,
+                        "max-sm:block max-sm:border-0 max-sm:px-1 max-sm:first:col-span-2 max-sm:first:pl-1 max-sm:last:pr-1 max-sm:break-words",
+                      )}
+                    >
                       <span className="tabular-nums" data-testid="project-milestone-count">
+                        <span className="sm:hidden">途中目標: </span>
                         {milestoneCount}
                       </span>
                     </td>

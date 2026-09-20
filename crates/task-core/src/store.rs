@@ -57,11 +57,12 @@ const MIGRATION_0015: &str = include_str!("../migrations/0015_lifecycle.sql");
 const MIGRATION_0016: &str = include_str!("../migrations/0016_org_profiles.sql");
 const MIGRATION_0017: &str = include_str!("../migrations/0017_console_actions.sql");
 /// ADR-0047 D4（Phase 62）: `knowledge_runs`（知識整理 run を高々 1 回だけ起こすための目印）。
+const MIGRATION_0019: &str = include_str!("../migrations/0019_notification_scan.sql");
 const MIGRATION_0018: &str = include_str!("../migrations/0018_knowledge_runs.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 18;
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -1113,6 +1114,7 @@ impl SqliteStore {
             16 => Ok(MIGRATION_0016),
             17 => Ok(MIGRATION_0017),
             18 => Ok(MIGRATION_0018),
+            19 => Ok(MIGRATION_0019),
             other => Err(StoreError::Invalid(format!(
                 "unknown migration version: {other}"
             ))),
@@ -5760,7 +5762,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -6300,7 +6302,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -6791,7 +6793,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
 
         let project = store.project_get(project_id).unwrap().expect("project");
         assert_eq!(project.status, ProjectStatus::Active);
@@ -6857,7 +6859,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
 
         // 導入前の行は `metadata = None` として読める。
         let messages = store.message_list("secretary", None, 10).unwrap();
@@ -6949,7 +6951,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn
@@ -7255,5 +7257,29 @@ mod tests {
             hits, 0,
             "FTS5 の既定のトークナイザでは日本語の部分一致にならない"
         );
+    }
+    #[test]
+    fn migration_0019_resumes_notification_scan_from_the_existing_ledger() {
+        use crate::notify::NotificationStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.sqlite3");
+        let last = OffsetDateTime::now_utc() - time::Duration::minutes(10);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)").unwrap();
+            for version in 1..=18 {
+                SqliteStore::apply_migration_version(&mut conn, version).unwrap();
+            }
+            conn.execute("INSERT INTO notifications (id, kind, key, created_at) VALUES (?1, 'approval_pending', 'approval', ?2)", params![crate::notify::NotificationId::new().to_string(), format_rfc3339(last).unwrap()]).unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.notification_scan_at().unwrap(), Some(last));
+        let next = last + time::Duration::minutes(1);
+        store.notification_scan_mark(next).unwrap();
+        drop(store);
+        let reopened = SqliteStore::open(&path).unwrap();
+        assert_eq!(reopened.notification_scan_at().unwrap(), Some(next));
+        reopened.notification_scan_mark(last).unwrap();
+        assert_eq!(reopened.notification_scan_at().unwrap(), Some(next));
     }
 }

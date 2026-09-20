@@ -340,7 +340,7 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
       </Card>
 
       <Card className="overflow-hidden">
-        <div className={cn(theadClass, "flex items-center gap-4 border-b border-border px-4 py-2.5 sm:px-5")}>
+        <div className={cn(theadClass, "hidden items-center gap-4 border-b border-border px-4 py-2.5 sm:px-5 xl:flex")}>
           <span className="min-w-0 flex-1">タイトル</span>
           <span className="w-28 shrink-0">状態</span>
           <span className="w-20 shrink-0">種別</span>
@@ -374,28 +374,34 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                     key={item.id}
                     data-testid="task-row"
                     data-task-id={item.id}
-                    className="absolute left-0 top-0 flex w-full items-center gap-4 border-b border-border px-4 text-sm transition-colors hover:bg-surface-2/60 sm:px-5"
-                    style={{ height: virtualRow.size, transform: `translateY(${virtualRow.start}px)` }}
+                    data-index={virtualRow.index}
+                    ref={virtualizer.measureElement}
+                    className="absolute left-0 top-0 grid min-h-28 w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-2 border-b border-border px-4 py-3 text-sm transition-colors hover:bg-surface-2/60 sm:px-5 xl:flex xl:min-h-14 xl:gap-4 xl:py-0"
+                    style={{ transform: `translateY(${virtualRow.start}px)` }}
                   >
                     <Link
                       to={`/tasks/${item.id}`}
                       title={item.id}
-                      className="min-w-0 flex-1 truncate font-medium text-fg no-underline hover:text-primary hover:underline"
+                      className="col-span-2 min-w-0 break-words font-medium text-fg no-underline hover:text-primary hover:underline xl:flex-1 xl:truncate"
                     >
                       {item.title}
                     </Link>
                     <span className="w-28 shrink-0">
                       <StatusBadge status={item.status} />
                     </span>
-                    <span className="w-20 shrink-0">
+                    <span className="hidden w-20 shrink-0 xl:block">
                       <KindBadge kind={item.kind} />
                     </span>
                     {/* 役割（ADR-0016 D1、celeris-requests R2）。色分けはせずテキストのラベルだけ。役割なしは空欄。 */}
-                    <span className="w-20 shrink-0 truncate" data-testid="task-role" title={item.role ?? ""}>
+                    <span
+                      className="hidden w-20 shrink-0 truncate xl:block"
+                      data-testid="task-role"
+                      title={item.role ?? ""}
+                    >
                       {item.role ? <RoleLabel role={item.role} /> : ""}
                     </span>
                     {/* 案件・担当・途中目標（監査 M2「裏方から戻れる」）。分野は詳細（/tasks/:id）で見る。 */}
-                    <span className="w-32 shrink-0 truncate" data-testid="task-project">
+                    <span className="hidden w-32 shrink-0 truncate xl:block" data-testid="task-project">
                       {placements[item.id] ? (
                         <Link
                           to={`/projects/${placements[item.id].projectId}`}
@@ -408,7 +414,7 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                         <span className="text-fg-subtle">-</span>
                       )}
                     </span>
-                    <span className="w-28 shrink-0 truncate" data-testid="task-assignee">
+                    <span className="min-w-0 truncate xl:w-28 xl:shrink-0" data-testid="task-assignee">
                       {item.assignee ? (
                         <Link
                           to={
@@ -426,13 +432,16 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                       )}
                     </span>
                     <span
-                      className="w-32 shrink-0 truncate text-xs text-fg-muted"
+                      className="hidden w-32 shrink-0 truncate text-xs text-fg-muted xl:block"
                       data-testid="task-milestone"
                       title={placements[item.id]?.milestoneTitle ?? ""}
                     >
                       {placements[item.id]?.milestoneTitle ?? "-"}
                     </span>
-                    <span className="w-28 shrink-0 truncate text-xs text-fg-subtle" title={item.updated_at}>
+                    <span
+                      className="hidden w-28 shrink-0 truncate text-xs text-fg-subtle xl:block"
+                      title={item.updated_at}
+                    >
                       {item.updated_at}
                     </span>
                   </div>

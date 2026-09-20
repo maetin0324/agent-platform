@@ -107,6 +107,7 @@ pub fn execute(
     malformed: &[String],
     now: OffsetDateTime,
 ) -> Result<Option<ActionsOutcome>, OpsError> {
+    let source = source_request_context(store, task)?;
     if !store.console_action_run_claim(run_id, task.id, now)? {
         return Ok(None);
     }
@@ -118,7 +119,20 @@ pub fn execute(
         });
     }
     for action in valid {
-        match execute_one(store, org, roles, genres, action, now) {
+        let mut action = action.clone();
+        if let ConsoleAction::CreateTask {
+            objective,
+            acceptance,
+            ..
+        } = &mut action
+        {
+            objective.push_str(&source);
+            // 空の acceptance は従来どおり入力エラー。自動条件で隠さない。
+            if !acceptance.is_empty() {
+                acceptance.push("元の依頼と成果の範囲が整合していること。修正・実装を依頼された場合、調査報告や提案だけでは合格にせず、実際の変更と検証の証拠を確認する。人が明示的に調査だけを求めた場合はその範囲を守る。分割した中間成果を依頼全体の完了として扱わない。".into());
+            }
+        }
+        match execute_one(store, org, roles, genres, &action, now) {
             Ok(executed) => outcome.executed.push(executed),
             Err(reason) => outcome.failed.push(FailedAction {
                 kind: action.kind().to_string(),
@@ -127,6 +141,28 @@ pub fn execute(
         }
     }
     Ok(Some(outcome))
+}
+
+/// CoS が書いた要約とは独立に、依頼時点の会話をワーカーとレビュアーへ渡す。
+fn source_request_context(store: &dyn TaskStore, task: &Task) -> Result<String, OpsError> {
+    let mut out = format!(
+        "\n\n## 元の依頼（対話タスク {}）\n{}\n",
+        task.id, task.objective
+    );
+    if let (Some(node), Some(message_id)) = (&task.assignee, task.conversation) {
+        let mut messages = store.message_list(
+            node,
+            task.project_id,
+            crate::conversation::CONVERSATION_HISTORY,
+        )?;
+        messages.retain(|m| m.id == message_id || m.created_at < task.created_at);
+        messages.sort_by_key(|m| (m.created_at, m.id));
+        out.push_str("\n依頼時点までの対話（後の依頼で上書きしない）:\n");
+        for message in messages {
+            out.push_str(&format!("[{}] {}\n", message.role.as_str(), message.text));
+        }
+    }
+    Ok(out)
 }
 
 fn execute_one(
@@ -825,5 +861,66 @@ mod tests {
         assert_eq!(metadata.actions_failed.len(), 1);
         assert!(ActionsOutcome::default().failure_note().is_none());
         assert!(ActionsOutcome::default().to_metadata().is_none());
+    }
+    #[test]
+    fn delegated_work_keeps_the_original_request_and_a_scope_review_condition() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_engineering(&store);
+        let mut task = cos_task();
+        task.objective = "スマホGUIを修正し、検証してください".into();
+        let source_id = task_core::MessageId::new();
+        task.conversation = Some(source_id);
+        let source = task_core::Message {
+            id: source_id,
+            node_id: "cos".into(),
+            project_id: None,
+            role: task_core::MessageRole::User,
+            text: task.objective.clone(),
+            run_id: None,
+            task_id: Some(task.id),
+            metadata: None,
+            created_at: now(),
+        };
+        store.message_append(&source).unwrap();
+        store
+            .message_append(&task_core::Message {
+                id: task_core::MessageId::new(),
+                text: "後から届いた別の依頼".into(),
+                created_at: now() + time::Duration::seconds(1),
+                ..source
+            })
+            .unwrap();
+        let parsed = parse(
+            r#"{"actions":[{"type":"create_task","title":"GUIを調査","objective":"改善案を書く","acceptance":["報告書がある"]}]}"#,
+        );
+        let outcome = execute(
+            &store,
+            &[],
+            &[],
+            &[],
+            &task,
+            "source-run",
+            &parsed.0,
+            &parsed.1,
+            now(),
+        )
+        .unwrap()
+        .unwrap();
+        let created = store
+            .get(outcome.executed[0].task_id.unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(
+            created
+                .objective
+                .contains("スマホGUIを修正し、検証してください")
+        );
+        assert!(!created.objective.contains("後から届いた別の依頼"));
+        assert!(
+            created
+                .acceptance
+                .iter()
+                .any(|c| c.text.contains("調査報告や提案だけでは合格にせず"))
+        );
     }
 }

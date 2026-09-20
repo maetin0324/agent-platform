@@ -16,7 +16,8 @@ export const NOTIFY_KIND_LABEL: Record<NotificationKind, string> = {
   approval_pending: "認可の要求が来た",
   question_blocked: "質問で止まっている",
   bad_news: "悪い知らせが届いた",
-  secretary_reply: "CoS から方針の提案が届いた",
+  secretary_reply: "返事が届いた",
+  task_ready: "仕事の成果が届いた",
 };
 
 export function notifyKindLabel(kind: NotificationKind): string {
@@ -54,13 +55,16 @@ export function notifyTargetHref(recent: Pick<NotifyRecent, "kind" | "key" | "pr
     case "approval_pending":
       return `/approvals#approval-${encodeURIComponent(recent.key)}`;
     case "question_blocked":
-      return `/tasks/${encodeURIComponent(recent.key)}`;
+    case "task_ready":
+      return `/tasks/${encodeURIComponent(recent.key.split(":")[0])}`;
     case "bad_news":
       return `/reports#report-${encodeURIComponent(recent.key)}`;
     case "secretary_reply":
       return recent.project_id
         ? `/projects/${encodeURIComponent(recent.project_id)}`
-        : `/projects/${encodeURIComponent(recent.key)}`;
+        : recent.key.startsWith("message:")
+          ? "/"
+          : `/projects/${encodeURIComponent(recent.key)}`;
     case "milestone_ready":
       return recent.project_id ? `/projects/${encodeURIComponent(recent.project_id)}` : null;
     default:

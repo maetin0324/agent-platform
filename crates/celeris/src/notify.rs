@@ -1,5 +1,8 @@
 //! 人の判断が要るときだけ Discord に知らせる（ADR-0037。Phase 39）。
 //!
+//! ADR-0050: 通常仕事の完了・全体対話も通知する。未解決の待ちは再起動後も対象、
+//! 終端イベントの走査時刻はDBに永続化する。以下のPhase記録の起動時刻制限を更新した。
+//!
 //! ここには 2 つのことしか無い:
 //!
 //! 1. **判定**（`scan` / `schedule`）— DB を読んで「人の手が要る」5 種の条件を**決定的に**見つけ、
@@ -177,10 +180,7 @@ fn node_name(org: &[task_core::OrgNode], id: &str) -> String {
 /// tick ごとに DB を読み、「人の判断が要る」条件に当たるものを全部返す（重複排除はまだしない）。
 /// 並びは `NotificationKind::ALL` の順、同じ種の中は id の昇順で決定的。
 ///
-/// `started_at`（ADR-0037 D5 / 実機 2026-09-18）: `milestone_ready` を除く 4 種は
-/// **celeris の起動時刻より後に作られたもの**（`created_at >= started_at`）だけを対象にする
-/// （過去の出来事を一斉送信しない。backfill 禁止）。`milestone_ready` は状態の判定なので
-/// 起動時刻を見ない（起動直後に 1 回評価してよい）。
+/// `started_at` は終端イベントの走査下限。schedule は永続化済みの走査時刻を渡す。
 pub fn scan(
     store: &dyn TaskStore,
     started_at: OffsetDateTime,
@@ -193,6 +193,7 @@ pub fn scan(
     out.extend(scan_question_blocked(store, &org, started_at, base_url)?);
     out.extend(scan_bad_news(store, started_at, base_url)?);
     out.extend(scan_secretary_reply(store, &org, started_at, base_url)?);
+    out.extend(scan_task_ready(store, started_at, base_url)?);
     Ok(out)
 }
 
@@ -215,10 +216,17 @@ fn scan_milestone_ready(
     for ready in crate::milestone_review::ready_milestones(store)? {
         let state =
             task_ops::milestone_review::review_state(store, ready.project.id, ready.milestone.id)?;
-        // ADR-0038 D4: 秘書のまとめが付くまでは鳴らさない（「結果 → 提案」が手元で読めるように）。
-        let Some(reply) = state.reply else {
+        // ADR-0050: まとめは最大5分待つ。失敗や供給停止で永久に無通知にしない。
+        let reply = state
+            .reply
+            .filter(|reply| ready.last_done_at.is_none_or(|at| reply.created_at >= at));
+        if reply.is_none()
+            && ready
+                .last_done_at
+                .is_some_and(|at| OffsetDateTime::now_utc() - at < time::Duration::minutes(5))
+        {
             continue;
-        };
+        }
         let proposal = task_ops::milestone_review::latest_proposal(
             store,
             ready.project.id,
@@ -233,7 +241,13 @@ fn scan_milestone_ready(
         let body = format!(
             "途中目標『{}』の仕事が止まりました。秘書のまとめ: {} {next}→ 案件で ok / 議論 / ng を選んでください。{}",
             ready.milestone.title,
-            excerpt(&reply.text, REVIEW_EXCERPT_CHARS),
+            reply
+                .as_ref()
+                .map(|r| excerpt(&r.text, REVIEW_EXCERPT_CHARS))
+                .unwrap_or_else(|| {
+                    "仕事の成果が揃いました。CoS のまとめは未着です。案件で結果を確認してください。"
+                        .into()
+                }),
             link(base_url, &format!("/projects/{}", ready.project.id))
         );
         out.push(Candidate {
@@ -246,18 +260,17 @@ fn scan_milestone_ready(
     Ok(out)
 }
 
-/// 未決の認可（`decision IS NULL`）。**celeris の起動時刻より後にできたものだけ**（backfill 禁止）。
+/// 未決の認可。解決するまで再起動に関係なく対象（台帳で重複排除）。
 fn scan_approval_pending(
     store: &dyn TaskStore,
     org: &[task_core::OrgNode],
-    started_at: OffsetDateTime,
+    _started_at: OffsetDateTime,
     base_url: Option<&str>,
 ) -> Result<Vec<Candidate>, StoreError> {
     let mut out = Vec::new();
     let mut pending: Vec<_> = store
         .approval_list(Some(true), None, None)?
         .into_iter()
-        .filter(|a| a.created_at >= started_at)
         .collect();
     pending.sort_by_key(|a| a.id);
     for approval in pending {
@@ -277,18 +290,15 @@ fn scan_approval_pending(
     Ok(out)
 }
 
-/// `blocked`（人への質問）のタスク。同じ `task_id` の認可があるものは `approval_pending` に任せる。
-/// **`blocked` になった時刻（`updated_at`）が celeris の起動時刻より後のものだけ**（backfill 禁止。
-/// Phase 44（実機 2026-09-18）: 以前は `created_at` を見ていたため、起動前からある古いタスクが
-/// 起動後に `blocked` へ落ちても通知されなかった）。
+/// 未解決の質問。同じタスクの未決認可のみを approval_pending に任せる。
 fn scan_question_blocked(
     store: &dyn TaskStore,
     org: &[task_core::OrgNode],
-    started_at: OffsetDateTime,
+    _started_at: OffsetDateTime,
     base_url: Option<&str>,
 ) -> Result<Vec<Candidate>, StoreError> {
     let with_approval: HashSet<String> = store
-        .approval_list(None, None, None)?
+        .approval_list(Some(true), None, None)?
         .into_iter()
         .filter_map(|a| a.task_id.map(|t| t.to_string()))
         .collect();
@@ -297,11 +307,7 @@ fn scan_question_blocked(
         ..ListFilter::default()
     };
     let page = store.list_page(&filter, ListOrder::CreatedDesc, None, TASK_SCAN)?;
-    let mut tasks: Vec<_> = page
-        .items
-        .into_iter()
-        .filter(|t| t.updated_at >= started_at)
-        .collect();
+    let mut tasks: Vec<_> = page.items.into_iter().collect();
     tasks.sort_by_key(|a| a.id);
     let mut out = Vec::new();
     for task in tasks {
@@ -313,19 +319,30 @@ fn scan_question_blocked(
             .as_deref()
             .map(|id| node_name(org, id))
             .unwrap_or_else(|| "担当".to_string());
-        let where_to = match task.project_id {
-            Some(project_id) => link(base_url, &format!("/projects/{project_id}")),
-            None => String::new(),
-        };
+        let events = store.events_for(task.id)?;
+        let question = events
+            .iter()
+            .rev()
+            .find_map(|(_, event)| match event {
+                task_core::Event::QuestionRaised { text, .. } => Some(text.as_str()),
+                task_core::Event::WorkerFinished {
+                    outcome,
+                    role: None,
+                    ..
+                } => outcome.strip_prefix("question: "),
+                _ => None,
+            })
+            .unwrap_or(&task.title);
+        let where_to = link(base_url, &format!("/tasks/{}", task.id));
         let body = format!(
             "{who} が質問で止まっています: {}{where_to}",
-            excerpt(&task.title, EXCERPT_CHARS)
+            excerpt(question, EXCERPT_CHARS)
         );
         out.push(Candidate {
             kind: NotificationKind::QuestionBlocked,
-            key: task.id.to_string(),
+            key: transition_key(&task, &events),
             body,
-            project_id: None,
+            project_id: task.project_id,
         });
     }
     Ok(out)
@@ -364,47 +381,119 @@ fn scan_bad_news(
         .collect())
 }
 
-/// `proposed` の案件に、組織のノードの返事（`role = node`）が付いた（人の返事待ち）。
-/// **その返事が celeris の起動時刻より後に作られたときだけ**（backfill 禁止）。
+/// 全体対話と継続中の案件の最新の返事。案件ではなく message id で重複排除する。
 fn scan_secretary_reply(
     store: &dyn TaskStore,
     org: &[task_core::OrgNode],
-    started_at: OffsetDateTime,
+    since: OffsetDateTime,
     base_url: Option<&str>,
 ) -> Result<Vec<Candidate>, StoreError> {
-    let mut projects: Vec<_> = store
-        .project_list()?
-        .into_iter()
-        .filter(|p| p.status == ProjectStatus::Proposed)
-        .collect();
-    projects.sort_by_key(|a| a.id);
+    let mut projects = store.project_list()?;
+    projects.sort_by_key(|p| p.id);
+    let scopes = std::iter::once(None).chain(
+        projects
+            .iter()
+            .filter(|p| {
+                p.archived_at.is_none()
+                    && matches!(p.status, ProjectStatus::Proposed | ProjectStatus::Active)
+            })
+            .take(PROJECT_SCAN)
+            .map(|p| Some(p.id)),
+    );
     let mut out = Vec::new();
-    for project in projects.into_iter().take(PROJECT_SCAN) {
-        let mut replied = false;
+    for scope in scopes {
         for node in org {
-            let messages = store.message_list(&node.id, Some(project.id), MESSAGE_SCAN)?;
-            if messages
-                .iter()
-                .any(|m| m.role == MessageRole::Node && m.created_at >= started_at)
-            {
-                replied = true;
-                break;
+            let messages = store.message_list(&node.id, scope, MESSAGE_SCAN)?;
+            let Some(reply) = messages.iter().max_by_key(|m| (m.created_at, m.id)) else {
+                continue;
+            };
+            if reply.role != MessageRole::Node || reply.created_at < since {
+                continue;
             }
+            // 途中目標レビューは milestone_ready が内容付きで通知する。
+            if let Some(id) = reply.task_id
+                && store.get(id)?.is_some_and(|t| t.milestone_id.is_some())
+            {
+                continue;
+            }
+            out.push(Candidate {
+                kind: NotificationKind::SecretaryReply,
+                key: format!("message:{}", reply.id),
+                body: format!(
+                    "{} から返事が届きました: {}{}",
+                    node.name,
+                    excerpt(&reply.text, REVIEW_EXCERPT_CHARS),
+                    link(
+                        base_url,
+                        &scope
+                            .map(|id| format!("/?scope=project:{id}"))
+                            .unwrap_or_else(|| "/".into())
+                    )
+                ),
+                project_id: scope,
+            });
         }
-        if !replied {
-            continue;
-        }
+    }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(out)
+}
+
+/// 更新時刻（コメント等でも動く）ではなく状態遷移ごとに通知する。旧データには id を使う。
+fn transition_key(task: &task_core::Task, events: &[(u64, task_core::Event)]) -> String {
+    match events
+        .iter()
+        .rev()
+        .find(|(_, e)| matches!(e, task_core::Event::Transitioned { to, .. } if *to == task.status))
+    {
+        Some((seq, _)) => format!("{}:{seq}", task.id),
+        None => task.id.to_string(),
+    }
+}
+
+fn scan_task_ready(
+    store: &dyn TaskStore,
+    since: OffsetDateTime,
+    base_url: Option<&str>,
+) -> Result<Vec<Candidate>, StoreError> {
+    let tasks = store.list_page(
+        &ListFilter {
+            statuses: vec![Status::Done],
+            ..Default::default()
+        },
+        ListOrder::UpdatedDesc,
+        None,
+        TASK_SCAN,
+    )?;
+    let mut out = Vec::new();
+    for task in tasks.items.into_iter().filter(|t| {
+        t.updated_at >= since && t.milestone_id.is_none() && task_core::support_kind(t).is_none()
+    }) {
+        let events = store.events_for(task.id)?;
+        let summary = events
+            .iter()
+            .rev()
+            .find_map(|(_, e)| match e {
+                task_core::Event::WorkerFinished {
+                    outcome,
+                    role: None,
+                    ..
+                } => outcome.strip_prefix("done: "),
+                _ => None,
+            })
+            .unwrap_or("");
         out.push(Candidate {
-            kind: NotificationKind::SecretaryReply,
-            key: project.id.to_string(),
+            kind: NotificationKind::TaskReady,
+            key: transition_key(&task, &events),
             body: format!(
-                "秘書から『{}』の方針の提案が届きました。返事をお願いします。{}",
-                excerpt(&project.title, EXCERPT_CHARS),
-                link(base_url, &format!("/projects/{}", project.id))
+                "仕事『{}』が完了しました。成果を確認してください。{}{}",
+                excerpt(&task.title, EXCERPT_CHARS),
+                excerpt(summary, REVIEW_EXCERPT_CHARS),
+                link(base_url, &format!("/tasks/{}", task.id))
             ),
-            project_id: Some(project.id),
+            project_id: task.project_id,
         });
     }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
     Ok(out)
 }
 
@@ -419,7 +508,8 @@ pub fn schedule(
     now: OffsetDateTime,
 ) -> Result<Vec<Notification>, StoreError> {
     let mut created = Vec::new();
-    for candidate in scan(store, started_at, config.base_url())? {
+    let since = store.notification_scan_at()?.unwrap_or(started_at);
+    for candidate in scan(store, since, config.base_url())? {
         if let Some(row) = store.notification_upsert_pending(
             candidate.kind,
             &candidate.key,
@@ -430,6 +520,7 @@ pub fn schedule(
             created.push(row);
         }
     }
+    store.notification_scan_mark(now)?;
     Ok(created)
 }
 

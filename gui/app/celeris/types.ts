@@ -492,7 +492,7 @@ export type PriorityInput = ("P0" | "P1" | "P2" | "P3") | number;
  * `result` / `progress` は入れない（SPEC §3.5 の数時間単位の流れは GUI の報告の仕事）。
  */
 export type NotificationKind =
-  "milestone_ready" | "approval_pending" | "question_blocked" | "bad_news" | "secretary_reply";
+  "milestone_ready" | "approval_pending" | "question_blocked" | "bad_news" | "secretary_reply" | "task_ready";
 /**
  * 組織のノードの種類（ADR-0033 D1）。`secretary` は根で 1 つだけ。
  */
