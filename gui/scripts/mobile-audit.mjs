@@ -6,6 +6,12 @@
 // D1 の 1〜6 を検査する。1 件でも落ちたら非 0 で終わる（`gui/scripts/check-delivery.mjs` と同じ
 // 「Build GUI first。実 celeris は起動しない。外部ネットワークに出ない」作り）。
 //
+// Phase 76（ADR-0055 D1 拡張、ラウンド 8）: D1 の 1〜6 に加えて 3 つのルールを足した。
+// `a11y-name`（操作できる要素のアクセシブルな名前）・`a11y-structure`（h1 の数・見出しの階層・
+// img/svg の代替情報・ランドマーク）は `runChecks` の一部として `page.evaluate` の中で純粋に判定する。
+// `focus-order`（Tab キーでの到達性・罠の検知）だけは実際のキー入力が要るので Node 側の
+// `checkFocusOrder(page, route)` として別枠で呼ぶ。
+//
 // **`test/mock-celeris/server.ts` の `startMockCeleris` は使わない**: `./fixtures`（拡張子なし）を
 // 相対 import しており、これは vite/vitest の TS 解決の下でしか解決できない（Node 24 の組み込み型剥がしは
 // 拡張子の補完をしない）。`fixtures.ts` 自身は celeris の型を **type-only** import しているだけ
@@ -756,6 +762,155 @@ function checkTables() {
   return violations;
 }
 
+/**
+ * アクセシブルな名前（Phase 76、ADR-0055 D1 拡張）。WAI-ARIA の accessible name 算出を厳密に実装は
+ * しない（そこまでの精度は要らない）が、仕様が挙げる代表的な情報源を優先順位どおりに見る:
+ * `aria-label` → `aria-labelledby`（参照先の textContent）→ `<label for>` / 包む `<label>` →
+ * `<input type=submit|button|reset>` の `value` → 自身の textContent → 最後の手段として `title`。
+ * `placeholder` は仕様上アクセシブルな名前にならないので対象に入れない（プレースホルダだけの入力欄を
+ * 見落とさないため、意図して外す）。
+ */
+function computeAccessibleName(el) {
+  const ariaLabel = el.getAttribute("aria-label");
+  if (ariaLabel?.trim()) return ariaLabel.trim();
+  const labelledby = el.getAttribute("aria-labelledby");
+  if (labelledby) {
+    const text = labelledby
+      .split(/\s+/)
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ")
+      .trim();
+    if (text) return text;
+  }
+  if (el.id) {
+    const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+    const text = (label?.textContent ?? "").trim();
+    if (text) return text;
+  }
+  const wrappingLabel = el.closest("label");
+  if (wrappingLabel) {
+    const text = (wrappingLabel.textContent ?? "").trim();
+    if (text) return text;
+  }
+  if (el.tagName === "INPUT" && ["submit", "button", "reset"].includes(el.type) && el.value?.trim()) {
+    return el.value.trim();
+  }
+  const text = (el.textContent ?? "").trim();
+  if (text) return text;
+  const title = el.getAttribute("title");
+  if (title?.trim()) return title.trim();
+  return "";
+}
+
+/**
+ * D1 拡張その 1（Phase 76）: 操作できる要素（button / a[href] / input・select・textarea /
+ * role=button|tab|menuitem）は非空のアクセシブルな名前を持つ。アイコンだけのボタン（`~/components/ui/Icon.tsx`
+ * は常に `aria-hidden` なので、囲む button/a 自身に `aria-label` が無いと名前が空になる）を主な標的にする。
+ */
+function checkA11yNames() {
+  const violations = [];
+  const selector =
+    'button, a[href], input:not([type="hidden"]), select, textarea, [role="button"], [role="tab"], [role="menuitem"]';
+  for (const el of document.querySelectorAll(selector)) {
+    if (isNotVisible(el)) continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) continue;
+    const name = computeAccessibleName(el);
+    if (!name) {
+      violations.push({
+        rule: "a11y-name",
+        selector: cssPathRef(el),
+        box: {},
+        detail: `no accessible name on <${el.tagName.toLowerCase()}${el.getAttribute("role") ? ` role=${el.getAttribute("role")}` : ""}>`,
+      });
+    }
+  }
+  return violations;
+}
+
+/**
+ * D1 拡張その 2（Phase 76）: 画面の骨格。
+ * - 可視な `h1` がちょうど 1 個（0 個も 2 個以上も違反）。
+ * - 可視な見出しが並び順でレベルを飛ばさない（例: h1 の次に h3。axe-core の heading-order と同じ、
+ *   直前の見出しとの比較）。
+ * - `img` は `alt` 属性を持つ（空文字 `alt=""` は装飾として許容。属性そのものが無いのが違反）。
+ * - `svg` は `role="img"`（`aria-label`/`aria-labelledby`/`<title>` のいずれかで名前を持つ）か、
+ *   装飾なら `aria-hidden="true"`（`~/components/ui/Icon.tsx` は既にそう）。どちらでもない宙ぶらりんが違反。
+ * - ランドマーク: 可視な `main`（または `role=main`）と `nav`（または `role=navigation`）が画面に 1 つ以上ある
+ *   （`~/root.tsx` は `<main>` は常時、`<nav>` はデスクトップの `Sidebar` かモバイルの `MobileTabBar` の
+ *   どちらか一方だけが可視になる）。
+ */
+function checkA11yStructure() {
+  const violations = [];
+  const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6")).filter((h) => !isNotVisible(h));
+  const h1Count = headings.filter((h) => h.tagName === "H1").length;
+  if (h1Count !== 1) {
+    violations.push({
+      rule: "a11y-structure",
+      selector: "h1",
+      box: {},
+      detail: `expected exactly one visible h1, found ${h1Count}`,
+    });
+  }
+  let prevLevel = null;
+  for (const h of headings) {
+    const level = Number(h.tagName[1]);
+    if (prevLevel !== null && level > prevLevel + 1) {
+      violations.push({
+        rule: "a11y-structure",
+        selector: cssPathRef(h),
+        box: {},
+        detail: `heading level skips from h${prevLevel} to h${level}`,
+      });
+    }
+    prevLevel = level;
+  }
+  for (const img of document.querySelectorAll("img")) {
+    if (isNotVisible(img)) continue;
+    if (!img.hasAttribute("alt")) {
+      violations.push({
+        rule: "a11y-structure",
+        selector: cssPathRef(img),
+        box: {},
+        detail: "img missing alt attribute",
+      });
+    }
+  }
+  for (const svg of document.querySelectorAll("svg")) {
+    if (isNotVisible(svg)) continue;
+    const role = svg.getAttribute("role");
+    const hidden = svg.getAttribute("aria-hidden") === "true";
+    if (role === "img") {
+      const label = svg.getAttribute("aria-label");
+      const labelledby = svg.getAttribute("aria-labelledby");
+      const titleText = svg.querySelector("title")?.textContent?.trim();
+      if (!label?.trim() && !labelledby && !titleText) {
+        violations.push({
+          rule: "a11y-structure",
+          selector: cssPathRef(svg),
+          box: {},
+          detail: "svg[role=img] missing accessible name",
+        });
+      }
+    } else if (!hidden) {
+      violations.push({
+        rule: "a11y-structure",
+        selector: cssPathRef(svg),
+        box: {},
+        detail: "decorative svg missing aria-hidden",
+      });
+    }
+  }
+  const visible = (els) => Array.from(els).some((el) => !isNotVisible(el));
+  if (!visible(document.querySelectorAll('main, [role="main"]'))) {
+    violations.push({ rule: "a11y-structure", selector: "main", box: {}, detail: "no visible main landmark" });
+  }
+  if (!visible(document.querySelectorAll('nav, [role="navigation"]'))) {
+    violations.push({ rule: "a11y-structure", selector: "nav", box: {}, detail: "no visible nav landmark" });
+  }
+  return violations;
+}
+
 function runChecks() {
   return [
     ...checkOverflow(),
@@ -765,7 +920,69 @@ function runChecks() {
     ...checkFixedOverlays(),
     ...checkTables(),
     ...checkContrast(),
+    ...checkA11yNames(),
+    ...checkA11yStructure(),
   ];
+}
+
+/**
+ * D1 拡張その 3（Phase 76、`focus-order`）: 文書の先頭から実際に Tab キーを送り、フォーカスが
+ * 罠にはまらず（= 同じ要素から動かなくなったら罠）進むかを見る。Console 画面（`console-text` を持つ画面。
+ * `/`・`/org/:id`）だけは、下部固定の入力欄（composer）まで、画面上の操作可能な要素数を上回らない歩数で
+ * 辿り着けることまで確かめる（辿り着けない＝ DOM 順が入力欄より手前で行き止まっている）。
+ * それ以外の画面は「罠が無い」ことだけを見る（`console-text` が無いので composer の到達は対象外）。
+ *
+ * 罠の判定: Tab を押しても `window.__cssPathRef(document.activeElement)` が直前と全く同じ文字列のまま
+ * なら、そのキー入力はフォーカスを動かせていない（=罠）。フォーカスがドキュメント外（ブラウザ chrome 等）
+ * へ抜けたら `null` が返るので、単に「その画面の残りの要素を辿り終えた」として歩みを止める（罠ではない）。
+ */
+async function checkFocusOrder(page, route) {
+  const violations = [];
+  const hasComposer = await page.evaluate(() => document.querySelector('[data-testid="console-text"]') !== null);
+  const focusableCount = await page.evaluate(() => {
+    const selector = 'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])';
+    return Array.from(document.querySelectorAll(selector)).filter((el) => {
+      const style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") return false;
+      const rect = el.getBoundingClientRect();
+      return !(rect.width === 0 && rect.height === 0);
+    }).length;
+  });
+  const maxSteps = Math.max(focusableCount + 10, 20);
+  let prevSig = null;
+  let reachedComposer = false;
+  for (let i = 0; i < maxSteps; i += 1) {
+    await page.keyboard.press("Tab");
+    const sig = await page.evaluate(() => {
+      const el = document.activeElement;
+      if (!el || el === document.body) return null;
+      return `${el.getAttribute("data-testid") ?? ""}::${window.__cssPathRef(el)}`;
+    });
+    if (sig === null) break; // ドキュメント外へ出た = 辿り終えた
+    if (sig === prevSig) {
+      violations.push({
+        rule: "focus-order",
+        selector: sig.split("::")[1] ?? sig,
+        box: {},
+        detail: `Tab did not move focus away from this element after step ${i + 1} (trap)`,
+      });
+      break;
+    }
+    prevSig = sig;
+    if (sig.startsWith("console-text::") || sig.startsWith("console-send::")) {
+      reachedComposer = true;
+      break;
+    }
+  }
+  if (hasComposer && !reachedComposer && violations.length === 0) {
+    violations.push({
+      rule: "focus-order",
+      selector: route,
+      box: {},
+      detail: `composer (console-text) not reached from document start within ${maxSteps} Tab presses (${focusableCount} focusable elements on page)`,
+    });
+  }
+  return violations;
 }
 
 async function main() {
@@ -826,8 +1043,13 @@ async function main() {
       contrastRatio.toString(),
       findEffectiveBackground.toString(),
       checkContrast.toString(),
+      computeAccessibleName.toString(),
+      checkA11yNames.toString(),
+      checkA11yStructure.toString(),
       runChecks.toString(),
       "window.__runMobileAudit = runChecks;",
+      // Phase 76: `checkFocusOrder`（Node 側、実際に Tab キーを送る）が要素を突き合わせるのに使う。
+      "window.__cssPathRef = cssPathRef;",
     ].join("\n");
     await context.addInitScript(auditSource);
 
@@ -854,6 +1076,10 @@ async function main() {
         } else {
           const violations = await page.evaluate(() => window.__runMobileAudit());
           for (const v of violations) allViolations.push({ route, scheme, ...v });
+          // Phase 76: フォーカス順（`focus-order`）はページごとに実際の Tab キーで確かめる必要があるので
+          // `page.evaluate` 単体の `runChecks` には入れず、ここで別枠として呼ぶ。
+          const focusViolations = await checkFocusOrder(page, route);
+          for (const v of focusViolations) allViolations.push({ route, scheme, ...v });
         }
         if (pageErrors.length > 0) {
           allViolations.push({

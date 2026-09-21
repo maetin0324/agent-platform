@@ -87,11 +87,17 @@ function BlockShell({
   testId,
   align = "start",
   className,
+  /** Phase 76（ADR-0055 D1 拡張、ライブリージョン）: 育つ返事（`ReplyBlockView`）が run 中の間 `true`。
+   * 中身を `aria-live="polite"` にはしない（tool_use/tool_result の 1 手ごとに読み上げが騒がしくなる
+   * のを避けるため、live は「考え中…」の行と確定テキストだけに個別で付ける）が、吹き出し全体は
+   * 更新中であることを支援技術に伝える。 */
+  busy,
   children,
 }: {
   testId: string;
   align?: "start" | "end";
   className?: string;
+  busy?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -101,6 +107,7 @@ function BlockShell({
       className={cn("flex", align === "end" ? "justify-end" : "justify-start")}
     >
       <div
+        aria-busy={busy || undefined}
         className={cn(
           "max-w-[46rem] min-w-0 rounded-xl border border-border bg-surface px-3 py-2 text-sm shadow-xs",
           align === "end" && "bg-primary-soft text-primary-soft-fg border-transparent",
@@ -316,7 +323,7 @@ function ReplyBlockView({
   const streaming = block.state === "streaming";
   const steps = block.steps ?? [];
   return (
-    <BlockShell testId="console-block-reply">
+    <BlockShell testId="console-block-reply" busy={streaming}>
       <BlockHeader
         icon="message"
         who={
@@ -324,7 +331,7 @@ function ReplyBlockView({
             <span className="flex items-center gap-1.5">
               {orgNodeName(block.node_id, org)}
               {/* CSS だけの控えめな点滅（`prefers-reduced-motion: reduce` では `motion-reduce:` で止める。
-                  ADR-0055 D2 ラウンド 5）。 */}
+                  ADR-0055 D2 ラウンド 5）。視覚だけの合図なので `aria-hidden`（状態は `busy`/`aria-live` 側で伝える）。 */}
               <span
                 className="inline-block size-1.5 animate-pulse rounded-full bg-primary motion-reduce:animate-none"
                 aria-hidden="true"
@@ -338,8 +345,16 @@ function ReplyBlockView({
         atIso={block.at}
         fetchedAt={fetchedAt}
       />
+      {/* Phase 76（ライブリージョン）: 「考え中…」の 1 行は置き換え式（celeris 側が最新の 1 行だけを送る）
+          なので、そのまま `aria-live="polite"` にしても読み上げは 1 回分で済む。`tool_use`/`tool_result`
+          の 1 手ごと（下の `console-reply-steps`）はここに含めない（騒がしくなるため。ADR-0055 D2 の
+          「一度に 1 つずつ」の精神を読み上げにも適用）。 */}
       {streaming && (
-        <p className="mb-1.5 text-sm text-fg-subtle italic lg:text-xs" data-testid="console-reply-thinking">
+        <p
+          aria-live="polite"
+          className="mb-1.5 text-sm text-fg-subtle italic lg:text-xs"
+          data-testid="console-reply-thinking"
+        >
           {block.thinking || "考え中…"}
         </p>
       )}
@@ -351,7 +366,8 @@ function ReplyBlockView({
           ))}
         </div>
       )}
-      {block.text && <MarkdownViewer content={block.text} />}
+      {/* 確定していく本文（`text` は run 中も「ここまでの積み上げ」。ADR-0054 D2）だけを live にする。 */}
+      {block.text && <MarkdownViewer content={block.text} live={streaming} />}
       {result && (result.actions_executed?.length || result.actions_failed?.length) ? (
         <div className="mt-2 space-y-1 text-sm lg:text-xs" data-testid="console-actions-result">
           {result.actions_executed?.map((a, i) => (
@@ -415,8 +431,11 @@ function TaskBlockView({
         >
           {t.title}
         </Link>
-        {/* ADR-0055 D1-3: 状態は 1 語のバッジ（`to` = 遷移先の状態）。理由・経過は下の行へ。 */}
-        <StatusBadge status={t.to} />
+        {/* ADR-0055 D1-3: 状態は 1 語のバッジ（`to` = 遷移先の状態）。理由・経過は下の行へ。
+            Phase 76: Console はこのブロック自体が SSE で生きたまま更新される画面なので `role="status"`
+            を付ける（`~/lib/format.ts` 等、ページ単位でしか変わらない一覧・詳細画面のバッジは付けない。
+            全部に付けると読み上げが多すぎて「騒がしくしない」方針に反するため、範囲を Console に絞る）。 */}
+        <StatusBadge status={t.to} role="status" />
       </div>
       {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
       <p className="mt-1 text-sm text-fg-subtle lg:text-xs" data-testid="console-task-summary">

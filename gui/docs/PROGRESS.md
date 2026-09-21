@@ -4721,3 +4721,179 @@ U-G30-2 / P-G30-1）に沿って 3 項目を実装した。
 - **U-G31-3**: `formatDuration`/`relativeTimeLabel` の絶対日付フォールバック（7 日超）は UTC の年月日
   比較で、ブラウザのローカルタイムゾーンでの「日付が変わった」感覚とはずれうる（celeris・GUI とも
   タイムゾーン変換をしない既存方針に合わせた。ずれが問題になったら次のラウンドで検討）。
+
+## Phase G32 — スマホ UX ラウンド 8: アクセシブルな名前・フォーカス・ライブリージョン（ADR-0055、Phase 76。2026-09-21）
+
+celeris 側は無変更（`crates/` 無変更）。Phase 76 の依頼（`gui/CLAUDE.md`・ADR-0055・U-G31-2「`contrast` ルールは
+アイコン・フォーカスリングを見ていない」）に沿って、機械検査に 3 ルールを足し、それが見つけた違反と、
+目視で見つけたフォーカスリングのコントラスト不足を直した。
+
+### 1. `a11y-name`（アクセシブルな名前。受け入れ条件 1 前半）
+
+- `scripts/mobile-audit.mjs` に `computeAccessibleName(el)` を追加: `aria-label` → `aria-labelledby`
+  （参照先の `textContent`）→ `<label for>` / 包む `<label>` → `input[type=submit|button|reset]` の
+  `value` → 自身の `textContent` → 最後の手段として `title` の順で見る。`placeholder` は仕様上アクセシブルな
+  名前にならないので対象に入れていない（意図して外した。プレースホルダしか無い入力欄を見落とさないため）。
+- `checkA11yNames()`: `button, a[href], input:not([type=hidden]), select, textarea, [role=button],
+  [role=tab], [role=menuitem]` のうち可視なものを全部見て、`computeAccessibleName` が空文字なら違反
+  （ルール名 `a11y-name`）。`runChecks()` に配線。
+- 実装直後の実行では違反 0 件だった（`~/components/ui/Icon.tsx` は常に `aria-hidden` で、アイコンのみの
+  ボタン（下部固定タブの「閉じる」「ログアウト」「その他の操作」等）は既に個別の `aria-label` を持っていた
+  ため、ラウンド 2〜7 の積み重ねで既に揃っていたことが分かった）。**ルールが実際に働くことは、
+  `~/components/Console.tsx` の `console-overflow-trigger`（アイコンのみのボタン）から一時的に
+  `aria-label="その他の操作"` を外して `pnpm mobile-audit` を再実行し、`home`/`org-node` の light/dark
+  4 件が `a11y-name` で落ちる（`detail: "no accessible name on <button>"`）ことを確認してから元に戻した
+  （証跡は「監査」節）。
+
+### 2. `a11y-structure`（画面の骨格。受け入れ条件 1 後半）
+
+- `checkA11yStructure()`: 可視な `h1` がちょうど 1 個・見出しレベルが直前の見出しから 2 段以上飛ばない
+  （axe-core の heading-order と同じ考え方）・`img` は `alt` 属性を持つ・`svg` は `role="img"`（`aria-label`/
+  `aria-labelledby`/`<title>` のいずれかで名前を持つ）か装飾なら `aria-hidden="true"`・可視な `main`（または
+  `role=main`）と `nav`（または `role=navigation`）が画面に 1 つ以上ある、の 4 点を見る。`runChecks()` に配線。
+- 実装直後の実行で 4 件（`home`/`org-node` の light/dark）: `~/components/Console.tsx`（`/` と `/org/:id` が
+  共有）だけが他の画面と違い `~/components/ui/misc.tsx::PageHeader`（既定 `h1`）を使わず、可視な見出しが
+  0 個だった（`/org` や `/projects` 等は `PageHeader` 経由で `h1` を 1 個持っており、違反はここだけだった）。
+  `~/components/Console.tsx` の先頭に `<h1 className="sr-only">Console</h1>` を足して解消（見た目は変えず、
+  構造だけ足す）。
+- `img`/`svg`/ランドマークの違反は最初から 0 件だった（`Icon` コンポーネントは既に常に `aria-hidden`、
+  `<main>` は `~/root.tsx` に常時、`<nav>` はデスクトップ幅では `Sidebar`、モバイル幅（393px）では
+  `MobileTabBar` のどちらか一方が可視になる作りが既にできていた）。
+
+### 3. フォーカスの可視性と順序（受け入れ条件 2）
+
+- **リングのコントラスト不足を発見・修正**: `~/components/ui/form.ts` の `FIELD`（`input`/`select`/
+  `textarea` 共通）は `focus:outline-none focus:ring-3 focus:ring-primary/20` だけで、不透明度 20% の
+  box-shadow リングだった。Python で実測（`relativeLuminance`/`contrastRatio` を手計算、WCAG の式どおり）
+  したところ、light で `--primary`（`#4f46e5`）20% を `--surface`（`#ffffff`）に合成した実効色との対比が
+  **1.36:1**、dark で `--primary`（`#7c83f7`）20% を `--surface`（`#11141c`）に合成した実効色との対比が
+  **1.32:1** で、どちらも要求の 3:1 を大きく下回っていた。`~/components/ui/button.tsx` の `BASE` と同じ
+  `focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`（不透明な `--ring`
+  トークンの実線 outline、2px）に揃えた。同じく Python で実測: light `--ring`（`#6366f1`）対
+  `--surface`/`--bg`/`--surface-2` が 4.47:1 / 4.17:1 / 4.03:1、dark `--ring`（`#818cf8`）対
+  同じ 3 つが 6.17:1 / 6.55:1 / 5.77:1 で、全組み合わせが 3:1 を十分上回る。`~/app/app.css` の
+  `:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }`（Phase 69 から存在）は
+  `button`/`a`/`Icon` を持つボタン等には既に効いていた（`~/components/ui/button.tsx` の `BASE` が既に
+  同じ `focus-visible:outline-*` を持っていたため）ので、今回直したのはフォームの `input`/`select`/
+  `textarea` だけ（`~/components/ui/form.ts` の `FIELD` 1 箇所。`inputClass`/`textareaClass`/`selectClass`/
+  `multiSelectClass` は全部これを継承するので 1 箇所の修正で揃う）。この変更は `lg:` で分岐していない
+  （デスクトップにも同じ効果が及ぶ）が、見た目のレイアウトは変えず純粋にアクセシビリティの不具合修正
+  なので「明らかに中立」として扱った（デスクトップは元々リングが薄すぎて実質見えていなかったのが、
+  見えるようになるだけ）。
+- **DOM 順**: `~/root.tsx` は元々、下部固定タブ（`MobileTabBar`）が本文（`<main>` を含む `div>`）の
+  **後ろ**の兄弟要素として置かれており（フェーズ 71 の実装のまま）、DOM 順としては既に「本文の後」を
+  満たしていた。Console の入力欄（`ConsoleInput`）も `position: fixed` で画面下に貼り付くだけで、DOM 上は
+  `BlockStream`（ブロックの一覧）の直後というブロック内の自然な位置にあり、これも問題無かった
+  （`checkFocusOrder` の「罠が無い」「composer に届く」が実装直後から 0 件だったのはこのため）。
+- **スキップリンク**: `~/root.tsx` の認証済みレイアウトの先頭（`<div className="min-h-screen lg:grid...">`
+  の最初の子）に `<a href="#main-content">本文へ</a>` を追加。既定は `sr-only`（`clip` で 1×1 に潰す）、
+  `focus:not-sr-only` でフォーカス時だけ見える固定バッジになる。`<main>` に `id="main-content"` と
+  `tabIndex={-1}`（アンカーが指すために必要。クリック/Enter でジャンプしたあとフォーカスが `<main>` 自体に
+  移る）を追加。
+  - **副作用**: `sr-only` は `display:none` にしないので、既存の `tap-target` ルール（44×44 未満は違反）が
+    未フォーカス時の 1×1 のアンカーに反応し、実装直後の `pnpm mobile-audit` で 21 route × 2 scheme = 42 件の
+    `tap-target` 違反が出た（アプリ本体の既存欠陥ではなく、スキップリンクを足したこと自体が原因）。
+    スキップリンクはタッチで狙って押す対象ではないので、`~/scripts/mobile-audit.mjs` の既存の例外機構
+    `data-touch-ok` を付けて解消した（0 件に戻ったことを確認済み）。
+- **`focus-order`（新設ルール）**: `checkFocusOrder(page, route)`（`scripts/mobile-audit.mjs`。`runChecks`
+  とは別枠、Node 側から実際に `page.keyboard.press("Tab")` を送る）。文書の先頭から Tab を押し続け、
+  `window.__cssPathRef(document.activeElement)`（`runChecks` と同じ `cssPathRef` を注入スクリプト経由で
+  公開）が直前と全く同じ文字列のままなら罠と判定して止める。歩数の上限は「画面上の可視な操作可能要素数 + 10」
+  （決め打ちの固定値だと画面ごとの複雑さのばらつきで誤検知しうるため）。`console-text`（Console の
+  composer）を持つ画面（`home`・`org-node`・`org-detail`。実際に composer を持つのは `home`/`org-node`
+  だけで `org-detail` は持たない）だけは、composer に到達したかも見て、到達しなければ違反にする。
+  - **ルールの検証**: `~/components/Console.tsx` の `console-text` に一時的に `tabIndex={-1}` を付けて
+    `pnpm mobile-audit` を再実行し、`home`/`org-node` の light/dark 4 件が `focus-order` で落ちる
+    （`detail: "composer (console-text) not reached from document start within 31 Tab presses (21
+    focusable elements on page)"`）ことを確認してから元に戻した（証跡は「監査」節）。
+
+### 4. ライブリージョン（受け入れ条件 3）
+
+- `~/components/ConsoleBlockItem.tsx::BlockShell` に `busy?: boolean` を追加し、中身の箱に
+  `aria-busy={busy || undefined}` を付けられるようにした。`ReplyBlockView`（育つ返事）は
+  `busy={streaming}` を渡す。
+- 「考え中…」の行（`console-reply-thinking`）に `aria-live="polite"` を追加（celeris 側が最新の 1 行だけを
+  置き換え式で送る設計なので、読み上げは常に 1 回分で済む）。
+- `~/components/MarkdownViewer.tsx` に `live?: boolean`（既定 `false`）を追加し、`true` のときだけ
+  `aria-live="polite"` / `aria-atomic="false"` を付ける。`ReplyBlockView` は確定していく本文
+  （`block.text`。run 中は「ここまでの積み上げ」、ADR-0054 D2）だけ `live={streaming}` で渡す。報告・
+  途中目標のレビュー・文書ページ等、他の `MarkdownViewer` 利用箇所（開いたあと中身が変わらない）は
+  既定のまま（`live` を渡さない = ライブリージョンにしない）にして、無関係な画面までライブリージョンだらけに
+  しないようにした。
+- **spam しない**: `tool_use`/`tool_result` の 1 手ごとの行（`console-reply-steps` の中の `ReplyStepRow`）は
+  上記のどちらのライブリージョンにも含めていない（見た目の並び順は変えていないが、`aria-live` を持つ
+  兄弟要素の外に置いている）。「考え中…」の 1 行と、確定していく本文の更新だけが読み上げられ、tool の
+  1 手ごとには読み上げが飛ばない。
+- **状態バッジの `role="status"`**: `~/components/ConsoleBlockItem.tsx::TaskBlockView` の
+  `<StatusBadge status={t.to} />` にだけ `role="status"` を追加した（Console はこのブロック自体が SSE で
+  生きたまま更新される画面のため）。`/board`・`/tasks`・`/tasks/:id` 等、他の画面の `StatusBadge` は
+  `role` を付けていない（スコープを絞った理由は「未解決事項」参照）。
+
+### 監査（機械検査。ルール実装直後 → 全修正後）
+
+| rule | 実装直後 | 全修正後（light） | 全修正後（dark） |
+| --- | --- | --- | --- |
+| overflow / status-badge / fixed-overlay / font-size / table-wrap / contrast | 0 | 0 | 0 |
+| `a11y-name`（新規） | 0 | 0 | 0 |
+| `a11y-structure`（新規） | 4（`home`/`org-node` の light+dark） | 0 | 0 |
+| `focus-order`（新規） | 0 | 0 | 0 |
+| `tap-target`（既存。スキップリンク追加の副作用） | 42（21 route × 2 scheme） | 0 | 0 |
+| 合計 | 46 | **0** | **0** |
+
+`pnpm mobile-audit` は 21 route × 2 scheme = 42 通り全て 200 応答、違反 0 件で exit 0
+（`by_rule: {}`、`by_scheme: {"light": 0, "dark": 0}`）。
+
+### 証跡（コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint`（`scripts/mobile-audit.mjs` の 1 箇所で `pnpm exec biome check --write .` による自動整形が要った） | exit 0。`Checked 227 files in ...ms. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0。**Test Files 62 passed (62) / Tests 925 passed (925)**（Phase G31 から変わらず。新規の純粋関数は追加していないため） |
+| build | `pnpm build` | exit 0（client・server とも） |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（API 変更なし） |
+| mobile-audit（ルール実装直後、修正前） | `pnpm mobile-audit` | exit 1。`{"ok": false, "total": 46, "by_rule": {"tap-target": 42, "a11y-structure": 4}, "by_scheme": {"light": 23, "dark": 23}}` |
+| mobile-audit（全修正後） | `pnpm mobile-audit` | **exit 0。violations 0 件**（`by_rule: {}`、`by_scheme: {"light": 0, "dark": 0}`）。21 route × 2 scheme = 42 通り全て 200 応答 |
+| a11y-name ルールの検証 | `console-overflow-trigger` の `aria-label` を一時除去 → `pnpm mobile-audit` | exit 1。`{"total": 4, "by_rule": {"a11y-name": 4}}`（`home`/`org-node` の light/dark）。元に戻して再実行し 0 件を確認 |
+| focus-order ルールの検証 | `console-text` に一時的に `tabIndex={-1}` → `pnpm mobile-audit` | exit 1。`{"total": 4, "by_rule": {"focus-order": 4}}`（`home`/`org-node` の light/dark、`detail` は「composer 未到達」）。元に戻して再実行し 0 件を確認 |
+| フォーカスリングのコントラスト実測（Python、WCAG の相対輝度式） | 修正前: light `ring/20% on surface` = 1.36:1、dark = 1.32:1 | どちらも 3:1 未満（違反） |
+| 同上（修正後） | light `--ring` on `--surface`/`--bg`/`--surface-2` = 4.47 / 4.17 / 4.03:1、dark = 6.17 / 6.55 / 5.77:1 | 全組み合わせ 3:1 以上 |
+
+### 変更したファイル
+
+- `scripts/mobile-audit.mjs`（`computeAccessibleName`・`checkA11yNames`・`checkA11yStructure`・
+  `checkFocusOrder` を新設、`runChecks`/`addInitScript` バンドル/メインループに配線）
+- `app/root.tsx`（スキップリンク「本文へ」、`<main id="main-content" tabIndex={-1}>`）
+- `app/components/ui/form.ts`（`FIELD` のフォーカスリングを不透明な `outline-ring` トークンに変更）
+- `app/components/Console.tsx`（`<h1 className="sr-only">Console</h1>` を追加）
+- `app/components/ConsoleBlockItem.tsx`（`BlockShell` に `busy`、「考え中…」に `aria-live`、
+  確定本文の `MarkdownViewer` に `live`、Console の task 状態バッジに `role="status"`）
+- `app/components/MarkdownViewer.tsx`（`live?: boolean` プロパティを追加）
+
+### 未解決事項
+
+- **U-G32-1（実機未確認、ADR-0009 P-34 継続）**: VoiceOver / TalkBack・実機キーボードでの読み上げ順・
+  読み上げ内容の確認は未実施（認証・ネットワークが使えるサンドボックスではないため）。機械検査は DOM 構造と
+  ARIA 属性の存在・Tab キーでの到達性までしか見ておらず、実際に何がどう読み上げられるかは支援技術の実装に依存する。
+- **U-G32-2**: `role="status"` は Console の task ブロック（`TaskBlockView`）だけに絞った。`~/hooks/useCelerisStream.ts`
+  は root で SSE を受けるたびに全ルートを再検証するので、理屈のうえでは `/board`・`/tasks`・`/tasks/:id` 等の
+  `StatusBadge` も「ライブに変わりうる」。ただしそれらは Console のように「1 画面を開いたまま流れを追う」
+  用途ではなく、通常のページ全体再検証（React Router の revalidate）で書き換わるだけなので、全部に
+  `role="status"` を付けると無関係な操作（他のバッジのフィルタ変更等）のたびに読み上げが増えて「騒がしく
+  しない」の精神に反すると判断し、今回は Console に絞った。他画面への広げ方は次のラウンドで検討（下の
+  「提案」参照）。
+- **U-G32-3**: `contrast` ルール（Phase 75）はテキストの前景色/背景色だけを見ており、フォーカスリング自体の
+  コントラストは自動検査していない（今回は Python での手計算のみ。U-G31-2 の解消は「フォーカスリングを
+  不透明なトークンに揃えて手計算で確かめる」までで、audit スクリプトへのルール化はしていない）。
+- **U-G32-4**: `focus-order` の罠判定は「Tab を押しても `activeElement` の `cssPathRef` が変わらない」を
+  唯一の基準にしている。理論上はフォーカスが A → B → A と 2 要素間を往復するループ（B から A に戻るケース）は
+  「直前と同じ」判定に引っかからず見逃す。今回の 21 画面では発生しなかった（0 件のまま）が、将来モーダル等の
+  実装ミスでそういう罠が入る可能性はある。
+
+### 提案
+
+- **P-G32-1**: `role="status"` を Console 以外（`/board` 等、SSE で頻繁に更新される一覧画面）にも広げるなら、
+  「ページ全体の再検証」ではなく「個々の要素が実際に変わったときだけ」読み上げる仕組み（差分検出）が要る。
+  今のまま全バッジに付けると再検証のたびに画面上の全バッジが一斉に「読み上げ候補」になり、かえって煩くなる
+  おそれがあるため、次にやるなら先に celeris 側 API から「何が変わったか」が拾える形（SSE のペイロードに
+  変更フィールドを載せる等）を検討したい。
