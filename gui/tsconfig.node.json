@@ -8,6 +8,11 @@
     "react-router.config.ts",
     "scripts/**/*.mjs"
   ],
+  // `mobile-audit.mjs` は 1 ファイルの中で Node（このプロジェクトの lib）と、`page.evaluate` へ
+  // `toString()` で送るブラウザの関数（`document` / `window` / `getComputedStyle` / `Element` が要る）の
+  // 2 つの実行環境を混ぜている（ADR-0055）。DOM の lib を足すと Node 側の型と衝突するので、素の JS のまま
+  // ここだけ対象外にする（`gui/CLAUDE.md` の禁止事項には抵触しない: celeris への依存は増えない）。
+  "exclude": ["scripts/mobile-audit.mjs"],
   "compilerOptions": {
     "composite": true,
     "strict": true,

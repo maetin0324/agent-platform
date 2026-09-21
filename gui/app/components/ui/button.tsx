@@ -20,10 +20,12 @@ const VARIANTS: Record<ButtonVariant, string> = {
   soft: "border border-primary-border bg-primary-soft text-primary-soft-fg hover:border-primary",
 };
 
+// ADR-0055 D1-2: タップ領域は 44×44 以上。`lg:` でデスクトップは元の高さ（`h-7`/`h-8`/`h-10`）に戻す
+// （見た目はデスクトップでは変えない。パディング・文字・アイコンの大きさはそのまま）。
 const SIZES: Record<ButtonSize, string> = {
-  xs: "h-7 px-2.5 text-xs [&_svg]:size-3.5",
-  sm: "h-8 px-3 text-sm [&_svg]:size-4",
-  md: "h-10 px-4 text-sm [&_svg]:size-4",
+  xs: "h-11 px-2.5 text-xs [&_svg]:size-3.5 lg:h-7",
+  sm: "h-11 px-3 text-sm [&_svg]:size-4 lg:h-8",
+  md: "h-11 px-4 text-sm [&_svg]:size-4 lg:h-10",
 };
 
 export function buttonClass({

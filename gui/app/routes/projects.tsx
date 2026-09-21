@@ -225,7 +225,11 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
                       )}
                     >
                       <span className="flex flex-wrap items-center gap-1.5">
-                        <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status">
+                        <Badge
+                          tone={PROJECT_STATUS_TONE[project.status]}
+                          data-testid="project-status"
+                          data-status-badge="project"
+                        >
                           {projectStatusLabel(project.status)}
                         </Badge>
                         {/* アーカイブは `status` に出ないので別のバッジ（ADR-0044 D6）。 */}

@@ -53,6 +53,8 @@ export function StatusBadge({ status, className, ...props }: HTMLAttributes<HTML
       dot
       pulse={status === "running"}
       className={cn(status === "cancelled" && "opacity-80", className)}
+      // ADR-0055 D1-3: 状態バッジは 1 語。`gui/scripts/mobile-audit.mjs` がこの印を見て検査する。
+      data-status-badge="task"
       {...props}
     >
       {status}

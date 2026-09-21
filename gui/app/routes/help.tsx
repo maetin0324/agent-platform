@@ -273,7 +273,8 @@ export default function HelpPage() {
         description="Celeris の使い方をひとまとめにしたドキュメントです。"
       />
 
-      <nav aria-label="使い方の目次" className="rounded-xl border border-border bg-surface-2/50 p-3">
+      {/* ADR-0055 D1-2 の例外: 同じ行に並ぶ目次のリンク群（`data-touch-ok`）。 */}
+      <nav aria-label="使い方の目次" className="rounded-xl border border-border bg-surface-2/50 p-3" data-touch-ok>
         <ul className="flex flex-wrap gap-1.5 text-sm">
           {TOC.map((item) => (
             <li key={item.id}>
