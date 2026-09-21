@@ -10024,3 +10024,32 @@ LLM source の抽象層で、ハーネスと密結合にしない。
   問い合わせる経路が要る（今回は別枠のまま。公平性は多少甘くなるが cooldown・観測値は共有できている）。
 - claude-oauth の `token_url`/`client_id` の既定値は、実際の Claude Code アカウントで 1 回 `curl`
   して確認するまで「未確認」の注記を外さないこと。
+
+### Phase 65 の本番反映と実機確認（2026-09-21 08:43–08:55 UTC。`0b1815cab8f6`、schema 22、停止→起動）
+
+- main `0b1815c` = Phase 65 の merge（`e72d41c`。migration は Phase 64 の本物の `0021_knowledge_run_retry.sql` を残し、
+  Phase 65 の予約プレースホルダ `0021_reserved_*` を削除、`0022_llm_proxy_requests.sql` を追加、`SCHEMA_VERSION = 22`）
+  ＋ 汎用 pre-start フック `scripts/selfdeploy/hooks/swap-config-next.sh`。
+- ゲート（merge 後の main）: `cargo test --workspace --no-fail-fast` **1611 passed / 0 failed** exit 0、
+  `cargo clippy --workspace --all-targets -- -D warnings` exit 0、GUI `pnpm typecheck`/`lint` exit 0、`pnpm test` 60 files / 856 passed。
+- `release.sh main` → `0b1815cab8f6`（7 ゲート exit 0。changes.json: base=0b50710cd3dc、commits=4、files=51）。
+- `verify.sh`: check 1–4・6 true、check 5（N-1）は想定どおり false（旧 `0b50710cd3dc` が schema 22 を `SchemaTooNew` で拒否）→ `ok=true live_ok=false`。
+- 設定は `deny_unknown_fields` なので `[llm_proxy]` を先に書くと旧バイナリが読めない。`config.toml.next`（現行＋`[llm_proxy]`
+  claude_oauth / codex_oauth / openai_compatible `qwen`、tier 写像）を用意し、新バイナリで `--mode verify` 起動（scratch DB・7713）
+  → health 200・`llm-proxy listening 127.0.0.1:18100` を確認した上で、
+  `promote.sh 0b1815cab8f6 --pre-start hooks/swap-config-next.sh` を実行（1 分 load 0.77、blocked 0、in-flight 0）。
+  旧の停止 1 秒 → バックアップ 8.5 MB → フック（`config.toml.pre-0b1815cab8f6` を残して入替）→ 新 healthy（schema 22）。API の停止は約 3 秒。
+- 実機（ADR-0053 §3 Phase 65 の「本番の Claude アカウントで curl 1 回」）:
+  - `GET /healthz` → `{"status":"ok"}`。`GET /v1/models` → `celeris/{frontier,standard,cheap}`、`claude/*`、`gpt/*`、`qwen/*` の 12 件。
+  - `POST /v1/chat/completions {"model":"celeris/cheap", …"pong"}` → **200、2.25 s、`x-celeris-source: claude-oauth`、
+    `x-celeris-account: claude_max_lab`**、本文 `pong`、usage 15/5。Qwen（`openai-compatible:qwen`）は `reachable: false` なので
+    設計どおり Claude に倒れた。ログに `refreshed claude-oauth tokens`（期限切れ→更新→書き戻しの経路も実機で通った）。
+  - `GET /api/v1/llm/sources` → 3 source（claude-oauth 2 アカウント logged_in、codex-oauth 1、qwen unreachable）、直近 1 時間の要求数・token 数。
+  - **codex-oauth は上流 400**: `gpt/cheap`（gpt-5-mini）・`gpt/standard`（gpt-5）・`gpt/frontier`（gpt-5-codex）、stream の有無・
+    `max_tokens` の有無に関係なく 0.4 秒で `upstream error`。上流の本文がログにも応答にも出ないため原因を特定できず。
+    → **Phase 65b**（上流エラーの可視化、Codex CLI と同じ要求形: `store:false`・上流は常に `stream:true`・`instructions` 必須・
+    `temperature`/`max_output_tokens` を送らない、UA）を Sonnet で起動。
+  - ADR-0052 の probe（`GET <base_url>/models`）は認証なしなので、プロキシ（401）に向けると常に fallback になる。Phase 65b で
+    probe に bearer を足し、401/403 は `Unknown` 扱いにする。**`langmem-main` のプロキシ化はその配備後**。
+- 次: `ldr-qwen` → `paperqa-qwen` を 1 つずつプロキシへ（`env_from_secrets` で `OPENAI_API_KEY = "celeris-api-token"`。秘密ファイルは
+  `~/.config/celeris/secrets/celeris-api-token` に api.token の写し）。opencode は Phase 65 の判断どおり据え置き。
