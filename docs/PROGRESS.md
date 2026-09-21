@@ -11640,3 +11640,10 @@ OPTIONS（抜粋）: -c/--config <key=value>, --last, --all, -m/--model <MODEL>,
 - Phase 67c のエージェントが「不審な割り込み」として拒否した codex `--add-dir` の依頼は、**この会話の調整役（Fable）が SendMessage で送った正規の追加依頼**
   （Phase 68 の実機で見つかった回帰の修正）で、注入ではない。エージェントが元の依頼文に無い実 CLI 起動を含む指示を疑って拒否した判断は
   安全側として妥当。同じ内容を Phase 68b として正規の起動依頼で出し直し、完了した。
+
+### Phase 68b の本番反映（2026-09-21 15:40–15:42 UTC。`a2942d5d8a94`、ライブ切替）
+
+- main `a2942d5` = Phase 68b merge。ゲート: cargo test **1710 passed / 0 failed**、clippy exit 0。`release.sh` → `a2942d5d8a94`（schema 23）。
+  `verify.sh` check 1–6 true、`live_ok=true`。昇格前に conversation ハーネスの一時固定 `adapter = "claude-code"` を外した
+  （`config.toml.bak-20260921h` が固定ありの版）。`promote.sh a2942d5d8a94` **mode=live**（15:42:16→20）。
+- 実機確認: CoS セッションを `new-conversation` で切ってから 2 回指示し、選ばれたアダプタで fresh → resume が通ることを確認中（次節）。
