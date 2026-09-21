@@ -1008,6 +1008,11 @@ function ProjectLifecycleActions({ project }: { project: ProjectDetail["project"
 /**
  * 途中目標のカードの「一時停止／再開」「中止（確認付き）」（ADR-0044 D6、§3.89〜3.91。Phase 55 / G19）。
  * 案件の状態は変わらない（途中目標だけ）。中止すると、この途中目標に属する非終端タスクが連鎖で中止される。
+ *
+ * フェーズ 72（ADR-0055 D2 ラウンド 4、U11）: 「一時停止／再開」は途中目標カードの主役の操作として
+ * 常に出すが、頻度が低く確認も要る「中止」は `<details>` に畳む（Project 画面のアーカイブと同じ規律。
+ * Phase 71 の「その他の操作」に揃えた）。中止だけを畳んでも中止・一時停止・再開は同じ 1 つの
+ * `fetcher`（`milestone-lifecycle-${id}`）を共有したまま。
  */
 function MilestoneLifecycleActions({ milestone }: { milestone: MilestoneView }) {
   const fetcher = useFetcher<ProjectOpOutcome>({ key: `milestone-lifecycle-${milestone.id}` });
@@ -1058,36 +1063,47 @@ function MilestoneLifecycleActions({ milestone }: { milestone: MilestoneView }) 
             </Button>
           </fetcher.Form>
         )}
-        {buttons.cancel && (
-          <Button
-            type="button"
-            variant="danger"
-            size="xs"
-            disabled={busy}
-            onClick={() => setConfirming(true)}
-            data-testid="milestone-cancel"
-            className="w-full sm:w-auto"
-          >
-            <Icon name="ban" />
-            {CANCEL_LABEL}
-          </Button>
-        )}
       </div>
-      {confirming && (
-        <Alert tone="danger" data-testid="milestone-cancel-confirm">
-          <p>{milestoneCancelConfirmText(milestone.title)}</p>
-          <fetcher.Form method="post" className="flex flex-wrap items-center gap-2 pt-1">
-            <input type="hidden" name="intent" value="milestone_cancel" />
-            <input type="hidden" name="milestone_id" value={milestone.id} />
-            <Button type="submit" variant="danger" size="xs" disabled={busy} data-testid="milestone-cancel-submit">
+      {buttons.cancel && (
+        <details data-testid="milestone-cancel-details" className="text-sm text-fg-subtle lg:text-xs">
+          <summary className="min-h-11 cursor-pointer select-none">その他の操作（中止）</summary>
+          <div className="mt-2 space-y-2">
+            <Button
+              type="button"
+              variant="danger"
+              size="xs"
+              disabled={busy}
+              onClick={() => setConfirming(true)}
+              data-testid="milestone-cancel"
+              className="w-full sm:w-auto"
+            >
               <Icon name="ban" />
-              {CANCEL_CONFIRM_LABEL}
+              {CANCEL_LABEL}
             </Button>
-            <Button type="button" variant="ghost" size="xs" onClick={() => setConfirming(false)}>
-              {CANCEL_STOP_LABEL}
-            </Button>
-          </fetcher.Form>
-        </Alert>
+            {confirming && (
+              <Alert tone="danger" data-testid="milestone-cancel-confirm">
+                <p>{milestoneCancelConfirmText(milestone.title)}</p>
+                <fetcher.Form method="post" className="flex flex-wrap items-center gap-2 pt-1">
+                  <input type="hidden" name="intent" value="milestone_cancel" />
+                  <input type="hidden" name="milestone_id" value={milestone.id} />
+                  <Button
+                    type="submit"
+                    variant="danger"
+                    size="xs"
+                    disabled={busy}
+                    data-testid="milestone-cancel-submit"
+                  >
+                    <Icon name="ban" />
+                    {CANCEL_CONFIRM_LABEL}
+                  </Button>
+                  <Button type="button" variant="ghost" size="xs" onClick={() => setConfirming(false)}>
+                    {CANCEL_STOP_LABEL}
+                  </Button>
+                </fetcher.Form>
+              </Alert>
+            )}
+          </div>
+        </details>
       )}
       <ProjectActionFlash outcome={fetcher.data} />
     </div>

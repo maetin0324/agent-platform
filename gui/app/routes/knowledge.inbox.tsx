@@ -180,7 +180,9 @@ function CandidateCard({ candidate }: { candidate: KnowledgeCandidate }) {
         }
         description={
           <span className="flex flex-wrap items-center gap-2">
-            <Mono data-testid="knowledge-candidate-path">{candidate.path}</Mono>
+            <Mono data-testid="knowledge-candidate-path" className="break-all">
+              {candidate.path}
+            </Mono>
             {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
             {candidate.created && <span className="text-sm text-fg-subtle lg:text-xs">{candidate.created}</span>}
           </span>

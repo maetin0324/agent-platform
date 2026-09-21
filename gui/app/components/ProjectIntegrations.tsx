@@ -49,6 +49,7 @@ function IntegrationRow({ item }: { item: ProjectIntegrationItem }) {
         to={`/tasks/${integration.task_id}`}
         className="min-w-0 flex-1 truncate font-medium text-primary hover:underline"
         data-testid="project-integration-task"
+        title={item.task_title}
       >
         {item.task_title}
       </Link>

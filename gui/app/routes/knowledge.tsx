@@ -44,6 +44,7 @@ import {
   KNOWLEDGE_UNINITIALIZED_TITLE,
   knowledgeErrorHint,
 } from "~/lib/labels";
+import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/knowledge";
 
@@ -98,7 +99,9 @@ export default function KnowledgePageRoute({ loaderData }: Route.ComponentProps)
           tree ? (
             // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
             <span className="flex items-center gap-2 text-sm text-fg-subtle lg:text-xs">
-              <Mono data-testid="knowledge-root">{tree.root}</Mono>
+              <Mono data-testid="knowledge-root" className="break-all">
+                {tree.root}
+              </Mono>
               <Link to={knowledgeInboxHref()} className={buttonClass({ variant: "secondary", size: "xs" })}>
                 <Icon name="inbox" />
                 {KNOWLEDGE_INBOX_LABEL}
@@ -285,10 +288,12 @@ function KnowledgeSidebar({
         {tree.items.length === 0 ? (
           <EmptyState icon="database" title={KNOWLEDGE_EMPTY_LABEL} />
         ) : q ? (
-          <ul className="space-y-0.5 text-sm" data-testid="knowledge-results">
+          // フェーズ 72（ADR-0055 D2 ラウンド 4）: 検索結果は「一覧はカード（縦積み）」の規律に揃えた
+          // （ツリーの下の並びは今までどおり軽いナビ行のまま。検索結果だけ枠付きのカードにする）。
+          <ul className="space-y-2 text-sm" data-testid="knowledge-results">
             {tree.items.map((item) => (
               <li key={item.path}>
-                <PageLink item={item} current={item.path === path} q={q} scope={scope} />
+                <PageLink item={item} current={item.path === path} q={q} scope={scope} card />
               </li>
             ))}
           </ul>
@@ -349,26 +354,40 @@ function PageLink({
   current,
   q,
   scope,
+  card = false,
 }: {
   item: KnowledgeItem;
   current: boolean;
   q: string | null;
   scope: string | null;
+  /** フェーズ 72（ADR-0055 D2）: 検索結果はカード（枠付き）、ツリーの並びは軽いナビ行のまま。 */
+  card?: boolean;
 }) {
   return (
     <Link
       to={knowledgeHref({ path: item.path, q, scope })}
       data-testid="knowledge-page-link"
       data-current={current ? "true" : "false"}
-      className={
-        current
-          ? "block rounded bg-surface-2 px-1.5 py-1 font-medium text-primary no-underline"
-          : "block rounded px-1.5 py-1 text-fg no-underline hover:bg-surface-2"
-      }
+      className={cn(
+        "block min-h-11 no-underline",
+        card
+          ? cn(
+              "rounded-lg border p-3",
+              current
+                ? "border-primary-border bg-primary-soft text-primary-soft-fg"
+                : "border-border bg-surface text-fg hover:border-border-strong",
+            )
+          : cn("rounded px-1.5 py-1", current ? "bg-surface-2 font-medium text-primary" : "text-fg hover:bg-surface-2"),
+      )}
     >
-      <span className="block truncate">{item.title || item.path}</span>
+      <span className="block truncate font-medium">{item.title || item.path}</span>
+      {card && (
+        <span className="mt-0.5 block truncate font-mono text-xs break-all text-fg-subtle" title={item.path}>
+          {item.path}
+        </span>
+      )}
       {(item.tags ?? []).length > 0 && (
-        <span className="mt-0.5 flex flex-wrap gap-1">
+        <span className="mt-1 flex flex-wrap gap-1">
           {(item.tags ?? []).map((tag) => (
             <Badge key={tag} tone="neutral">
               {tag}

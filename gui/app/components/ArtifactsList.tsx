@@ -154,6 +154,7 @@ function ArtifactRow({ row, fetchedAt }: { row: ProjectArtifactRow; fetchedAt: s
                       target="_blank"
                       rel="noreferrer"
                       className="min-w-0 flex-1 truncate text-primary hover:underline"
+                      title={link.title}
                     >
                       {link.title}
                     </a>

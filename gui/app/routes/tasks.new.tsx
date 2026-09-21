@@ -488,7 +488,9 @@ export default function NewTaskPage({ loaderData }: Route.ComponentProps) {
                       className="flex items-center gap-2 rounded-md px-1.5 py-1 text-sm text-fg hover:bg-surface-2/60"
                     >
                       <input type="checkbox" name="depends_on" value={item.id} className={checkboxClass} />
-                      <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                      <span className="min-w-0 flex-1 truncate" title={item.title}>
+                        {item.title}
+                      </span>
                       <StatusBadge status={item.status} />
                     </label>
                   ))}

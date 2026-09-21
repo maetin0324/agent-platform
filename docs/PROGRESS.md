@@ -10255,3 +10255,61 @@ celeris 本体（Rust）には触っていない。作業は全て `gui/` 側（
 表示時の実機確認（ADR-0055 D2 の `100dvh`）が新たに必要になった（未実施、P-G23-1 と同じ経路で
 人またはネットワーク・実機が使える環境のエージェントに依頼）、(3) Project のアーカイブの開閉化は
 デスクトップの見た目も変える判断だったので、人が「常に見せたい」と言うなら次のラウンドで戻す。
+
+## Phase 72 — スマホ UX ラウンド 4（ADR-0055。2026-09-21）
+
+celeris 本体（Rust）には触っていない。作業は全て `gui/` 側（詳細は `gui/docs/PROGRESS.md` の
+`## Phase G26`）。機械検査（`pnpm mobile-audit`）はラウンド 2 以降 0 件のまま、今回は Phase 71（Phase
+G25）の未解決事項 U7・U10・U11 の解消と、`/org`・`/org/<node>`・`/reports`・`/knowledge`・
+`/knowledge/inbox`・`/releases`・`/help` の D2 磨き、その他の画面のタイポグラフィ・省略表示の仕上げを
+行った。並行して別エージェントが `accounts.tsx`/`clusters.tsx`/`app/celeris/types.ts`/accounts・
+clusters・llm-sources のモックを編集していたため、それらには一切触れていない。
+
+### 画面ごとの変更と理由（1〜2 行）
+
+- **U7（Console 入力欄の spacer）**: 見積もりの `h-52` をやめ、`ConsoleInput` 自身の実高さを
+  `ResizeObserver` で測って spacer に反映するようにした（返信バナーの有無に関わらず正確）。
+- **U10（Board の segmented control）**: 6 択の横スクロール（6 番目が隠れがち）を、393px で 3 列 ×
+  2 行のグリッドに変え、6 つ全部を一度に見えるようにした。
+- **U11（task/milestone カード）**: 途中目標カードの「中止」（頻度が低く確認も要る）を `<details>`
+  に畳み、「一時停止／再開」だけを主役の操作として残した（Board のカードは Phase 71 で既に対応済み）。
+- **`/org`・`/org/<node>`**: 木をサブツリーごとに開閉できる字下げ一覧にし、ノード行に既定のハーネス・
+  動かす場所（`host`/`container` を 1 語のバッジ）を添えた。`/org/<node>` は Console 部品の共用なので
+  U7 の直しがそのまま効く。
+- **`/reports`**: 報告の行をカード（枠付き）にし、展開した本文に `shortId` の id（`title` に全文）を
+  足した。
+- **`/knowledge`・`/knowledge/inbox`**: 検索結果をカード化（パスの `break-all` を含む）、置き場・
+  候補・ページのパス表示に `break-all` を足した。
+- **`/releases`**: gate/verify バッジが 1 語ではなかった（`gate ✓`、`検証済み（ライブ引き継ぎ）` 等）
+  ので、1 語の新しいバッジ用ラベル関数を追加し、詳細は `title` と行の下に残した。「upgrade」ボタンは
+  押せるときだけモバイルで全幅にした。
+- **`/help`**: 説明文に `leading-relaxed` を足して読みやすさを上げた（目次のピル行は既存のまま）。
+- **画面共通**: `truncate` していて `title` の無かった箇所（ファイルツリー・変更ファイル一覧・PR/取り込み・
+  成果物のリンク集・依存タスク候補・Console の report ブロック）に `title` を足した。ついでに
+  `task-changes.tsx` の変更ファイルバッジが 2 語（`A 追加`）だったのを 1 語（`追加`。生の記号は
+  `title`）にした。
+
+### 監査（機械検査。数値は 0 を維持したことの確認）
+
+| rule | ラウンド 3 後 | ラウンド 4 後 |
+| --- | --- | --- |
+| overflow / status-badge / fixed-overlay / tap-target / font-size | 0 | **0**（維持） |
+| 合計 | 0 | **0**（`pnpm mobile-audit` exit 0） |
+
+### 証跡（GUI 側、コマンドと出力の要点。詳細は `gui/docs/PROGRESS.md` ## Phase G26）
+
+- `pnpm lint` exit 0（一度 biome の整形差分 2 件を `biome check --write` で直してから再確認）。
+- `pnpm typecheck` exit 0。
+- `pnpm test` exit 0（**857 passed / 60 files**。Phase G25 の 856 から +1、`releaseGateBadgeLabel`/
+  `releaseVerifyBadgeLabel` の新規ユニットテストを追加）。
+- `pnpm build` exit 0（client・server とも）。
+- `pnpm gen:types && git diff --exit-code app/celeris/types.ts` 差分ゼロ（celeris API 契約は変えていない）。
+- `pnpm mobile-audit` exit 0（**違反 0 件を維持**。20 route 全て 200 応答）。
+
+### 未解決事項・提案
+
+詳細は `gui/docs/PROGRESS.md` Phase G26 の「未解決事項」（U8・U9 継続、U12・U13 新規）・「提案」
+（P-G26-1/2）を参照。要点: (1) U8（ソフトキーボード表示時の実機確認）は今回も未実施のまま、
+(2) Milestone の「中止」を開閉に畳んだ変更は Project のアーカイブ（Phase 71）と同様デスクトップの
+見た目も変える判断で、人が「常に見せたい」と言うなら戻す、(3) `/releases` の検証バッジを 1 語化した
+ことで `ok_live`/`ok_stop_start` の区別がバッジの文字だけでは分からなくなった（色と詳細行に依存）。

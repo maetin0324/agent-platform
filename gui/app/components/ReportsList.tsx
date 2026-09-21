@@ -9,6 +9,7 @@ import { Button } from "~/components/ui/button";
 import { touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import type { Tone } from "~/components/ui/tone";
+import { shortId } from "~/lib/format";
 import { relativeTimeLabel, reportNodeName, reportProjectName } from "~/lib/reports";
 import { cn } from "~/lib/utils";
 
@@ -141,7 +142,9 @@ function ReportRow({
       data-report-id={report.id}
       data-report-kind={report.kind}
       className={cn(
-        depth > 0 && "ml-3 border-l border-border pl-3",
+        // フェーズ 72（ADR-0055 D2 ラウンド 4）: 一覧はカード（縦積み）の規律に揃え、depth 0 の行を
+        // 枠付きのカードにした（差し込みの元報告は今までどおり `border-l` の字下げで区別する）。
+        depth === 0 ? "rounded-lg border border-border bg-surface" : "ml-3 border-l border-border pl-3",
         // 悪い知らせは行そのものを目立たせる（SPEC §2.4「良い知らせと同じ経路で、目立つ形で届く」。監査 6）。
         report.kind === "bad_news" && "rounded-lg border border-danger-border bg-danger-soft/70",
       )}
@@ -184,6 +187,10 @@ function ReportRow({
               <div data-testid="report-body" className="text-sm text-fg">
                 {detail.report.body ? <MarkdownViewer content={detail.report.body} /> : <p>（本文なし）</p>}
               </div>
+              {/* ADR-0055 D2「id は末尾だけ、全文は title」（フェーズ 72）。 */}
+              <p className="font-mono text-xs break-all text-fg-subtle" title={detail.report.id}>
+                id: {shortId(detail.report.id)}
+              </p>
               <ReportLinks report={detail.report} projects={projects} />
               <Button
                 variant="secondary"

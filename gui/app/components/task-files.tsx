@@ -124,7 +124,9 @@ export function TaskFiles({ taskId, tree, file, fileError, filePath }: TaskFiles
                       data-testid="task-files-entry-link"
                     >
                       <Icon name="folder" />
-                      <span className="truncate">{entry.name}</span>
+                      <span className="truncate" title={entry.name}>
+                        {entry.name}
+                      </span>
                     </Link>
                   ) : entry.kind === "file" ? (
                     <Link
@@ -133,12 +135,16 @@ export function TaskFiles({ taskId, tree, file, fileError, filePath }: TaskFiles
                       data-testid="task-files-entry-link"
                     >
                       <Icon name="file" />
-                      <span className="truncate">{entry.name}</span>
+                      <span className="truncate" title={entry.name}>
+                        {entry.name}
+                      </span>
                     </Link>
                   ) : (
                     <span className="flex min-w-0 items-center gap-2 text-fg-muted">
                       <Icon name="file" />
-                      <span className="truncate">{entry.name}</span>
+                      <span className="truncate" title={entry.name}>
+                        {entry.name}
+                      </span>
                     </span>
                   )}
                   {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}

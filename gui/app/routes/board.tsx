@@ -378,36 +378,40 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
         </EmptyState>
       )}
 
-      {/* ADR-0055 D2 ラウンド 3: モバイルは 1 列だけ選ぶ segmented control（`md:` 以上は列グリッドが
-          そのまま出るので不要）。横スクロールするピル行は D1-1/D1-6 と同じ「overflow-x-auto の箱」。 */}
+      {/* ADR-0055 D2 ラウンド 4（U10）: 6 択は 393px では横スクロールでは 1 画面に入らない（6 番目が
+          隠れがちだった）ので、横スクロールをやめて 3 列 × 2 行のグリッドにし、6 つ全部を一度に見える
+          ようにした（`md:` 以上は列グリッドがそのまま出るので不要）。ラベルが狭い列幅で折り返しても
+          横はみ出しにはならない（折り返す分だけ縦に伸びる）。念のため `title` にも全文を持たせる。 */}
       <div
         role="tablist"
         aria-label="ボードの列を選ぶ"
         data-testid="board-column-picker"
-        className="sticky top-14 z-10 -mx-4 -mt-2 flex gap-2 overflow-x-auto bg-bg/95 px-4 py-2 backdrop-blur md:hidden"
+        className="sticky top-14 z-10 -mx-4 -mt-2 grid grid-cols-3 gap-1.5 bg-bg/95 px-4 py-2 backdrop-blur md:hidden"
       >
         {BOARD_COLUMNS.map((column) => {
           const active = column.id === activeColumn;
           const count = columns[column.id].length;
+          const label = boardColumnLabel(column.id);
           return (
             <button
               key={column.id}
               type="button"
               role="tab"
               aria-selected={active}
+              title={label}
               data-testid="board-column-picker-item"
               onClick={() => setActiveColumn(column.id)}
               className={cn(
-                "flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-sm font-medium whitespace-nowrap",
+                "flex min-h-11 min-w-0 items-center justify-center gap-1 rounded-full border px-2 text-sm font-medium",
                 active
                   ? "border-primary-border bg-primary-soft text-primary-soft-fg"
                   : "border-border bg-surface text-fg-muted",
               )}
             >
-              {boardColumnLabel(column.id)}
+              <span className="min-w-0 truncate">{label}</span>
               <span
                 className={cn(
-                  "rounded-full px-1.5 py-0.5 text-sm tabular-nums",
+                  "shrink-0 rounded-full px-1.5 py-0.5 text-sm tabular-nums",
                   active ? "bg-surface/70" : "bg-surface-2 text-fg-subtle",
                 )}
               >
