@@ -4,7 +4,7 @@
 //! `Dispatcher::resolve_node_session`（`dispatcher.rs`）が行う。ここに置くのは、テストしやすい形の
 //! 「続けるか、新しく作るか」の判断と、前置きに出す差分・要約の行の組み立てだけ。
 
-use task_core::{MessageRole, NodeSession};
+use task_core::{MessageRole, NodeSession, Tier};
 use time::OffsetDateTime;
 
 /// このアダプタだけが継続セッションを持てる（ADR-0054 D1）。他のアダプタ（`paperqa` /
@@ -129,11 +129,78 @@ pub fn diff_lines(
 /// （本番で ULID（`01M323X6TJQSFEP0MKXABWVY78` のような）を渡していて全滅した事故の修正。
 /// 2026-09-21 観測）。`codex`（スレッド id をアダプタ自身が報告する）・`acp`（エージェントが
 /// 割り当てる id）は形式を問わない。
+///
+/// **Phase 67c 追記**: どのアダプタでも空文字は無効。`codex`/`acp` は celeris が id を先取りせず
+/// `new_session_id` が空文字のまま `node_sessions` を作り、run の途中でアダプタが報告した id を
+/// `EventSink::session_established` が上書きする（ADR-0054 D1）。その 1 回目の run が id を報告し損ねた
+/// （JSON の形が想定と違う・run が id を返す前に失敗した、等）まま `retired_at` が付かずに残ると、次の
+/// run が空文字の `session_id` を「現役セッション」として `resume` してしまう
+/// （`codex exec resume ""` / ACP の `sessionId: ""`）。空文字は「まだ確定していない」印として扱い、
+/// 他の形式チェックと同じ自己修復経路（`FreshReason::InvalidSessionId`）に乗せて retire し、次の run は
+/// 新規セッション（要約付き）として仕切り直す。
 pub fn session_id_is_valid_for_adapter(adapter_id: &str, session_id: &str) -> bool {
+    if session_id.is_empty() {
+        return false;
+    }
     if adapter_id == "claude-code" {
         task_worker::provider::is_valid_uuid(session_id)
     } else {
         true
+    }
+}
+
+/// ADR-0054 Phase 67c: `tier` の「能力」の順位（大きいほど高性能・高コスト）。`Tier` の宣言順とは
+/// 逆（`Frontier` が最上位）。sticky 選択の「同じ tier 以上」を決定的に比べるためだけの道具。
+pub fn tier_rank(tier: Tier) -> u8 {
+    match tier {
+        Tier::Cheap => 0,
+        Tier::Standard => 1,
+        Tier::Frontier => 2,
+    }
+}
+
+/// [`decide_sticky`] が返す判断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StickyDecision {
+    /// 現役セッションのアダプタ・アカウントのまま run する。
+    Stick,
+    /// 使えないので、通常の ADR-0049 ランキングにフォールバックする（結果としてアダプタ・アカウントが
+    /// 変われば、次の [`decide`] が `AccountChanged`/`AdapterChanged` で retire する。既存の経路）。
+    FallBack,
+}
+
+/// ADR-0054 Phase 67c: 継続セッションがあるノードの provider/account 選択は、まずそのセッションの
+/// `(adapter, account_id)` に留まることを試す（D1「同じアカウントで続ける」）。ADR-0049 の残量
+/// ランキングを毎 run 走らせてアカウントを付け替え続けると、セッションが尽きるたびに前置きを全量に
+/// 戻し 5 万トークン級の再送を発生させる（本番 2026-09-21 観測: claude-code → codex/
+/// chatgpt_plus_personal への付け替えで 52,629 input tokens の全量前置きが再送された）。
+///
+/// 純粋関数: 「使えるか」を表す 2 つの bool は呼び出し側（`Dispatcher::select_provider`）が集める
+/// （アカウントプールの状態・設定表の現在の中身は I/O）。
+///
+/// - `active` が無ければ sticky の対象外。
+/// - `rollover_tokens` を超えていればどのみち次の run で作り直すので、無理に留まらない。
+/// - `account_usable`: プールを使わない（`account_id` が無い）セッションは常に `true`
+///   （ログイン・cooldown・枯渇の概念が無い）。プールを使うなら、そのアカウントがログイン済み・
+///   cooldown 外・上限未満・枯渇していないことを呼び出し側が確かめて渡す。
+/// - `provider_offers_tier`: このアダプタの設定行が、要求された tier と同じかそれ以上を提供し、かつ
+///   cooldown 中でも並列度上限でもないことを呼び出し側が確かめて渡す。
+pub fn decide_sticky(
+    active: Option<&NodeSession>,
+    rollover_tokens: u64,
+    account_usable: bool,
+    provider_offers_tier: bool,
+) -> StickyDecision {
+    let Some(active) = active else {
+        return StickyDecision::FallBack;
+    };
+    if active.approx_tokens as u64 >= rollover_tokens {
+        return StickyDecision::FallBack;
+    }
+    if account_usable && provider_offers_tier {
+        StickyDecision::Stick
+    } else {
+        StickyDecision::FallBack
     }
 }
 
@@ -287,6 +354,23 @@ mod tests {
         }
     }
 
+    /// ADR-0054 Phase 67c: 空文字はどのアダプタでも無効（`codex`/`acp` が id を確定できないまま次の
+    /// run に来ても、それを resume しようとしない）。
+    #[test]
+    fn an_empty_session_id_self_heals_for_every_adapter() {
+        for adapter in ["claude-code", "codex", "acp"] {
+            let mut s = session(adapter, Some("a"), 10);
+            s.session_id = String::new();
+            let action = decide(Some(&s), adapter, Some("a"), 400_000, false);
+            assert_eq!(
+                action,
+                SessionAction::Fresh(FreshReason::InvalidSessionId),
+                "adapter={adapter}"
+            );
+            assert!(!session_id_is_valid_for_adapter(adapter, ""));
+        }
+    }
+
     #[test]
     fn session_id_is_valid_for_adapter_only_requires_uuid_for_claude_code() {
         assert!(!session_id_is_valid_for_adapter(
@@ -382,5 +466,74 @@ mod tests {
     fn summary_lines_handles_fewer_entries_than_the_limit() {
         let history = vec![(MessageRole::User, "hi".to_string())];
         assert_eq!(summary_lines(&history, 20), vec!["人: hi".to_string()]);
+    }
+
+    // ---- Phase 67c: decide_sticky ----
+
+    #[test]
+    fn tier_rank_orders_frontier_above_standard_above_cheap() {
+        assert!(tier_rank(task_core::Tier::Frontier) > tier_rank(task_core::Tier::Standard));
+        assert!(tier_rank(task_core::Tier::Standard) > tier_rank(task_core::Tier::Cheap));
+    }
+
+    /// 受け入れ条件 1: セッションが使える（アカウント・tier とも問題なし）→ stick。
+    #[test]
+    fn a_usable_session_sticks() {
+        let s = session("claude-code", Some("claude_max_lab"), 10);
+        assert_eq!(
+            decide_sticky(Some(&s), 400_000, true, true),
+            StickyDecision::Stick
+        );
+    }
+
+    /// 受け入れ条件 1: アカウントが cooldown（枯渇・未ログイン等を含む） → 通常のランキングへ
+    /// フォールバックする（このセッションはそのランキングの結果次第で `decide` が retire する）。
+    #[test]
+    fn an_account_in_cooldown_falls_back() {
+        let s = session("claude-code", Some("claude_max_lab"), 10);
+        assert_eq!(
+            decide_sticky(Some(&s), 400_000, false, true),
+            StickyDecision::FallBack
+        );
+    }
+
+    /// 受け入れ条件 1: プロバイダが設定から消えた（tier を提供する行が無い）→ フォールバック。
+    #[test]
+    fn a_provider_removed_from_config_falls_back() {
+        let s = session("claude-code", Some("claude_max_lab"), 10);
+        assert_eq!(
+            decide_sticky(Some(&s), 400_000, true, false),
+            StickyDecision::FallBack
+        );
+    }
+
+    #[test]
+    fn no_active_session_never_sticks() {
+        assert_eq!(
+            decide_sticky(None, 400_000, true, true),
+            StickyDecision::FallBack
+        );
+    }
+
+    /// rollover 済みのセッションは、アカウント・tier が問題無くても留まらない（次の run で作り直す方が
+    /// 一貫している。前置きの要約もそちらの経路が付ける）。
+    #[test]
+    fn a_session_past_rollover_falls_back_even_if_otherwise_usable() {
+        let s = session("claude-code", Some("claude_max_lab"), 400_000);
+        assert_eq!(
+            decide_sticky(Some(&s), 400_000, true, true),
+            StickyDecision::FallBack
+        );
+    }
+
+    /// プールを使わないセッション（`account_id = None`）は、アカウントの状態を問わず provider さえ
+    /// あれば stick できる（呼び出し側が `account_usable = true` を渡す想定どおり）。
+    #[test]
+    fn a_poolless_session_sticks_without_an_account_check() {
+        let s = session("acp", None, 10);
+        assert_eq!(
+            decide_sticky(Some(&s), 400_000, true, true),
+            StickyDecision::Stick
+        );
     }
 }

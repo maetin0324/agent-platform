@@ -464,14 +464,21 @@ fn handle_line(
         return;
     }
     match ty {
-        // ADR-0054 D1（Phase 67）: 新規セッション（`context.session.resume == false`）で codex 自身が
-        // 割り当てた thread id を報告する。**フィールド名 `thread_id` は実機で確認していない**
-        // （`thread.started` イベント自体は ADR-0008 の実機確認で観測済みだが、その本文の形は
-        // 未確認。誤って読めなくても run 自体は失敗しない — 次の run が新規セッションとして走るだけ）。
-        "thread.started" => {
+        // ADR-0054 D1（Phase 67）/ Phase 67c 追記: 新規セッション（`context.session.resume == false`）で
+        // codex 自身が割り当てた thread/session id を報告する。**フィールド名は実機で確認していない**
+        // （`thread.started` イベント自体は ADR-0008 の実機確認で観測済みだが、その本文の形は未確認）。
+        // `codex exec resume <id>` は celeris が作った id ではなく codex 自身が報告した id しか受け付け
+        // ないので、ここで読み損なうと（フィールド名が実機と違う等）その run は id を持たないまま
+        // 終わる。celeris 側は空文字を「まだ確定していない」として扱い（
+        // `crate::sessions::session_id_is_valid_for_adapter`。Phase 67c）、次の run を resume させずに
+        // 新規セッションとして仕切り直すので、誤って読めなくても run 自体は失敗しない。`thread_id` /
+        // `threadId` / `session_id`（`session_configured` 系の実装がこの名前を使うことがある）の
+        // どれかで受け取る。
+        "thread.started" | "session_configured" => {
             if let Some(id) = value
                 .get("thread_id")
                 .or_else(|| value.get("threadId"))
+                .or_else(|| value.get("session_id"))
                 .and_then(|v| v.as_str())
             {
                 sink.session_established(id);
@@ -1645,6 +1652,58 @@ printf '%s\n' '{"type":"turn.completed"}'
             sink.sessions.lock().unwrap().as_slice(),
             &["thread-xyz".to_string()]
         );
+    }
+
+    /// ADR-0054 Phase 67c: `session_configured`（実装によっては `thread.started` の代わりにこの type
+    /// 名を使うことがある）の `session_id` からも id を拾う。
+    #[tokio::test]
+    async fn session_configured_with_a_session_id_reports_session_established() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"
+mkdir -p artifacts
+printf '%s\n' '{"type":"session_configured","session_id":"sess-abc"}'
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"type":"turn.completed"}'
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let _ = adapter
+            .run(req, "run-6b", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.sessions.lock().unwrap().as_slice(),
+            &["sess-abc".to_string()]
+        );
+    }
+
+    /// ADR-0054 Phase 67c: `thread.started` に id が無ければ `session_established` は呼ばない
+    /// （`node_sessions.session_id` は空文字のまま残り、Phase 67c の自己修復
+    /// — `crate::sessions::session_id_is_valid_for_adapter` が空文字を無効扱いする — に委ねる）。
+    #[tokio::test]
+    async fn thread_started_without_an_id_does_not_report_session_established() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"
+mkdir -p artifacts
+printf '%s\n' '{"type":"thread.started"}'
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"type":"turn.completed"}'
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let _ = adapter
+            .run(req, "run-6c", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(sink.sessions.lock().unwrap().is_empty());
     }
 
     /// ADR-0054 D1（Phase 67）: `resume` を頼んだ run が turn.failed の `message` に「セッションが
