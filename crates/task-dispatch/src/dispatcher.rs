@@ -201,6 +201,35 @@ impl ClusterSpec {
 /// ADR-0023 D1: クラスタの多重接続を確認する間隔（`ssh -O check`）。tick がこれより長ければ毎 tick になる。
 const CLUSTER_LIVENESS_INTERVAL: Duration = Duration::from_secs(5);
 
+/// ADR-0053 D3 / Phase 66b: `refresh_cluster_liveness` / `refresh_cluster_tunnels` は `ssh` を同期に
+/// 呼び、`cluster_connector`（ADR-0032 D3）経由でネストした tokio ランタイムを `block_on` することがある。
+/// `tick()` は celeris の tick ループの中から**同期のまま**呼ばれ、そのループ自身が（マルチスレッドの）
+/// tokio ランタイムの上で動く async タスクなので、ここで直接ブロックすると (a) 他の非同期処理を
+/// 数秒単位で止め、(b) ネストしたランタイムの `block_on` が「Cannot start a runtime from within a
+/// runtime」で panic する（本番 2026-09-21 の観測、`crates/celeris/src/lib.rs` の `cluster_connector`）。
+///
+/// `f` を、tokio の文脈を一切持たない本物の OS スレッドへ逃がして実行する。マルチスレッド・ランタイムの
+/// 中から呼ばれたときだけ `block_in_place` で包み、スケジューラが他のタスクを別ワーカーへ逃がせるように
+/// する（`block_in_place` は `current_thread` ランタイムの中で呼ぶと panic するため、既存の
+/// `#[tokio::test]`〈既定は current_thread〉の `tunnel_*` テストや、ランタイムが無い素の同期呼び出しでは
+/// 使わない。どちらの場合も `f` は素の OS スレッドで動くので、ネストしたランタイムを作っても安全）。
+fn run_cluster_hooks_off_async<F: FnOnce() + Send>(f: F) {
+    let on_multi_thread_runtime = tokio::runtime::Handle::try_current()
+        .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
+        .unwrap_or(false);
+    let spawn_and_join = move || {
+        std::thread::scope(|scope| match scope.spawn(f).join() {
+            Ok(()) => {}
+            Err(panic) => std::panic::resume_unwind(panic),
+        });
+    };
+    if on_multi_thread_runtime {
+        tokio::task::block_in_place(spawn_and_join);
+    } else {
+        spawn_and_join();
+    }
+}
+
 /// RFC 3339 の文字列（デーモンのスナップショット用）。書式化に失敗することは実質無いが、その場合は空文字列。
 fn rfc3339(t: OffsetDateTime) -> String {
     t.format(&Rfc3339).unwrap_or_default()
@@ -1476,9 +1505,11 @@ impl Dispatcher {
             self.recover_reviews()?;
         }
         let recover_ms = lap(&mut at);
-        self.refresh_cluster_liveness();
+        // Phase 66b: `ssh` を呼ぶ・ネストしたランタイムを `block_on` しうるので、async ワーカーから逃がす
+        // （`run_cluster_hooks_off_async` の説明を参照）。
+        run_cluster_hooks_off_async(|| self.refresh_cluster_liveness());
         let cluster_ms = lap(&mut at);
-        self.refresh_cluster_tunnels();
+        run_cluster_hooks_off_async(|| self.refresh_cluster_tunnels());
         let tunnel_ms = lap(&mut at);
         report.dispatched = if self.accepting_new_work {
             self.dispatch_ready()?
