@@ -739,11 +739,30 @@ async fn run_claude_code(
         .session
         .as_ref()
         .is_some_and(|s| s.adapter == ClaudeCodeAdapter::ID && s.resume);
+    // ADR-0054 Phase 67b 追記: Claude Code CLI 2.1.278 は `--session-id`/`--resume` に渡す id が UUID
+    // でなければ拒否する（本番で ULID を渡してすべての CoS 対話・部門長レビュー run が失敗した事故。
+    // 2026-09-21）。celeris 側の発行（`crate::sessions` 相当。呼び出し元は `resolve_node_session` の
+    // 自己修復）は Phase 67b で直したが、ここでも**境界で** spawn 前に拒否する（将来の回帰がテストで
+    // 静かに ULID を通してしまわないよう、falsely-loud に落とす）。
     match req.context.session.as_ref() {
         Some(session) if session.adapter == ClaudeCodeAdapter::ID && session.resume => {
+            if !crate::provider::is_valid_uuid(&session.session_id) {
+                return Err(AdapterError::Other(format!(
+                    "refusing to --resume claude-code session id {:?}: not a valid UUID \
+                     (Claude Code CLI 2.1.278+ requires one; ADR-0054 Phase 67b)",
+                    session.session_id
+                )));
+            }
             command.arg("--resume").arg(&session.session_id);
         }
         Some(session) if session.adapter == ClaudeCodeAdapter::ID => {
+            if !crate::provider::is_valid_uuid(&session.session_id) {
+                return Err(AdapterError::Other(format!(
+                    "refusing to --session-id claude-code session id {:?}: not a valid UUID \
+                     (Claude Code CLI 2.1.278+ requires one; ADR-0054 Phase 67b)",
+                    session.session_id
+                )));
+            }
             command.arg("--session-id").arg(&session.session_id);
         }
         _ => {
@@ -2670,7 +2689,7 @@ printf '%s\n' '{"type":"turn.completed"}'
         let mut req = sample_req(dir.path().to_path_buf());
         req.context.session = Some(crate::protocol::SessionHandle {
             adapter: ClaudeCodeAdapter::ID.to_string(),
-            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             resume: false,
         });
         let _ = adapter
@@ -2683,7 +2702,7 @@ printf '%s\n' '{"type":"turn.completed"}'
             .iter()
             .position(|a| a == "--session-id")
             .expect("--session-id present");
-        assert_eq!(args[idx + 1], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(args[idx + 1], "550e8400-e29b-41d4-a716-446655440000");
         assert!(!args.contains(&"--resume".to_string()));
     }
 
@@ -2696,7 +2715,7 @@ printf '%s\n' '{"type":"turn.completed"}'
         let mut req = sample_req(dir.path().to_path_buf());
         req.context.session = Some(crate::protocol::SessionHandle {
             adapter: ClaudeCodeAdapter::ID.to_string(),
-            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             resume: true,
         });
         let _ = adapter
@@ -2710,7 +2729,7 @@ printf '%s\n' '{"type":"turn.completed"}'
             .iter()
             .position(|a| a == "--resume")
             .expect("--resume present");
-        assert_eq!(args[idx + 1], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert_eq!(args[idx + 1], "550e8400-e29b-41d4-a716-446655440000");
     }
 
     /// `context.session` が別アダプタ向けなら無視する（渡り歩きは無い）。
@@ -2743,7 +2762,7 @@ printf '%s\n' '{"type":"turn.completed"}'
         let mut req = sample_req(dir.path().to_path_buf());
         req.context.session = Some(crate::protocol::SessionHandle {
             adapter: ClaudeCodeAdapter::ID.to_string(),
-            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             resume: true,
         });
         let _ = adapter
@@ -2758,7 +2777,7 @@ printf '%s\n' '{"type":"turn.completed"}'
         assert_eq!(value["context"]["session"]["resume"], true);
         assert_eq!(
             value["context"]["session"]["session_id"],
-            "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+            "550e8400-e29b-41d4-a716-446655440000"
         );
         assert_eq!(value["context"]["session"]["adapter"], "claude-code");
     }
@@ -2774,7 +2793,7 @@ printf '%s\n' '{"type":"turn.completed"}'
         let mut req = sample_req(dir.path().to_path_buf());
         req.context.session = Some(crate::protocol::SessionHandle {
             adapter: ClaudeCodeAdapter::ID.to_string(),
-            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             resume: false,
         });
         let sink = RecordingSink::default();
@@ -2784,7 +2803,7 @@ printf '%s\n' '{"type":"turn.completed"}'
             .unwrap();
         assert_eq!(
             sink.session_established.lock().unwrap().as_slice(),
-            ["01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()]
+            ["550e8400-e29b-41d4-a716-446655440000".to_string()]
         );
         assert!(sink.session_resume_failed.lock().unwrap().is_empty());
     }
@@ -2803,7 +2822,7 @@ printf '%s\n' '{"type":"turn.completed"}'
         let mut req = sample_req(dir.path().to_path_buf());
         req.context.session = Some(crate::protocol::SessionHandle {
             adapter: ClaudeCodeAdapter::ID.to_string(),
-            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
             resume: true,
         });
         let sink = RecordingSink::default();
@@ -2832,5 +2851,54 @@ printf '%s\n' '{"type":"turn.completed"}'
         let sink = RecordingSink::default();
         let _ = adapter.run(req, "run-7", default_limits(), &sink).await;
         assert!(sink.session_resume_failed.lock().unwrap().is_empty());
+    }
+
+    /// ADR-0054 Phase 67b 追記: `--resume` に渡す id が UUID でなければ、spawn する**前**に拒否する
+    /// （本番で ULID を渡してすべての CoS 対話・部門長レビュー run が失敗した事故の再発防止。
+    /// `resolve_node_session` 側の自己修復（Phase 67b）を将来の回帰が回避しても、ここでテストが
+    /// 静かに ULID を通さず落ちるようにする）。
+    #[tokio::test]
+    async fn a_non_uuid_resume_id_is_refused_without_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: ClaudeCodeAdapter::ID.to_string(),
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            resume: true,
+        });
+        let err = adapter
+            .run(req, "run-8", default_limits(), &RecordingSink::default())
+            .await
+            .expect_err("a non-UUID resume id must be refused, not spawned");
+        assert!(format!("{err}").contains("not a valid UUID"), "{err}");
+        assert!(
+            !dir.path().join("args.log").exists(),
+            "the claude stub must not have been spawned"
+        );
+    }
+
+    /// 同じ拒否を、初回の `--session-id`（`resume: false`）でも見る。
+    #[tokio::test]
+    async fn a_non_uuid_fresh_session_id_is_refused_without_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: ClaudeCodeAdapter::ID.to_string(),
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            resume: false,
+        });
+        let err = adapter
+            .run(req, "run-9", default_limits(), &RecordingSink::default())
+            .await
+            .expect_err("a non-UUID session id must be refused, not spawned");
+        assert!(format!("{err}").contains("not a valid UUID"), "{err}");
+        assert!(
+            !dir.path().join("args.log").exists(),
+            "the claude stub must not have been spawned"
+        );
     }
 }
