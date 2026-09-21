@@ -13041,3 +13041,11 @@ GUI のみ（`crates/`・`docs/DESIGN.md`・`docs/SPEC.md`・ADR は無変更）
 - `tierResolutionReason`・`releaseVerifyCheckGroups` 等、Phase 86 の未解決事項は変化なし
   （`gui/docs/PROGRESS.md` Phase G38 参照）。
 - 本番 = Phase 65〜86。実装中: Phase 87（このワークトリーク。GUI のみ）。
+
+### Phase 87 の本番反映（2026-09-21 23:2x UTC。`27e01218ed38`、ライブ切替）
+
+- main `27e0121` = Phase 87（監査スクリプトの `cssPathRef` を content 属性ベースに、`/inbox` を監査と e2e に追加、レポートに git sha と route ごとの所要時間）。
+  GUI ゲート: typecheck / lint exit 0、`pnpm test` 1004 passed、`pnpm e2e:mock` ok。`pnpm mobile-audit` は merge 後の 1 回目に `focus-order` 1 件
+  （`home`: composer に 32 Tab で届かない）が出たが、再実行で **0 件**（`routes=26 schemes=2 violations=0`）。既知のフレーク（Phase 83 でも 1 回）。
+  提案: `focus-order` の Tab 上限を焦点可能要素数 + 余裕に自動で合わせるか、1 回リトライする（次ラウンド候補）。
+- `release.sh` → `27e01218ed38`（schema 24）。`verify.sh` `ok=true live_ok=true` → `promote.sh` mode=live。本番 = Phase 65〜87。
