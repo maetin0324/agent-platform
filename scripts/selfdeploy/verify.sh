@@ -11,6 +11,11 @@
 #        本番と比べると当たり前にずれて偽陰性になる。ADR-0041 §1-2）
 #     3. 主要 GET が 200 かつ JSON（inbox / org/<node>/memory / notify / clusters / providers / config）
 #     4. 新リリースの GUI を 127.0.0.1:7701 に起こして主要ページが 200
+#     4b. **GUI の e2e（読み取り専用。Phase 83 / G36、ADR-0041 追記）**: `gui/`（devDependencies 込みの方。
+#        `$SD_REPO/gui` か、無ければ release の `gui/`）から `pnpm e2e:staging` を検査 4 の GUI/celeris に
+#        対して走らせる。mobile-audit と同じ画面一覧の 200 応答・コンソールエラー無し・`/accounts` や
+#        `/knowledge/skills` の描画・既存タスクでのタブ切り替えを確かめる。タスクは作らない
+#        （検査 6 の煙試験より前に置く）。Playwright が無ければ「未インストール」で false（クラッシュしない）
 #     5. N-1 互換: `current` の旧デーモンを、**新バイナリがマイグレーションした後の**同じスナップショットに
 #        対して 127.0.0.1:7712 に起こし、1〜3 と同じ検査（件数はスナップショットと比べる。
 #        落ちたら live_ok = false）
@@ -19,7 +24,7 @@
 #        （`assignee` を付けられたときは）その run の報告が `GET /reports` に出ることを確かめる。
 #        verify の celeris は `genre = "smoke"` だけを dispatch し、役割・分野・プロバイダはすべて
 #        **偽のアダプタ**の組み込み（LLM は呼ばない）。**検査 5 の後**に行う（検査 2 / 5 の件数を動かさない）
-#   を行い、`$CELERIS_STATE_DIR/releases/<sha12>/verify.json` を書く。`ok` は 1〜4 と 6 が全部真のとき。
+#   を行い、`$CELERIS_STATE_DIR/releases/<sha12>/verify.json` を書く。`ok` は 1〜4・4b・6 が全部真のとき。
 #
 #   **直列化（ADR-0041 D2）**: `$SD_STAGING/.lock` を `flock` で取る（待ちの上限
 #   `SD_VERIFY_LOCK_WAIT`、既定 1800 秒）。取れなければ exit 75（EX_TEMPFAIL）。
@@ -235,6 +240,17 @@ production API    : 叩かない（ADR-0041 D2。件数は同じスナップシ�
 [3/6] curl http://127.0.0.1:$SD_STAGING_API_PORT/api/v1/{health,tasks,projects,org,approvals,reports,inbox,notify,clusters,providers,config}
 [4/6] ( cd $REL/gui && ${GUI_ENV[*]} /usr/bin/node server.js )
       curl http://127.0.0.1:$SD_STAGING_GUI_PORT/{healthz,,org,projects,projects/<id>,approvals,reports,clusters}
+[4b/6] gui-e2e（Phase 83 / G36、ADR-0041 追記）: $(
+  DRY_GUI_TEST_DIR=""
+  for cand in "$REL/gui" "$SD_REPO/gui"; do
+    [ -d "$cand/node_modules/@playwright/test" ] && { DRY_GUI_TEST_DIR="$cand"; break; }
+  done
+  if [ -n "$DRY_GUI_TEST_DIR" ]; then
+    echo "( cd $DRY_GUI_TEST_DIR && E2E_REQUIRE_STAGING=1 E2E_GUI_URL=http://127.0.0.1:$SD_STAGING_GUI_PORT E2E_API_URL=http://127.0.0.1:$SD_STAGING_API_PORT E2E_TOKEN_FILE=$ST_TOKEN timeout ${SD_E2E_TIMEOUT:-240} pnpm e2e:staging )"
+  else
+    echo "not installed — @playwright/test not found in $REL/gui or $SD_REPO/gui"
+  fi
+)
 [5/6] $( [ ${#OLD_CMD[@]} -gt 0 ] && echo "${OLD_CMD[*]}" || echo "（current が無いので N-1 検査は行わない。live_ok=false）" )
 [6/6] curl -X POST http://127.0.0.1:$SD_STAGING_API_PORT/api/v1/tasks -d '{"title":"smoke","genre":"smoke","role":"smoke",...}'
       → approve → GET /tasks/<id> を 60 秒まで待って done → events → reports（ADR-0041 D5）
@@ -248,7 +264,8 @@ fi
 # ---- 検査の記録 ------------------------------------------------------------
 
 CHECKS_TSV="$(mktemp)"
-printf 'id:i name:s ok:b detail:s task_id:s elapsed_s:f\n' >"$CHECKS_TSV"
+# `id` は文字列（`s`）。検査 4b（Phase 83 / G36。ADR-0041 追記）が id `4b` を足すため、数値専用の `i` にはできない。
+printf 'id:s name:s ok:b detail:s task_id:s elapsed_s:f\n' >"$CHECKS_TSV"
 # record <id> <name> <ok:true|false> <detail> [task_id] [elapsed_s]
 # `task_id` / `elapsed_s` は検査 6（煙試験。ADR-0041 D5）だけが埋める。他の検査では空 / 0。
 record() {
@@ -650,6 +667,57 @@ else
   record 4 gui false "skipped (check 1 failed)"
 fi
 
+# ---- 4b. GUI の e2e（read-only。Phase 83 / G36、ADR-0041 追記）-------------
+#
+# `pnpm e2e`（gui/e2e/*.spec.ts）はタスクを作って承認する結合テストなので、staging にはそのまま使えない
+# （検査 2/5 の件数一致は「検査 6 の煙試験だけが書き込む」という前提。ADR-0041 D2/D5）。代わりに
+# **読み取り専用**の `pnpm e2e:staging`（`gui/scripts/e2e-check.mjs`）を、検査 4 が起こした staging の
+# GUI（$GUI_BASE）と celeris（$NEW_BASE）に対して走らせる。ナビゲーションと `?tab=` の切り替えだけで、
+# タスクは作らない。**検査 6（煙試験）より前**に置く（検査 6 が足す 1 件がここに写り込まないように）。
+#
+# release の `gui/`（`release.sh` が `pnpm install --prod` した方）には Playwright が devDependency なので
+# 入っていない。**リポジトリの `gui/`**（`$SD_REPO/gui`。人・自己改善の作業ツリーが `pnpm install` 済みの方）
+# から走らせ、どちらにも `@playwright/test` が無ければクラッシュさせずに「未インストール」で false にする。
+OK4B=false
+E2E_LOG="$SD_STAGING/logs/e2e-staging.log"
+SD_E2E_TIMEOUT="${SD_E2E_TIMEOUT:-240}"
+if [ "$OK1" = true ] && [ "$OK4" = true ]; then
+  GUI_TEST_DIR=""
+  for cand in "$REL/gui" "$SD_REPO/gui"; do
+    if [ -d "$cand/node_modules/@playwright/test" ]; then
+      GUI_TEST_DIR="$cand"
+      break
+    fi
+  done
+  if [ -z "$GUI_TEST_DIR" ]; then
+    record 4b gui-e2e false "not installed — @playwright/test not found in $REL/gui or $SD_REPO/gui (release gui is pnpm install --prod; devDependencies are stripped there)"
+  else
+    sd_use_pnpm
+    sd_log "gui-e2e: pnpm e2e:staging in $GUI_TEST_DIR (timeout ${SD_E2E_TIMEOUT}s) against gui=$GUI_BASE api=$NEW_BASE"
+    E2E_RC=0
+    ( cd "$GUI_TEST_DIR" && E2E_REQUIRE_STAGING=1 E2E_GUI_URL="$GUI_BASE" E2E_API_URL="$NEW_BASE" \
+        E2E_TOKEN_FILE="$ST_TOKEN" timeout "$SD_E2E_TIMEOUT" pnpm e2e:staging ) >"$E2E_LOG" 2>&1 8>&- 9>&- \
+      || E2E_RC=$?
+    case "$E2E_RC" in
+      0)
+        OK4B=true
+        record 4b gui-e2e true "pnpm e2e:staging ok (from $GUI_TEST_DIR); see $E2E_LOG"
+        ;;
+      124)
+        record 4b gui-e2e false "timed out after ${SD_E2E_TIMEOUT}s (SD_E2E_TIMEOUT); see $E2E_LOG"
+        ;;
+      3)
+        record 4b gui-e2e false "not installed — see $E2E_LOG"
+        ;;
+      *)
+        record 4b gui-e2e false "exit $E2E_RC; see $E2E_LOG ($(tail -n 5 "$E2E_LOG" | tr '\n' ' '))"
+        ;;
+    esac
+  fi
+else
+  record 4b gui-e2e false "skipped (check 1 or 4 failed)"
+fi
+
 # ---- 5. N-1 互換（live_ok） -------------------------------------------------
 
 LIVE_OK=false
@@ -722,7 +790,7 @@ fi
 # ---- verify.json ------------------------------------------------------------
 
 OK=false
-if [ "$OK1" = true ] && [ "$OK2" = true ] && [ "$OK3" = true ] && [ "$OK4" = true ] && [ "$OK6" = true ]; then
+if [ "$OK1" = true ] && [ "$OK2" = true ] && [ "$OK3" = true ] && [ "$OK4" = true ] && [ "$OK4B" = true ] && [ "$OK6" = true ]; then
   OK=true
 fi
 

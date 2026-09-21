@@ -12450,3 +12450,198 @@ celeris-mcp の `org_mount_skill`/`org_unmount_skill` と**同じ** `task_ops::k
   clippy exit 0、`pnpm gen:types` 差分なし、typecheck / lint exit 0、`pnpm test` 965 passed、`pnpm mobile-audit` 違反 0（23 route × light/dark）。
   `release.sh` → `618708a1c954`（schema 24）。`verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（20:02:46→50）。
 - 実機: `GET /skills` に `celeris-commit-style`（`mounted_by: engineering`）が出る（次行の出力を参照）。GUI からの mount/unmount の目視は人に依頼。
+
+## Phase 83 — verify.sh が GUI の e2e を staging に対して走らせる（検査 4b。ADR-0041 D3/D5、ADR-0055 D3。2026-09-21）
+
+Phase 69〜82 の全ラウンド、本ファイルの「未解決事項」に「`pnpm e2e` は実行していない」が繰り返し残って
+いた（`gui/e2e/*.spec.ts` は `scripts/celeris.sh` で使い捨ての celeris を起こしてタスクを作る結合テストで、
+staging〈本番 DB のスナップショット〉に対する `verify.sh` の検査 2/5 の件数一致検査の前提〈「検査 6 の
+煙試験だけが書き込む」〉と衝突するため、そのままでは組み込めなかった。ADR-0055 D3 が挙げた既知の
+ギャップ）。このフェーズは celeris 本体（`crates/`）を変更しない **GUI + selfdeploy スクリプトだけ**の
+Phase で、`verify.sh` に**読み取り専用**の GUI e2e を検査 4b として足した。
+
+### 1. 既存の e2e 一式（`gui/e2e/*.spec.ts`）の棚卸し（受け入れ条件 1）
+
+`g0`〜`g9`・`g13`・`g5-a11y`・`g5-release` の全 13 ファイルを読んだ。**全ファイルが `scripts/celeris.sh`
+（`execFileSync`）で自分専用の celeris を起動・停止する**作り（`g0`: `dev` インスタンスの start/stop、
+`g13`: `fixture org` → `start` → 案件を作って承認 → `stop`、`g8`/`g9`: `fixture accounts`、等）で、
+**staging（既に動いている GUI/celeris に外から繋ぐ）という使い方を想定していない**。読み取りだけの
+アサーションを持つファイルも、セットアップ自体が `POST /tasks`・`POST /tasks/{id}/approve` 等の書き込みを
+伴うため、「どれかを read-only として流用する」という道は無かった（1 ファイルも該当しない。全 13 ファイルを
+`pnpm e2e` 用のまま**無変更**で残した）。
+
+代わりに、`gui/scripts/mobile-audit.mjs`（ADR-0055 D1）と同じ作り──Playwright の test runner を使わず
+`createRequire` で `chromium` だけを借りて生の Node スクリプトとして動かす──を踏襲した新しい検査
+`gui/scripts/e2e-check.mjs` を書いた。この作りなら「既に起きている GUI/celeris に接続するだけ（何も
+起動しない）」と「自前で偽の celeris + GUI を起こす」の両方を同じコードで扱える。
+
+### 2. `gui/scripts/e2e-check.mjs` と `gui/scripts/lib/celeris-fixture.mjs`（受け入れ条件 1）
+
+- **`gui/scripts/lib/celeris-fixture.mjs`（新規）**: `mobile-audit.mjs` が持っていた「偽の celeris
+  （`node:http`、`test/mock-celeris/fixtures.ts` の値）」と「画面一覧（ADR-0055 D1）」をここに切り出した
+  （`e2e-check.mjs` と 2 か所に同じ画面一覧・同じ偽データを書くと片方だけ更新し忘れる事故が起きるため）。
+  画面一覧は `buildRoutes({taskId, projectId, orgId, orgHeadId, skillName})` という関数にし、
+  `mobile-audit.mjs` は固定の fixture id（既定引数）で、`e2e-check.mjs` の staging モードは
+  スナップショットから読んだ実在の id で呼ぶ。`mobile-audit.mjs` 自身はこの切り出しの前後で**出力が
+  変わらないことを確認済み**（下の「ゲート」参照）。
+- **`gui/scripts/e2e-check.mjs`（新規）**: 2 通りのモード。
+  - `pnpm e2e:mock`（`E2E_GUI_URL` 未設定）: 偽の celeris + `pnpm build` 済みの GUI を自分のポートに
+    起こす（`mobile-audit.mjs` と同じ。外部ネットワーク不使用）。
+  - `pnpm e2e:staging`（`E2E_REQUIRE_STAGING=1`。`E2E_GUI_URL`/`E2E_API_URL`/`E2E_TOKEN_FILE` を取る）:
+    **何も起動しない**。`E2E_GUI_URL` に接続するだけ。`taskId`/`projectId`/`orgId`/`skillName` は
+    **Node 側**（ブラウザではない）が `E2E_API_URL` へ `GET /api/v1/{tasks,projects,org,skills}` を
+    staging のトークンで投げて見つける（gui/CLAUDE.md「ブラウザから celeris を直接呼ぶコードを書かない」
+    を守る。g13.spec.ts が Node 側の `fetch` で案件を作っているのと同じ位置づけ）。何も見つからなければ、
+    その id が要る画面（`/projects/<id>` 等）と `/tasks/<id>` のタブ切り替え検査を**スキップする**
+    （タスクを作らない。理由を `notes` に積む）。
+  - 検査: mobile-audit と同じ画面一覧を 393×851 と 1280×800 の両方で開き 200・コンソールエラー無し・
+    失敗した要求（401 は許容）無し。`/`（Console）が `[data-testid="console-screen"]` を描画（ブロック数は
+    `notes` に参考情報として出す）。`/accounts` が `llm-sources-section`/`mcp-clients-section` を描画。
+    `/knowledge/skills` が `knowledge-skills` を描画。実在するタスクで `/tasks/<id>` の 5 タブを
+    `<Link>` のクリックで切り替え、対応する節（`info-section`/`timeline-section`/`changes-section`/
+    `files-section`/`artifacts-section`）が出る。**`POST` は一切しない**。
+- `gui/package.json`: `"e2e:mock": "node scripts/e2e-check.mjs"`、
+  `"e2e:staging": "E2E_REQUIRE_STAGING=1 node scripts/e2e-check.mjs"`。
+- `gui/.gitignore` に `test/e2e-check/`（`mobile-audit` と同じレポート置き場の扱い）。
+
+### 3. `verify.sh`: 検査 4b（受け入れ条件 2）
+
+- `scripts/selfdeploy/verify.sh`: 検査 4（GUI 起動）の直後、**検査 5（N-1 互換）・検査 6（煙試験）より前**に
+  検査 4b を挿入した（検査 6 が足すタスクが e2e のナビゲーションに写り込まないように。検査 2/5 の件数
+  一致検査の基準もまだ動かしていない段階）。
+  - `$REL/gui`（release。`pnpm install --prod` 済み）→ `$SD_REPO/gui`（作業チェックアウト）の順で
+    `node_modules/@playwright/test` の有無を見て、あればそちらから `pnpm e2e:staging` を走らせる。
+    **release の `gui/` には Playwright（devDependency）が無い**ことを確認済み（`release.sh` の
+    `pnpm install --prod --frozen-lockfile`）ので、実質的にはほぼ常に `$SD_REPO/gui` から走る。
+  - どちらにも無ければ `record 4b gui-e2e false "not installed — ..."`（クラッシュしない）。
+  - `SD_E2E_TIMEOUT`（既定 240 秒）を `timeout` に渡し、超えたら `false — timed out`。
+  - `verify.json.checks` に `id = "4b"`（**文字列**。`CHECKS_TSV` のヘッダを `id:i` → `id:s` に変更した。
+    `status.sh` は `checks[].name` しか読まないので影響なし。Rust 側〈`crates/celeris/src/releases.rs`〉も
+    `verify.json` を `serde_json::Value` として読み `ok`/`live_ok`/`at` だけを取り出す作りで `checks` は
+    見ていないので、`id` の型を変えても壊れるものが無いことをコードで確認した）。
+  - `OK`（`verify.json.ok`）の条件に `OK4B` を追加（`1・2・3・4・4b・6` が全部真）。`live_ok`（検査 5）の
+    意味は変えていない。
+  - `--dry-run` の出力にも `[4b/6]` として、実行するはずのコマンド（`$GUI_TEST_DIR` の解決結果込み）を
+    表示するよう足した。
+- `scripts/selfdeploy/lib.sh`: `SD_REPO` の説明コメントに Phase 83 の注記を追加（検査 4b は `$SD_REPO/gui`
+  を**あれば使う**が、無くても false になるだけでクラッシュしない = 「作業チェックアウトが無くても動く」
+  という既存の性質は変えていないことを明記）。
+- `docs/selfdeploy.md`・`docs/adr/0041-self-improvement-loop-hardening.md`「Phase 83 追記」に詳細を書いた。
+
+### 4. テスト（受け入れ条件 3）
+
+`scripts/selfdeploy/` に既存のテストディレクトリ（`tests/`）は無い（他の `.sh` にも単体テストの前例が
+無い）ので、CLAUDE.md の代替規則どおり **`bash -n` + 手順の文書化**にした:
+
+- `bash -n scripts/selfdeploy/verify.sh` / `bash -n scripts/selfdeploy/lib.sh` → **exit 0**。
+- `verify.sh` 自体（`--dry-run` 含む）は**このワークトリークでは実行していない**（本番の
+  `~/.local/celeris/`・ポート 7710/7711/7701/7712 を握る実環境がこのマシンに同居しているため。指示
+  「verify.sh を実際には実行しない。コーディネータが実行する」に従った）。コーディネータが本節の
+  「実機確認の手順」で確かめること。
+- 検査 4b の実装（`discoverIds`・staging モードでの非起動）はオフラインで検証した: `gui/scripts/lib/
+  celeris-fixture.mjs` の偽の celeris + GUI を自分のポートに起こし、`e2e-check.mjs` を
+  `E2E_REQUIRE_STAGING=1 E2E_GUI_URL=<偽の GUI> E2E_API_URL=<偽の celeris>` で外側から呼ぶ使い捨ての
+  スクリプトを一時的に作って実行 → `{"ok": true, "mode": "staging", ...}`、exit 0（discoverIds が
+  `GET /projects` / `/org` / `/skills` / `/tasks` を実際に叩いて id を拾い、タブ切り替えまで通ることを
+  確認した。このスクリプトは検証用の使い捨てで、リポジトリには残していない）。
+- `pnpm e2e:mock`（`gui/scripts/e2e-check.mjs` を偽の celeris に対して。**オフライン、外部ネットワーク
+  不使用**）→ **`{"ok": true, ...}`、exit 0**（`pnpm build` からの通し、`E2E_SKIP_BUILD=1` での再実行
+  の両方で確認）。
+
+### 実機確認の手順（コーディネータへ）
+
+```bash
+scripts/selfdeploy/release.sh main          # 今回のブランチを main に反映した後
+scripts/selfdeploy/verify.sh <sha12>
+cat ~/.local/celeris/releases/<sha12>/verify.json   # checks に id "4b" name "gui-e2e" が入っていることを見る
+tail -50 ~/.local/celeris/staging/logs/e2e-staging.log
+```
+
+`ok` が偽なら、まず `checks` の `id: "4b"` の `detail` を見る。`not installed` なら
+`~/workspace/agent-platform/gui` で `pnpm install`（devDependencies 込み）と
+`pnpm exec playwright install chromium` を確認する。**この Phase を実行した時点でこのホストの
+`/home` はほぼ満杯（下記「重大: ディスク」参照）**なので、`release.sh`/`verify.sh` を回す前に空き容量を
+確保すること。
+
+### 重大: このホストの `/home` がほぼ満杯（作業中に一度 ENOSPC を実測）
+
+本 Phase の作業中、`cargo test --workspace`（CLAUDE.md の規定どおり実行しようとした。**crates/ には
+このフェーズの変更は無い**）をこのワークトリークで走らせたところ、クリーンな `target/`
+（このワークトリークは初めてのビルドだった）が数 GB 育った時点で **`docs/PROGRESS.md` への書き込みが
+`ENOSPC`（no space left on device）で失敗した**。`df -h /home` は `1007G 958G 3.1G(残) 100%`、
+`/home/rmaeda/.local/celeris`（本番の状態一式）だけで **257G**。原因はこのフェーズの変更ではなく、
+**ホスト全体のディスクがほぼ満杯**という既存の状態（このワークトリークの `target/` が数 GB 乗っただけで
+0 になった）。
+
+**取った対応**: `cargo test --workspace` を `pkill` で止め、このワークトリークの `target/`
+（3.1G、他に影響しない自分専用のビルド成果物）を `rm -rf` して 3.1G を回収した。ファイルの破損は無かった
+（`docs/PROGRESS.md` は失敗した書き込みの前の状態のまま、`git status` で他のファイルにも異常無しを確認）。
+**`cargo test --workspace` / `cargo clippy --workspace -- -D warnings` はこの Phase では実行できていない**
+（本番データと同じボリュームがほぼ満杯の状態で数 GB 規模のビルドを走らせるのは、本番の celeris
+（SQLite・WAL・releases）を巻き込む事故のリスクがあり、指示の「本番には触れない」を優先して見送った）。
+**本 Phase は `crates/` を一切変更していない**（`git status` で確認済み。Rust の差分はゼロ）ので、
+cargo のゲートが通らないリスクは実質無いと判断したが、CLAUDE.md の規則どおりには実行できていないことを
+明記する。**このホストのディスク逼迫は本 Phase のスコープを超える運用上の問題なので、コーディネータ/
+人に対処を依頼する**（`~/.local/celeris` の古い `releases/`・`.build/`・`.cargo-target` の掃除、
+他の worktree の `target/` の掃除等）。
+
+### ゲート
+
+- `cd gui && pnpm lint` → **exit 0**（biome。import の並び順と `test/e2e-check/report.json` の整形を
+  `--write` で 1 回直した後）。
+- `pnpm typecheck` → **exit 0**（新規 `.mjs` 2 本は `tsconfig.node.json` の `scripts/**/*.mjs` に含まれ
+  checkJs で型検査される。`node:http`/`node:net` の戻り値・catch の `e` 等に JSDoc で型を付けた）。
+- `pnpm test` → **965 passed**（既存のまま。新規ファイルに unit テストは足していない — 読み取り専用の
+  ブラウザ検査で、判断ロジックが無い純粋関数を切り出していないため）。
+- `pnpm build` → exit 0。
+- `pnpm gen:types && git diff --exit-code app/celeris/types.ts` → 差分ゼロ（celeris の API 契約は
+  変えていない）。
+- `pnpm mobile-audit`（`MOBILE_AUDIT_SKIP_BUILD=1`）→ **exit 0、violations 0 件**（切り出しの前後で
+  出力が変わらないことを確認。1 回目は `focus-order` が 1 件出たが、`MOBILE_AUDIT_SKIP_BUILD=1` での
+  再実行で 0 件になったので既知のフレーク〈Tab キーの実行タイミング依存。CPU 負荷が高いとき起きやすい〉
+  と判断した）。
+- `pnpm e2e:mock` → **exit 0**（上記「テスト」節）。
+- `bash -n scripts/selfdeploy/verify.sh` / `bash -n scripts/selfdeploy/lib.sh` → exit 0。
+- `unwrap()`: 新規コードに無い（JS/TS のみで Rust の変更は無い）。
+- `cargo test --workspace` / `cargo clippy --workspace -- -D warnings`: **未実行**（上の「重大: ディスク」
+  参照。`crates/` の差分はゼロ）。
+
+### 変更したファイル
+
+- `gui/scripts/lib/celeris-fixture.mjs`（新規。偽の celeris + 画面一覧）
+- `gui/scripts/e2e-check.mjs`（新規。`pnpm e2e:mock`/`pnpm e2e:staging` の実体）
+- `gui/scripts/mobile-audit.mjs`（偽の celeris・画面一覧を上の lib に委譲。出力は無変更）
+- `gui/package.json`（`e2e:mock`/`e2e:staging`）・`gui/.gitignore`（`test/e2e-check/`）
+- `scripts/selfdeploy/verify.sh`（検査 4b、`id:s`、`OK` の条件、`--dry-run` 出力、ヘッダコメント）
+- `scripts/selfdeploy/lib.sh`（`SD_REPO` コメントに Phase 83 の注記）
+- `docs/selfdeploy.md`（「検査 4b」節、`SD_E2E_TIMEOUT` の使用例）
+- `docs/adr/0041-self-improvement-loop-hardening.md`（「Phase 83 追記」節）
+
+### 未解決事項
+
+- **verify.sh を実機で通していない**（指示によりこのワークトリークでは実行禁止。コーディネータに依頼）。
+  検査 4b の staging モードのコード経路自体は、偽の GUI/celeris を使ったオフラインの代替確認で通した
+  （上の「テスト」節）が、**本物の staging の GUI（`node server.js`、release ビルド）**に対して
+  `pnpm e2e:staging` が実際に動くことはまだ見ていない。
+- **`cargo test --workspace` / `cargo clippy` を実行できていない**（上の「重大: ディスク」参照）。
+  `crates/` は無変更なので回帰のリスクは低いと考えるが、コーディネータの環境（空きがあれば）で
+  一度確認してほしい。
+- スナップショットに `tasks`/`projects`/`org` の行が 1 つも無い状態（新規インストール直後等）だと、
+  検査 4b は動的な画面（`/tasks/<id>` 等）を全てスキップし、固定画面だけを検査する。それでも `ok` は
+  真になりうる（意図した仕様だが、「本当に何も検査していない」に近づく下限があることは留意）。
+- 既存の `pnpm e2e`（`gui/e2e/*.spec.ts`、13 ファイル）はこのフェーズで変更していない。将来 staging 相当の
+  読み取り専用シナリオを増やすなら、新しいファイルは `e2e-check.mjs` の作り（何も起動しない・
+  Node 側でだけ celeris を読む）を踏襲すること。
+
+### 提案
+
+- **このホストの `/home` のディスク逼迫（上記「重大」参照）を早急に手当てすること。** 空き 3.1G は
+  `cargo test --workspace` 1 回のビルドでも枯渇しうる水準で、本番の celeris（同じボリュームの
+  `~/.local/celeris`）の書き込み（SQLite WAL 等）にも波及しうる。`~/.local/celeris/releases/` の
+  古いリリース・`.build*`/`.cargo-target*` の掃除、または別ボリュームへの分離を検討してほしい。
+- `pnpm e2e:staging` はコンソールの人間発言〈ブロック数〉や失敗要求の**内容**までは検査しない（0 件でも
+  ok）。実際の staging に本物のデータが積もってきたら、`notes` に出している「rendered N console
+  block(s)」等を将来 `verify.json` に載せて、GUI ダッシュボード側で経時的な劣化（急に 0 になった等）に
+  気づけるようにするとよい。
+- `SD_E2E_TIMEOUT` の既定 240 秒は画面数（現状 13〜23、実在データの有無で変動）× 2 viewport の実測から
+  余裕を見て決めた。今後画面が増えたら実測を見て調整する。

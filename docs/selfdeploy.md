@@ -153,6 +153,7 @@ scripts/selfdeploy/release.sh celeris/01M2XXX # 自己改善の案件の実装�
 scripts/selfdeploy/verify.sh <sha12>
 scripts/selfdeploy/verify.sh --dry-run <sha12>   # 前提だけ確かめる（何も起こさない）
 SD_VERIFY_LOCK_WAIT=60 scripts/selfdeploy/verify.sh <sha12>   # 他の検証を 60 秒だけ待つ
+SD_E2E_TIMEOUT=120 scripts/selfdeploy/verify.sh <sha12>       # 検査 4b（gui-e2e）の時間切れを短く（既定 240 秒）
 ```
 
 やること（ADR-0040 D3 / ADR-0041 D2。本番には触れない）:
@@ -179,14 +180,52 @@ SD_VERIFY_LOCK_WAIT=60 scripts/selfdeploy/verify.sh <sha12>   # 他の検証を 
    3. 主要 GET が 200 かつ JSON（`inbox` / `org/<最初のノード>/memory` / `notify` / `clusters` / `providers` / `config`）
    4. 新リリースの GUI を `127.0.0.1:7701` に起こして `/healthz`（`release` が新しい sha12）と
       `/`, `/org`, `/projects`, `/projects/<最新>`, `/approvals`, `/reports`, `/clusters` が 200
+   4b. **GUI の e2e（read-only。Phase 83 / G36）**: 検査 4 の GUI/celeris に対して `pnpm e2e:staging`
+      （`gui/scripts/e2e-check.mjs`）を走らせる。詳しくは下の節
    5. **N-1 互換**: `~/.local/celeris/current/bin/celeris`（旧）を、**新バイナリがマイグレーションした後の**同じ
       スナップショットに対して `:7712` で起こし、1〜3 と同じ検査（件数は**スナップショット**と比べる。
       ここでも本番 API は読まない）。落ちたら `live_ok = false`（`current` が無い初回も `live_ok = false`）。
       **煙試験（6）はここではやらない**（旧バイナリは `smoke` を知らない）
    6. **煙試験（ADR-0041 D5）**: staging に 1 件だけタスクを流し、**dispatch → ワーカー起動 →
       結果の取り込み → レビュー → 終端 → 報告の生成**までを通す。詳しくは下の節
-4. `~/.local/celeris/releases/<sha12>/verify.json` を書く。`ok` は **1〜4 と 6 が全部真**のとき。`live_ok` は 5。
+4. `~/.local/celeris/releases/<sha12>/verify.json` を書く。`ok` は **1〜4・4b・6 が全部真**のとき。`live_ok` は 5。
 5. 起こしたプロセスは `trap` で必ず止める（自分が起こした pid だけ）。
+
+### 検査 4b: GUI の e2e（read-only。Phase 83 / G36、ADR-0041 追記）
+
+`gui/e2e/*.spec.ts`（`pnpm e2e`）はタスクを作って承認する結合テストで、`scripts/celeris.sh` が起こす
+使い捨ての celeris に対して行う前提（ADR-0055 D3 が挙げていたギャップ）。staging はそのまま使えない
+（検査 2 / 5 の件数一致は「検査 6 の煙試験だけが書き込む」という前提で組んである。ADR-0041 D2/D5）。
+
+検査 4b は別物で、**読み取りだけ**（ナビゲーションと `?tab=` の切り替え。`POST` は一切しない）を
+`gui/scripts/e2e-check.mjs`（`pnpm e2e:staging`）で行う。**検査 6（煙試験）より前**に置く（検査 6 が
+足す 1 件がここに写り込まないように）:
+
+1. mobile-audit（ADR-0055 D1）と同じ画面一覧を 393×851 と 1280×800 の両方で開き、200 で応答し、
+   コンソールエラー・失敗した要求（401 は許容）が無いこと。`taskId` / `projectId` / `orgId` / `skillName`
+   は Node 側（ブラウザではない）が `GET /api/v1/{tasks,projects,org,skills}` を staging のトークンで
+   読んで見つけたものを使う（gui/CLAUDE.md の境界どおり、ブラウザは celeris を直接叩かない）。
+   見つからなければその id が要る画面（`/projects/<id>` 等）はスキップする
+2. `/`（Console）が `[data-testid="console-screen"]` を描画すること
+3. `/accounts` が「LLM source」「MCP クライアント」節（`llm-sources-section` / `mcp-clients-section`）を
+   描画すること
+4. `/knowledge/skills` が描画すること
+5. 見つかった実在のタスクで `/tasks/<id>` のタブ（概要・タイムライン・変更・ファイル・成果物）を
+   `<Link>` のクリックで切り替え、対応する節（`info-section` 等）が出ること
+
+**release の `gui/`（`release.sh` が `pnpm install --prod` した方）には Playwright が入っていない**
+（devDependency なので剥がされる）。検査 4b は `$SD_REPO/gui`（既定 `~/workspace/agent-platform/gui`。
+人・自己改善の作業ツリーが `pnpm install` 済みの方）から走らせ、release の `gui/` にしか無ければそちらを
+使う。**どちらにも `@playwright/test` が無ければ、検査 4b は `false — not installed`**（クラッシュしない。
+`verify.json` の他の検査には影響しない）。`SD_E2E_TIMEOUT`（既定 240 秒）を超えたら `false — timed out`。
+ログは `~/.local/celeris/staging/logs/e2e-staging.log`。
+
+手で確かめる（本物の celeris/GUI は起こさない。外部ネットワークに出ない）:
+
+```bash
+cd gui
+pnpm e2e:mock       # 偽の celeris + pnpm build 済みの GUI に対して読み取り専用の e2e。exit 0 なら OK
+```
 
 ### 検査 6: 煙試験（ADR-0041 D5）
 

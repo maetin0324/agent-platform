@@ -24,6 +24,10 @@ CELERIS_STATE_DIR="${CELERIS_STATE_DIR:-$HOME/.local/celeris}"
 # ADR-0040 D6（Phase 48）: `release.sh` がこの一式を `<release>/scripts/` に写すので、
 # `promote.sh` はリリースの中から（`POST /releases/{sha12}/promote` 経由で）起きることがある。
 # そのときも `lib.sh` は `dirname "${BASH_SOURCE[0]}"` で自分の隣を読むだけなので、場所に依らない。
+# Phase 83 / G36（ADR-0041 追記）: `verify.sh` の検査 4b（gui-e2e）だけ、`$SD_REPO/gui`（devDependencies
+# 込みで `pnpm install` 済みの方。release の `gui/` は `pnpm install --prod` で Playwright が無い）を
+# **あれば使う**。無くても検査 4b は「未インストール」で false になるだけでクラッシュしない
+# （＝この段落の「作業チェックアウトが無くても動く」は変わらない）。
 SD_REPO="${SD_REPO:-$HOME/workspace/agent-platform}"
 
 SD_RELEASES="$CELERIS_STATE_DIR/releases"
