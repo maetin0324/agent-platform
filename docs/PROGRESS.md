@@ -11737,3 +11737,9 @@ Phase 68b の確認と同一テキスト（`--add-dir`・`-s/--sandbox`・`--app
   設定）を引き継ぐという前提はどちらも実機未検証のまま（Phase 68b から持ち越し）。
 - ホワイトリスト方式にしたことで、今後 `exec resume` が別の未知フラグを拒否する事態そのものは
   celeris 側で明示的に追加しない限り再発しない（`-c` の値が resume で実際に効くかどうかの検証は残る）。
+
+### Phase 68c の本番反映（2026-09-21 15:58–15:59 UTC。`88e649c4b53c`、ライブ切替）
+
+- main `88e649c` = Phase 68c merge。ゲート: cargo test **1711 passed / 0 failed**、clippy exit 0。`release.sh` → `88e649c4b53c`（schema 23）。
+  `verify.sh` check 1–6 true、`live_ok=true` → `promote.sh 88e649c4b53c` **mode=live**（15:58:50→59）。
+- 実機確認（CoS を `new-conversation` で切ってから 2 回指示、選ばれたアダプタで fresh → resume）は次節。
