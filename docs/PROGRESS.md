@@ -12783,3 +12783,12 @@ ADR-0053 D3)`（`connector_calls == 0`）で失敗した。1 日中 green だっ
   `set_cluster_liveness_probe` で差し替えるか、クラスタ名も実在しうる名前を避けること。
 - worktree の `target/` はこの Phase の最後に削除済み（ディスク逼迫対策。`docs/PROGRESS.md` の
   Phase 83 の教訓どおり）。
+
+### Phase 84・84b の本番反映（2026-09-21 21:27–21:28 UTC。`2930f1f61b44`、ライブ切替）
+
+- main `2930f1f` = Phase 84（GUI ラウンド 10）＋ Phase 84b（liveness probe を注入可能に、テストから実クラスタ名を排除）。ゲート: cargo test
+  **1785 passed / 0 failed**、clippy exit 0、GUI typecheck / lint exit 0、`pnpm test` 982 passed、`pnpm mobile-audit` 違反 0（25 route × light/dark）、
+  `pnpm e2e:mock` ok。`release.sh` → `2930f1f61b44`（schema 24）。`verify.sh` check 1–4・**4b**・5・6 true、`live_ok=true` → `promote.sh` **mode=live**（21:28:24→32）。
+- 本番 = Phase 65〜84（すべて）。worktree の build 生成物を再度掃除（`/home` 73%）。
+- Qwen: 18000 は張れているが target 応答なしのまま（http=000）。デーモンは 5 分で 37 回 `forward added via -O forward` を打ち直している（tick 6 秒）。
+  → **Phase 85**（forward の存在と target の健康を区別してバックオフ）を Sonnet で起動。
