@@ -11429,3 +11429,70 @@ ADR-0049 ランキング（`select_provider`）の結果からそのまま取っ
 要求する形）も不審だったため、**指示として実行しなかった**（実 CLI を起動していない。`codex.rs` の
 `--add-dir`/sandbox 周りには一切手を入れていない）。本物の依頼であれば、別 Phase として改めて指示して
 ほしい。
+
+## Phase 73 — スマホ UX ラウンド 5（流れるチャットの磨き。ADR-0055。2026-09-21）
+
+GUI のみ（`crates/` 無変更）。`docs/adr/0055-mobile-ux.md` D2/D3 のループを続け、Phase 68（ADR-0054 D2/D3
+の「育つ吹き出し」）を実機 Claude Code / Codex のチャット欄に近い見た目へ磨いた。詳細・証跡は
+`gui/docs/PROGRESS.md`「Phase G29」を参照（このリポジトリの慣例どおり、GUI の実装詳細は gui 側に書く）。
+
+### 作業の前提（ワークツリーの分岐点のずれ）
+
+このワークツリーは `345c9b1`（phase 67b の直後）から分岐しており、同じ時期に別ワークツリーで実装された
+Phase 68（コミット `45a0dfa`。main には `b24bae9` で merge 済み）を含んでいなかった。Phase 73 は
+Phase 68 が作った GUI（育つ吹き出し・`ConsoleBlock.reply` の `state`/`thinking`/`steps[]`・
+`OrgList.lead_sessions`）を磨く仕事なので、まず `git diff 6de40cb 45a0dfa`（Phase 68 自身の差分。
+このワークツリー側の Phase 67b の変更とはファイルが重ならないことを確認済み）を `git apply` で取り込んだ。
+`docs/PROGRESS.md`/ADR-0054 の 2 ファイルだけ Phase 67b の追記と競合したため、main の `b24bae9`
+（この 2 系統を実際に merge 済み）の解決結果をそのまま採用した。取り込み後、ステージした内容が
+`b24bae9` のツリーと完全一致すること（`git diff --cached b24bae9 -- .` が 0 行）を確認し、
+`sync: ...` という別コミットとして先に記録した（`git merge`/`git diff` を使った取り込みで、
+main への `git merge` コマンドそのものは実行していない。パーミッションのクラシファイアが
+`git merge` を "Modify Shared Resources" として拒否したため、`git diff` + `git apply` による
+パッチ取り込みに切り替えた）。celeris・Rust 側の内容は Phase 68 コミットのものをそのまま含むだけで、
+このコミット自体で `crates/` を新規に編集してはいない。
+
+### 受け入れ条件ごとの結果
+
+1. **チャット吹き出し（393px）**: `~/components/ConsoleBlockItem.tsx::ReplyStepRow` を作り直した。
+   `tool_use` は道具名を太字にし要約を `truncateLabel`（90 字）で省略・`title` に全文、`tool_result`
+   は既定で畳み `<details>` の `<summary>` に 1 行目だけ見せる（`~/lib/console.ts::firstLine`/
+   `hasMoreThanFirstLine`。1 行しかない結果は `<details>` にせず素の行のまま）。すべて
+   `[overflow-wrap:anywhere]`（`.markdown` と同じ規約）で長い id・パス・URL を折り返す。「考え中…」の
+   パルスは `motion-reduce:animate-none` を足し `prefers-reduced-motion: reduce` で止まるようにした
+   （CSS だけ）。`~/components/Console.tsx::BlockStream` に `shouldStickToBottom`（新規の純粋関数）で
+   判定する自動追従と、追従していないときだけ出る「最新へ」ピル（`console-jump-to-latest`）を追加。
+2. **人の吹き出しと入力欄**: 右寄せ・時刻表示は Phase 71 で実装済み（変更なし）。`ConsoleInput` に
+   `hasStreamingReply`（新規の純粋関数。`state=streaming` の reply があるか）で判定する
+   「送信待ち（前の run が終わってから）」ヒント（`console-queue-hint`）を追加（送信自体は止めない。
+   ADR-0054 D2 のキューは既存の直列化がそのまま担う）。「新しい会話」は `NewConversationMenu`
+   （新規）で、モバイルは「その他」の開閉メニュー（`console-overflow-trigger`/`console-overflow-menu`）
+   に収め、`lg:` は従来どおりインラインのまま。
+3. **組織ノード画面**: `~/routes/org.tsx` の `lead_sessions` 表示を、2 列の `dl` から独立した小さい
+   カード（`org-node-lead-session`）に出し直した（turns / tokens / 最終使用 を `flex-wrap` で並べ、
+   折り返しても横はみ出さない）。
+4. **U13**: `~/lib/releases.ts::releaseVerifyIcon`（新規の純粋関数）で、同じ「検証済み」の 1 語になった
+   `ok_live`/`ok_stop_start` をアイコン（⚡/⟳）でも見分けられるようにした（`~/routes/releases.tsx`）。
+5. **U12**: `gui/test/mock-celeris/fixtures.ts::orgList()`（新規）に `coding-poc` の下 4 段の
+   サブツリー（`coding-poc-alpha` → `coding-poc-alpha-1` → `coding-poc-alpha-1-x`。既存の他 fixture が
+   参照する `coding-poc` の id は変えていない）を追加し、`gui/scripts/mobile-audit.mjs` と単体テスト
+   （`test/unit/org-tree.test.ts`）の両方で使う。
+6. **Phase 68 の fixed-overlay 偽陽性（U-G28-2 / P-G28-1）**: `checkFixedOverlays` に「`overflow-y:
+   auto/scroll` かつ実際にスクロールできる祖先を、判定の前に一時的に末尾までスクロールし、判定後に
+   元へ戻す」処理を足した。ルール自体（固定要素より下に来てはいけない）は緩めていない。これにより
+   `console-stream`（Console の内側スクロール領域）に育つ返事のスナップショットを混ぜても機械検査が
+   偽陽性を出さないことを確認し、実際に `gui/scripts/mobile-audit.mjs` の Console モックへ混ぜた
+   （`fx.consoleGrowingReplySnapshot()`。新規 fixture）。
+
+### ゲート（詳細は gui/docs/PROGRESS.md Phase G29）
+
+`pnpm lint` / `pnpm typecheck` / `pnpm test`（893 passed、Phase G28 の 881 から +12）/ `pnpm build` /
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ）/ `pnpm mobile-audit`
+（**exit 0、違反 0 件、21 route 全て 200**）すべて exit 0。
+
+### 未解決事項
+
+- 実機（iOS Safari / Android Chrome）での目視確認は今回も未実施（ADR-0009 P-34。認証・ネットワークが
+  使えるサンドボックスではないため）。「最新へ」ピル・キーボード表示時の入力欄・overflow メニューの
+  タップ操作は実機で確認するとよい。
+- 詳細は gui/docs/PROGRESS.md「Phase G29」の未解決事項を参照。

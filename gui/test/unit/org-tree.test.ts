@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { OrgNode, TaskSummary } from "~/celeris/types";
 import { buildOrgTree, countWorkload, tasksByAssignee } from "~/lib/org-tree";
+import { orgList } from "../mock-celeris/fixtures";
 
 /**
  * `buildOrgTree` / `countWorkload` / `tasksByAssignee`（`/org` の loader が使う純粋関数）のテスト。
@@ -76,6 +77,21 @@ describe("buildOrgTree", () => {
 
   it("空配列なら根も孤児も無い", () => {
     expect(buildOrgTree([])).toEqual({ roots: [], orphanIds: [] });
+  });
+
+  it("U12（フェーズ 73）: 4 段以上深いサブツリーも parent_id を辿って正しく組む（`/org` の開閉トグルの土台）", () => {
+    const { roots } = buildOrgTree(orgList().items);
+    const cos = roots.find((r) => r.node.id === "cos");
+    const coding = cos?.children.find((c) => c.node.id === "coding");
+    const codingPoc = coding?.children.find((c) => c.node.id === "coding-poc");
+    expect(codingPoc?.children.map((c) => c.node.id)).toEqual(["coding-poc-alpha", "coding-poc-beta"]);
+    const alpha = codingPoc?.children.find((c) => c.node.id === "coding-poc-alpha");
+    const alpha1 = alpha?.children.find((c) => c.node.id === "coding-poc-alpha-1");
+    expect(alpha1?.children.map((c) => c.node.id)).toEqual(["coding-poc-alpha-1-x"]);
+    // cos → coding → coding-poc → coding-poc-alpha → coding-poc-alpha-1 → coding-poc-alpha-1-x
+    // の 5 段（開閉トグルは children.length > 0 のノードにだけ出る。`coding-poc` を畳むとこの 4 世代
+    // ぶんが一度に隠れる、という「大きな組織で効果が出る」ことの土台をここで確認する）。
+    expect(alpha1?.children[0]?.children).toEqual([]);
   });
 });
 

@@ -20,6 +20,9 @@ import type {
   KnowledgeTree,
   Milestone,
   MilestoneLifecycle,
+  NodeSessionSummary,
+  OrgList,
+  OrgNode,
   Project,
   ProjectIntegrationItem,
   ProjectIntegrations,
@@ -509,6 +512,58 @@ export function milestoneLifecycle(overrides: Partial<MilestoneLifecycle> = {}):
 }
 
 // ---------------------------------------------------------------------------
+// 組織（ADR-0033 D1、docs/gui/api.md §3.42〜3.45。フェーズ 73 で追加）
+// ---------------------------------------------------------------------------
+
+/** `orgList()` の 1 ノード。`gui/scripts/mobile-audit.mjs` の同名のヘルパと同じ既定値。 */
+function orgNode(id: string, over: Partial<OrgNode> = {}): OrgNode {
+  return {
+    id,
+    parent_id: null,
+    name: id,
+    kind: "section",
+    position: 0,
+    created_at: "2026-09-17T00:00:00Z",
+    updated_at: "2026-09-17T00:00:01Z",
+    ...over,
+  };
+}
+
+/**
+ * `GET /org` の既定応答（ADR-0055 D2 ラウンド 5、U12）: `/org` の開閉トグル（`OrgTreeItem`。
+ * フェーズ 72 で追加）が、実際に何段か深いサブツリーを畳めることを機械検査・単体テストの両方で
+ * 確かめられるように、`coding-poc`（既存の他の fixture が assignee として参照する id。変えていない）の
+ * 下に 3 段の子を足した: `coding-poc` → `coding-poc-alpha` → `coding-poc-alpha-1` →
+ * `coding-poc-alpha-1-x`（+ 兄弟 `coding-poc-beta`）。`research` 部・`research-survey` 課も足し、
+ * 部門長の継続セッション（`lead_sessions`）を `coding`・`research` の 2 部に付ける。
+ */
+export function orgList(overrides: Partial<OrgList> = {}): OrgList {
+  return {
+    items: [
+      orgNode("cos", { kind: "secretary", name: "CoS" }),
+      orgNode("coding", { kind: "department", parent_id: "cos", name: "Coding", position: 0 }),
+      orgNode("coding-poc", { parent_id: "coding", genre: "coding", name: "PoC", position: 0 }),
+      orgNode("coding-poc-alpha", { parent_id: "coding-poc", name: "PoC・alpha 班", position: 0 }),
+      orgNode("coding-poc-alpha-1", { parent_id: "coding-poc-alpha", name: "alpha・第 1 陣", position: 0 }),
+      orgNode("coding-poc-alpha-1-x", { parent_id: "coding-poc-alpha-1", name: "alpha・第 1 陣・x", position: 0 }),
+      orgNode("coding-poc-beta", { parent_id: "coding-poc", name: "PoC・beta 班", position: 1 }),
+      orgNode("research", { kind: "department", parent_id: "cos", name: "Research", position: 1 }),
+      orgNode("research-survey", { parent_id: "research", genre: "research", name: "調査課", position: 0 }),
+    ],
+    lead_sessions: orgLeadSessions(),
+    ...overrides,
+  };
+}
+
+/** `orgList()` の `lead_sessions`（部門長 2 名分。単独で上書きしたいテストのために切り出す）。 */
+export function orgLeadSessions(): NodeSessionSummary[] {
+  return [
+    { node_id: "coding", turns: 3, approx_tokens: 123456, last_used_at: "2026-09-21T01:00:00Z" },
+    { node_id: "research", turns: 1, approx_tokens: 9800, last_used_at: "2026-09-20T23:00:00Z" },
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // 文書（ADR-0044 D7、docs/celeris-api-v1.md §3.92〜3.97。Phase 57 / G20）
 // ---------------------------------------------------------------------------
 
@@ -859,6 +914,42 @@ export function consoleGrowingReplySteps(): ConsoleBlock[] {
       state: "done",
     },
   ];
+}
+
+/**
+ * `consoleGrowingReplySteps()` の 4 件（celeris が SSE で送る**増分**）を、`~/lib/console.ts::
+ * appendConsoleBlock` と同じ規則でその場で積み上げた 1 件（フェーズ 73、U-G28-2 / P-G28-1）。
+ * `GET /console`（履歴の初期表示。`since` 無し）は celeris 側で 1 回に組んで返す（Phase 68 追記 2）ので、
+ * GUI から見ると SSE の積み上げ結果と同じ形の 1 件が最初から乗っている。`gui/scripts/mobile-audit.mjs`
+ * が「育つ返事」の見た目（考え中の帯・`tool_use`/`tool_result` の `steps`）を機械検査に通すために使う
+ * （`appendConsoleBlock` 自体のテストは `test/unit/console.test.ts` に別途ある）。
+ */
+export function consoleGrowingReplySnapshot(
+  overrides: Partial<Extract<ConsoleBlock, { kind: "reply" }>> = {},
+): ConsoleBlock {
+  const run_id = "01RUNCOS0000000000000001";
+  const task_id = "01TASKCOS0000000000000001";
+  return {
+    kind: "reply",
+    at: "2026-09-21T01:00:01Z",
+    cursor: "00001789000009000000.9.p01TASKCOS0000000000000001:01RUNCOS0000000000000001",
+    message_id: `streaming:${task_id}:${run_id}`,
+    node_id: "cos",
+    project_id: null,
+    task_id,
+    run_id,
+    text: "承知しました。",
+    state: "streaming",
+    thinking: "考え中…",
+    steps: [
+      { kind: "tool_use", tool: "celerisctl", text: "knowledge search 降水予測の長期トレンドについて" },
+      {
+        kind: "tool_result",
+        text: "3 件\n- 降水予測の手法比較（2024）\n- 長期トレンド分析（2023）\n- 気候変動と降水（2022）",
+      },
+    ],
+    ...overrides,
+  };
 }
 
 /** `GET /knowledge/tree` の応答（`celerisctl knowledge init` がまだ）。 */

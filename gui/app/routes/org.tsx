@@ -588,6 +588,36 @@ function OrgNodeDetail({
           )}
         </dl>
 
+        {/* ADR-0054 D3（Phase 68）: 部門長（レビュー・切り分け run。ADR-0051）の継続セッション。
+            無いノード（部門長でない・まだ 1 度もレビューしていない）には出さない。フェーズ 73
+            （ADR-0055 D2 ラウンド 5）: 393px でも窮屈にならないよう、上の 2 列の `dl` から出して
+            独立した小さいカードにした（3 つの値を `flex-wrap` で並べ、折り返しても横はみ出しない）。 */}
+        {leadSession && (
+          <div data-testid="org-node-lead-session" className="rounded-lg border border-border bg-surface-2/40 p-3">
+            <p className={labelClass}>継続中のセッション</p>
+            <dl className="mt-1.5 flex flex-wrap gap-x-4 gap-y-2 text-sm">
+              <div className="min-w-0">
+                <dt className="text-sm text-fg-subtle lg:text-xs">turns</dt>
+                <dd className="tabular-nums" data-testid="org-node-lead-session-turns">
+                  {leadSession.turns}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-sm text-fg-subtle lg:text-xs">tokens</dt>
+                <dd className="tabular-nums" data-testid="org-node-lead-session-tokens">
+                  {leadSession.approx_tokens.toLocaleString("ja-JP")}
+                </dd>
+              </div>
+              <div className="min-w-0 flex-1">
+                <dt className="text-sm text-fg-subtle lg:text-xs">最終使用</dt>
+                <dd className="break-words font-mono text-xs" data-testid="org-node-lead-session-last-used">
+                  {leadSession.last_used_at}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        )}
+
         {/* SPEC §4 の 2「ノードを選ぶとその『人』に直接話せる」（Phase G13b-2）。 */}
         <Link
           to={node.id === "secretary" ? "/org/secretary" : `/org/${encodeURIComponent(node.id)}`}

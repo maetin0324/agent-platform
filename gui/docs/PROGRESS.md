@@ -4309,3 +4309,147 @@ Phase 68 以前から潜在していた違反（`OrgNodeDetail` の「追加・�
   領域を持つ画面の検査精度が上がる。
 - celeris 側の提案（ACP の読み取り道具の許可が fail-closed であること等）は
   `docs/adr/0054-stateful-sessions-and-streaming-chat.md`（celeris 側）の「Phase 68 追記」を参照。
+
+## Phase G29 — スマホ UX ラウンド 5: 流れるチャットの磨き（ADR-0055 D2/D3、Phase 73。2026-09-21）
+
+Phase G28（Phase 68 の GUI）で作った「育つ吹き出し」を、Claude Code / Codex のチャット欄に近い見た目へ
+磨いた。celeris・Rust 側は変更していない（`crates/` 無変更）。ワークツリーの分岐点が Phase 68（`45a0dfa`）
+より前だったため、まずそのコミットの差分だけを取り込んでから着手した（詳細は `docs/PROGRESS.md`
+「Phase 73」の「作業の前提」を参照）。
+
+### 1. チャット吹き出し（393px。U1 相当・受け入れ条件 1）
+
+- **`~/components/ConsoleBlockItem.tsx::ReplyStepRow`** を作り直した:
+  - `tool_use` は道具名を `<span className="font-semibold">` で太字にし、要約は `~/lib/format.ts::
+    truncateLabel(step.text, 90)` で省略、`title` に全文（省略していないときも `title` は常に全文を
+    持つ。押しても壊れない）。
+  - `tool_result` は既定で畳む: 新しい純粋関数 `~/lib/console.ts::firstLine`/`hasMoreThanFirstLine`
+    で「1 行目だけ」を `<summary>` に見せ、改行を含む（＝ 1 行目の裏に何かある）ときだけ `<details>`
+    にする（1 行しか無い結果に空の開閉矢印を出さない）。開くと `<pre className="whitespace-pre-wrap
+    [overflow-wrap:anywhere]">` で全文。
+  - どちらも `[overflow-wrap:anywhere]`（Tailwind の任意プロパティ）にした。`break-words`
+    （`overflow-wrap: break-word`）は「はみ出したときだけ折る」ので、詰まった flex 行では
+    min-content の計算に効かず横はみ出しを起こしうる。`.markdown`（Phase 68 で既に
+    `overflow-wrap: anywhere` になっていた）と同じ規約に揃えた。
+- **「考え中…」のパルス**: 既存の `animate-pulse` に `motion-reduce:animate-none` を足した
+  （`prefers-reduced-motion: reduce` で止まる。CSS だけ、JS の分岐は無い）。`.markdown` の本文は
+  Phase 68 から既に `line-height: 1.75` なので「comfortable line-height」は元から満たしていた。
+- **自動追従 + 「最新へ」ピル**: `~/lib/console.ts::shouldStickToBottom(scrollHeight, scrollTop,
+  clientHeight, threshold=96)`（新規の純粋関数。既存の `stickyRef` の中の計算式をそのまま切り出した
+  だけ）。`~/components/Console.tsx::BlockStream` はこれを `state` としても持ち（`stuck`）、
+  追従していない（人が上にスクロールして読んでいる）間だけ、下端に戻るピル
+  （`console-jump-to-latest`、`min-h-11` の丸ボタン）を出す。押すと最下部へスクロールし、
+  追従を再開する。
+
+### 2. 人の吹き出しと入力欄（受け入れ条件 2）
+
+- 右寄せ・時刻表示は Phase 71 の `BlockHeader`（`align="end"`）がそのまま満たしていた（変更なし）。
+- **送信待ちヒント**: 新しい純粋関数 `~/lib/console.ts::hasStreamingReply(blocks)`
+  （`state === "streaming"` の `reply` が 1 件でもあるか）を `Console` → `ConsoleInput` に
+  `streaming` prop として渡し、`true` のとき「送信待ち（前の run が終わってから）」
+  （`console-queue-hint`）を「送る」ボタンの横に出す。**送信自体は無効化しない**（ADR-0054 D2
+  「入力欄は run 中も打てる」。キューそのものは既存の直列化（Phase 27 監査 M-3 の `depends_on`）が
+  担うので、ここでは状態を伝えるだけ）。
+- **「新しい会話」を overflow メニューへ**: `NewConversationMenu`（新規）。`lg:` は従来どおり
+  `NewConversationButton` をインラインで表示。モバイルは `size-11` の「⋯」ボタン
+  （`console-overflow-trigger`）を押すと `role="menu"` のパネル（`console-overflow-menu`）が開き、
+  その中に「新しい会話」がある（`~/root.tsx` の `MobileOtherSheet` と同じ「背景の透明ボタンで閉じる」
+  作り）。これで Console の主役のボタンは「送る」1 つだけになる。`NewConversationButton` に
+  `onSubmitted` を足し、押す（確認 OK 後）とメニューが閉じる。
+
+### 3. 組織ノード画面: lead_sessions をカードに（受け入れ条件 3）
+
+`~/routes/org.tsx` の `OrgNodeDetail`。以前は 2 列の `dl`（`grid-cols-2`、`sm:` 以上でしか
+`col-span-2` が効かない）の中に「turns ・ tokens ・ 最終使用」を 1 行のテキストで詰め込んでいたため、
+393px では実質 1 列（~180px 幅）に窮屈に収まっていた。独立した `rounded-lg border` のカード
+（`org-node-lead-session`）に出し、3 つの値を `flex flex-wrap` で並べる（狭ければ折り返すだけで
+横はみ出さない。`最終使用` は `min-w-0 flex-1` + `break-words` で長い ISO 時刻でも安全）。
+
+### 4. U13: リリースの検証バッジにアイコン（Phase G26 の未解決事項）
+
+`~/lib/releases.ts::releaseVerifyIcon`（新規の純粋関数。`ReleaseVerifyState → IconName | null`）:
+`ok_live` は `zap`（⚡）、`ok_stop_start` は `rotate`（⟳）、`unverified`/`ng` はアイコン無し
+（バッジの文字だけで意味が通るため）。`~/routes/releases.tsx` の `release-verify` バッジに、色（既存の
+`releaseVerifyTone`）に加えてこのアイコンを添えた。文字は変えていない（`releaseVerifyBadgeLabel` は
+そのまま「検証済み」の 1 語）。
+
+### 5. U12: 組織の開閉トグルが実際に畳む中身を持つように
+
+`gui/test/mock-celeris/fixtures.ts::orgList()`（新規のエクスポート）と `orgLeadSessions()`
+（付随する `lead_sessions`）: `cos`（secretary）→ `coding`（department）→ `coding-poc`（section。
+既存の他 fixture が `assignee`/`selected` として参照する id なので変えていない）の下に、
+`coding-poc-alpha` → `coding-poc-alpha-1` → `coding-poc-alpha-1-x` の 3 段（+ 兄弟
+`coding-poc-beta`）を追加。`research` 部・`research-survey` 課も足した。
+
+- **`gui/scripts/mobile-audit.mjs`**: 以前はここに 3 ノードだけのその場限りの木を書いていたが、
+  `fx.orgList()` を使うよう差し替えた。これで `/org` の開閉トグル（フェーズ 72）が実際に 4 世代ぶんの
+  サブツリーを畳めることをスクリーンショット（`test/mobile-audit/org.png`/`org-detail.png`）で
+  確認できる。
+- **`test/unit/org-tree.test.ts`**: `buildOrgTree(orgList().items)` が `cos → coding → coding-poc →
+  coding-poc-alpha → coding-poc-alpha-1 → coding-poc-alpha-1-x` の 5 世代を正しく組むことを確認する
+  テストを追加（`buildOrgTree` 自体の再帰はすでに汎用だったので新しいバグは無かったが、「深い
+  サブツリーが実際に組める」ことを固定データで留めておく）。
+
+### 6. Phase 68 の fixed-overlay 偽陽性（U-G28-2 の解消、P-G28-1 の実装）
+
+`gui/scripts/mobile-audit.mjs::checkFixedOverlays`（D1-5）に、判定の前に「`overflow-y: auto/scroll`
+かつ実際にスクロールできる（`scrollHeight > clientHeight`）祖先をすべて一時的に末尾までスクロールし、
+判定が終わったら元の位置に戻す」処理を足した（`window.scrollTo` は文書全体にしか効かず、
+`console-stream` のような**それ自身がスクロールする箱**の中身は動かせなかったため）。ルールそのもの
+（「固定要素より下に来てはいけない」）は緩めていない — 判定の入力を実機に近づけただけ。
+
+これが効いていることを実際に確かめるため、`gui/scripts/mobile-audit.mjs` の `/api/v1/console` モックに
+育つ返事のスナップショット（`fx.consoleGrowingReplySnapshot()`。新規 fixture。
+`consoleGrowingReplySteps()` の 4 件の SSE 増分を `appendConsoleBlock` と同じ規則でその場で積み上げた
+1 件）を混ぜた。Phase 68 はまさにこの理由（偽陽性）で混ぜるのを見送っていたが、今回は
+`pnpm mobile-audit` が引き続き 0 件のままであることを確認した（下記の証跡）。
+
+### 監査（機械検査）
+
+| rule | G28 後 | G29 後 |
+| --- | --- | --- |
+| overflow / status-badge / fixed-overlay / tap-target / font-size | 0 | **0**（維持） |
+| 合計 | 0 | **0**（`pnpm mobile-audit` exit 0、21 route 全て 200） |
+
+途中、新設した `org-node-lead-session` カードの `<dt>` 3 箇所が `text-xs`（12px）のままで
+`font-size` 違反 3 件が一度出たが、`text-sm lg:text-xs`（ADR-0055 D1-4 の規約）に直して 0 に戻した。
+
+### 証跡（コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint` | exit 0。`Checked 225 files. No fixes applied.`（`biome check --write` で新規コードの整形差分を一度自動修正してから確認） |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0。**Test Files 61 passed (61) / Tests 893 passed (893)**（Phase G28 の 881 から +12: `hasStreamingReply` 3 件、`firstLine`/`hasMoreThanFirstLine` 3 件、`shouldStickToBottom` 4 件、`releaseVerifyIcon` 1 件、`buildOrgTree` の深いサブツリー 1 件） |
+| build | `pnpm build` | exit 0（client・server とも） |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（celeris API 契約は変えていない。今回は API 変更そのものが無い） |
+| mobile-audit | `pnpm mobile-audit` | **exit 0。violations 0 件**。21 route 全て 200 応答、`page-error` 0 |
+
+before/after のスクリーンショット（`gui/test/mobile-audit/*.png`、git には入れない。差分の目視用）:
+`home.png`（育つ吹き出し・送信待ちヒント・overflow メニュー）、`org.png`/`org-detail.png`
+（深いサブツリーの開閉・lead_sessions カード）、`releases.png`（検証バッジのアイコン）で今回の変更を
+確認した。
+
+### 未解決事項
+
+- **U-G29-1（実機未確認）**: 「最新へ」ピル（上にスクロールしてから新しいブロックが来る操作）、
+  overflow メニューのタップでの開閉、キーボード表示時の入力欄（U8 から継続）は Playwright では
+  再現しづらい・していない。実機（iOS Safari / Android Chrome）が使える人またはエージェントに依頼する
+  （手順は P-G23-1 のとおり）。
+- **U-G29-2**: `ReplyStepRow` の `tool_use` の要約は 90 字で切っている（`truncateLabel`）。実機の
+  celeris が返す `summary` がこれより大きく長い（例: 長いコマンドライン全体）場合、`title` で全文は
+  見えるが、393px でホバー相当の手段が無いスマホでは「タップして長押し」以外に全文を見る手段が無い。
+  次のラウンドでタップで展開できるようにする案がある（今回は tool_result の `<details>` と役割が
+  重ならないよう見送った）。
+- **U-G29-3**: `NewConversationMenu` の背景を閉じるボタン（`fixed inset-0`）は、メニューを開いている
+  間だけ DOM に存在する（閉じているときは無い）ので機械検査には映らない。スクリーンリーダーでの
+  フォーカストラップ（Tab で外に出られてしまわないか）は確認していない（既存の `MobileOtherSheet` も
+  同じ作りで、これまで指摘は出ていない）。
+
+### 提案
+
+- **P-G29-1**: 今回 `checkFixedOverlays` に内側スクローラの追随を足したので（P-G28-1 の実装）、
+  同じ考え方（`isNotVisible` の構造的な判定と同様）を他の検査（例えば D1-2 タップ領域）にも広げられる
+  余地がある。今のところ他の検査で内側スクロールに起因する誤検知は出ていないので急ぎではない。
+- **P-G29-2**: U-G29-2 のとおり、`tool_use` の要約をタップで展開できるようにする（`tool_result` と
+  同じ `<details>` にするか、別の折り畳みにするか）は次のラウンドの候補。

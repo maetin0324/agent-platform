@@ -6,7 +6,10 @@ import {
   buildInstructBody,
   consoleWaitingCounts,
   findMentionQuery,
+  firstLine,
   formatRunEventRow,
+  hasMoreThanFirstLine,
+  hasStreamingReply,
   matchMentionCandidates,
   normalizeScope,
   parseScope,
@@ -14,6 +17,7 @@ import {
   replyTargetForMessageBlock,
   scopeForNode,
   scopeForProject,
+  shouldStickToBottom,
   taskLineSummary,
 } from "~/lib/console";
 import { consoleGrowingReplySteps } from "../mock-celeris/fixtures";
@@ -441,5 +445,61 @@ describe("formatRunEventRow（「すべて見る」の行整形）", () => {
         }),
       ).label,
     ).toBe("成果物: report.md");
+  });
+});
+
+// フェーズ 73（ADR-0055 D2 ラウンド 5）: 流れるチャットの磨きで足した純粋関数。
+
+describe("hasStreamingReply", () => {
+  it("state: streaming の reply が 1 件でもあれば true", () => {
+    const blocks: ConsoleBlock[] = [humanBlock(), replyBlock({ cursor: "c9", message_id: "m9", state: "streaming" })];
+    expect(hasStreamingReply(blocks)).toBe(true);
+  });
+
+  it("streaming の reply が無ければ false（既定の state=done を含む）", () => {
+    const blocks: ConsoleBlock[] = [humanBlock(), replyBlock()];
+    expect(hasStreamingReply(blocks)).toBe(false);
+  });
+
+  it("空配列は false", () => {
+    expect(hasStreamingReply([])).toBe(false);
+  });
+});
+
+describe("firstLine / hasMoreThanFirstLine", () => {
+  it("改行が無ければそのまま", () => {
+    expect(firstLine("3 件")).toBe("3 件");
+    expect(hasMoreThanFirstLine("3 件")).toBe(false);
+  });
+
+  it("改行があれば 1 行目だけを切り出す", () => {
+    const text = "3 件\n- 一つ目\n- 二つ目";
+    expect(firstLine(text)).toBe("3 件");
+    expect(hasMoreThanFirstLine(text)).toBe(true);
+  });
+
+  it("空文字は空文字のまま", () => {
+    expect(firstLine("")).toBe("");
+    expect(hasMoreThanFirstLine("")).toBe(false);
+  });
+});
+
+describe("shouldStickToBottom（console-stream の自動追従の判定）", () => {
+  it("下端から threshold（既定 96px）未満なら張り付いている", () => {
+    expect(shouldStickToBottom(1000, 904, 96)).toBe(true); // 1000 - 904 - 96 = 0 < 96
+    expect(shouldStickToBottom(1000, 900, 100)).toBe(true);
+  });
+
+  it("上にスクロールして離れていれば張り付いていない", () => {
+    expect(shouldStickToBottom(1000, 400, 300)).toBe(false); // 1000 - 400 - 300 = 300 >= 96
+  });
+
+  it("threshold を明示的に変えられる", () => {
+    expect(shouldStickToBottom(1000, 850, 100, 50)).toBe(false); // 差 50、threshold 50 未満ではない
+    expect(shouldStickToBottom(1000, 860, 100, 50)).toBe(true); // 差 40 < 50
+  });
+
+  it("すべて表示できている（スクロール不要）なら常に張り付いている扱い", () => {
+    expect(shouldStickToBottom(200, 0, 200)).toBe(true);
   });
 });
