@@ -32,6 +32,47 @@ Qwen は tier に関わらず `qwen3.8-27b`（ADR-0053 D1 で明記）。
 `claude-oauth` / `codex-oauth` は **ADR-0024/0025 のアカウントプールを再利用する**（`.celeris-usage.json`
 帳簿を CLI ワーカーの dispatch と共有。cooldown・観測値は同じ表に書く。別の写しは作らない）。
 
+### codex-oauth の要求形（Phase 65b 追記）
+
+本番で `gpt/*`（codex-oauth）経由の要求が全て 0.4 秒以内に `400 {"error":{"message":"upstream error","type":"upstream_error"}}`
+で落ちる事故があった（2026-09-21。`docs/adr/0053-llm-source-proxy.md` の Phase 65b 追記）。原因は
+ChatGPT の Codex backend（`https://chatgpt.com/backend-api/codex/responses`）が Codex CLI
+（`codex-rs`）と違う形の要求を拒否すること。この層は Codex CLI と同じ形で送る:
+
+- **`store: false`、`stream: true` を常に送る**（クライアントの `stream` の値に関わらず。Codex
+  backend は非 stream の応答を受け付けない）。クライアントが `stream: false` を要求したときは、
+  この層が上流の SSE を集約して 1 つの `chat.completion` に組み立てる（`response.output_text.delta`
+  でテキスト、`response.output_item.done` の `function_call` で tool call、`response.completed`
+  （`incomplete`/`failed` も同様）で usage / finish_reason を集める）。
+- **`instructions` は常に入れる**（クライアントに system メッセージが無ければ既定の一文。Codex CLI
+  は空にしない）。
+- **`temperature` / `max_output_tokens` は既定では送らない**（Codex CLI が送らないフィールドで、
+  送ると拒否されることがある）。`[llm_proxy.sources.codex_oauth] send_sampling_params = true` で
+  明示的に opt-in したときだけクライアントの値を転送する。
+- `reasoning_effort`（`[llm_proxy.sources.codex_oauth]`）を設定したときだけ
+  `"reasoning": {"effort": ..., "summary": "auto"}` と `"include": ["reasoning.encrypted_content"]`
+  を付ける（既定では付けない）。
+- `parallel_tool_calls: true` を常に付け、`tools` があって `tool_choice` の指定が無ければ
+  `tool_choice: "auto"` を付ける。
+- ヘッダに `User-Agent: codex_cli_rs/<version>`（`[llm_proxy.sources.codex_oauth] user_agent`。
+  **既定値のバージョン番号は未確認**。`codex --version` 等の実機で確認して上書きすること）を追加した。
+  他のヘッダ（`Authorization`、`chatgpt-account-id`、`OpenAI-Beta: responses=experimental`、
+  `originator: codex_cli_rs`、`session_id`、`accept: text/event-stream`）は Phase 65 のまま。
+
+### 上流エラーの読み方（Phase 65b 追記）
+
+上流が非 2xx を返したとき、この層は本文から `error.message`（OpenAI 互換の形）と、ChatGPT backend
+がよく返す上位の `detail` / `message` フィールドの両方を見て、300 文字までの要約を作る
+（`sources::codex::extract_error_summary`。トークン・ヘッダは絶対に含めない）。この要約は:
+
+1. **WARN ログ**に出る（`llm-proxy: codex-oauth upstream returned a non-success status`。
+   `status` と `summary` のフィールド）。本番でログを見れば、以前のように
+   `candidate failed before any bytes were sent` だけでなく、実際に上流が何と言って拒否したかが
+   分かる（例: `{"detail":"Store must be set to false"}` → 要約は `Store must be set to false`）。
+2. **プロキシの応答本文**（`error.message`）にそのまま出る。`llm_proxy_requests.error_kind` は
+   `upstream` のまま変えていない（本文を書く列は増やしていない。CLAUDE.md「migration は今回の
+   Phase だけ」に沿って、要約はログと応答にだけ出す）。
+
 ### トークン更新
 
 - **claude-oauth**: `.credentials.json` の `expiresAt`（unix ms）を見て、送信前に残り 60 秒を切っていれば
@@ -166,8 +207,18 @@ bearer トークン（`[api] token_file` の中身）が必要。直接 Qwen を
      -d '{"model":"celeris/cheap","messages":[{"role":"user","content":"hi"}]}' \
      http://127.0.0.1:18100/v1/chat/completions` → 200 と応答本文。`x-celeris-source` ヘッダで
    選ばれた供給元を確認する。
+4b. **codex-oauth（Phase 65b で修正）**を明示的に確認する:
+   `curl -s -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+     -d '{"model":"gpt/cheap","messages":[{"role":"user","content":"hi"}]}' \
+     http://127.0.0.1:18100/v1/chat/completions` → 200 と応答本文、`x-celeris-source: codex-oauth`。
+   400 等が返ったら、celeris のログの `llm-proxy: codex-oauth upstream returned a non-success status`
+   の `summary` フィールドに上流が言っている理由が出る（§「上流エラーの読み方」参照）。
 5. 4 つのプロバイダ（`paperqa-qwen` / `ldr-qwen` / `opencode-qwen` / `langmem-main`）を**1 つずつ**
-   プロキシへ向け、そのつど 1 タスクを流して結果を確認する（同時に全部変えない）。
+   プロキシへ向け、そのつど 1 タスクを流して結果を確認する（同時に全部変えない）。`langmem-main` を
+   プロキシへ向けるときは、`[knowledge.langmem].api_key_secret` を必ず設定すること（Phase 65b:
+   到達性 probe の `GET /v1/models` がこのトークンで `Authorization: Bearer` を送る。無いと 401 が
+   返るが、401/403 は「落ちている」と誤認せず `Unknown`（＝従来どおり `langmem` で走らせる）として
+   扱うので、フォールバックし続けることはない）。
 
 ## 9. 明示した既知の制約（Phase 65 の範囲）
 

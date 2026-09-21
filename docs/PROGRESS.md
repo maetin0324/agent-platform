@@ -10107,3 +10107,90 @@ celeris 本体（Rust）には触っていない。作業は全て `gui/` 側（
   `env_from_secrets = { OPENAI_API_KEY = "celeris-api-token" }`。`POST /reload` → `{"reloaded":true}`。
   動作確認タスク `01M31K37HN82V75J6DGEB3CRWC`（literature、tier standard）を 09:05 に作成。結果は次のラウンドで追記。
 - `langmem-main` は Phase 65b（probe に bearer）の配備後。`opencode-qwen` は Phase 65 の判断どおり据え置き。
+## Phase 65b — codex-oauth の上流エラーの可視化と Codex CLI 互換の要求形（2026-09-21）
+
+### 観測（本番、release `0b1815cab8f6`、2026-09-21 08:47–08:55 UTC）
+
+`celeris/cheap` → claude-oauth は 200/`pong` で動いていたが、`gpt/*`（codex-oauth。cheap=gpt-5-mini、
+standard=gpt-5、frontier=gpt-5-codex。クライアントの `stream`/`max_tokens` の有無に関わらず）は
+全て 0.4 秒以内に `400 {"error":{"message":"upstream error","type":"upstream_error"}}` で落ちて
+いた。ログには `candidate failed before any bytes were sent; trying the next one … kind: upstream`
+しか出ず、上流の本文が見えないため原因を特定できなかった（認証は正常。401 は出ていない）。
+
+### 何を変えたか
+
+1. **上流エラーの可視化**（`crates/llm-proxy/src/sources/codex.rs`）: 非 2xx 応答の本文から
+   `error.message` と上位の `detail`/`message` の両方を見て 300 文字までの要約を作り
+   （`extract_error_summary`）、WARN ログ（`status = ..., summary = ...`）とプロキシのエラー応答
+   （`error.message`）の両方に出す。トークン・ヘッダは出さない。`llm_proxy_requests.error_kind` は
+   変えていない（migration は増やさない）。
+2. **Codex CLI 互換の要求形**（同ファイル）: 上流へは常に `store: false` / `stream: true` を送り
+   （Codex backend は非 stream の応答を受け付けないため。クライアントが非 stream を求めたときは
+   `aggregate_stream` が SSE を集約して 1 つの応答に組み立てる）、`instructions` は system が無くても
+   既定の一文を入れ、`temperature`/`max_output_tokens` は既定では送らない（
+   `[llm_proxy.sources.codex_oauth] send_sampling_params = true` で opt-in）。
+   `parallel_tool_calls: true` と `tools` があれば既定 `tool_choice: "auto"` を付けた。
+   `reasoning_effort` を設定したときだけ `reasoning`/`include` を付ける。ヘッダに
+   `User-Agent: codex_cli_rs/<version>`（`user_agent` で上書き可。既定値のバージョンは未確認）を
+   追加した。既存の streaming 経路は変えていない。
+3. **コーディネーターからの追加指示（同じ Phase 内）**: `[knowledge.langmem].base_url` を
+   `llm-proxy`（`/v1/models` が Bearer を要求する）に向けたとき、従来の到達性 probe
+   （ADR-0052 D1、`crates/task-worker/src/probe.rs`）は 401 を「落ちている」と誤認して知識整理 run
+   が永久にフォールバックしてしまう問題を修正した。`probe_models` に `bearer_token: Option<&str>`
+   を足し、`[knowledge.langmem].api_key_secret` から解決した値（`crates/celeris/src/config.rs`
+   `dispatch_config()` が解決 → `task_dispatch::KnowledgeRuntimeConfig.langmem_api_key` →
+   `crates/task-dispatch/src/dispatcher.rs` の `KnowledgeProbe`/`knowledge_reachability`）で
+   `Authorization: Bearer` を送る。**401/403 は `Unreachable` ではなく `Unknown`**（＝従来どおり
+   `langmem` で走らせる。フォールバックしない）に分類を変えた。トークンの値はどのログにも出さない。
+
+### 変更したファイル
+
+`crates/llm-proxy/src/sources/codex.rs`、`crates/llm-proxy/src/config.rs`、
+`crates/llm-proxy/tests/proxy_integration.rs`、`crates/task-worker/src/probe.rs`、
+`crates/task-dispatch/src/dispatcher.rs`、`crates/celeris/src/config.rs`、`docs/llm-source.md`、
+`docs/adr/0053-llm-source-proxy.md`（Phase 65b 追記）。`gui/`・本番の設定/資格情報・ポート・
+`systemctl` は触っていない。
+
+### 証拠コマンドと結果
+
+- `cargo test --workspace --no-fail-fast`: **exit 0。1623 passed / 0 failed**（doctest 含む
+  全クレート。ワークスペース全体の `test result:` 行を合計）。
+  - `llm-proxy`: unit 36 passed（`sources::codex::tests` に 6 件追加）、integration 20 passed
+    （`codex_non_stream_round_trip` を書き替え、`codex_400_upstream_error_surfaces_the_detail_field`
+    を追加）。
+  - `task-worker`: `probe::tests` 9 passed（`a_bearer_token_is_sent_as_an_authorization_header`、
+    `without_a_bearer_token_the_same_upstream_answers_401`、
+    `a_401_or_403_from_the_probe_is_unknown_not_unreachable` を追加）。
+  - `task-dispatch`: `dispatcher::knowledge_fallback_tests` 6 passed
+    （`the_resolved_api_key_is_passed_to_the_knowledge_probe` を追加）。
+  - `celeris`: `config::tests` に `dispatch_config_resolves_the_langmem_api_key_from_secrets` を追加、
+    green。
+- `cargo clippy --workspace --all-targets -- -D warnings`: **exit 0。警告 0**。
+- 非テストコードに `unwrap()` を増やしていない（`git diff` の追加行を確認済み。テスト内の
+  `unwrap()`/`expect()` のみ）。
+- テストは全て偽の上流（`127.0.0.1:0` に実際に bind した axum サーバ、または `TcpListener` の生
+  ソケット）。外部ネットワークには出ていない。
+
+### 未実施・人（またはエージェント）に依頼すること
+
+実際の Codex 資格情報も外向きネットワークも無いサンドボックスのため、実機確認は**未実施**
+（ADR-0009 P-34）。`docs/llm-source.md` §8 の手順 4b を、認証が使える環境で 1 回実行し、結果を
+ここに追記すること:
+
+```
+curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" \
+  -H 'content-type: application/json' \
+  -d '{"model":"gpt/cheap","messages":[{"role":"user","content":"hi"}]}' \
+  http://127.0.0.1:18100/v1/chat/completions
+```
+
+200 と応答本文、`x-celeris-source: codex-oauth` を期待する。まだ 400 等が返る場合は、celeris の
+ログの `llm-proxy: codex-oauth upstream returned a non-success status` の `summary` フィールドに
+上流の実際の拒否理由（`detail`/`message`）が出るはずなので、それを見て次の調整判断ができる。
+
+### 未解決事項
+
+- `codex_cli_rs/<version>` の既定バージョン番号は未確認（値そのものは重要でない可能性が高いが、
+  実機で `codex --version` 系の情報から確認して上書きするのが望ましい）。
+- `reasoning_effort` / `send_sampling_params` は既定で無効のままなので、実機の 400 が収まったあとで
+  必要なら有効化を検討する（今回は「まず届くこと」を優先し、機能追加は最小にした）。

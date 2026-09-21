@@ -128,7 +128,7 @@ fn default_claude_client_id() -> String {
     "9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_string()
 }
 
-/// `[llm_proxy.sources.codex_oauth]`（ADR-0053 D1-2）。
+/// `[llm_proxy.sources.codex_oauth]`（ADR-0053 D1-2。Phase 65b で D1-2 の要求形を Codex CLI に合わせた）。
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CodexOauthConfig {
@@ -143,6 +143,19 @@ pub struct CodexOauthConfig {
     pub client_id: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// `User-Agent`（Codex CLI と同じ形 `codex_cli_rs/<version>`）。**バージョン値は未確認**
+    /// （`docs/llm-source.md` §2 参照。実機で `codex --version` 等から確認して上書きすること）。
+    #[serde(default = "default_codex_user_agent")]
+    pub user_agent: String,
+    /// 既定では `temperature` / `max_output_tokens` を上流へ送らない（ChatGPT の Codex backend は
+    /// Codex CLI が送らないフィールドを拒否することがあるため。ADR-0053 Phase 65b 追記）。
+    /// 明示的に `true` にしたときだけ、クライアントの値をそのまま転送する（opt-in）。
+    #[serde(default)]
+    pub send_sampling_params: bool,
+    /// 設定したときだけ `"reasoning": {"effort": <値>, "summary": "auto"}` と
+    /// `"include": ["reasoning.encrypted_content"]` を付ける（Codex CLI 相当。既定は付けない）。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 fn default_codex_responses_url() -> String {
@@ -153,6 +166,10 @@ fn default_codex_token_url() -> String {
 }
 fn default_codex_client_id() -> String {
     "app_EMoamEEZ73f0CkXaXp7hrann".to_string()
+}
+/// **未確認**（`docs/llm-source.md` §2 参照）。Codex CLI (`codex-rs`) が送る形に沿わせた既定値。
+fn default_codex_user_agent() -> String {
+    "codex_cli_rs/0.45.0".to_string()
 }
 
 /// `[[llm_proxy.sources.openai_compatible]]`（ADR-0053 D1-3）。既存の Qwen 等をそのまま中継する。

@@ -2260,6 +2260,17 @@ impl Config {
                 default_mounts: self.knowledge.mounts().unwrap_or_default(),
                 // ADR-0052 D1（Phase 64）: dispatch の直前に `GET <base_url>/models` を当てる先。
                 langmem_base_url: self.knowledge.langmem.base_url.clone(),
+                // Phase 65b: probe の `Authorization: Bearer` に使う平文のトークン（`llm-proxy` の
+                // ように `/v1/models` が認証を要求する上流を `[knowledge.langmem].base_url` に
+                // 指したときのため）。`[secrets] dir` が無い・見つからないなら `None`（検査は従来どおり
+                // トークン無しで行い、401/403 は `Unknown` として扱われる）。**値はここにしか無い**
+                // （`build_adapters` の langmem アダプタと同じ解決。ログには出さない）。
+                langmem_api_key: self
+                    .knowledge
+                    .langmem
+                    .api_key_secret
+                    .as_deref()
+                    .and_then(|id| crate::resolve_secret(self.secrets.as_ref().map(|s| s.dir.as_path()), id)),
                 // ADR-0052 D2: `knowledge` ハーネスの `fallback`（組み込みの既定は tier `cheap`）。
                 fallback_tier: self
                     .harness_registry()
@@ -4758,6 +4769,45 @@ roles = ["lead"]
             toml::from_str("[knowledge]\ndefault_mounts = [\"kb:../etc\"]\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n")
                 .unwrap();
         assert!(escape.validate().is_err());
+    }
+
+    /// Phase 65b: `dispatch_config().knowledge.langmem_api_key` が `[knowledge.langmem].api_key_secret`
+    /// を `[secrets] dir` から解決した平文の値になること（`build_adapters` の langmem アダプタと同じ
+    /// 解決）。到達性 probe（`task_dispatch::Dispatcher::knowledge_reachability`）がこれを
+    /// `Authorization: Bearer` に使う（`llm-proxy` のような認証必須の上流のため）。
+    #[test]
+    fn dispatch_config_resolves_the_langmem_api_key_from_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let secrets_dir = dir.path().join("secrets");
+        std::fs::create_dir_all(&secrets_dir).unwrap();
+        std::fs::write(secrets_dir.join("langmem-key"), "sk-test-value\n").unwrap();
+        let text = format!(
+            r#"
+[secrets]
+dir = "{secrets}"
+
+[knowledge.langmem]
+enabled = true
+provider = "openai-compatible"
+base_url = "http://127.0.0.1:18100/v1"
+model = "celeris/cheap"
+api_key_secret = "langmem-key"
+
+[[providers]]
+id = "x"
+adapter = "fake"
+"#,
+            secrets = secrets_dir.display()
+        );
+        let cfg: Config = toml::from_str(&text).unwrap();
+        assert_eq!(cfg.dispatch_config().knowledge.langmem_api_key.as_deref(), Some("sk-test-value"));
+
+        // `api_key_secret` が無ければ `None`（従来どおり、probe はトークン無しで検査する）。
+        let without: Config = toml::from_str(
+            "[knowledge.langmem]\nenabled = true\nbase_url = \"http://127.0.0.1:18100/v1\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        assert!(without.dispatch_config().knowledge.langmem_api_key.is_none());
     }
 
     /// ADR-0033 D6（Phase 24）: `[memory] dir` は設定ファイル基準で絶対化され、0700 で作られ、

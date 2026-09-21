@@ -252,6 +252,10 @@ pub struct KnowledgeRuntimeConfig {
     /// ADR-0052 D1（Phase 64）: `[knowledge.langmem].base_url`。知識整理タスクを dispatch する直前に
     /// `GET <base_url>/models` を当てる。`None` なら検査しない（＝従来どおり `langmem` で走らせる）。
     pub langmem_base_url: Option<String>,
+    /// Phase 65b: `[knowledge.langmem].api_key_secret` から解決した平文のトークン（`[secrets] dir`
+    /// が無い・見つからない等なら `None`）。到達性の probe が `Authorization: Bearer` に使う
+    /// （`llm-proxy` のように `/v1/models` が認証を要求する上流を指したときのため）。**値はログに出さない**。
+    pub langmem_api_key: Option<String>,
     /// ADR-0052 D2（Phase 64）: `knowledge` ハーネスの `fallback`（倒す先の tier）。`None` は
     /// 「倒さない」（`fallback = false` か、そもそも `knowledge` ハーネスが無い）。
     pub fallback_tier: Option<Tier>,
@@ -902,8 +906,10 @@ pub struct Dispatcher {
     knowledge_probe_cache: HashMap<String, (Instant, Reachability)>,
 }
 
-/// ADR-0052 D1: 到達性の検査のフック（差し替えられるようにしてある。既定は本物の HTTP GET）。
-pub type KnowledgeProbe = Arc<dyn Fn(&str) -> Reachability + Send + Sync>;
+/// ADR-0052 D1（Phase 65b で `bearer_token` を追加）: 到達性の検査のフック（差し替えられるようにして
+/// ある。既定は本物の HTTP GET）。第 2 引数は `[knowledge.langmem].api_key_secret` から解決した
+/// 平文のトークン（`llm-proxy` のように `/v1/models` が認証を要求する上流のため。値はログに出さない）。
+pub type KnowledgeProbe = Arc<dyn Fn(&str, Option<&str>) -> Reachability + Send + Sync>;
 
 /// ADR-0052 D2: フォールバックする run に載せる上書き（`run_extras` の結果に混ぜる）。
 #[derive(Debug, Clone)]
@@ -989,8 +995,8 @@ impl Dispatcher {
             accepting_new_work: true,
             task_workspaces: HashMap::new(),
             eligible: None,
-            knowledge_probe: Arc::new(|base_url| {
-                task_worker::probe_models(base_url, task_worker::PROBE_TIMEOUT)
+            knowledge_probe: Arc::new(|base_url, bearer_token| {
+                task_worker::probe_models(base_url, task_worker::PROBE_TIMEOUT, bearer_token)
             }),
             knowledge_probe_cache: HashMap::new(),
         }
@@ -1015,8 +1021,9 @@ impl Dispatcher {
         {
             return cached.clone();
         }
+        let token = self.config.knowledge.langmem_api_key.clone();
         let started = Instant::now();
-        let outcome = (self.knowledge_probe)(&base_url);
+        let outcome = (self.knowledge_probe)(&base_url, token.as_deref());
         log_slow_step("knowledge_probe", started);
         tracing::debug!(%base_url, ?outcome, "knowledge: probed the langmem endpoint");
         self.knowledge_probe_cache
@@ -13500,7 +13507,7 @@ mod knowledge_fallback_tests {
         store.insert(&task).expect("insert");
         let seen = Arc::new(SyncMutex::new(Vec::new()));
         let mut d = knowledge_dispatcher(store.clone(), seen.clone(), Some(Tier::Cheap), true);
-        d.set_knowledge_probe(Arc::new(|_| Reachability::Unreachable {
+        d.set_knowledge_probe(Arc::new(|_, _| Reachability::Unreachable {
             reason: "接続できない: Connection refused".into(),
         }));
         run_until_idle(&mut d, 100).await;
@@ -13568,7 +13575,7 @@ mod knowledge_fallback_tests {
         let mut d = knowledge_dispatcher(store.clone(), seen.clone(), Some(Tier::Cheap), true);
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
-        d.set_knowledge_probe(Arc::new(move |_| {
+        d.set_knowledge_probe(Arc::new(move |_, _| {
             counter.fetch_add(1, Ordering::SeqCst);
             Reachability::Ok
         }));
@@ -13595,6 +13602,27 @@ mod knowledge_fallback_tests {
         );
     }
 
+    /// Phase 65b: `[knowledge.langmem].api_key_secret` から解決したトークンが probe に渡ること
+    /// （celeris の `llm-proxy` のように `GET /v1/models` が認証を要求する上流を指したときのため）。
+    #[tokio::test]
+    async fn the_resolved_api_key_is_passed_to_the_knowledge_probe() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().expect("open"));
+        let task = knowledge_task(dir.path());
+        store.insert(&task).expect("insert");
+        let seen = Arc::new(SyncMutex::new(Vec::new()));
+        let mut d = knowledge_dispatcher(store.clone(), seen, Some(Tier::Cheap), true);
+        d.config.knowledge.langmem_api_key = Some("secret-proxy-token".to_string());
+        let seen_tokens = Arc::new(SyncMutex::new(Vec::new()));
+        let capture = seen_tokens.clone();
+        d.set_knowledge_probe(Arc::new(move |_, token| {
+            capture.lock().expect("lock").push(token.map(str::to_string));
+            Reachability::Ok
+        }));
+        run_until_idle(&mut d, 100).await;
+        assert_eq!(seen_tokens.lock().expect("lock").as_slice(), [Some("secret-proxy-token".to_string())]);
+    }
+
     /// ADR-0052 D2: `fallback = false`（＝ `fallback_tier` が無い）なら、届かなくても倒さない
     /// （検査もしない。従来どおり `langmem` に出す）。
     #[tokio::test]
@@ -13607,7 +13635,7 @@ mod knowledge_fallback_tests {
         let mut d = knowledge_dispatcher(store.clone(), seen, None, true);
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
-        d.set_knowledge_probe(Arc::new(move |_| {
+        d.set_knowledge_probe(Arc::new(move |_, _| {
             counter.fetch_add(1, Ordering::SeqCst);
             Reachability::Unreachable {
                 reason: "接続できない".into(),
@@ -13628,7 +13656,7 @@ mod knowledge_fallback_tests {
         store.insert(&task).expect("insert");
         let seen = Arc::new(SyncMutex::new(Vec::new()));
         let mut d = knowledge_dispatcher(store.clone(), seen.clone(), Some(Tier::Cheap), false);
-        d.set_knowledge_probe(Arc::new(|_| Reachability::Unreachable {
+        d.set_knowledge_probe(Arc::new(|_, _| Reachability::Unreachable {
             reason: "接続できない".into(),
         }));
         for _ in 0..3 {
@@ -13656,7 +13684,7 @@ mod knowledge_fallback_tests {
         let mut d = knowledge_dispatcher(store.clone(), seen, Some(Tier::Cheap), true);
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = calls.clone();
-        d.set_knowledge_probe(Arc::new(move |_| {
+        d.set_knowledge_probe(Arc::new(move |_, _| {
             counter.fetch_add(1, Ordering::SeqCst);
             Reachability::Unreachable {
                 reason: "接続できない".into(),

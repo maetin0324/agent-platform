@@ -109,3 +109,66 @@
   （CLAUDE.md の禁止事項、かつ ADR-0009 P-34 の「使えなければ手順を書いて人間に依頼する」に従う）。
   `docs/llm-source.md` §8 に curl での確認手順を書いたので、認証が使える環境の人（またはエージェント）
   が実行し、結果を PROGRESS に追記すること。
+
+## Phase 65b 追記（2026-09-21。codex-oauth の上流エラーの可視化と Codex CLI 互換の要求形）
+
+- **観測（本番、2026-09-21 08:47–08:55 UTC、release `0b1815cab8f6`）**: `celeris/cheap` →
+  claude-oauth は 200/`pong` で動くのに、`gpt/*`（codex-oauth。cheap=gpt-5-mini、standard=gpt-5、
+  frontier=gpt-5-codex。stream の有無・`max_tokens` の有無に関わらず）は全て 0.4 秒以内に
+  `400 {"error":{"message":"upstream error","type":"upstream_error"}}` で落ちていた。ログには
+  `candidate failed before any bytes were sent; trying the next one … kind: upstream` しか出ず、
+  上流の本文が見えないため原因を特定できなかった。認証は正常（`account_check … result ok`、401 は
+  出ていない）。
+- **原因**: ChatGPT の Codex backend（`.../backend-api/codex/responses`）は Codex CLI（`codex-rs`）
+  が送る形以外を拒否する。Phase 65 の実装は `store` を送らず、`stream` をクライアントの値のまま
+  送り、`instructions` を system メッセージが無いときは省略し、`temperature`/`max_output_tokens`
+  を常に転送していた。これらのどれか（複数の可能性が高い）が拒否の原因だった。
+- **変更**:
+  1. `crates/llm-proxy/src/sources/codex.rs`: 上流へは常に `store: false`・`stream: true` を送り、
+     `instructions` は system が無ければ既定の一文を入れ、`temperature`/`max_output_tokens` は
+     既定では送らない（opt-in）。`parallel_tool_calls: true` と、`tools` があれば既定
+     `tool_choice: "auto"` を付けた。`reasoning_effort` を設定したときだけ `reasoning`/`include`
+     を付ける。ヘッダに `User-Agent: codex_cli_rs/<version>` を追加した（値は未確認。設定で上書き
+     可能）。クライアントが非 stream を求めたときは、常に stream で要求した上流の SSE をこの層で
+     集約して 1 つの `chat.completion` に組み立てる（`aggregate_stream`）。既存の streaming 経路
+     （`build_chunk_stream`/`ResponsesStreamMapper`）は変えていない。
+  2. 上流が非 2xx を返したとき、`error.message` と上位の `detail`/`message` の両方を見て 300 文字
+     までの要約を作り（`extract_error_summary`）、WARN ログ（`status`/`summary`）とプロキシの
+     エラー応答（`error.message`）の両方に出す。`llm_proxy_requests.error_kind` は変えていない
+     （migration は増やさない。本文はログと応答にだけ残る）。
+  3. `crates/llm-proxy/src/config.rs` の `[llm_proxy.sources.codex_oauth]` に
+     `user_agent` / `send_sampling_params` / `reasoning_effort` を追加した。
+  4. **コーディネーターからの追加指示**（同じ Phase 内。ADR-0052 D1 の到達性 probe）:
+     `[knowledge.langmem].base_url` を `llm-proxy`（`/v1/models` が Bearer を要求する）に向けると、
+     従来の probe は 401 を「落ちている」と誤認して永久にフォールバックしてしまう。
+     `crates/task-worker/src/probe.rs` の `probe_models` に `bearer_token: Option<&str>` を足し、
+     `[knowledge.langmem].api_key_secret` から解決した値（`crates/celeris/src/config.rs`
+     `dispatch_config()` が解決し、`task_dispatch::KnowledgeRuntimeConfig.langmem_api_key` に運ぶ。
+     `crates/task-dispatch/src/dispatcher.rs` の `KnowledgeProbe`/`knowledge_reachability` も
+     第 2 引数を通す）で `Authorization: Bearer` を送る。**401/403 は `Unreachable` ではなく
+     `Unknown`**（＝従来どおり `langmem` で走らせる。認証エラーは「LLM が落ちている」ことを意味
+     しない）に分類を変えた。トークンの値はどのログにも出さない。
+- **テスト**（すべて偽の上流。外部ネットワークには出ない）:
+  - `crates/llm-proxy/src/sources/codex.rs` の単体テスト 6 件（要求の形が既定で
+    `store:false`/`stream:true`/`instructions` あり/`temperature`・`max_output_tokens` 無し、
+    system がある場合の `instructions`、`send_sampling_params`/`reasoning_effort` の opt-in、
+    `extract_error_summary` が `detail`/`error.message`/`message` を見ること、300 文字で切ること）。
+  - `crates/llm-proxy/tests/proxy_integration.rs`: `codex_non_stream_round_trip`
+    （非 stream クライアント要求が、上流には `store`/`stream`/`instructions`/欠落フィールドの形で
+    送られ、SSE 上流からの tool call + usage が 1 つの集約応答になること）、
+    `codex_tool_call_round_trip`、`codex_stream_round_trip`（変わらず動くことを確認）、
+    `codex_400_upstream_error_surfaces_the_detail_field`（`{"detail":"Store must be set to false"}`
+    がプロキシのエラー本文にそのまま出ること）。
+  - `crates/task-worker/src/probe.rs`: `a_bearer_token_is_sent_as_an_authorization_header`
+    （ヘッダが実際に送られる）、`without_a_bearer_token_the_same_upstream_answers_401`、
+    `a_401_or_403_from_the_probe_is_unknown_not_unreachable`（401/403 が `Unknown` になり
+    `should_fall_back()` が `None` を返すこと）。
+  - `crates/task-dispatch/src/dispatcher.rs`:
+    `the_resolved_api_key_is_passed_to_the_knowledge_probe`。
+  - `crates/celeris/src/config.rs`: `dispatch_config_resolves_the_langmem_api_key_from_secrets`。
+- **ゲート**: `cargo test --workspace --no-fail-fast` exit 0（1623 passed / 0 failed。doctest 含む
+  全クレート）。`cargo clippy --workspace --all-targets -- -D warnings` exit 0（警告 0）。
+  非テストコードに `unwrap()` を増やしていない。
+- **実機確認は未実施**（このセッションには本物の Codex 資格情報も外向きネットワークも無い。
+  ADR-0009 P-34）。`docs/llm-source.md` §8 の手順 4b（`gpt/cheap` への 1 回の curl）を、認証が
+  使える環境の人（またはエージェント）が実行し、結果を PROGRESS に追記すること。
