@@ -12792,3 +12792,130 @@ ADR-0053 D3)`（`connector_calls == 0`）で失敗した。1 日中 green だっ
 - 本番 = Phase 65〜84（すべて）。worktree の build 生成物を再度掃除（`/home` 73%）。
 - Qwen: 18000 は張れているが target 応答なしのまま（http=000）。デーモンは 5 分で 37 回 `forward added via -O forward` を打ち直している（tick 6 秒）。
   → **Phase 85**（forward の存在と target の健康を区別してバックオフ）を Sonnet で起動。
+
+## Phase 85 — トンネルの forward 有無と target の健康を区別してバックオフ（2026-09-21）
+
+### 観測（本番、2026-09-21 21:00〜21:30 UTC、release `8c3e8c7eb9b9` → `2930f1f61b44`）
+
+人が pegasus へ ssh ControlMaster を張った後、celeris は forward を張れた（`tunnel: forward added via
+-O forward pegasus 127.0.0.1:18000 → bnode150:18000`、master プロセスが 127.0.0.1:18000 を LISTEN）。
+しかし `GET http://127.0.0.1:18000/v1/models` は応答なし（http=000）で、`GET /llm/sources` の qwen は
+`reachable: false` のまま（bnode150 の vLLM が落ちているか pegasus→bnode150 が不通。celeris 側の不具合
+ではない）。旧実装（Phase 66）は「forward が届くか」を `/v1/models` の到達性 1 つだけで判定していたため、
+「forward はあるが先方が不健全」を「forward が無い」と誤認し、**5 分で 37 回** `-O forward` を打ち直し、
+`slow tick phases … tunnel_ms≈6040`（tick が約 6 秒に伸びる）を引き起こしていた。
+
+### 変更（詳細は `docs/adr/0053-llm-source-proxy.md`「Phase 85 追記」）
+
+1. **listener（`-O forward` の手元の待ち受け）と target（先方、`/v1/models`）の健康を別の観測にした。**
+   `crates/task-dispatch/src/dispatcher.rs`: 新しい `TunnelListenerProbe`（軽い TCP connect。ssh は
+   起こさない）を足し、`refresh_one_forward` は listener が無いときだけ `tunnel_forward_ensurer`
+   （`-O forward`）を呼ぶ。listener が有って target が不健全でも re-add しない。観測は
+   `ForwardObservation { listener, target_healthy, last_error }`（`tunnel_state` に保持）、新しい
+   `TunnelEventKind::TargetUnreachable` で表す。
+2. **target の健康 probe に `[[clusters.forwards]] probe_interval_secs`（既定 30 秒）のバックオフを
+   足した。** forward ごとに最後に probe した時刻（`last_target_probe`）を見て、間隔内なら probe を
+   スキップする（listener の TCP connect は間引かない）。celeris 側の probe タイムアウトも、他の到達性
+   検査と共有していた 3 秒（`task_worker::PROBE_TIMEOUT`）から、この経路専用の 2 秒
+   （`TUNNEL_TARGET_PROBE_TIMEOUT`）に分けた。
+3. 状態遷移のログ/イベント（Console の 1 行）は、フェーズが変わったときだけ積む（既存の diff 判定を
+   継続。バックオフで probe 自体が減ったことで、二重にスパムしない形になった）。
+4. **`GET /clusters` を拡張**: `TunnelForwardLive`（`task-ops`）/`ClusterForwardView`（`task-api`）に
+   `listener` / `target_healthy` / `last_error` を追加（`up` は互換のため残し、意味は
+   `listener && target_healthy` のまま）。GUI（`gui/app/routes/clusters.tsx`、`gui/app/lib/llm-sources.ts`）
+   は `listener === true && target_healthy === false` のとき、状態バッジを `unreachable`（1 語）にし、
+   「転送あり・先方応答なし」という理由の文を添える。GUI は表示だけで判断ロジックは持たない
+   （`gui/CLAUDE.md` の規律どおり）。
+
+### 実行したコマンドと出力の要点
+
+- **条件**: `cargo test --workspace --no-fail-fast` が exit 0、FAILED 0。
+  **実行**: `cargo test --workspace --no-fail-fast`
+  **出力**: exit 0。各クレートの `test result: ok` がすべて `0 failed`（`FAILED` 行なし）。
+  `task-dispatch`（`dispatcher::tests`）217 passed（新設の tunnel 系 6 件を含む:
+  `tunnel_down_then_key_auth_ok_brings_the_forward_up` /
+  `tunnel_down_and_key_auth_fails_marks_login_needed_once` /
+  `tunnel_listener_absent_is_re_added`（新規。旧
+  `tunnel_forward_missing_while_master_alive_is_re_added` の置き換え） /
+  `tunnel_listener_present_target_unhealthy_does_not_re_add`（新規。Phase 85 の本旨。listener 有り・
+  target 不健全で re-add しないこと、`TargetUnreachable` イベントと `last_error` を確認） /
+  `tunnel_target_probe_is_backed_off_by_probe_interval_secs`（新規。`probe_interval_secs` 内では
+  target probe が走らないこと） /
+  `tunnel_target_unreachable_emits_the_event_once_across_many_ticks`（新規。5 回 probe しても
+  イベントは 1 回だけ）。`verify_mode_does_not_refresh_cluster_tunnels_or_write_a_report` に
+  listener probe の呼び出し回数の assertion も追加）。`celeris`（`tests`）264 passed（Phase 66b/81/84b
+  の `phase_` 3 件を含めて green のまま。実際の listen アドレスが `"127.0.0.1:0"`（接続不能）のため、
+  celeris 実装側の実物の `TunnelListenerProbe`（TCP connect）を通しても「listener 無し」判定になり、
+  これらの回帰テストの前提〈`ensure_calls >= 1` 等〉は変えずに済んだ）。
+- **条件**: `cargo clippy --workspace --all-targets -- -D warnings` が exit 0（警告 0）。
+  **実行**: `cargo clippy --workspace --all-targets -- -D warnings`
+  **出力**: exit 0、warning/error 0 件。
+- **条件**: `GET /clusters` の API 契約変更を schema に反映する。
+  **実行**: `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::`
+  **出力**: `test result: ok. 2 passed`（`committed_schema_matches_generated` を含む）。
+  `docs/api/v1/api-v1.schema.json` に `ClusterForwardView`/`TunnelForwardLive` の
+  `listener`/`target_healthy`/`last_error` が追加（+40 行）。
+- **条件**: `scripts/sync-gui-docs.sh` で GUI 側の API 文書の写しが最新であること。
+  **実行**: `scripts/sync-gui-docs.sh && scripts/sync-gui-docs.sh --check`
+  **出力**: `updated gui/docs/celeris-api-v1.md` → 2 回目は `up to date`。
+- **条件**: GUI 一式が exit 0。
+  **実行**: `pnpm install`（node_modules 未作成だったため）、`pnpm gen:types`、
+  `git diff --exit-code app/celeris/types.ts` は差分あり（`ClusterForwardView`/`TunnelForwardLive` に
+  新フィールド。API 契約を変えた Phase なので想定どおり）、その後もう一度 `pnpm gen:types` を実行して
+  差分ゼロ（＝生成が安定していることを確認）、`pnpm typecheck`、`pnpm lint`（`clusters.tsx` の三項式が
+  1 行を超えたのを biome が検出 → `pnpm exec biome check --write` で整形）、`pnpm test`、`pnpm build`、
+  `pnpm exec playwright install chromium`、`pnpm mobile-audit`、`pnpm e2e:mock`。
+  **出力**: `pnpm typecheck` exit 0（出力なし）。`pnpm lint` `Checked 243 files … ` エラー 0。
+  `pnpm test` **983 passed**（982 + `forwardStatusWord` の新規ケース 1 件）。`pnpm build` exit 0。
+  `pnpm mobile-audit` → `{"ok": true, "total": 0, ...}`（25 route × light/dark、違反 0）。
+  `pnpm e2e:mock` → `{"ok": true, "mode": "mock", ...}`。
+- **条件**: `unwrap()` を非テストコードに増やしていない。
+  **実行**: `git diff` の非テスト差分を目視確認（`crates/celeris/src/lib.rs` /
+  `crates/celeris/src/config.rs` / `crates/task-api/src/handlers.rs` /
+  `crates/task-api/src/types.rs` / `crates/task-ops/src/daemon.rs`）。
+  **出力**: `unwrap()` の出現なし。
+
+### 変更したファイル
+
+- `crates/task-dispatch/src/dispatcher.rs`: `TunnelListenerProbe` 型・`ForwardObservation`/
+  `ForwardPhase`・`ClusterForwardSpec.probe_interval_secs`・`Dispatcher` の新フィールド
+  （`tunnel_listener_probe`/`tunnel_state`/`last_target_probe`）・`set_tunnel_listener_probe`・
+  `tunnel_listener_present`/`tunnel_target_healthy`/`tunnel_last_error`・`refresh_one_forward` の
+  書き換え・`TunnelEventKind::TargetUnreachable`・テスト 6 件の新規/書き換え。
+- `crates/celeris/src/lib.rs`: `tunnel_listener_probe()`（TCP connect）・`TUNNEL_TARGET_PROBE_TIMEOUT`
+  （2 秒）・`build_dispatcher` の配線・`config_view()` の `ClusterForwardView` に新フィールド。
+- `crates/celeris/src/config.rs`: `ClusterForwardConfig.probe_interval_secs`（既定 30 秒）と
+  `ClusterForwardSpec` への写し。
+- `crates/task-ops/src/daemon.rs`: `TunnelForwardLive` に `listener`/`target_healthy`/`last_error`。
+- `crates/task-api/src/types.rs` / `handlers.rs`: `ClusterForwardView` に同じ 3 フィールド、
+  `GET /clusters` での組み立て。
+- `docs/api/v1/api-v1.schema.json`（`UPDATE_SCHEMA=1` で再生成）、`docs/gui/api.md` §3.23、
+  `gui/docs/celeris-api-v1.md`（`sync-gui-docs.sh`）。
+- `gui/app/lib/llm-sources.ts`（`forwardStatusWord` に `unreachable`）、
+  `gui/app/routes/clusters.tsx`（`TunnelForwardRow` に理由の文）、
+  `gui/app/celeris/types.ts`（`pnpm gen:types` で再生成）、
+  `gui/test/unit/llm-sources.test.ts`（新規ケース）。
+- `docs/adr/0053-llm-source-proxy.md`「Phase 85 追記」。
+
+### 配備後に実機で確認すること（このセッションには本物の pegasus/bnode150 が無いため未確認。ADR-0009 P-34）
+
+1. `forward added via -O forward` が繰り返し出なくなること（listener が張れた後は、target が落ちたままでも
+   再発行のログが増えないこと）。
+2. `slow tick phases … tunnel_ms` が 6 秒台から 1 秒未満に戻ること（tick 全体の所要時間も同様）。
+3. `GET /clusters` の `tunnel_forwards[]` が、bnode150 が落ちている間は
+   `{"up": false, "listener": true, "target_healthy": false, "last_error": "target … did not answer
+   /v1/models …"}` を返すこと。GUI の `/clusters` 画面でバッジが `unreachable` になり、
+   「転送あり・先方応答なし」の文が出ること。
+4. bnode150 が復旧したら、次の probe（最大 `probe_interval_secs` 後）で `target_healthy: true` に戻り、
+   `celeris/cheap` が Qwen に戻ること（`GET /llm/sources` の `reachable: true`）。
+
+### 未解決事項・提案
+
+- 1 クラスタが複数 `forwards` を持つ場合、forward ごとに独立して `-O forward` を呼びうる（「クラスタ
+  ごとに tick 高々 1 回の ssh」は forward 単位で満たしているが、クラスタ単位の合算では保証していない）。
+  本番の構成（Qwen 用の 1 forward のみ）では問題にならないが、将来複数 forward を持つクラスタを使うなら
+  クラスタ単位の間引きを足すことを検討する。
+- listener probe（TCP connect）自体は `probe_interval_secs` の対象外（軽いので毎回行う設計）。将来
+  この頻度自体が問題になる環境が出てきたら、こちらにも間引きを足す。
+- `docs/PROGRESS.md`「Phase 84 の release ゲート失敗」の直後に記録した旧 `celeris-qwen-tunnel.service`
+  の撤去（`install-units.sh --remove-qwen-tunnel`）は本 Phase のスコープ外のまま（人の作業待ち）。

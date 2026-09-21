@@ -447,9 +447,22 @@ fn default_cluster_auth() -> String {
 pub struct ClusterForwardView {
     pub listen: String,
     pub target: String,
-    /// forward 越しに `GET <listen>/v1/models` が届くか。スナップショットが無ければ `null`。
+    /// forward 越しに `GET <listen>/v1/models` が届くか（`listener && target_healthy`）。
+    /// スナップショットが無ければ `null`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub up: Option<bool>,
+    /// ADR-0053 Phase 85: 手元のリスナー（`-O forward`/`ssh -N -L`）が有るか。スナップショットが
+    /// 無ければ `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listener: Option<bool>,
+    /// ADR-0053 Phase 85: listener 越しに target（`/v1/models`）が健全か。スナップショットが無ければ
+    /// `null`（`listener == false` のときは意味を持たない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_healthy: Option<bool>,
+    /// ADR-0053 Phase 85: 直近の失敗理由（無ければ `null`）。GUI が「転送あり・先方応答なし」等の
+    /// 理由を出すのに使う。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 /// `GET /clusters`（ADR-0018 受け入れ条件8）。

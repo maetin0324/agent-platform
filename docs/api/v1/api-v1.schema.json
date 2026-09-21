@@ -1395,14 +1395,35 @@
     "ClusterForwardView": {
       "description": "ADR-0053 D3（Phase 66）: `[[clusters.forwards]]` 1 本の要約と生存（`GET /clusters` にそのまま出す）。",
       "properties": {
+        "last_error": {
+          "description": "ADR-0053 Phase 85: 直近の失敗理由（無ければ `null`）。GUI が「転送あり・先方応答なし」等の\n理由を出すのに使う。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "listen": {
           "type": "string"
+        },
+        "listener": {
+          "description": "ADR-0053 Phase 85: 手元のリスナー（`-O forward`/`ssh -N -L`）が有るか。スナップショットが\n無ければ `null`。",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "target": {
           "type": "string"
         },
+        "target_healthy": {
+          "description": "ADR-0053 Phase 85: listener 越しに target（`/v1/models`）が健全か。スナップショットが無ければ\n`null`（`listener == false` のときは意味を持たない）。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "up": {
-          "description": "forward 越しに `GET <listen>/v1/models` が届くか。スナップショットが無ければ `null`。",
+          "description": "forward 越しに `GET <listen>/v1/models` が届くか（`listener && target_healthy`）。\nスナップショットが無ければ `null`。",
           "type": [
             "boolean",
             "null"
@@ -11087,14 +11108,31 @@
     "TunnelForwardLive": {
       "description": "ADR-0053 D3（Phase 66）: 1 本の port forward の生存（`GET /clusters` にそのまま出す）。",
       "properties": {
+        "last_error": {
+          "description": "ADR-0053 Phase 85: 直近の失敗理由（無ければ `null`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "listen": {
           "type": "string"
+        },
+        "listener": {
+          "default": false,
+          "description": "ADR-0053 Phase 85: 手元のリスナー（`-O forward`/`ssh -N -L`）が有るか。古いスナップショットには\n無いので既定は `false`。",
+          "type": "boolean"
         },
         "target": {
           "type": "string"
         },
+        "target_healthy": {
+          "default": false,
+          "description": "ADR-0053 Phase 85: listener 越しに target（`/v1/models`）が健全か。古いスナップショットには\n無いので既定は `false`。",
+          "type": "boolean"
+        },
         "up": {
-          "description": "forward 越しに `GET <listen>/v1/models` が届くか（直近の観測）。",
+          "description": "forward 越しに `GET <listen>/v1/models` が届くか（直近の観測。`listener && target_healthy`）。",
           "type": "boolean"
         }
       },

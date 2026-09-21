@@ -65,11 +65,19 @@ export function isAccountCoolingDown(account: Pick<LlmSourceAccountView, "cooldo
 }
 
 /**
- * `/clusters` の port forward（ADR-0053 D3、Phase 66）1 本の状態バッジの一語。
- * `up` が `null`（まだ観測が無い。celeris 再起動直後など）は「unknown」にする（値を捏造しない）。
+ * `/clusters` の port forward（ADR-0053 D3、Phase 66。listener/target の分離は Phase 85）1 本の
+ * 状態バッジの一語。`up` が `null`（まだ観測が無い。celeris 再起動直後など）は「unknown」にする
+ * （値を捏造しない）。`listener === true` かつ `target_healthy === false` は「転送はあるが先方が
+ * 応答しない」（celeris は再発行しない。ADR-0053 Phase 85）ので、`down`（転送自体が無い）とは
+ * 別の一語 `unreachable` にする。
  */
-export function forwardStatusWord(forward: { up?: boolean | null }): string {
+export function forwardStatusWord(forward: {
+  up?: boolean | null;
+  listener?: boolean | null;
+  target_healthy?: boolean | null;
+}): string {
   if (forward.up === true) return "up";
+  if (forward.listener === true && forward.target_healthy === false) return "unreachable";
   if (forward.up === false) return "down";
   return "unknown";
 }

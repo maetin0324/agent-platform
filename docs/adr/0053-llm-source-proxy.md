@@ -485,3 +485,57 @@ ADR-0053 D3)`（`connector_calls == 0`）で落ちた。このテストは 1 日
 - **ゲート**: `cargo test -p celeris --lib phase_` 3 件 green、`cargo test --workspace --no-fail-fast`
   全 green（FAILED 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0。詳細は
   `docs/PROGRESS.md` の「Phase 84b」節。
+
+## Phase 85 追記（forward の有無と target の健康を区別してバックオフ。2026-09-21）
+
+**観測（本番、2026-09-21 21:00〜21:30 UTC、release `8c3e8c7eb9b9` → `2930f1f61b44`）**: 人が pegasus へ
+ssh ControlMaster を張った後、celeris は毎 tick `tunnel: forward added via -O forward pegasus
+127.0.0.1:18000 → bnode150:18000`（master は 18000 を LISTEN 済み＝forward は張れている）を出し続けたが、
+`GET http://127.0.0.1:18000/v1/models` は応答なし（bnode150 の vLLM が落ちているか pegasus→bnode150 が
+不通）。旧実装（Phase 66）は `tunnel_probe`（`/v1/models` の到達性）1 つだけで「forward が届くか」を判定して
+いたため、「forward はあるが先方が不健全」を「forward が無い」と誤認し、5 分で 37 回 `-O forward` を打ち
+直し、`slow tick phases … tunnel_ms≈6040`（tick が 6 秒に伸びる）を引き起こした。詳細は
+`docs/PROGRESS.md`「Phase 84 の release ゲート失敗」の直後の節を参照。
+
+### 決めたこと
+
+1. **「listener の有無」と「target の健康」を別の観測にする**（D3 の拡張）。`Dispatcher` に
+   `TunnelListenerProbe`（新規。`listen` への軽い TCP connect。ssh は起こさない）を足し、`refresh_one_forward`
+   はまずこれで判定する。**listener が無いときだけ** `tunnel_forward_ensurer`（`-O forward`）を呼ぶ。
+   listener が有るのに target（`TunnelProbe`、`/v1/models`）が不健全でも、**re-add はしない**
+   （listener は既に有るので `-O forward` の再発行は無意味な上、これが本番の 37 回/5 分の原因そのもの
+   だった）。状態は `ForwardObservation { listener, target_healthy, last_error }` として持ち、
+   `TunnelEventKind::TargetUnreachable`（新規）で「listener 有り・target 不健全」を表す。`Down` は
+   「listener が無い」に意味を絞った（以前は 1 つの bool でこの 2 つを兼ねていた）。
+2. **target の健康 probe に `probe_interval_secs`（既定 30 秒）のバックオフを入れる**。`[[clusters.forwards]]`
+   に新しいフィールドを足し（`ClusterForwardConfig`/`ClusterForwardSpec`）、`refresh_one_forward` は
+   forward ごとに最後に probe した時刻（`Dispatcher::last_target_probe`）を見て、間隔内なら probe 自体を
+   スキップする（listener の確認は軽い＝TCP connect なので間引かない。バックオフされるのは HTTP の
+   `/v1/models` 呼び出しだけ）。celeris 側の probe タイムアウトも、他の到達性検査と共有していた
+   `task_worker::PROBE_TIMEOUT`（3 秒）から、この経路専用の `TUNNEL_TARGET_PROBE_TIMEOUT`（2 秒）に
+   分けた（`refresh_cluster_tunnels` は tick を止めうる同期経路なので、他の probe より短く切る。
+   グローバルな `PROBE_TIMEOUT` は `[knowledge.langmem]` 等が使うので変えない）。これにより、target が
+   落ちている間の tick への影響は「TCP connect（ミリ秒）＋高々 2 秒の HTTP を 30 秒に 1 回」に収まる。
+3. **状態遷移のログ/イベントは、フェーズ（`Up`/`Down`/`TargetUnreachable`）が変わったときだけ 1 回積む**
+   （`observe_tunnel` の既存の diff 判定をそのまま流用。Phase 66 の時点で既にこの規律はあったが、
+   バックオフを入れたことで「probe 自体が起きない間はイベントも起きない」という形になり、二重に
+   スパムを防ぐ）。
+4. **`GET /clusters` の可視化を拡張**する（`up` は互換のため残し、意味は `listener && target_healthy` の
+   ままにした）。`TunnelForwardLive`（`task-ops`）/`ClusterForwardView`（`task-api`）に `listener` /
+   `target_healthy` / `last_error` を追加。GUI（`/clusters`）は `up === false && listener === true &&
+   target_healthy === false` のとき、状態バッジとは別に「転送あり・先方応答なし」という理由の文を
+   添える（`forwardStatusWord` に `unreachable` の一語を追加。GUI 側の変更は表示だけで、判断は celeris
+   のまま）。
+
+### 逸脱・確認していないこと
+
+- 「never more than one ssh invocation per cluster per tick」は、**forward ごとに高々 1 回の
+  `-O forward` 呼び出し**（listener が無いときだけ）として満たした。1 クラスタが複数 `forwards` を
+  持つ場合、理論上は forward の数だけ ssh 呼び出しがありうるが、本番の構成は 1 クラスタ 1 forward
+  （Qwen 用の 18000 のみ）で、この形は問題にならない。将来複数 forward を持つクラスタを本番で使うなら、
+  クラスタ単位でさらに間引く設計を足すこと。
+- listener probe（TCP connect）は `[[clusters.forwards]] probe_interval_secs` の対象に**含めていない**
+  （軽いので毎回行う設計判断）。もし将来 TCP connect 自体が高頻度で問題になる環境が出てきたら、
+  こちらにも間引きを足す。
+- 実機再確認は未実施（このセッションには本物の pegasus/bnode150 が無い）。`docs/PROGRESS.md`「Phase 85」
+  節に配備後の確認手順を書いた。

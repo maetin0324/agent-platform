@@ -108,6 +108,10 @@ pub struct ClusterForwardSpec {
     pub listen: String,
     /// master のホスト側から見た転送先。`"bnode150:18000"` の形。
     pub target: String,
+    /// ADR-0053 Phase 85: target（`/v1/models`）の健康 probe をこの秒数より短い間隔では行わない
+    /// （`[[clusters.forwards]] probe_interval_secs`。既定 30 秒）。リスナーの有無の確認（軽い TCP
+    /// connect）はこの間隔に縛られない — 毎回の `refresh_cluster_tunnels` で見る。
+    pub probe_interval_secs: u64,
 }
 
 /// ADR-0032 D3: `auth = "publickey"` のクラスタに未接続なら、cooldown にする前にディスパッチャが 1 回だけ
@@ -125,9 +129,23 @@ pub type ClusterConnector = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send 
 /// （届かなければ master 上で `ssh -N -L` を張るフォールバック）を挿す。テストは偽物を挿す。
 pub type TunnelForwardEnsurer = Arc<dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync>;
 
-/// ADR-0053 D3: forward の生存を見るフック。引数は `listen`（`"127.0.0.1:18000"`）。本番では
-/// `GET http://<listen>/v1/models` の probe（`task_worker::probe_models`）を挿す。テストは偽物を挿す。
+/// ADR-0053 D3 / Phase 85: forward の**先方（target）**の健康を見るフック。引数は `listen`
+/// （`"127.0.0.1:18000"`）。本番では `GET http://<listen>/v1/models` の probe
+/// （`task_worker::probe_models`）を挿す。テストは偽物を挿す。**listener（`-O forward` が届いているか）
+/// とは別物**: これは `refresh_one_forward` がリスナーの存在を確認した後、かつ `probe_interval_secs` の
+/// 間隔でしか呼ばない（Phase 85 のバックオフ。本番で `-O forward` は張れているのに先方の vLLM が
+/// 落ちている観測から、tick を毎回 3 秒級の HTTP で遅くしないため）。
 pub type TunnelProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// ADR-0053 Phase 85: forward の**リスナー**（`-O forward`/`ssh -N -L` が実際に手元の `listen` で待ち受けて
+/// いるか）を見るフック。軽い確認（`listen` への TCP connect 等。ssh を起こさない）を想定。`None`
+/// （フックを挿さない）のときは常に「存在しない」として扱う（＝安全側のデフォルト。`tunnel_forward_ensurer`
+/// に(再)確立を試みさせる。Phase 66 までの「probe が失敗したら毎回張り直す」と同じ保守的な挙動）。
+///
+/// **listener の有無と target の健康は別の観測**（Phase 85 の本旨）: listener が有るのに target が
+/// 不健全（先方が落ちている）なら `-O forward` は再発行しない（listener は既に有るので無意味な上、
+/// 本番でこれが毎 tick 起きて tick が 6 秒に伸びた。`docs/adr/0053-llm-source-proxy.md`「Phase 85 追記」）。
+pub type TunnelListenerProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// ADR-0053 Phase 84b: クラスタの ssh master の多重接続の有無を調べるフック。引数は
 /// `(ssh_command, host)`（`control_master_alive_blocking` と同じ形）。既定（`Dispatcher::new`）は本物の
@@ -155,14 +173,18 @@ pub struct TunnelEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelEventKind {
-    /// forward が初めて（または前回の観測が無い状態から）繋がった。
+    /// forward が初めて（または前回の観測が無い状態から）繋がった（listener 有り・target 健全）。
     Up,
-    /// forward が届かなくなった（master は生きているが、probe が失敗）。
+    /// forward の**リスナーが消えた**（master は生きているが `-O forward` が届かない）。
     Down,
-    /// 一度 `Down` を観測した forward が繋がり直した。
+    /// 一度 `Down`/`TargetUnreachable` を観測した forward が繋がり直した（listener 有り・target 健全）。
     Restored,
     /// master が落ち、鍵認証も失敗した（人の TOTP が要る）。
     LoginNeeded,
+    /// ADR-0053 Phase 85: listener は有る（`-O forward` は張れている）が、target（先方の vLLM 等）が
+    /// `/v1/models` に応答しない。**listener が無いわけではないので re-add はしない**（本番観測: forward は
+    /// 張れているのに bnode150 が応答せず、`Down` 扱いで毎 tick 張り直していた不具合の修正）。
+    TargetUnreachable,
 }
 
 impl TunnelEventKind {
@@ -172,6 +194,7 @@ impl TunnelEventKind {
             TunnelEventKind::Down => "down",
             TunnelEventKind::Restored => "restored",
             TunnelEventKind::LoginNeeded => "login_needed",
+            TunnelEventKind::TargetUnreachable => "target_unreachable",
         }
     }
 }
@@ -179,9 +202,47 @@ impl TunnelEventKind {
 /// ADR-0053 D3: `tunnel_events` に積む上限（古いものから捨てる。無限に溜め込まない）。
 const TUNNEL_EVENTS_CAP: usize = 100;
 
-/// `Dispatcher::tunnel_up` のキー。
+/// `Dispatcher::tunnel_state` のキー。
 fn tunnel_key(cluster: &str, listen: &str) -> String {
     format!("{cluster}\u{0}{listen}")
+}
+
+/// ADR-0053 Phase 85: `[[clusters.forwards]] probe_interval_secs` の既定（30 秒）。
+pub const DEFAULT_TUNNEL_PROBE_INTERVAL_SECS: u64 = 30;
+
+/// ADR-0053 Phase 85: 1 forward の直近の観測（`Dispatcher::tunnel_state` に積む）。listener（`-O forward`
+/// の有無）と target の健康（`/v1/models`）を別々に持つ。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ForwardObservation {
+    /// `-O forward`/`ssh -N -L` の手元のリスナーが有るか。
+    listener: bool,
+    /// listener 越しに target（`/v1/models`）が健全か。listener が無ければ意味を持たない（常に `false`）。
+    target_healthy: bool,
+    /// 直近の失敗理由（無ければ `None`）。
+    last_error: Option<String>,
+}
+
+impl ForwardObservation {
+    /// 従来の「forward が届く」（`tunnel_reachable`）と同じ意味: listener も target も健全。
+    fn up(&self) -> bool {
+        self.listener && self.target_healthy
+    }
+
+    fn phase(&self) -> ForwardPhase {
+        match (self.listener, self.target_healthy) {
+            (true, true) => ForwardPhase::Up,
+            (true, false) => ForwardPhase::TargetUnreachable,
+            (false, _) => ForwardPhase::Down,
+        }
+    }
+}
+
+/// `ForwardObservation` から導いた 3 値（イベント種別の判定用。`Unknown` は「まだ観測が無い」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ForwardPhase {
+    Up,
+    Down,
+    TargetUnreachable,
 }
 
 /// ADR-0041 D5: この celeris が**面倒を見てよいタスク**の述語。`None`（既定）は「全部」＝従来どおり。
@@ -1121,10 +1182,18 @@ pub struct Dispatcher {
     knowledge_probe_cache: HashMap<String, (Instant, Reachability)>,
     /// ADR-0053 D3（Phase 66）: `[[clusters]].forwards` を(再)確立するフック。`None` なら何もしない。
     tunnel_forward_ensurer: Option<TunnelForwardEnsurer>,
-    /// ADR-0053 D3: forward の生存を見るフック。`None` なら常に「届かない」扱い。
+    /// ADR-0053 D3 / Phase 85: forward の target（先方）の健康を見るフック。`None` なら常に「不健全」扱い。
     tunnel_probe: Option<TunnelProbe>,
-    /// ADR-0053 D3: forward ごとの直近の観測（キーは `tunnel_key`）。`true` = 届く。
-    tunnel_up: HashMap<String, bool>,
+    /// ADR-0053 Phase 85: forward のリスナーの有無を見るフック。`None` なら常に「無い」扱い
+    /// （安全側のデフォルト。`tunnel_forward_ensurer` に(再)確立を試みさせる。Phase 66 までと同じ保守的な
+    /// 挙動）。
+    tunnel_listener_probe: Option<TunnelListenerProbe>,
+    /// ADR-0053 D3 / Phase 85: forward ごとの直近の観測（キーは `tunnel_key`）。listener と target の
+    /// 健康を別々に持つ（`ForwardObservation`）。
+    tunnel_state: HashMap<String, ForwardObservation>,
+    /// ADR-0053 Phase 85: forward ごとに、target の健康 probe を最後に行った時刻（キーは `tunnel_key`）。
+    /// `[[clusters.forwards]] probe_interval_secs` より短い間隔では probe しない（バックオフ）。
+    last_target_probe: HashMap<String, Instant>,
     /// ADR-0053 D3: 「TOTP ログインが要る」と判定済みのクラスタ id（重複通知を防ぐ。master が戻れば消す）。
     cluster_login_needed: std::collections::HashSet<String>,
     /// ADR-0053 D3: 直近のトンネル状態遷移（Console / cluster API 向け。`take_tunnel_events` で取り出す）。
@@ -1231,7 +1300,9 @@ impl Dispatcher {
             knowledge_probe_cache: HashMap::new(),
             tunnel_forward_ensurer: None,
             tunnel_probe: None,
-            tunnel_up: HashMap::new(),
+            tunnel_listener_probe: None,
+            tunnel_state: HashMap::new(),
+            last_target_probe: HashMap::new(),
             cluster_login_needed: std::collections::HashSet::new(),
             tunnel_events: std::collections::VecDeque::new(),
             last_cluster_tunnel_refresh: None,
@@ -1373,9 +1444,16 @@ impl Dispatcher {
         self.tunnel_forward_ensurer = Some(ensurer);
     }
 
-    /// ADR-0053 D3: forward の生存を見るフックを挿す。呼ばなければ常に「届かない」扱い。
+    /// ADR-0053 D3 / Phase 85: forward の target（先方）の健康を見るフックを挿す。呼ばなければ常に
+    /// 「不健全」扱い。
     pub fn set_tunnel_probe(&mut self, probe: TunnelProbe) {
         self.tunnel_probe = Some(probe);
+    }
+
+    /// ADR-0053 Phase 85: forward のリスナー（`-O forward` が実際に手元で待ち受けているか）を見るフックを
+    /// 挿す。呼ばなければ常に「無い」扱い（安全側のデフォルト）。
+    pub fn set_tunnel_listener_probe(&mut self, probe: TunnelListenerProbe) {
+        self.tunnel_listener_probe = Some(probe);
     }
 
     /// ADR-0053 Phase 84b: クラスタの ssh master の多重接続の有無を調べるフックを差し替える。
@@ -1397,12 +1475,37 @@ impl Dispatcher {
         v
     }
 
-    /// ADR-0053 D3: forward が今届いているか（無ければ観測が無い＝`false`）。
+    /// ADR-0053 D3: forward が今届いているか（listener も target も健全。無ければ観測が無い＝`false`）。
     pub fn tunnel_reachable(&self, cluster: &str, listen: &str) -> bool {
-        self.tunnel_up
+        self.tunnel_state
             .get(&tunnel_key(cluster, listen))
-            .copied()
+            .map(ForwardObservation::up)
             .unwrap_or(false)
+    }
+
+    /// ADR-0053 Phase 85: forward の**リスナー**が今有るか（`-O forward` が届いているか。target の健康とは
+    /// 別。無ければ観測が無い＝`false`）。
+    pub fn tunnel_listener_present(&self, cluster: &str, listen: &str) -> bool {
+        self.tunnel_state
+            .get(&tunnel_key(cluster, listen))
+            .map(|o| o.listener)
+            .unwrap_or(false)
+    }
+
+    /// ADR-0053 Phase 85: forward の**target**が今健全か（`/v1/models` が応答するか。listener の有無とは
+    /// 別。無ければ観測が無い＝`false`）。
+    pub fn tunnel_target_healthy(&self, cluster: &str, listen: &str) -> bool {
+        self.tunnel_state
+            .get(&tunnel_key(cluster, listen))
+            .map(|o| o.target_healthy)
+            .unwrap_or(false)
+    }
+
+    /// ADR-0053 Phase 85: forward の直近の失敗理由（無ければ `None`）。
+    pub fn tunnel_last_error(&self, cluster: &str, listen: &str) -> Option<String> {
+        self.tunnel_state
+            .get(&tunnel_key(cluster, listen))
+            .and_then(|o| o.last_error.clone())
     }
 
     pub fn set_delivery_policy(&mut self, policy: task_ops::delivery::DeliveryPolicy) {
@@ -1835,7 +1938,13 @@ impl Dispatcher {
             let alive = self.ensure_cluster_master_for_tunnel(&spec);
             if !alive {
                 for fwd in &spec.forwards {
-                    self.observe_tunnel(&spec.id, &fwd.listen, false);
+                    self.observe_tunnel(
+                        &spec.id,
+                        &fwd.listen,
+                        false,
+                        false,
+                        Some("the cluster ssh master is not connected".to_string()),
+                    );
                 }
                 continue;
             }
@@ -1899,24 +2008,72 @@ impl Dispatcher {
         }
     }
 
-    /// 1 本の forward: 届いているか probe し、届かなければ(再)確立を試して再 probe する。
+    /// ADR-0053 D3 / Phase 85: 1 本の forward。まずリスナー（`-O forward` の手元の待ち受け）の有無を見る
+    /// （軽い。ssh は起こさない）。無ければ `tunnel_forward_ensurer` で(再)確立を試みる。
+    ///
+    /// **listener が有れば、target の健康 probe は `probe_interval_secs` の間隔でしか行わない**
+    /// （Phase 85 のバックオフ。本番観測: `-O forward` は張れているのに先方の vLLM が落ちている間、
+    /// probe が毎 tick 失敗し続け、`reachable == false` を理由に celeris が毎 tick `-O forward` を打ち
+    /// 直し、tick が 6 秒に伸びていた。listener が有るのに再発行しても無意味な上、`/v1/models` の HTTP
+    /// probe 自体も遅い。listener と target の健康を分けて見ることで、両方を防ぐ）。
     fn refresh_one_forward(&mut self, spec: &ClusterSpec, fwd: &ClusterForwardSpec) {
-        let mut reachable = self.probe_forward(&fwd.listen);
-        if !reachable
+        let mut listener = self.probe_listener(&fwd.listen);
+        let mut ensure_error: Option<String> = None;
+        if !listener
             && let Some(ensure) = self.tunnel_forward_ensurer.clone()
         {
             match ensure(&spec.host, &fwd.listen, &fwd.target) {
                 Ok(()) => {
-                    reachable = self.probe_forward(&fwd.listen);
+                    listener = self.probe_listener(&fwd.listen);
                 }
                 Err(detail) => {
                     tracing::warn!(cluster = %spec.id, listen = %fwd.listen, target = %fwd.target, %detail, "tunnel: could not (re-)establish the forward");
+                    ensure_error = Some(detail);
                 }
             }
         }
-        self.observe_tunnel(&spec.id, &fwd.listen, reachable);
+        if !listener {
+            let error = ensure_error
+                .unwrap_or_else(|| "no listener on the local forward address".to_string());
+            self.observe_tunnel(&spec.id, &fwd.listen, false, false, Some(error));
+            return;
+        }
+
+        // listener は有る。target の健康は `probe_interval_secs` の間隔でしか見ない（バックオフ）。
+        // 間隔内なら probe 自体を省略し、前回の観測をそのまま保つ（イベントも積まない＝スパムしない）。
+        let key = tunnel_key(&spec.id, &fwd.listen);
+        let now = Instant::now();
+        let probe_interval = Duration::from_secs(fwd.probe_interval_secs.max(1));
+        let due = self
+            .last_target_probe
+            .get(&key)
+            .map(|last| now.duration_since(*last) >= probe_interval)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.last_target_probe.insert(key, now);
+        let target_healthy = self.probe_forward(&fwd.listen);
+        let error = if target_healthy {
+            None
+        } else {
+            Some(format!(
+                "target {} did not answer /v1/models through the forward",
+                fwd.target
+            ))
+        };
+        self.observe_tunnel(&spec.id, &fwd.listen, true, target_healthy, error);
     }
 
+    /// forward のリスナーが手元に有るか（`-O forward`/`ssh -N -L` が届いているか）。
+    fn probe_listener(&self, listen: &str) -> bool {
+        self.tunnel_listener_probe
+            .as_ref()
+            .map(|p| p(listen))
+            .unwrap_or(false)
+    }
+
+    /// forward の target（先方）が健全か（`/v1/models` が応答するか）。
     fn probe_forward(&self, listen: &str) -> bool {
         self.tunnel_probe
             .as_ref()
@@ -1924,26 +2081,43 @@ impl Dispatcher {
             .unwrap_or(false)
     }
 
-    /// 状態遷移を記録する（`tunnel_up` を更新し、変化があれば `tunnel_events` に積む）。
-    fn observe_tunnel(&mut self, cluster: &str, listen: &str, reachable: bool) {
+    /// 状態遷移を記録する（`tunnel_state` を更新し、フェーズ（Up/Down/TargetUnreachable）が変わったときだけ
+    /// `tunnel_events` に積む。Phase 85: 同じフェーズが続く間は 1 行も出さない＝スパムしない）。
+    fn observe_tunnel(
+        &mut self,
+        cluster: &str,
+        listen: &str,
+        listener: bool,
+        target_healthy: bool,
+        last_error: Option<String>,
+    ) {
         let key = tunnel_key(cluster, listen);
-        let was_up = self.tunnel_up.get(&key).copied();
+        let prev_phase = self.tunnel_state.get(&key).map(ForwardObservation::phase);
         let now = OffsetDateTime::now_utc();
-        match (was_up, reachable) {
-            (Some(true), true) | (Some(false), false) => {}
-            (_, true) => {
-                let kind = if was_up == Some(false) {
-                    TunnelEventKind::Restored
-                } else {
-                    TunnelEventKind::Up
-                };
-                self.push_tunnel_event(cluster, listen, kind, now);
-            }
-            (_, false) => {
-                self.push_tunnel_event(cluster, listen, TunnelEventKind::Down, now);
-            }
+        let observation = ForwardObservation {
+            listener,
+            target_healthy,
+            last_error,
+        };
+        let new_phase = observation.phase();
+        if prev_phase != Some(new_phase) {
+            let kind = match new_phase {
+                ForwardPhase::Up => {
+                    if matches!(
+                        prev_phase,
+                        Some(ForwardPhase::Down) | Some(ForwardPhase::TargetUnreachable)
+                    ) {
+                        TunnelEventKind::Restored
+                    } else {
+                        TunnelEventKind::Up
+                    }
+                }
+                ForwardPhase::Down => TunnelEventKind::Down,
+                ForwardPhase::TargetUnreachable => TunnelEventKind::TargetUnreachable,
+            };
+            self.push_tunnel_event(cluster, listen, kind, now);
         }
-        self.tunnel_up.insert(key, reachable);
+        self.tunnel_state.insert(key, observation);
     }
 
     fn push_tunnel_event(
@@ -2061,6 +2235,9 @@ impl Dispatcher {
                         listen: f.listen.clone(),
                         target: f.target.clone(),
                         up: self.tunnel_reachable(&spec.id, &f.listen),
+                        listener: self.tunnel_listener_present(&spec.id, &f.listen),
+                        target_healthy: self.tunnel_target_healthy(&spec.id, &f.listen),
+                        last_error: self.tunnel_last_error(&spec.id, &f.listen),
                     })
                     .collect(),
             })
@@ -9355,11 +9532,15 @@ mod tests {
     }
 
     /// ADR-0053 D3（Phase 66）: forward 付きの `ClusterSpec` を作る（`refresh_cluster_tunnels` 用）。
+    /// `probe_interval_secs` は既定（`DEFAULT_TUNNEL_PROBE_INTERVAL_SECS`）にしておく。バックオフを
+    /// テストしたいケースは `d.last_target_probe` を直接いじって間引きを避ける（既存の
+    /// `d.last_cluster_tunnel_refresh` の扱いと同じ流儀）。
     fn cluster_spec_with_forward(id: &str, host: &str, auth: &str, listen: &str, target: &str) -> ClusterSpec {
         let mut spec = cluster_spec_with_auth(id, host, auth);
         spec.forwards = vec![ClusterForwardSpec {
             listen: listen.into(),
             target: target.into(),
+            probe_interval_secs: DEFAULT_TUNNEL_PROBE_INTERVAL_SECS,
         }];
         spec
     }
@@ -9400,6 +9581,12 @@ mod tests {
             ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             forward_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
+        }));
+        // Phase 85: listener と target の健康は別のフック。この試験では両方を同じフラグに束ねる
+        // （ensure が listener を立て、立った listener はそのまま target も健全とみなす）。
+        let forward_present_listener = forward_present.clone();
+        d.set_tunnel_listener_probe(Arc::new(move |_listen: &str| {
+            forward_present_listener.load(std::sync::atomic::Ordering::SeqCst)
         }));
         let forward_present_probe = forward_present.clone();
         d.set_tunnel_probe(Arc::new(move |_listen: &str| {
@@ -9475,10 +9662,11 @@ mod tests {
         );
     }
 
-    /// forward が消えている（probe が失敗する）が master は生きている: `tunnel_forward_ensurer` で
-    /// 張り直しを試みる（呼ばれたことを確認する。「forward missing → re-add」）。
+    /// listener が消えている（`-O forward` の手元の待ち受けが無い）が master は生きている:
+    /// `tunnel_forward_ensurer` で張り直しを試みる（呼ばれたことを確認する。「listener missing →
+    /// re-add」。Phase 85: listener の有無だけで re-add を決める。target の健康は別）。
     #[tokio::test]
-    async fn tunnel_forward_missing_while_master_alive_is_re_added() {
+    async fn tunnel_listener_absent_is_re_added() {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         let adapter = Arc::new(InstantAdapter {
             terminal: Terminal::Done {
@@ -9501,40 +9689,48 @@ mod tests {
         );
         d.cluster_connected.insert("pegasus".into(), true);
         let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let forward_present = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let listener_present = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let ensure_calls_hook = ensure_calls.clone();
-        let forward_present_hook = forward_present.clone();
+        let listener_present_hook = listener_present.clone();
         d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
             ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            forward_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+            listener_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(())
         }));
-        let forward_present_probe = forward_present.clone();
-        d.set_tunnel_probe(Arc::new(move |_listen: &str| {
-            forward_present_probe.load(std::sync::atomic::Ordering::SeqCst)
+        let listener_present_probe = listener_present.clone();
+        d.set_tunnel_listener_probe(Arc::new(move |_listen: &str| {
+            listener_present_probe.load(std::sync::atomic::Ordering::SeqCst)
         }));
+        // listener が有る間は target も健全（この試験は listener の有無だけを見たいので単純化する）。
+        d.set_tunnel_probe(Arc::new(|_listen: &str| true));
 
-        // 1 回目: 最初から届いている。ensure は呼ばれない。
+        // 1 回目: 最初から listener が有る。ensure は呼ばれない。
         d.refresh_cluster_tunnels();
         assert_eq!(ensure_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(d.tunnel_reachable("pegasus", "127.0.0.1:19003"));
 
-        // forward が消える（誰かが master 側を再起動した、等）。
-        forward_present.store(false, std::sync::atomic::Ordering::SeqCst);
+        // listener が消える（誰かが master 側を再起動した、等）。
+        listener_present.store(false, std::sync::atomic::Ordering::SeqCst);
         d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
         d.refresh_cluster_tunnels();
         assert_eq!(
             ensure_calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "missing forward must be re-added"
+            "a missing listener must be re-added"
         );
         assert!(d.tunnel_reachable("pegasus", "127.0.0.1:19003"));
     }
 
-    /// probe が失敗する間、master は生きている: 張り直しを試みるが失敗する場合は `Down` イベントになる
-    /// （「probe fails while master alive → re-forward」で、再確立できなければ down のまま観測する）。
+    /// ADR-0053 Phase 85 の本旨: listener は有る（`-O forward` は張れている）が target
+    /// （先方の vLLM 等）の `/v1/models` probe が失敗する。**re-add はしない**（listener が有るので
+    /// `tunnel_forward_ensurer` を呼ぶのは無意味）。状態は `TargetUnreachable` として観測され、
+    /// `up = false` だが `listener = true` / `target_healthy = false` / `last_error` が立つ。
+    ///
+    /// 本番観測（2026-09-21）: `-O forward` は張れているのに bnode150 が応答せず、旧実装（listener と
+    /// target を区別しない）は「届かない＝forward が無い」と誤認し、毎 tick `-O forward` を打ち直して
+    /// いた（5 分で 37 回）。この試験はその回帰を防ぐ。
     #[tokio::test]
-    async fn tunnel_probe_failure_while_master_alive_tries_to_reforward_then_reports_down() {
+    async fn tunnel_listener_present_target_unhealthy_does_not_re_add() {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         let adapter = Arc::new(InstantAdapter {
             terminal: Terminal::Done {
@@ -9556,13 +9752,12 @@ mod tests {
             ),
         );
         d.cluster_connected.insert("pegasus".into(), true);
-        // 最初から up の状態を作っておく（`observe_tunnel` の前回値を `Some(true)` にする）。
-        d.tunnel_up.insert(tunnel_key("pegasus", "127.0.0.1:19004"), true);
+        d.set_tunnel_listener_probe(Arc::new(|_listen: &str| true));
         let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let ensure_calls_hook = ensure_calls.clone();
         d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
             ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err("bnode150 is unreachable from pegasus right now".to_string())
+            Ok(())
         }));
         d.set_tunnel_probe(Arc::new(|_listen: &str| false));
 
@@ -9570,16 +9765,136 @@ mod tests {
 
         assert_eq!(
             ensure_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "a failed probe while the master is alive must try to re-establish the forward"
+            0,
+            "a present listener must not be re-added just because the target is unhealthy"
         );
         assert!(!d.tunnel_reachable("pegasus", "127.0.0.1:19004"));
+        assert!(d.tunnel_listener_present("pegasus", "127.0.0.1:19004"));
+        assert!(!d.tunnel_target_healthy("pegasus", "127.0.0.1:19004"));
+        assert_eq!(
+            d.tunnel_last_error("pegasus", "127.0.0.1:19004"),
+            Some(
+                "target bnode150:19004 did not answer /v1/models through the forward".to_string()
+            )
+        );
         let events = d.take_tunnel_events();
         assert!(
             events.iter().any(|e| e.cluster == "pegasus"
                 && e.listen == "127.0.0.1:19004"
-                && e.kind == TunnelEventKind::Down),
+                && e.kind == TunnelEventKind::TargetUnreachable),
             "{events:?}"
+        );
+    }
+
+    /// ADR-0053 Phase 85: target の健康 probe は `probe_interval_secs`（既定 30 秒）より短い間隔では
+    /// 行わない。listener が有る限り、間隔内の 2 回目の呼び出しは probe をスキップする（tick を
+    /// 毎回 HTTP 呼び出しで遅くしないためのバックオフ）。
+    #[tokio::test]
+    async fn tunnel_target_probe_is_backed_off_by_probe_interval_secs() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.clusters.insert(
+            "pegasus".into(),
+            cluster_spec_with_forward(
+                "pegasus",
+                "pegasus",
+                "totp",
+                "127.0.0.1:19006",
+                "bnode150:19006",
+            ),
+        );
+        d.cluster_connected.insert("pegasus".into(), true);
+        d.set_tunnel_listener_probe(Arc::new(|_listen: &str| true));
+        d.set_tunnel_forward_ensurer(Arc::new(|_host: &str, _listen: &str, _target: &str| Ok(())));
+        let probe_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_calls_hook = probe_calls.clone();
+        d.set_tunnel_probe(Arc::new(move |_listen: &str| {
+            probe_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        }));
+
+        d.refresh_cluster_tunnels();
+        assert_eq!(probe_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // 2 回目（`CLUSTER_LIVENESS_INTERVAL` は過ぎさせるが、`probe_interval_secs` はまだ過ぎていない）。
+        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.refresh_cluster_tunnels();
+        assert_eq!(
+            probe_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the target probe must not run again before probe_interval_secs elapses"
+        );
+
+        // `probe_interval_secs` を過ぎさせる。
+        let key = tunnel_key("pegasus", "127.0.0.1:19006");
+        d.last_target_probe.insert(
+            key,
+            Instant::now() - Duration::from_secs(DEFAULT_TUNNEL_PROBE_INTERVAL_SECS + 1),
+        );
+        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.refresh_cluster_tunnels();
+        assert_eq!(
+            probe_calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "the target probe must run again once probe_interval_secs elapses"
+        );
+    }
+
+    /// ADR-0053 Phase 85: 同じフェーズ（ここでは `TargetUnreachable`）が続く間、状態遷移のイベント
+    /// （Console に出る 1 行）は 1 回しか積まない（毎回 probe しても、フェーズが変わらなければスパムしない）。
+    #[tokio::test]
+    async fn tunnel_target_unreachable_emits_the_event_once_across_many_ticks() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.clusters.insert(
+            "pegasus".into(),
+            cluster_spec_with_forward(
+                "pegasus",
+                "pegasus",
+                "totp",
+                "127.0.0.1:19007",
+                "bnode150:19007",
+            ),
+        );
+        d.cluster_connected.insert("pegasus".into(), true);
+        d.set_tunnel_listener_probe(Arc::new(|_listen: &str| true));
+        d.set_tunnel_forward_ensurer(Arc::new(|_host: &str, _listen: &str, _target: &str| Ok(())));
+        d.set_tunnel_probe(Arc::new(|_listen: &str| false));
+
+        let key = tunnel_key("pegasus", "127.0.0.1:19007");
+        for _ in 0..5 {
+            // 間引き（`CLUSTER_LIVENESS_INTERVAL` と `probe_interval_secs`）を毎回越えさせ、実際に
+            // probe が走ることを保証したうえで、それでもイベントが 1 回しか積まれないことを確かめる。
+            d.last_cluster_tunnel_refresh =
+                Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+            d.last_target_probe.remove(&key);
+            d.refresh_cluster_tunnels();
+        }
+        let events = d.take_tunnel_events();
+        let target_unreachable: Vec<_> = events
+            .iter()
+            .filter(|e| e.kind == TunnelEventKind::TargetUnreachable)
+            .collect();
+        assert_eq!(
+            target_unreachable.len(),
+            1,
+            "a steady TargetUnreachable state must log the transition once, not every tick: {events:?}"
         );
     }
 
@@ -9633,6 +9948,12 @@ mod tests {
             probe_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             true
         }));
+        let listener_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let listener_calls_hook = listener_calls.clone();
+        d.set_tunnel_listener_probe(Arc::new(move |_listen: &str| {
+            listener_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        }));
 
         let reports_before = store
             .report_list(&task_core::ReportFilter::default())
@@ -9661,6 +9982,11 @@ mod tests {
             probe_calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
             "verify mode must not probe forwards"
+        );
+        assert_eq!(
+            listener_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "verify mode must not probe forward listeners"
         );
         assert!(d.clusters_needing_login().is_empty());
         assert!(d.take_tunnel_events().is_empty());

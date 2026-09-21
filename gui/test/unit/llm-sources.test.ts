@@ -130,9 +130,24 @@ describe("forwardStatusWord", () => {
     expect(forwardStatusWord({})).toBe("unknown");
   });
 
+  // ADR-0053 Phase 85: 転送（listener）はあるのに先方（target）が応答しないのは、転送そのものが
+  // 無い（down）とは別の状態。celeris はこの状態では転送を再発行しない。
+  it("distinguishes a present listener with an unhealthy target from a missing forward", () => {
+    expect(forwardStatusWord({ up: false, listener: true, target_healthy: false })).toBe("unreachable");
+    expect(forwardStatusWord({ up: true, listener: true, target_healthy: true })).toBe("up");
+    expect(forwardStatusWord({ up: false, listener: false, target_healthy: false })).toBe("down");
+  });
+
   it("never produces a badge with whitespace or more than 12 characters", () => {
-    for (const up of [true, false, null, undefined]) {
-      const word = forwardStatusWord({ up });
+    const cases: Array<{ up?: boolean | null; listener?: boolean | null; target_healthy?: boolean | null }> = [
+      { up: true },
+      { up: false },
+      { up: null },
+      { up: undefined },
+      { up: false, listener: true, target_healthy: false },
+    ];
+    for (const forward of cases) {
+      const word = forwardStatusWord(forward);
       expect(word).not.toMatch(/\s/);
       expect(word.length).toBeLessThanOrEqual(12);
     }

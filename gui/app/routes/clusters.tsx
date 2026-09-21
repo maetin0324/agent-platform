@@ -376,23 +376,33 @@ function ClusterCard({
 }
 
 /**
- * 1 本の port forward（ADR-0053 D3、Phase 66）。`up` の一語バッジと `listen → target` を出す。
+ * 1 本の port forward（ADR-0053 D3、Phase 66。listener/target の分離は Phase 85）。状態バッジと
+ * `listen → target` を出す。`unreachable`（転送はあるが先方が応答しない）のときは、バッジの下に
+ * 「転送あり・先方応答なし」の理由を添える（celeris はこの状態では転送を再発行しない）。
  * モバイル幅でも折り返せるよう `flex-wrap` にし、長い host:port は `break-all` にする。
  */
 function TunnelForwardRow({ forward }: { forward: ClusterForwardView }) {
   const word = forwardStatusWord(forward);
-  const tone: Tone = word === "up" ? "success" : word === "down" ? "danger" : "neutral";
+  const tone: Tone =
+    word === "up" ? "success" : word === "unreachable" ? "warning" : word === "down" ? "danger" : "neutral";
   return (
     <div
-      className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs"
+      className="flex min-w-0 flex-col gap-1 rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs"
       data-testid="cluster-tunnel-forward-row"
     >
-      <Mono className="min-w-0 break-all">
-        {forward.listen} → {forward.target}
-      </Mono>
-      <Badge tone={tone} dot data-status-badge="tunnel" data-testid="cluster-tunnel-forward-status">
-        {word}
-      </Badge>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <Mono className="min-w-0 break-all">
+          {forward.listen} → {forward.target}
+        </Mono>
+        <Badge tone={tone} dot data-status-badge="tunnel" data-testid="cluster-tunnel-forward-status">
+          {word}
+        </Badge>
+      </div>
+      {word === "unreachable" && (
+        <p className="text-fg-muted" data-testid="cluster-tunnel-forward-reason">
+          転送あり・先方応答なし
+        </p>
+      )}
     </div>
   );
 }

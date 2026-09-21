@@ -2516,16 +2516,18 @@ async fn clusters(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
                     .forwards
                     .iter()
                     .map(|f| {
-                        let up = live.and_then(|live| {
-                            live.tunnel_forwards
-                                .iter()
-                                .find(|tf| tf.listen == f.listen)
-                                .map(|tf| tf.up)
+                        let snapshot = live.and_then(|live| {
+                            live.tunnel_forwards.iter().find(|tf| tf.listen == f.listen)
                         });
                         ClusterForwardView {
                             listen: f.listen.clone(),
                             target: f.target.clone(),
-                            up,
+                            up: snapshot.map(|tf| tf.up),
+                            // ADR-0053 Phase 85: listener/target の健康を別々に出す（GUI が
+                            // 「転送あり・先方応答なし」等の理由を出し分けるため）。
+                            listener: snapshot.map(|tf| tf.listener),
+                            target_healthy: snapshot.map(|tf| tf.target_healthy),
+                            last_error: snapshot.and_then(|tf| tf.last_error.clone()),
                         }
                     })
                     .collect(),

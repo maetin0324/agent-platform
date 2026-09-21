@@ -562,6 +562,9 @@ pub fn build_dispatcher(
     let tunnel_forward_children: TunnelForwardChildren =
         Arc::new(std::sync::Mutex::new(TunnelForwardRegistry::default()));
     dispatcher.set_tunnel_forward_ensurer(tunnel_forward_ensurer(tunnel_forward_children));
+    // ADR-0053 Phase 85: listener（手元の待ち受け。軽い TCP connect）と target の健康
+    // （`/v1/models`。バックオフされる）を別のフックで挿す。
+    dispatcher.set_tunnel_listener_probe(tunnel_listener_probe());
     dispatcher.set_tunnel_probe(tunnel_probe());
     // ADR-0043 D3（Phase 56）: 起動時に 1 度だけコンテナ runtime を調べる（`podman info` → `docker info`）。
     // 結果はログと `GET /daemon` の `containers` に出る。使えなければ `run = container` のタスクは
@@ -751,16 +754,39 @@ fn tunnel_forward_ensurer(
     })
 }
 
-/// ADR-0053 D3: forward の生存を `GET http://<listen>/v1/models` で見る（既存の probe をそのまま使う）。
+/// ADR-0053 Phase 85: target（先方）の健康 probe の上限。`task_worker::PROBE_TIMEOUT`（3 秒。
+/// `[knowledge.langmem]` 等の到達性検査と共有の既定値）より短くしてある: この probe は
+/// `refresh_cluster_tunnels`（同期・tick を止めうる経路）から呼ばれるため、先方が応答しないとき
+/// tick を長く止めないよう 2 秒で切る（本番観測: forward は張れているのに先方が無応答で、旧実装は
+/// 3 秒の probe を毎 tick 行い tick が 6 秒に伸びていた）。
+const TUNNEL_TARGET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// ADR-0053 D3 / Phase 85: forward の target（先方）の健康を `GET http://<listen>/v1/models` で見る
+/// （既存の probe をそのまま使うが、タイムアウトは tick 向けに短くしてある）。
 fn tunnel_probe() -> task_dispatch::dispatcher::TunnelProbe {
     Arc::new(|listen: &str| {
         let base = format!("http://{listen}/v1");
         // Qwen 側の中継はトンネルの向こう（bnode150）そのものであり、celeris の llm-proxy を経由しない
         // ので bearer は要らない（ADR-0052 の knowledge probe と同じ Qwen エンドポイントに対する既定）。
         matches!(
-            task_worker::probe_models(&base, task_worker::PROBE_TIMEOUT, None),
+            task_worker::probe_models(&base, TUNNEL_TARGET_PROBE_TIMEOUT, None),
             task_worker::Reachability::Ok
         )
+    })
+}
+
+/// ADR-0053 Phase 85: forward の**リスナー**（`-O forward`/`ssh -N -L` が手元の `listen` で実際に
+/// 待ち受けているか）を見る。ssh は起こさず、`listen` への軽い TCP connect だけで判定する
+/// （届けば「リスナーは有る」。中身の健康は見ない＝`tunnel_probe` の役目と分ける）。
+fn tunnel_listener_probe() -> task_dispatch::dispatcher::TunnelListenerProbe {
+    /// TCP connect 自体の上限。ローカルの loopback アドレスへの接続なので短くてよい。
+    const LISTENER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
+    Arc::new(|listen: &str| {
+        let Ok(addr) = listen.parse::<std::net::SocketAddr>() else {
+            tracing::warn!(listen, "tunnel: could not parse the forward's listen address");
+            return false;
+        };
+        std::net::TcpStream::connect_timeout(&addr, LISTENER_CONNECT_TIMEOUT).is_ok()
     })
 }
 
@@ -835,6 +861,9 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                             listen: f.listen.clone(),
                             target: f.target.clone(),
                             up: None,
+                            listener: None,
+                            target_healthy: None,
+                            last_error: None,
                         })
                         .collect(),
                 }

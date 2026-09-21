@@ -750,7 +750,7 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 
 コミット済み `docs/api/v1/api-v1.schema.json` を `include_str!` で返す（開発・型生成の確認用。GUI の型生成はリポジトリのファイルから行い、この応答には依存しない）。
 
-### 3.23 `GET /clusters` → 200 `Clusters`（ADR-0018、Phase 12。トンネルは ADR-0053 D3、Phase 66）
+### 3.23 `GET /clusters` → 200 `Clusters`（ADR-0018、Phase 12。トンネルは ADR-0053 D3、Phase 66・85）
 
 `items[]` は `[[clusters]]` の順。定義（`id` / `host` / `concurrency` / `sync` / `delete_on_push` / `has_setup` = `setup` の有無 / `env_keys` = **キー名だけ** / `rsync_excludes` / `auth`）は設定から、
 `in_use`（そのクラスタで走っている run + 判定の数）/ `connected`（この tick の `ssh -O check` の結果 = 多重接続があるか）/ `cooldown_until` / `cooldown_remaining_secs` / `connect_pending` /
@@ -765,9 +765,19 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
   接続が戻れば cooldown はその tick で解ける。`auth = "publickey"` のクラスタは、未接続を見つけると cooldown にする前に
   1 回だけ自動で接続を試みる（ADR-0032 D3）。
 - GUI は `connected == false` のクラスタに、`auth` に応じた案内を出す（3.39〜3.41）。受信箱の `attention[].cluster_unavailable`（§5.1 (d)）と対。
-- `tunnel_forwards[]`（ADR-0053 D3、Phase 66）: `[[clusters.forwards]]`（`listen` / `target`）と、forward
-  越しに `GET <listen>/v1/models` が届くか（`up`。観測が無ければ `null`）。`forwards` を持たないクラスタは
-  空配列。
+- `tunnel_forwards[]`（ADR-0053 D3、Phase 66。listener/target の分離は Phase 85）: `[[clusters.forwards]]`
+  （`listen` / `target`）と、観測。`up`（forward 越しに `GET <listen>/v1/models` が届くか＝
+  `listener && target_healthy`）、`listener`（手元の `-O forward`/`ssh -N -L` の待ち受けが有るか）、
+  `target_healthy`（listener 越しに target が `/v1/models` に応答するか）、`last_error`（直近の失敗理由。
+  無ければ `null`）。観測が無ければ `up`/`listener`/`target_healthy` は `null`。`forwards` を持たない
+  クラスタは空配列。
+  - **`listener == true` かつ `target_healthy == false`** は「転送（forward）はあるが先方が応答しない」
+    （GUI はこれを 1 語のバッジとは別に、理由の文で示す）。celeris はこの状態では `-O forward` を
+    **再発行しない**（listener は既に有るので無意味。Phase 85 のバックオフ。以前は毎 tick 打ち直して
+    tick が数秒伸びる不具合があった）。target の健康 probe 自体も
+    `[[clusters.forwards]] probe_interval_secs`（既定 30 秒）の間隔でしか行わない。
+  - **`listener == false`** は「転送そのものが無い」。celeris は次の tick で `-O forward` の(再)発行を
+    試みる。
 - `tunnel_login_needed`（ADR-0053 D3）: `[[clusters.forwards]]` を持つクラスタで、ssh master が落ち、
   **鍵認証を試しても**繋がらなかった状態（人の TOTP 入力が要る）。`GET /clusters` にはこれだけが出る
   （プロンプト文字列やコードは `POST /clusters/{id}/connect`/`connect/code` の応答にだけ載る。§3.39〜3.41
@@ -777,10 +787,12 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 {"items": [
   {"id": "pegasus", "host": "pegasus", "concurrency": 2, "sync": "rsync", "delete_on_push": false,
    "has_setup": false, "env_keys": [], "rsync_excludes": [], "auth": "totp",
-   "in_use": 0, "connected": false, "cooldown_until": null, "cooldown_remaining_secs": null,
+   "in_use": 0, "connected": true, "cooldown_until": null, "cooldown_remaining_secs": null,
    "connect_pending": false,
-   "tunnel_forwards": [{"listen": "127.0.0.1:18000", "target": "bnode150:18000", "up": false}],
-   "tunnel_login_needed": true}
+   "tunnel_forwards": [{"listen": "127.0.0.1:18000", "target": "bnode150:18000", "up": false,
+     "listener": true, "target_healthy": false,
+     "last_error": "target bnode150:18000 did not answer /v1/models through the forward"}],
+   "tunnel_login_needed": false}
 ]}
 ```
 

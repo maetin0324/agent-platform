@@ -920,6 +920,16 @@ pub struct ClusterForwardConfig {
     pub listen: String,
     /// master のホスト側から見た転送先。`"bnode150:18000"` の形。
     pub target: String,
+    /// ADR-0053 Phase 85: target（`/v1/models`）の健康 probe をこの秒数より短い間隔では行わない
+    /// （既定 30 秒）。listener（`-O forward` の有無）の確認はこれに縛られず毎回行う。forward は
+    /// 張れているのに先方（bnode150 の vLLM 等）が落ちている間、probe を毎 tick 叩いて tick を
+    /// 遅くしないためのバックオフ（本番観測、`docs/adr/0053-llm-source-proxy.md`「Phase 85 追記」）。
+    #[serde(default = "default_tunnel_probe_interval_secs")]
+    pub probe_interval_secs: u64,
+}
+
+fn default_tunnel_probe_interval_secs() -> u64 {
+    task_dispatch::dispatcher::DEFAULT_TUNNEL_PROBE_INTERVAL_SECS
 }
 
 fn default_cluster_concurrency() -> usize {
@@ -2782,6 +2792,7 @@ genre = {}
                             .map(|f| task_dispatch::dispatcher::ClusterForwardSpec {
                                 listen: f.listen.clone(),
                                 target: f.target.clone(),
+                                probe_interval_secs: f.probe_interval_secs,
                             })
                             .collect(),
                     },

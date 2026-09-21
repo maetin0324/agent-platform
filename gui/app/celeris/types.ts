@@ -1320,10 +1320,26 @@ export interface ClusterView {
  * ADR-0053 D3（Phase 66）: `[[clusters.forwards]]` 1 本の要約と生存（`GET /clusters` にそのまま出す）。
  */
 export interface ClusterForwardView {
+  /**
+   * ADR-0053 Phase 85: 直近の失敗理由（無ければ `null`）。GUI が「転送あり・先方応答なし」等の
+   * 理由を出すのに使う。
+   */
+  last_error?: string | null;
   listen: string;
+  /**
+   * ADR-0053 Phase 85: 手元のリスナー（`-O forward`/`ssh -N -L`）が有るか。スナップショットが
+   * 無ければ `null`。
+   */
+  listener?: boolean | null;
   target: string;
   /**
-   * forward 越しに `GET <listen>/v1/models` が届くか。スナップショットが無ければ `null`。
+   * ADR-0053 Phase 85: listener 越しに target（`/v1/models`）が健全か。スナップショットが無ければ
+   * `null`（`listener == false` のときは意味を持たない）。
+   */
+  target_healthy?: boolean | null;
+  /**
+   * forward 越しに `GET <listen>/v1/models` が届くか（`listener && target_healthy`）。
+   * スナップショットが無ければ `null`。
    */
   up?: boolean | null;
 }
@@ -2000,10 +2016,24 @@ export interface ClusterLive {
  * ADR-0053 D3（Phase 66）: 1 本の port forward の生存（`GET /clusters` にそのまま出す）。
  */
 export interface TunnelForwardLive {
+  /**
+   * ADR-0053 Phase 85: 直近の失敗理由（無ければ `null`）。
+   */
+  last_error?: string | null;
   listen: string;
+  /**
+   * ADR-0053 Phase 85: 手元のリスナー（`-O forward`/`ssh -N -L`）が有るか。古いスナップショットには
+   * 無いので既定は `false`。
+   */
+  listener?: boolean;
   target: string;
   /**
-   * forward 越しに `GET <listen>/v1/models` が届くか（直近の観測）。
+   * ADR-0053 Phase 85: listener 越しに target（`/v1/models`）が健全か。古いスナップショットには
+   * 無いので既定は `false`。
+   */
+  target_healthy?: boolean;
+  /**
+   * forward 越しに `GET <listen>/v1/models` が届くか（直近の観測。`listener && target_healthy`）。
    */
   up: boolean;
 }
