@@ -10616,3 +10616,16 @@ thread while the thread is being used to drive asynchronous tasks.
      生きていれば forward が張られる。TOTP が要る状態なら GUI から 1 回入力する）。
   4. 上記が確認できたら、Phase 66 の節にある残りの本番運用手順（3〜5. systemd unit の撤去・
      `celeris/cheap` が Qwen に戻ることの確認）を進める。
+
+### PaperQA が Celeris 移行後ずっと起動できていなかった（2026-09-21 13:10 UTC 発見・修正）
+
+- 動作確認タスク `01M31ZM75RSG0R0AF2QA9KRQZH`（literature）: acquire（arXiv/OpenAlex、問いは **celeris/standard → codex-oauth gpt-5.6-terra で 5 要求 ok**）は
+  6 PDF まで進んだが、`pqa` の起動で `failed to spawn worker: No such file or directory`（requeue 5 回で ready に戻り、provider が throttle）。
+- 原因: `~/.local/celeris/tools/paperqa/.venv/bin/pqa` の shebang が **移行前の `/home/rmaeda/taskd/paperqa/.venv/bin/python`** のまま
+  （`migrate-to-celeris.sh` はディレクトリを移しただけで venv の console script の shebang は書き換えていない）。LDR の venv も 92 本の
+  console script が同じだったが、LDR は `python <script>` で起こすので影響が出ていなかった。langmem の venv は移行後に作ったので無事。
+- 修正: 2 つの venv の `bin/*` の 1 行目を `sed` で新パスに書き換え（paperqa 22 本、ldr 92 本）。`pqa --help` が動くことを確認。
+  タスクは throttle 明けに自動で再実行される（結果は次節）。
+- 提案: `migrate-to-celeris.sh`（もう使わない）の教訓として、venv を移すときは `uv venv` で作り直すか shebang を書き換える手順を
+  `docs/knowledge.md` / 運用メモに残す。`verify.sh` の smoke は fake アダプタなので実アダプタの起動可否は見ていない — アダプタごとに
+  `<command> --help` を叩く「起動できるか」の check を verify に足すと今回のような移行漏れを昇格前に拾える（提案）。
