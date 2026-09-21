@@ -1,5 +1,5 @@
 import { type ChangeEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
-import { useFetcher, useNavigate } from "react-router";
+import { useFetcher, useNavigate, useNavigation } from "react-router";
 import type { ConsoleInstructOutcome, ConsoleNewConversationOutcome } from "~/celeris/action-types";
 import type { ConsoleBlock, OrgNode, Project } from "~/celeris/types";
 import { useConsoleStream } from "~/hooks/useConsoleStream";
@@ -29,6 +29,7 @@ import { Card, CardBody } from "./ui/card";
 import { hintClass, labelClass, selectClass, textareaClass } from "./ui/form";
 import { Icon } from "./ui/Icon";
 import { EmptyState, SectionTitle } from "./ui/misc";
+import { Skeleton } from "./ui/skeleton";
 
 /**
  * Console（ADR-0048 D4、GUI Phase G22）。`/`（`scope=all` 既定、`?scope=` で `project:<id>` へ深リンクできる）
@@ -65,6 +66,13 @@ export function Console({ data }: { data: ConsoleData }) {
   const counts = consoleWaitingCounts(blocks);
   const streaming = hasStreamingReply(blocks);
   const [replyTarget, setReplyTarget] = useState<InstructReplyTarget | null>(null);
+  // Phase 77（ADR-0055 D3「体感速度」）: `/`・`/org/:id` の間を移動すると scope が変わり、loader が
+  // 新しい Console データを取りに行く。その間は直前の画面のブロックがそのまま残るだけなので、この画面
+  // （Console を持つ 2 つの経路のどちらか）への遷移が pending の間は `BlockStream` をスケルトンに差し替える。
+  const navigation = useNavigation();
+  const isConsoleNavigationPending =
+    navigation.state === "loading" &&
+    (navigation.location?.pathname === "/" || (navigation.location?.pathname.startsWith("/org/") ?? false));
   // フェーズ 72（ADR-0055 D2、U7 の解消）: spacer の高さは見積もり（`h-52` 固定）ではなく、
   // `ConsoleInput` 自身の実高さを `ResizeObserver` で測って反映する。返信先バナーの表示・非表示で
   // 高さが変わっても（`ResizeObserver` は border-box の変化を都度拾う）常に過不足なく確保できる。
@@ -91,7 +99,14 @@ export function Console({ data }: { data: ConsoleData }) {
       <div className="grid gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
         <ScopePicker parsedScope={parsedScope} org={org} projects={projects} />
         <div className="min-w-0 space-y-3">
-          <BlockStream blocks={blocks} org={org} projects={projects} fetchedAt={fetchedAt} onReply={handleReply} />
+          <BlockStream
+            blocks={blocks}
+            org={org}
+            projects={projects}
+            fetchedAt={fetchedAt}
+            onReply={handleReply}
+            loading={isConsoleNavigationPending}
+          />
           {/* フェーズ 71（ADR-0055 D2）: モバイルは入力欄を下部固定タブの上に `position: fixed` する
               （`ConsoleInput` 自身が `lg:static` で戻る）。フローから抜けた分の高さを、この spacer で
               本文側にあらかじめ確保しておく（無いと固定入力欄が直前のブロックに重なる）。
@@ -350,12 +365,15 @@ function BlockStream({
   projects,
   fetchedAt,
   onReply,
+  loading = false,
 }: {
   blocks: ConsoleBlock[];
   org: readonly OrgNode[];
   projects: readonly Project[];
   fetchedAt: string;
   onReply: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
+  /** Phase 77: 遷移が pending の間、中身をスケルトンに差し替える（枠の高さ・`data-testid` は変えない）。 */
+  loading?: boolean;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // `stickyRef` は「いま最新に張り付いているか」を、次に新しいブロックが来た瞬間に読むための ref
@@ -396,9 +414,12 @@ function BlockStream({
       <div
         ref={containerRef}
         data-testid="console-stream"
+        aria-busy={loading || undefined}
         className="h-[clamp(10rem,calc(100dvh-30rem),36rem)] space-y-2.5 xl:h-[60vh] overflow-y-auto rounded-xl border border-border bg-surface-2/30 p-3"
       >
-        {blocks.length === 0 ? (
+        {loading ? (
+          <ConsoleStreamSkeleton />
+        ) : blocks.length === 0 ? (
           <EmptyState icon="message" title="まだ何も流れていません">
             下の欄から話しかけてください。
           </EmptyState>
@@ -430,6 +451,24 @@ function BlockStream({
           </span>
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * `console-stream` が pending の間のプレースホルダ（Phase 77、ADR-0055 D3「体感速度」）。枠自体は
+ * `h-[clamp(...)]` で固定なので、これに差し替えてもレイアウトはガタつかない。人・返事のブロックを
+ * 3 つぶん並べた見た目にして、「何か流れてきそうだ」という形を残す。
+ */
+function ConsoleStreamSkeleton() {
+  return (
+    <div aria-hidden="true" data-testid="console-stream-skeleton" className="space-y-2.5">
+      {["a", "b", "c"].map((id) => (
+        <div key={id} className="ml-auto max-w-[85%] space-y-1.5 rounded-xl bg-surface p-3">
+          <Skeleton className="h-3 w-16" />
+          <Skeleton className="h-3.5 w-56 max-w-full" />
+        </div>
+      ))}
     </div>
   );
 }

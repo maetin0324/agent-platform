@@ -4,6 +4,13 @@ import { cn } from "~/lib/utils";
 /**
  * 24px グリッドのストローク SVG アイコン（docs/adr/0011 D2）。依存を足さないために直書きする。
  * 装飾なので常に `aria-hidden`。意味はリンク・ボタンの文字列で伝える。
+ *
+ * ここは（`components` と並んで）ほぼ全画面が読み込む共有チャンクなので、Phase 77（ADR-0055 性能予算）で
+ * どこからも使われていなかった `image` を削った（JSX の `name="..."`/`icon="..."` だけでなく、
+ * `~/components/ui/misc.tsx::ALERT_ICON` のような `Record<Tone, IconName>` 経由の間接参照まで
+ * `grep`/`tsc` で確かめた上で削除。`info` は `ALERT_ICON` からだけ使われていた（直接の JSX には出てこない）
+ * ので残した。他のアイコンはどこかの画面で使われているので、ここを個別チャンクに分けるより
+ * 「使っていない分だけ削る」方が単純で安全）。
  */
 const PATHS = {
   inbox: (
@@ -176,13 +183,6 @@ const PATHS = {
     </>
   ),
   code: <path d="m16 18 6-6-6-6M8 6l-6 6 6 6" />,
-  image: (
-    <>
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-      <circle cx="8.5" cy="8.5" r="1.5" />
-      <path d="m21 15-5-5L5 21" />
-    </>
-  ),
   link: (
     <>
       <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />

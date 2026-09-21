@@ -260,7 +260,8 @@
 
   @media (prefers-reduced-motion: reduce) {
     .animate-pulse-dot,
-    .animate-fade-in {
+    .animate-fade-in,
+    .animate-pulse {
       animation: none;
     }
   }

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { data, Form, isRouteErrorResponse, Link, useFetcher, useSearchParams } from "react-router";
+import { data, Form, isRouteErrorResponse, Link, useFetcher, useNavigation, useSearchParams } from "react-router";
 import type { TaskEditOutcome } from "~/celeris/action-types";
 import type { CelerisClient } from "~/celeris/client.server";
 import { getCelerisClient } from "~/celeris/client.server";
@@ -30,6 +30,7 @@ import {
 } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, PageHeader } from "~/components/ui/misc";
+import { Skeleton } from "~/components/ui/skeleton";
 import {
   BOARD_COLUMNS,
   type BoardColumnId,
@@ -140,6 +141,12 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
   const [activeColumn, setActiveColumn] = useState<BoardColumnId>(BOARD_COLUMNS[0].id);
   const [searchParams] = useSearchParams();
   const filter = parseBoardFilter(searchParams);
+  // Phase 77（ADR-0055 D3「体感速度」）: 絞り込みフォーム（`board-filter-form`、method="get"）を送ると
+  // `/board` への再ナビゲーションになり、新しい `loaderData` が届くまで直前の列がそのまま残る。その間は
+  // 列をスケルトンに差し替える（グリッドの列数はそのまま。カードの枚数は前回のものを概算に使うので
+  // 高さのガタつきは小さい）。
+  const navigation = useNavigation();
+  const isBoardNavigationPending = navigation.state === "loading" && navigation.location?.pathname === "/board";
   // 裏方のタスク（`TaskSummary.support`: 対話・報告のまとめ・承認待ち・レビュー）は既定で隠す
   // （SPEC「タスクは裏方」/ ADR-0033 D8。`/tasks` と同じ扱い）。判定は celeris の `support` をそのまま使い、
   // `show_support=1` は表示の切り替えだけ（`GET /tasks` には送らない。celeris に絞り込みが無い）。
@@ -422,18 +429,31 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
         })}
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3" data-testid="board-columns">
-        {BOARD_COLUMNS.map((column) => (
-          <BoardColumn
-            key={column.id}
-            id={column.id}
-            items={columns[column.id]}
-            orgNames={orgNames}
-            milestoneNames={milestoneNames}
-            org={org}
-            active={column.id === activeColumn}
-          />
-        ))}
+      <div
+        className="grid gap-4 md:grid-cols-2 xl:grid-cols-3"
+        data-testid="board-columns"
+        aria-busy={isBoardNavigationPending || undefined}
+      >
+        {isBoardNavigationPending
+          ? BOARD_COLUMNS.map((column) => (
+              <BoardColumnSkeleton
+                key={column.id}
+                id={column.id}
+                cardCount={columns[column.id].length}
+                active={column.id === activeColumn}
+              />
+            ))
+          : BOARD_COLUMNS.map((column) => (
+              <BoardColumn
+                key={column.id}
+                id={column.id}
+                items={columns[column.id]}
+                orgNames={orgNames}
+                milestoneNames={milestoneNames}
+                org={org}
+                active={column.id === activeColumn}
+              />
+            ))}
       </div>
     </div>
   );
@@ -480,6 +500,35 @@ function BoardColumn({
           ))}
         </ul>
       )}
+    </section>
+  );
+}
+
+/**
+ * `BoardColumn` の読み込み中プレースホルダ（Phase 77、ADR-0055 D3「体感速度」）。前回のカード枚数
+ * （`cardCount`）ぶんだけ出して、列の高さが差し替え前後でだいたい揃うようにする（0〜4 枚に丸めて、
+ * 空でも真っ平らにならないようにする）。
+ */
+function BoardColumnSkeleton({ id, cardCount, active }: { id: BoardColumnId; cardCount: number; active: boolean }) {
+  const rows = Math.min(Math.max(cardCount, 1), 4);
+  return (
+    <section
+      aria-hidden="true"
+      data-testid="board-column-skeleton"
+      data-column={id}
+      className={cn("rounded-xl border border-border bg-surface-2/40 p-3", active ? "block" : "hidden", "md:block")}
+    >
+      <div className="hidden items-center gap-2 md:flex">
+        <Skeleton className="h-4 w-20" />
+      </div>
+      <ul className="mt-3 space-y-2">
+        {Array.from({ length: rows }, (_, i) => `${id}-${i}`).map((key) => (
+          <li key={key} className="space-y-2 rounded-lg border border-border bg-surface p-3">
+            <Skeleton className="h-4 w-2/3" />
+            <Skeleton className="h-3 w-1/3" />
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }

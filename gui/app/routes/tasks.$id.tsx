@@ -1,5 +1,14 @@
-import { useEffect, useState } from "react";
-import { data, Form, isRouteErrorResponse, Link, useFetcher, useNavigate, useSearchParams } from "react-router";
+import { lazy, Suspense, useEffect, useState } from "react";
+import {
+  data,
+  Form,
+  isRouteErrorResponse,
+  Link,
+  useFetcher,
+  useNavigate,
+  useNavigation,
+  useSearchParams,
+} from "react-router";
 import type {
   ActionError,
   DocsOpOutcome,
@@ -51,10 +60,6 @@ import { HelpLink } from "~/components/HelpLink";
 import { ImageViewer } from "~/components/ImageViewer";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Sha256Badge } from "~/components/Sha256Badge";
-/* ADR-0043 D5 の変更の取り込み（Phase 54 / A2 の本物。ADR-0044 D5 の「変更」タブに載せる） */
-import { TaskChanges } from "~/components/task-changes";
-/* ADR-0043 D6 のファイル閲覧（Phase 52 / A1 の本物。ADR-0044 D5 の「ファイル」タブに載せる） */
-import { TaskFiles } from "~/components/task-files";
 import { Badge, GenreLabel, KindBadge, RoleLabel, StatusBadge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -75,6 +80,7 @@ import {
 } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, DataList, EmptyState, Mono } from "~/components/ui/misc";
+import { Skeleton } from "~/components/ui/skeleton";
 import type { Tone } from "~/components/ui/tone";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { isValidLabel, MAX_LABELS, PRIORITY_LABELS } from "~/lib/board";
@@ -116,6 +122,33 @@ import {
 import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/tasks.$id";
+
+// Phase 77（ADR-0055 性能予算）: 「変更」「ファイル」タブの本体（`~/components/task-changes.tsx`・
+// `~/components/task-files.tsx`）は、5 つあるタブのうち一度に 1 つしか出ない（`?tab=` で切り替え）のに
+// これまで両方とも静的 import していたので、どのタブを開いても他の 4 タブぶんの JS まで初回に届いていた。
+// `React.lazy` にして、実際に選んだタブのチャンクだけを取りに行くようにする（ADR-0043 D5/D6 の中身・
+// `~/routes/tasks.$id.changes.tsx`・`~/routes/tasks.$id.files.tsx` という兄弟ルートからの静的 import は
+// そのまま残すので、そちらの動作・バンドルは変えない）。
+const TaskChanges = lazy(() => import("~/components/task-changes").then((m) => ({ default: m.TaskChanges })));
+const TaskFiles = lazy(() => import("~/components/task-files").then((m) => ({ default: m.TaskFiles })));
+
+/**
+ * タブの中身の読み込み中プレースホルダ（Phase 77、ADR-0055 D3「体感速度」）。チャンク待ち（`Suspense`）と
+ * タブ切り替えのナビゲーション待ち（`useNavigation`）の両方で使う。高さは実際のタブの中身（見出し 1 行 +
+ * カード数枚）に近い概算。
+ */
+function TaskTabSkeleton() {
+  return (
+    <div className="space-y-4" aria-hidden="true" data-testid="task-tab-skeleton">
+      <Skeleton className="h-5 w-24" />
+      <div className="space-y-3 rounded-xl border border-border bg-surface p-4">
+        <Skeleton className="h-4 w-1/3" />
+        <Skeleton className="h-24 w-full" />
+        <Skeleton className="h-4 w-2/3" />
+      </div>
+    </div>
+  );
+}
 
 /**
  * `docs/celeris-api-v1.md` §3.6 の `types` フィルタの選択肢。`Event` の `type` タグと同じ。
@@ -384,6 +417,12 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
   const { task } = detail;
   const [searchParams] = useSearchParams();
   const tab = parseTaskTab(searchParams.get("tab"));
+  // Phase 77（ADR-0055 D3「体感速度」）: タブを切り替えると `?tab=` が変わって loader が再実行される
+  // （タブごとに `changes`/`files`/`timeline` の中身が違うため）。その間は前のタブの中身がそのまま
+  // 残るだけで何も動いて見えないので、この画面への遷移が pending の間はタブの中身をスケルトンに差し替える
+  // （高さは `TaskTabSkeleton` の概算。レイアウトのガタつきを避けるため中身の種類では変えない）。
+  const navigation = useNavigation();
+  const tabNavigationPending = navigation.state === "loading" && navigation.location?.pathname === `/tasks/${task.id}`;
   // 操作の結果は fetcher に載せる（監査 H1。SSE の再検証で `actionData` が消えるのを避ける）。
   const fetcher = useFetcher<TransitionOutcome>();
   const submitting = fetcher.state !== "idle";
@@ -551,110 +590,121 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
         counts={{ timeline: timeline.items.length, artifacts: artifacts.items.length }}
       />
 
-      {tab === "overview" && (
-        <OverviewTab
-          detail={detail}
-          artifactCount={artifacts.items.length}
-          org={org}
-          milestones={milestones}
-          genres={genres}
-          fetcher={fetcher}
-          submitting={submitting}
-          retryFetcher={retryFetcher}
-          retrying={retrying}
-          fetchedAt={fetchedAt}
-        />
-      )}
+      {tabNavigationPending ? (
+        <TaskTabSkeleton />
+      ) : (
+        <>
+          {tab === "overview" && (
+            <OverviewTab
+              detail={detail}
+              artifactCount={artifacts.items.length}
+              org={org}
+              milestones={milestones}
+              genres={genres}
+              fetcher={fetcher}
+              submitting={submitting}
+              retryFetcher={retryFetcher}
+              retrying={retrying}
+              fetchedAt={fetchedAt}
+            />
+          )}
 
-      {tab === "timeline" && (
-        <TimelineTab
-          taskId={task.id}
-          detail={detail}
-          timeline={timeline}
-          comments={comments}
-          events={events}
-          fetchedAt={fetchedAt}
-        />
-      )}
-
-      {tab === "changes" && (
-        <section aria-labelledby="changes-heading" data-testid="changes-section" className="space-y-4">
-          <h2 id="changes-heading" className="text-[0.95rem] font-semibold text-fg">
-            変更
-          </h2>
-          {/* ADR-0043 D5（Phase 54 / G18）の本物。中身は `~/components/task-changes.tsx`。
-              取り込みの `fetcher` と差分のリンクは兄弟のルート `/tasks/:id/changes` に出る
-              （「ファイル」タブと同じ作り）。 */}
-          {changes?.data ? (
-            <TaskChanges
+          {tab === "timeline" && (
+            <TimelineTab
               taskId={task.id}
-              changes={changes.data.changes}
-              diff={changes.data.diff}
-              diffError={changes.data.diffError}
-              diffRepo={changes.data.diffRepo}
-              diffPath={changes.data.diffPath}
+              detail={detail}
+              timeline={timeline}
+              comments={comments}
+              events={events}
+              fetchedAt={fetchedAt}
             />
-          ) : changes?.error ? (
-            <EmptyState icon="gitBranch" title="取り込める変更がありません" data-testid="task-changes-unavailable">
-              {changes.error.detail}
-            </EmptyState>
-          ) : null}
-        </section>
-      )}
+          )}
 
-      {tab === "files" && (
-        <section aria-labelledby="files-heading" data-testid="files-section" className="space-y-4">
-          <h2 id="files-heading" className="text-[0.95rem] font-semibold text-fg">
-            ファイル
-          </h2>
-          {/* ADR-0043 D6（Phase 52 / G16）の本物。中身は `~/components/task-files.tsx`。 */}
-          {files?.data ? (
-            <TaskFiles
-              taskId={task.id}
-              tree={files.data.tree}
-              file={files.data.file}
-              fileError={files.data.fileError}
-              filePath={files.data.filePath}
-            />
-          ) : files?.error ? (
-            <EmptyState icon="folder" title="作業ツリーがありません" data-testid="task-files-unavailable">
-              {files.error.detail}
-            </EmptyState>
-          ) : null}
-        </section>
-      )}
+          {tab === "changes" && (
+            <section aria-labelledby="changes-heading" data-testid="changes-section" className="space-y-4">
+              <h2 id="changes-heading" className="text-[0.95rem] font-semibold text-fg">
+                変更
+              </h2>
+              {/* ADR-0043 D5（Phase 54 / G18）の本物。中身は `~/components/task-changes.tsx`。
+                  取り込みの `fetcher` と差分のリンクは兄弟のルート `/tasks/:id/changes` に出る
+                  （「ファイル」タブと同じ作り）。Phase 77: `React.lazy`（このファイル冒頭）なので `Suspense` で包む。 */}
+              {changes?.data ? (
+                <Suspense fallback={<TaskTabSkeleton />}>
+                  <TaskChanges
+                    taskId={task.id}
+                    changes={changes.data.changes}
+                    diff={changes.data.diff}
+                    diffError={changes.data.diffError}
+                    diffRepo={changes.data.diffRepo}
+                    diffPath={changes.data.diffPath}
+                  />
+                </Suspense>
+              ) : changes?.error ? (
+                <EmptyState icon="gitBranch" title="取り込める変更がありません" data-testid="task-changes-unavailable">
+                  {changes.error.detail}
+                </EmptyState>
+              ) : null}
+            </section>
+          )}
 
-      {tab === "artifacts" && (
-        <section aria-labelledby="artifacts-heading" data-testid="artifacts-section">
-          <Card>
-            <CardHeader
-              icon="folder"
-              title={
-                <h2 id="artifacts-heading" className="text-[0.95rem] font-semibold text-fg">
-                  成果物
-                </h2>
-              }
-            />
-            <CardBody>
-              {artifacts.items.length === 0 ? (
-                <EmptyState icon="folder" title="ありません。" />
-              ) : (
-                <ul className="space-y-3">
-                  {artifacts.items.map((artifact) => (
-                    <ArtifactRow
-                      key={artifact.idx}
-                      taskId={task.id}
-                      artifact={artifact}
-                      projectId={task.project_id ?? null}
-                      taskTitle={task.title}
-                      category={task.category ?? null}
-                    />
-                  ))}
-                </ul>
-              )}
-            </CardBody>
-          </Card>
-        </section>
+          {tab === "files" && (
+            <section aria-labelledby="files-heading" data-testid="files-section" className="space-y-4">
+              <h2 id="files-heading" className="text-[0.95rem] font-semibold text-fg">
+                ファイル
+              </h2>
+              {/* ADR-0043 D6（Phase 52 / G16）の本物。中身は `~/components/task-files.tsx`。
+                  Phase 77: `React.lazy`（このファイル冒頭）なので `Suspense` で包む。 */}
+              {files?.data ? (
+                <Suspense fallback={<TaskTabSkeleton />}>
+                  <TaskFiles
+                    taskId={task.id}
+                    tree={files.data.tree}
+                    file={files.data.file}
+                    fileError={files.data.fileError}
+                    filePath={files.data.filePath}
+                  />
+                </Suspense>
+              ) : files?.error ? (
+                <EmptyState icon="folder" title="作業ツリーがありません" data-testid="task-files-unavailable">
+                  {files.error.detail}
+                </EmptyState>
+              ) : null}
+            </section>
+          )}
+
+          {tab === "artifacts" && (
+            <section aria-labelledby="artifacts-heading" data-testid="artifacts-section">
+              <Card>
+                <CardHeader
+                  icon="folder"
+                  title={
+                    <h2 id="artifacts-heading" className="text-[0.95rem] font-semibold text-fg">
+                      成果物
+                    </h2>
+                  }
+                />
+                <CardBody>
+                  {artifacts.items.length === 0 ? (
+                    <EmptyState icon="folder" title="ありません。" />
+                  ) : (
+                    <ul className="space-y-3">
+                      {artifacts.items.map((artifact) => (
+                        <ArtifactRow
+                          key={artifact.idx}
+                          taskId={task.id}
+                          artifact={artifact}
+                          projectId={task.project_id ?? null}
+                          taskTitle={task.title}
+                          category={task.category ?? null}
+                        />
+                      ))}
+                    </ul>
+                  )}
+                </CardBody>
+              </Card>
+            </section>
+          )}
+        </>
       )}
     </div>
   );
