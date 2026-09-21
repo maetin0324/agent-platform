@@ -10087,3 +10087,23 @@ celeris 本体（Rust）には触っていない。作業は全て `gui/` 側（
   `pnpm build` exit 0（client・server とも）。
 - `pnpm mobile-audit` exit 0（**違反 0 件**。overflow / status-badge / fixed-overlay / tap-target /
   font-size のすべてが 0）。
+
+### Phase 70 の本番反映と、LDR / PaperQA のプロキシ化（2026-09-21 08:55–09:05 UTC）
+
+- main `d417e87` = Phase 70 の merge（GUI のみ）。GUI ゲート exit 0（typecheck / lint / `pnpm test` 856 passed / `pnpm mobile-audit` **違反 0**）。
+- `release.sh main` → `d417e878b126`（schema 22 のまま）。`verify.sh` check 1–6 すべて true、`ok=true live_ok=true`。
+- `promote.sh d417e878b126`: **mode=live**。新 active まで 2 秒、GUI 切替、API 停止なし。バックアップ `20260921-085848-pre-d417e878b126.sqlite3`。
+- **ldr-qwen をプロキシへ**（`config.toml.bak-20260921b`）: `[adapters.local_deep_research.settings]` の
+  `llm.openai_endpoint.url = http://127.0.0.1:18100/v1`、`llm.model = celeris/cheap`、`api_key` の設定行を消して
+  `env_from_secrets.LDR_LLM_OPENAI_ENDPOINT_API_KEY = "celeris-api-token"`（`~/.config/celeris/secrets/celeris-api-token` = api.token の写し）、
+  `[[providers]] ldr-qwen.model = celeris/cheap`。`POST /reload`（JSON 本文必須）→ `{"reloaded":true}`、`GET /providers` で `ldr-qwen.model = celeris/cheap`。
+  動作確認タスク `01M31JR7P7X5C8WFXFD5P3N3BE`（web-research、tokio の最新安定版を問う）: **08:52 ready → 08:58 done**（run
+  `01M31JZAP7TBF5SHHRC5WWNNQQ`。`ldr_input.json` に `llm.openai_endpoint.url = …:18100/v1`）。`llm_proxy_requests` に同時刻の
+  `celeris/cheap → claude-oauth / claude_max_lab / claude-haiku-4-5-20251001` が 12 件以上（ok）。**LDR は供給元を知らずに Claude で完走**（ADR-0053 D2）。
+- **paperqa-qwen をプロキシへ**（`config.toml.bak-20260921c`）: 設定ファイル `~/.local/celeris/tools/paperqa/settings/celeris-proxy.json`
+  （`qwen-local.json` の写しで llm / summary_llm / agent_llm を `openai/celeris/standard`、`api_base = …:18100/v1`、
+  `api_key = "os.environ/OPENAI_API_KEY"`（litellm の秘密参照。値を JSON に書かない）、embedding は `sparse` のまま）。
+  `[adapters.paperqa] settings = …/celeris-proxy`、`env` から `OPENAI_API_KEY` の literal を消し `OPENAI_BASE_URL = …:18100/v1`、
+  `env_from_secrets = { OPENAI_API_KEY = "celeris-api-token" }`。`POST /reload` → `{"reloaded":true}`。
+  動作確認タスク `01M31K37HN82V75J6DGEB3CRWC`（literature、tier standard）を 09:05 に作成。結果は次のラウンドで追記。
+- `langmem-main` は Phase 65b（probe に bearer）の配備後。`opencode-qwen` は Phase 65 の判断どおり据え置き。
