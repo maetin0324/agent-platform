@@ -9658,3 +9658,15 @@ Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus
     - どちらのシナリオでも画面上に「昇格」の文字列が0件、「upgrade」が1件以上あることをアサートで確認。`pageerror` 0件。
   - 証跡: `/tmp/celeris-upgrade-gui-23BMgE/`（`success-01-started.png`, `success-02-succeeded.png`, `failure-01-started.png`, `failure-02-failed.png`, 各シナリオの `gui-*.log`）。`node scripts/check-upgrade.mjs` の標準出力は `{"ok":true,"results":[{"scenario":"success","requests":18},{"scenario":"failure","requests":18}],...}`。
 - 未解決事項: Nothing 2a 実機（IME・実タップ）は未検証（既存の既知の未検証事項、今回は合成APIでのヘッドレス確認のみ）。本番反映は別途 release → verify → promote の手続きで人が行う（このタスクでは実装・検証のみ）。
+
+### 同日追記: delivery-repair（部署内取り込みで差し戻し）— 既定ブランチ更新の取り込みと再検証
+
+- 差し戻し理由: 部署内の取り込み・リリース検証時点で、このブランチの分岐元（`7475b38`）以降に既定ブランチ `main` が別案件（ADR-0052 知識整理runフォールバック、phase 60b/62 実機通し証跡）で `54960af` まで進んでいた。実装内容そのものへの指摘ではなく、取り込み前の状態のまま検証されていたための差し戻し。
+- 対応: 元の実装（`406be63`、上記の内容）は変更せず保持。`git merge main`（fast-forwardではない通常のmerge、rebaseは行っていない）を実行し、`docs/adr/0052-knowledge-run-fallback.md` の追加のみを取り込んだ（コンフリクトなし、`git merge-tree --write-tree HEAD main` で事前確認）。マージコミット: `e47846f`。
+- 再検証（マージ後）:
+  - `cargo test --workspace`: 全 `test result: ok`、失敗0（doctest含む全クレート、exit 0）。
+  - `cargo clippy --workspace -- -D warnings`: exit 0、警告0。
+  - GUI: `pnpm build` 成功、`pnpm test` 849 passed。
+  - `node scripts/check-upgrade.mjs` を再実行: `{"ok":true,"results":[{"scenario":"success","requests":18},{"scenario":"failure","requests":18}]}`。証跡は `/tmp/celeris-upgrade-gui-Zy9P3L/`（success-01/02, failure-01/02 の各PNG）。成功シナリオで現行ハッシュが `aaaaaaaaaaaa` → `cccccccccccc` に更新され「upgrade が完了しました」が表示、失敗シナリオでハッシュ不変＋赤いバナー「upgrade に失敗しました」を目視確認。
+  - 元のチェックアウト（`/home/rmaeda/workspace/agent-platform`）や本番サービスへの変更・デプロイは行っていない。`git status` はクリーン。
+- 未解決事項: 前節と同じ（Nothing 2a実機・本番promoteは人が行う）。
