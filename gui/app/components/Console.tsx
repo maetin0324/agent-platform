@@ -11,12 +11,14 @@ import {
   type ConsoleScopeKind,
   consoleWaitingCounts,
   findMentionQuery,
+  hasStreamingReply,
   type InstructReplyTarget,
   type MentionQuery,
   matchMentionCandidates,
   parseScope,
   replyTargetForMessageBlock,
   scopeForProject,
+  shouldStickToBottom,
 } from "~/lib/console";
 import { cn } from "~/lib/utils";
 import { ConsoleBlockItem, orgNodeName, projectName } from "./ConsoleBlockItem";
@@ -61,6 +63,7 @@ export function Console({ data }: { data: ConsoleData }) {
   });
 
   const counts = consoleWaitingCounts(blocks);
+  const streaming = hasStreamingReply(blocks);
   const [replyTarget, setReplyTarget] = useState<InstructReplyTarget | null>(null);
   // フェーズ 72（ADR-0055 D2、U7 の解消）: spacer の高さは見積もり（`h-52` 固定）ではなく、
   // `ConsoleInput` 自身の実高さを `ResizeObserver` で測って反映する。返信先バナーの表示・非表示で
@@ -77,7 +80,9 @@ export function Console({ data }: { data: ConsoleData }) {
         <div className="min-w-0 flex-1">
           <WaitingStrip counts={counts} />
         </div>
-        <NewConversationButton />
+        {/* フェーズ 73（ADR-0055 D2 ラウンド 5）: モバイルは「送る」だけを主役のボタンにしたいので、
+            低頻度の「新しい会話」はここでは「その他」の開閉メニューに収める（`lg:` は従来どおり常時表示）。 */}
+        <NewConversationMenu />
       </div>
       <div className="grid gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
         <ScopePicker parsedScope={parsedScope} org={org} projects={projects} />
@@ -101,6 +106,7 @@ export function Console({ data }: { data: ConsoleData }) {
             onClearReply={() => setReplyTarget(null)}
             defaultScope={parsedScope.kind === "all" ? null : scope}
             onHeightChange={setInputHeight}
+            streaming={streaming}
           />
         </div>
       </div>
@@ -112,8 +118,9 @@ export function Console({ data }: { data: ConsoleData }) {
  * ADR-0054 D1/D3（Phase 67/68）: CoS の継続セッションを捨てる（`POST /console/new-conversation`）。
  * 確認は `window.confirm`（ブラウザ以外では聞かずそのまま送る。`~/components/ProjectRepos.tsx` の
  * 「削除」と同じ作り）。過去のやり取り自体は消えない（次に CoS へ話しかけたときの前置きが全量に戻るだけ）。
+ * `onSubmitted` はメニューに収めたとき（`NewConversationMenu`）に、押した直後にメニューを閉じるため。
  */
-function NewConversationButton() {
+function NewConversationButton({ onSubmitted }: { onSubmitted?: () => void }) {
   const fetcher = useFetcher<ConsoleNewConversationOutcome>();
   const submitting = fetcher.state !== "idle";
   const done = fetcher.data?.ok === true;
@@ -125,18 +132,68 @@ function NewConversationButton() {
         size="sm"
         disabled={submitting}
         data-testid="console-new-conversation"
+        className="w-full justify-start lg:w-auto lg:justify-center"
         onClick={(e) => {
           if (typeof window !== "undefined" && typeof window.confirm === "function") {
             if (!window.confirm("CoS との会話をリセットします（過去のやり取りは消えません）。よろしいですか？")) {
               e.preventDefault();
+              return;
             }
           }
+          onSubmitted?.();
         }}
       >
         <Icon name="message" />
         {done ? "新しい会話にしました" : "新しい会話"}
       </Button>
     </fetcher.Form>
+  );
+}
+
+/**
+ * フェーズ 73（ADR-0055 D2 ラウンド 5）: モバイルでは主役のボタンを「送る」1 つに絞りたいので、
+ * 使う頻度が低い「新しい会話」は「その他」の開閉メニュー（`console-overflow-*`）に収める
+ * （`~/root.tsx` の `MobileOtherSheet` と同じ「押すと開く・背景ボタンで閉じる」作り）。
+ * `lg:` はこれまでどおりインラインの secondary ボタンのまま（デスクトップの見た目は変えない）。
+ */
+function NewConversationMenu() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <div className="hidden lg:block">
+        <NewConversationButton />
+      </div>
+      <div className="relative shrink-0 lg:hidden">
+        <button
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label="その他の操作"
+          data-testid="console-overflow-trigger"
+          onClick={() => setOpen((v) => !v)}
+          className="grid size-11 place-items-center rounded-lg border border-border bg-surface text-fg-subtle hover:bg-surface-2"
+        >
+          <Icon name="more" className="size-4" />
+        </button>
+        {open && (
+          <>
+            <button
+              type="button"
+              aria-label="閉じる"
+              onClick={() => setOpen(false)}
+              className="fixed inset-0 z-10 cursor-default"
+            />
+            <div
+              role="menu"
+              data-testid="console-overflow-menu"
+              className="absolute right-0 z-20 mt-2 w-56 rounded-lg border border-border bg-surface p-1.5 shadow-md"
+            >
+              <NewConversationButton onSubmitted={() => setOpen(false)} />
+            </div>
+          </>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -295,14 +352,20 @@ function BlockStream({
   onReply: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  // `stickyRef` は「いま最新に張り付いているか」を、次に新しいブロックが来た瞬間に読むための ref
+  // （effect の依存に入れると新しいブロックごとに listener を張り直すことになるので分けている）。
+  // `stuck` は同じ値を state としても持ち、「最新へ」のジャンプピル（フェーズ 73）の表示・非表示に使う。
   const stickyRef = useRef(true);
+  const [stuck, setStuck] = useState(true);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     function onScroll() {
       if (!el) return;
-      stickyRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 96;
+      const next = shouldStickToBottom(el.scrollHeight, el.scrollTop, el.clientHeight);
+      stickyRef.current = next;
+      setStuck(next);
     }
     el.addEventListener("scroll", onScroll);
     return () => el.removeEventListener("scroll", onScroll);
@@ -314,20 +377,45 @@ function BlockStream({
     el.scrollTop = el.scrollHeight;
   }, [blocks]);
 
+  function jumpToLatest() {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    stickyRef.current = true;
+    setStuck(true);
+  }
+
   return (
-    <div
-      ref={containerRef}
-      data-testid="console-stream"
-      className="h-[clamp(10rem,calc(100dvh-30rem),36rem)] space-y-2.5 xl:h-[60vh] overflow-y-auto rounded-xl border border-border bg-surface-2/30 p-3"
-    >
-      {blocks.length === 0 ? (
-        <EmptyState icon="message" title="まだ何も流れていません">
-          下の欄から話しかけてください。
-        </EmptyState>
-      ) : (
-        blocks.map((b) => (
-          <ConsoleBlockItem key={b.cursor} block={b} org={org} projects={projects} onReplyToConversation={onReply} />
-        ))
+    <div className="relative">
+      <div
+        ref={containerRef}
+        data-testid="console-stream"
+        className="h-[clamp(10rem,calc(100dvh-30rem),36rem)] space-y-2.5 xl:h-[60vh] overflow-y-auto rounded-xl border border-border bg-surface-2/30 p-3"
+      >
+        {blocks.length === 0 ? (
+          <EmptyState icon="message" title="まだ何も流れていません">
+            下の欄から話しかけてください。
+          </EmptyState>
+        ) : (
+          blocks.map((b) => (
+            <ConsoleBlockItem key={b.cursor} block={b} org={org} projects={projects} onReplyToConversation={onReply} />
+          ))
+        )}
+      </div>
+      {/* フェーズ 73（ADR-0055 D2 ラウンド 5）: 人が上にスクロールして読んでいる間は自動で追いかけない
+          （`shouldStickToBottom`）。追いかけていない間だけ、下端に戻るピルを出す。 */}
+      {!stuck && blocks.length > 0 && (
+        <button
+          type="button"
+          onClick={jumpToLatest}
+          data-testid="console-jump-to-latest"
+          className="absolute inset-x-0 bottom-2 mx-auto min-h-11 w-fit rounded-full border border-border bg-surface px-4 text-sm font-medium text-fg shadow-md hover:bg-surface-2"
+        >
+          <span className="inline-flex items-center gap-1.5">
+            <Icon name="chevronDown" className="size-3.5" />
+            最新へ
+          </span>
+        </button>
       )}
     </div>
   );
@@ -340,6 +428,7 @@ function ConsoleInput({
   onClearReply,
   defaultScope,
   onHeightChange,
+  streaming,
 }: {
   org: readonly OrgNode[];
   projects: readonly Project[];
@@ -348,6 +437,8 @@ function ConsoleInput({
   defaultScope: string | null;
   /** フェーズ 72（U7）: この入力欄の実高さ（border-box）が変わるたびに呼ぶ。親の spacer を正確に保つ。 */
   onHeightChange: (height: number) => void;
+  /** フェーズ 73: いま育っている返事があるか（ADR-0054 D2 のキュー。打ってもこの run が終わってから）。 */
+  streaming: boolean;
 }) {
   const fetcher = useFetcher<ConsoleInstructOutcome>();
   const [text, setText] = useState("");
@@ -495,18 +586,30 @@ function ConsoleInput({
           </ul>
         )}
       </div>
-      <Button
-        type="button"
-        variant="primary"
-        size="sm"
-        disabled={submitting || !text.trim()}
-        onClick={submit}
-        data-testid="console-send"
-        className="min-h-11 min-w-24"
-      >
-        <Icon name="send" />
-        送る
-      </Button>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {/* ADR-0054 D2「入力欄は run 中も打てる（キューに入り、run が終わってから次の run になる）」の
+            見た目（フェーズ 73）。「送る」が押せることに変わりはない（無効化しない）— 次の run になる
+            だけなので、控えめな 1 行で伝えるだけにする。 */}
+        {streaming ? (
+          <p className="text-sm text-fg-subtle lg:text-xs" data-testid="console-queue-hint">
+            送信待ち（前の run が終わってから）
+          </p>
+        ) : (
+          <span />
+        )}
+        <Button
+          type="button"
+          variant="primary"
+          size="sm"
+          disabled={submitting || !text.trim()}
+          onClick={submit}
+          data-testid="console-send"
+          className="min-h-11 min-w-24"
+        >
+          <Icon name="send" />
+          送る
+        </Button>
+      </div>
     </div>
   );
 }

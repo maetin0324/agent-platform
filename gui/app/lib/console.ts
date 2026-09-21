@@ -230,6 +230,41 @@ export function consoleWaitingCounts(blocks: readonly ConsoleBlock[]): ConsoleWa
 }
 
 // ---------------------------------------------------------------------------
+// 育つ吹き出し（フェーズ 73、ADR-0055 D2 ラウンド 5）
+// ---------------------------------------------------------------------------
+
+/** いま流れているブロックの中に、育っている最中（`state === "streaming"`）の返事があるか。
+ * 入力欄の「送信待ち（前の run が終わってから）」ヒント（ADR-0054 D2 のキュー）に使う。 */
+export function hasStreamingReply(blocks: readonly ConsoleBlock[]): boolean {
+  return blocks.some((b) => b.kind === "reply" && b.state === "streaming");
+}
+
+/** 複数行の文字列の 1 行目だけを返す（`tool_result` の折り畳みの「開く前に見える行」に使う）。 */
+export function firstLine(text: string): string {
+  const idx = text.indexOf("\n");
+  return idx === -1 ? text : text.slice(0, idx);
+}
+
+/** `text` が 1 行目より長い（＝ `firstLine` の裏に隠れている内容がある）か。 */
+export function hasMoreThanFirstLine(text: string): boolean {
+  return text.length > firstLine(text).length;
+}
+
+/**
+ * `console-stream`（`overflow-y-auto` の箱）の scroll 状態から、新しいブロックが来たときに
+ * 自動で下まで追いかけてよいか（＝人が上にスクロールして読んでいる最中ではないか）を決める。
+ * `threshold` 未満（既定 96px。フェーズ 71 からの値）まで下に居れば「最新に張り付いている」とみなす。
+ */
+export function shouldStickToBottom(
+  scrollHeight: number,
+  scrollTop: number,
+  clientHeight: number,
+  threshold = 96,
+): boolean {
+  return scrollHeight - scrollTop - clientHeight < threshold;
+}
+
+// ---------------------------------------------------------------------------
 // SSE の積み上げ（`GET /console/stream` の `console.block` を既存の一覧に足す）
 // ---------------------------------------------------------------------------
 

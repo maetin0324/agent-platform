@@ -7,8 +7,14 @@ import type {
   TransitionOutcome,
 } from "~/celeris/action-types";
 import type { ConsoleBlock, ConsoleReplyStep, EventsPage, OrgNode, Project } from "~/celeris/types";
-import { formatRunEventRow, progressSummaryLine, taskLineSummary } from "~/lib/console";
-import { shortId } from "~/lib/format";
+import {
+  firstLine,
+  formatRunEventRow,
+  hasMoreThanFirstLine,
+  progressSummaryLine,
+  taskLineSummary,
+} from "~/lib/console";
+import { shortId, truncateLabel } from "~/lib/format";
 import { isKnowledgeFallback } from "~/lib/knowledge";
 import { milestoneDecisionValid } from "~/lib/milestone-review";
 import { cn } from "~/lib/utils";
@@ -170,29 +176,58 @@ function HumanBlockView({
 
 /**
  * ADR-0054 D2（Phase 68）: 育つ返事の中の 1 手（`tool_use`/`tool_result`）を 1 行に。
- * `ProgressLineRow`（折り畳んだ `progress` の展開）と見た目を揃える（長い出力も `break-words` で
- * 393px を飛び出さない。ADR-0055 D2）。
+ * フェーズ 73（ADR-0055 D2 ラウンド 5、Claude Code / Codex ライクな磨き）:
+ * - `tool_use` は道具名を太字にし、要約は長ければ省略して `title` に全文を残す（`truncateLabel`）。
+ * - `tool_result` は既定で畳み、1 行目だけを `<summary>` に見せる（`firstLine`）。中身が 1 行しか
+ *   無ければ `<details>` にせず素の行のまま（開いても閉じても同じものが見えるだけの空の三角を出さない）。
+ * - 長い id・パス・URL（空白の無いトークン）が 393px を飛び出さないよう、`.markdown` と同じ
+ *   `overflow-wrap: anywhere`（`break-words`＝`overflow-wrap: break-word` より min-content の計算にも
+ *   効くので、詰まったフレックス行でも確実に折り返す）にする。
  */
 function ReplyStepRow({ step }: { step: ConsoleReplyStep }) {
+  const toneClass = step.error ? "bg-danger-soft text-danger-soft-fg" : "bg-surface-2/60";
+  const errorBadge = step.error && (
+    <Badge tone="danger" className="ml-2 shrink-0">
+      エラー
+    </Badge>
+  );
+
+  if (step.kind === "tool_result") {
+    const first = firstLine(step.text);
+    const more = hasMoreThanFirstLine(step.text);
+    if (!more) {
+      return (
+        <div
+          data-testid="console-reply-step"
+          className={cn("rounded-md px-2 py-1 font-mono text-xs leading-snug [overflow-wrap:anywhere]", toneClass)}
+        >
+          <span className="text-fg-subtle">→ </span>
+          {first}
+          {errorBadge}
+        </div>
+      );
+    }
+    return (
+      <details data-testid="console-reply-step" className={cn("rounded-md px-2 py-1 font-mono text-xs", toneClass)}>
+        <summary className="cursor-pointer leading-snug [overflow-wrap:anywhere] marker:text-fg-subtle">
+          <span className="text-fg-subtle">→ </span>
+          {first}
+          <span className="ml-1 text-fg-subtle">…</span>
+          {errorBadge}
+        </summary>
+        <pre className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] text-fg-muted">{step.text}</pre>
+      </details>
+    );
+  }
+
   return (
     <div
       data-testid="console-reply-step"
-      className={cn(
-        "rounded-md px-2 py-1 font-mono text-xs break-words",
-        step.error ? "bg-danger-soft text-danger-soft-fg" : "bg-surface-2/60",
-      )}
+      className={cn("rounded-md px-2 py-1 font-mono text-xs leading-snug [overflow-wrap:anywhere]", toneClass)}
     >
-      {step.kind === "tool_result" ? (
-        <span className="text-fg-subtle">→ </span>
-      ) : (
-        step.tool && <span className="text-fg-subtle">[{step.tool}] </span>
-      )}
-      {step.text}
-      {step.error && (
-        <Badge tone="danger" className="ml-2">
-          エラー
-        </Badge>
-      )}
+      {step.tool && <span className="font-semibold">[{step.tool}] </span>}
+      <span title={step.text}>{truncateLabel(step.text, 90)}</span>
+      {errorBadge}
     </div>
   );
 }
@@ -219,8 +254,10 @@ function ReplyBlockView({
           streaming ? (
             <span className="flex items-center gap-1.5">
               {orgNodeName(block.node_id, org)}
+              {/* CSS だけの控えめな点滅（`prefers-reduced-motion: reduce` では `motion-reduce:` で止める。
+                  ADR-0055 D2 ラウンド 5）。 */}
               <span
-                className="inline-block size-1.5 animate-pulse rounded-full bg-primary"
+                className="inline-block size-1.5 animate-pulse rounded-full bg-primary motion-reduce:animate-none"
                 aria-hidden="true"
                 data-testid="console-reply-streaming-dot"
               />

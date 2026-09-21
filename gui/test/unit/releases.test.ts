@@ -21,6 +21,7 @@ import {
   releasePositionLabel,
   releaseSubtitle,
   releaseVerifyBadgeLabel,
+  releaseVerifyIcon,
   releaseVerifyLabel,
   releaseVerifyState,
   releaseVerifyTone,
@@ -99,6 +100,18 @@ describe("releaseVerifyState / ラベル（ADR-0040 D3）", () => {
     ]) {
       expect(label).not.toMatch(/\s/);
     }
+  });
+
+  it("U13（フェーズ 73）: ok_live / ok_stop_start は文字が同じ「検証済み」なので、アイコンで見分ける", () => {
+    expect(releaseVerifyIcon(item())).toBe("zap"); // ok_live
+    expect(releaseVerifyIcon(item({ verify: { ok: true, live_ok: false, at: null } }))).toBe("rotate"); // ok_stop_start
+    expect(releaseVerifyIcon(item())).not.toBe(
+      releaseVerifyIcon(item({ verify: { ok: true, live_ok: false, at: null } })),
+    );
+    // 未検証・検証NG はバッジの文字だけで意味が通るのでアイコンは付けない。
+    expect(releaseVerifyIcon(item({ verify: null }))).toBeNull();
+    const ng2 = item({ verify: { ok: false, live_ok: false, at: "2026-09-19T01:00:00Z" } });
+    expect(releaseVerifyIcon(ng2)).toBeNull();
   });
 
   it("1 行の説明は built_at · ref · schema", () => {

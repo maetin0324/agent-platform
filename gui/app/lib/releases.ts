@@ -1,4 +1,5 @@
 import type { DaemonInstance, ReleaseCommit, ReleaseItem, ReleaseRunning, Releases } from "~/celeris/types";
+import type { IconName } from "~/components/ui/Icon";
 import type { Tone } from "~/components/ui/tone";
 import { instanceRoleLabel, sensitiveChangesLabel, staleChangesLabel } from "~/lib/labels";
 
@@ -59,6 +60,24 @@ const VERIFY_TONE: Record<ReleaseVerifyState, Tone> = {
 
 export function releaseVerifyTone(item: Pick<ReleaseItem, "verify">): Tone {
   return VERIFY_TONE[releaseVerifyState(item)];
+}
+
+/**
+ * U13（フェーズ 72 の未解決事項。ADR-0055 D2「状態はバッジ 1 語 + 色」）: `ok_live` と `ok_stop_start`
+ * を同じ「検証済み」の 1 語にしたので、バッジの文字だけでは切替方法が分からなくなっていた。色（成功=緑・
+ * 警告=黄）に加えて、アイコンでも見分けられるようにする（`releaseVerifyLabel` の詳細行は残したまま。
+ * 色だけに頼らない、という判断は `STATUS_TONE` の「文字列は status 名をそのまま出す」と同じ考え方）。
+ * `unverified`/`ng` はアイコンを付けない（バッジの文字だけで意味が通るため）。
+ */
+const VERIFY_ICON: Record<ReleaseVerifyState, IconName | null> = {
+  unverified: null,
+  ok_live: "zap",
+  ok_stop_start: "rotate",
+  ng: null,
+};
+
+export function releaseVerifyIcon(item: Pick<ReleaseItem, "verify">): IconName | null {
+  return VERIFY_ICON[releaseVerifyState(item)];
 }
 
 /** gate（`release.sh` の 7 段）の一言。 */

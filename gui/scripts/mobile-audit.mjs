@@ -40,19 +40,6 @@ const PROJECT_ID = "p1";
 fs.mkdirSync(OUT_DIR, { recursive: true });
 for (const name of fs.readdirSync(OUT_DIR)) fs.rmSync(path.join(OUT_DIR, name), { force: true });
 
-function orgNode(id, over = {}) {
-  return {
-    id,
-    parent_id: null,
-    name: id,
-    kind: "section",
-    position: 0,
-    created_at: "2026-09-17T00:00:00Z",
-    updated_at: "2026-09-17T00:00:01Z",
-    ...over,
-  };
-}
-
 /** ADR-0055 D1 が挙げた画面。`mock` の id に合わせてある。 */
 const ROUTES = [
   { route: "home", path: "/" },
@@ -160,17 +147,13 @@ async function setupMockCeleris() {
   mock.on("GET", "/api/v1/knowledge/page", (_req, res) => sendJson(res, 200, fx.knowledgePage()));
   mock.on("GET", "/api/v1/knowledge/inbox", (_req, res) => sendJson(res, 200, fx.knowledgeInbox()));
 
-  const org = {
-    items: [
-      orgNode("cos", { kind: "secretary", name: "CoS" }),
-      orgNode("coding", { kind: "department", parent_id: "cos", name: "Coding" }),
-      orgNode("coding-poc", { parent_id: "coding", genre: "coding", name: "PoC" }),
-    ],
-    // ADR-0054 D3（Phase 68）: 部門長の継続セッション表示（`/org?selected=coding`）が 393px を
-    // 飛び出さないことも、この固定データで確かめられるようにしておく。
-    lead_sessions: [{ node_id: "coding", turns: 3, approx_tokens: 123456, last_used_at: "2026-09-21T01:00:00Z" }],
-  };
-  mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, org));
+  // フェーズ 73（ADR-0055 D2 ラウンド 5、U12）: `gui/test/mock-celeris/fixtures.ts` の `orgList()`
+  // （`coding-poc` の下に 3 段のサブツリーを持つ）をそのまま使う。以前はここに 3 ノードだけの
+  // その場限りの木を書いていたが、それでは `/org` の開閉トグル（フェーズ 72）が畳む中身がほぼ無く、
+  // 「大きな組織で畳むと画面が短くなる」効果を監査のスクリーンショットで確認できなかった
+  // （Phase G26 の未解決事項 U12）。部門長の継続セッション表示（`/org?selected=coding`）も
+  // 引き続きこの固定データで確かめる。
+  mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, fx.orgList()));
 
   mock.on("GET", "/api/v1/config", (_req, res) =>
     sendJson(res, 200, {
@@ -364,7 +347,16 @@ async function setupMockCeleris() {
     sendJson(res, 200, { approvals: 0, attention: 0, by_status: {}, drafts: 0, questions: 0 }),
   );
 
-  mock.on("GET", "/api/v1/console", (_req, res) => sendJson(res, 200, fx.consolePage()));
+  // フェーズ 73（ADR-0055 D2 ラウンド 5）: 育つ返事の積み上げ済みスナップショット
+  // （`consoleGrowingReplySnapshot()`。ADR-0054 D2、`GET /console` は celeris 側で 1 回に組んで返す
+  // ので GUI から見るとこの形で届く）を既定の流れに混ぜる。Phase 68 は `checkFixedOverlays`（D1-5）が
+  // `console-stream`（内側で `overflow-y-auto` する箱）の中身を判定できず、実際にはスクロールで届く
+  // 末尾要素を偽陽性で「固定バーに隠れている」と報告する既知の限界（U-G28-2 / P-G28-1）を理由に、
+  // 意図的にここへ混ぜていなかった。今回 `checkFixedOverlays` に内側スクローラの追随を足した（下記）
+  // ので、育つ返事の吹き出し（`ReplyStepRow` の折り畳み・トリム表示を含む）も実際に機械検査に通す。
+  mock.on("GET", "/api/v1/console", (_req, res) =>
+    sendJson(res, 200, fx.consolePage({ items: [...fx.consoleBlocks(), fx.consoleGrowingReplySnapshot()] })),
+  );
   mock.on("GET", "/api/v1/stream", (_req, res) => sendSse(res));
   mock.on("GET", "/api/v1/console/stream", (_req, res) => sendSse(res));
 
@@ -555,11 +547,33 @@ function checkFontSize() {
   return violations;
 }
 
-/** D1-5: 固定要素が内容を隠さない（一番下までスクロールしてから判定）。 */
+/**
+ * D1-5: 固定要素が内容を隠さない（一番下までスクロールしてから判定）。
+ *
+ * P-G28-1（Phase 68 の未解決事項 U-G28-2 の解消）: 文書全体の `window.scrollTo` だけでは、
+ * `console-stream`（Console の `overflow-y-auto` な内側スクロール領域）のように**それ自身がスクロール
+ * する箱**の中身までは末尾に送れない。そのため、育つ返事のような内側スクロール領域の中の要素が
+ * 実際にはスクロールすれば読める位置にあるのに、「固定の入力欄より下＝隠れている」という偽陽性を生む
+ * （Phase 68 で実際に踏んだので、育つ返事の既定モックへの混入を見送っていた）。ここでは判定の前に、
+ * `overflow-y: auto/scroll` かつ実際にスクロールできる（`scrollHeight > clientHeight`）祖先をすべて
+ * 一時的に末尾までスクロールし、判定が終わったら元の位置に戻す（スクリーンショットへの影響を避ける）。
+ * ルールそのもの（「固定要素より下に来てはいけない」）は緩めていない。
+ */
 function checkFixedOverlays() {
   const violations = [];
   const height = window.__MOBILE_AUDIT_HEIGHT__;
   window.scrollTo(0, document.body.scrollHeight);
+  const innerScrollers = [];
+  for (const el of document.querySelectorAll("body *")) {
+    const style = getComputedStyle(el);
+    if (style.overflowY !== "auto" && style.overflowY !== "scroll") continue;
+    if (el.scrollHeight <= el.clientHeight) continue;
+    innerScrollers.push({ el, prevTop: el.scrollTop });
+    el.scrollTop = el.scrollHeight;
+  }
+  function restoreInnerScrollers() {
+    for (const { el, prevTop } of innerScrollers) el.scrollTop = prevTop;
+  }
   const fixed = [];
   for (const el of document.querySelectorAll("body *")) {
     const style = getComputedStyle(el);
@@ -569,7 +583,10 @@ function checkFixedOverlays() {
     fixed.push({ el, rect });
   }
   const bottomBars = fixed.filter((f) => f.rect.top > height / 2);
-  if (bottomBars.length === 0) return violations;
+  if (bottomBars.length === 0) {
+    restoreInnerScrollers();
+    return violations;
+  }
   const minTop = Math.min(...bottomBars.map((f) => f.rect.top));
   let maxContentBottom = 0;
   let worst = null;
@@ -594,6 +611,7 @@ function checkFixedOverlays() {
       detail: `content bottom=${maxContentBottom.toFixed(1)} is below the fixed bar top=${minTop.toFixed(1)} even after scrolling to the end`,
     });
   }
+  restoreInnerScrollers();
   return violations;
 }
 

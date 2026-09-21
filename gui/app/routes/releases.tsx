@@ -31,6 +31,7 @@ import {
   releasePositionLabel,
   releaseSubtitle,
   releaseVerifyBadgeLabel,
+  releaseVerifyIcon,
   releaseVerifyLabel,
   releaseVerifyTone,
   sensitiveBadgeText,
@@ -277,6 +278,9 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
               data-status-badge="release-verify"
               title={releaseVerifyLabel(item)}
             >
+              {/* U13（フェーズ 72 の未解決事項）: `ok_live`/`ok_stop_start` は同じ「検証済み」の 1 語
+                  なので、色に加えてアイコンでも切替方法を見分けられるようにする（`releaseVerifyIcon`）。 */}
+              {releaseVerifyIcon(item) && <Icon name={releaseVerifyIcon(item) ?? "zap"} className="size-3" />}
               {releaseVerifyBadgeLabel(item)}
             </Badge>
             {sensitive && (
