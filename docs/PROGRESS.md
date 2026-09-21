@@ -12931,3 +12931,50 @@ ADR-0053 D3)`（`connector_calls == 0`）で失敗した。1 日中 green だっ
   ただしこの時点で pegasus の ssh master は落ちており（`GET /clusters`: `tunnel_login_needed: true`、`listener: false`、
   `last_error: "the cluster ssh master is not connected"`）、「listener あり・target 不健全 → 再追加しない」の経路は master が戻ったときに
   改めて確認する。tick が伸びなくなったこと自体は確認できた。
+
+## Phase 86 — スマホ UX ラウンド 11（運用画面: クラスタ・LLM source・リリース。ADR-0055。2026-09-21）
+
+GUI のみ（`crates/` 無変更。`gui/CLAUDE.md`「GUI から celeris に入る依存は作らない」のとおり）。`docs/adr/0055-mobile-ux.md` D3 の
+ループどおり、`/clusters`・`/accounts` の LLM source 節・`/releases` を「電話で最初に見る運用ステータスボード」として磨いた
+（Phase 65〜85 で作った API 契約はそのまま。GUI 側で判断ロジックは足していない）。詳細・証跡は `gui/docs/PROGRESS.md`
+「Phase G38」を参照（このリポジトリの慣例どおり、GUI の実装詳細は gui 側に書く）。要点:
+
+1. **`/clusters`**: クラスタ全体の状態を `connected` / `login-needed` / `down` の 1 語バッジにした
+   （`gui/app/routes/clusters.tsx::clusterStatusWord`。`tunnel_login_needed` を「down」より優先する）。トンネル（forward）は
+   Phase 85 の `listener`/`target_healthy`/`last_error` を引き続き 1 語バッジ＋理由の文で見せる（変更なし）。
+   `tunnel_login_needed` が真のときだけ「接続（TOTP）」を全幅の主操作にした（それ以外は従来の小さい「接続」ボタンのまま）。
+   トンネル一覧の下に「これは何を意味しますか？」の `<details>` を足し、Qwen が落ちている間は `celeris/<tier>` が
+   Claude/GPT に自動で倒れる旨を説明する。
+2. **`/accounts` の LLM source 節**: `celeris/<tier>` の解決先（既存）に加え、「why」（free-first / cooldown / unreachable /
+   no-source / unknown）を 1 行で添えた（`gui/app/lib/llm-sources.ts::tierResolutionReason` — celeris が返した
+   `kind`/`enabled`/`reachable`/`accounts[].cooldown_until` だけを読んで ADR-0053 D1 の規則をそのまま説明する。
+   スコアの再計算はしない）。アカウントの cooldown バッジに絶対時刻の `title` を追加。Claude のアカウントが全部
+   cooldown 中のときだけ出る警告カードを追加。
+3. **`/releases`**: `ReleaseVerify`（`ok`/`live_ok`/`at` の 2 集計値のみ。`GET /releases` は個別の検査結果を運ばない）を
+   使って、切替方法を英語 1 語（`live`/`stop-start`）のバッジで見せる `releaseModeWord`（Phase 73 のアイコン・色を流用）と、
+   検査 1〜4・4b・6 / 検査 5（N-1 互換）の 2 グループのコンパクトな一覧 `releaseVerifyCheckGroups` を足した。**個別の
+   6 検査の偽の内訳は作っていない**（celeris が持たない情報を GUI 側で捏造しない、gui/CLAUDE.md の禁止事項どおり）。
+   現行リリースのカードはスマホ幅（`xl:` の 2 列グリッドになる前）で先頭に出るよう `order-first xl:order-none` を付けた
+   （デスクトップの並びは崩さない）。upgrade ボタンの可否ルールは無変更。
+4. **通知/受信箱**: `/inbox` というルートは存在するが、ADR-0055 D1 が挙げる機械検査対象の画面一覧には**含まれていない**
+   （`gui/scripts/lib/celeris-fixture.mjs::buildRoutes` は `/knowledge/inbox` だけを対象にしており、`/inbox` 自体は
+   `pnpm mobile-audit`/`pnpm e2e:mock` の対象外）。カード・主操作 1 つは既存のラウンドで概ね満たされていた
+   （承認/却下は二者択一の決定なので両方残した）ため、承認・質問の行に相対時刻（`title` に絶対 ISO）を追加するだけの
+   軽い変更に留めた。ADR-0055 D1 の一覧に無いのでこの Phase の機械検査には含めていない。
+
+### ゲート（詳細は gui/docs/PROGRESS.md Phase G38）
+
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ。API 契約は変えていない）/ `pnpm lint` /
+`pnpm typecheck` / `pnpm test`（**1004 passed**、Phase G37 の 982 から +22）/ `pnpm build` / `pnpm mobile-audit`
+（**exit 0、違反 0 件**。25 route × light/dark。fixture に新しい状態を足して監査した）/ `pnpm e2e:mock`（**ok**）すべて exit 0。
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` はこの Phase の
+スコープ外（実行していない。Phase 80/82/83/84 と同じ扱い）。
+
+### 未解決事項
+
+- 実機（本物の celeris + 本物のブラウザ、特にスマホ）でのこの Phase の見た目・挙動は未確認（ADR-0009 P-34。サンドボックス
+  に外向きネットワークが無い）。
+- 詳細は `gui/docs/PROGRESS.md`「Phase G38」の未解決事項を参照（`releaseVerifyCheckGroups` が集計 2 値しか出せないこと、
+  `tierResolutionReason` の「cooldown」判定が「選ばれたアカウント自身」ではなく「プール内に 1 件でも cooldown 中の
+  アカウントがいる」ことを示すだけであること、`/inbox` が ADR-0055 D1 の監査対象外であることなど）。
+- 本番 = Phase 65〜85（すべて）。実装中: Phase 86（このワークトリーク。GUI のみ）。

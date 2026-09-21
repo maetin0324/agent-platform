@@ -80,6 +80,52 @@ export function releaseVerifyIcon(item: Pick<ReleaseItem, "verify">): IconName |
   return VERIFY_ICON[releaseVerifyState(item)];
 }
 
+/**
+ * 昇格したときの切替方法（ADR-0040 D4）を 1 語で（ADR-0055 ラウンド 11、Phase 86）。
+ * `releaseVerifyBadgeLabel` は `ok_live`/`ok_stop_start` をどちらも「検証済み」の 1 語にまとめている
+ * （U13、色とアイコンで見分ける方針）が、こちらは逆にその 2 つを英語 1 語のまま出す
+ * バッジ用（`live`/`stop-start`）。アイコン・色は既存の `releaseVerifyIcon`/`releaseVerifyTone` を
+ * そのまま流用する（Phase 73 相当の割り当て。二重に定義しない）。
+ */
+export type ReleaseModeWord = "live" | "stop-start" | "unknown";
+
+const MODE_WORD: Record<ReleaseVerifyState, ReleaseModeWord> = {
+  unverified: "unknown",
+  ok_live: "live",
+  ok_stop_start: "stop-start",
+  ng: "unknown",
+};
+
+export function releaseModeWord(item: Pick<ReleaseItem, "verify">): ReleaseModeWord {
+  return MODE_WORD[releaseVerifyState(item)];
+}
+
+/**
+ * 検証（`scripts/selfdeploy/verify.sh`）1〜6・4b の結果をコンパクトな一覧にする
+ * （ADR-0055 D1-3「状態バッジは 1 語」、Phase 86）。
+ *
+ * `GET /releases` の `ReleaseVerify` は個別の検査結果を運ばず、`ok`（検査 1〜4・4b・6 が全部真）と
+ * `live_ok`（検査 5、N-1 互換）の 2 つの集計値だけを持つ（`verify.sh` の doc コメントどおり）。
+ * GUI は celeris が持たない内訳を作らない（gui/CLAUDE.md「派生値の再計算・判断ロジックの再実装」の禁止）
+ * ので、**この 2 つの実在する値をそのまま 2 行として見せるだけ**（`ok` が偽でも「どの検査が落ちたか」は
+ * 分からないので、6 個の偽の内訳を捏造しない）。
+ */
+export type ReleaseCheckWord = "通過" | "失敗" | "未実施";
+
+export interface ReleaseVerifyCheckGroup {
+  key: "main" | "n1";
+  label: string;
+  word: ReleaseCheckWord;
+}
+
+export function releaseVerifyCheckGroups(item: Pick<ReleaseItem, "verify">): ReleaseVerifyCheckGroup[] {
+  const verify = item.verify;
+  return [
+    { key: "main", label: "検査 1〜4・4b・6", word: !verify ? "未実施" : verify.ok ? "通過" : "失敗" },
+    { key: "n1", label: "検査 5（N-1 互換）", word: !verify ? "未実施" : verify.live_ok ? "通過" : "失敗" },
+  ];
+}
+
 /** gate（`release.sh` の 7 段）の一言。 */
 export function releaseGateLabel(item: Pick<ReleaseItem, "gate_ok">): string {
   return item.gate_ok ? "gate ✓" : "gate ✗";

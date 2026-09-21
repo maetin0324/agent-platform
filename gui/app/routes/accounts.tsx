@@ -40,13 +40,17 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { TONE_SOLID_BG, type Tone } from "~/components/ui/tone";
 import { shortId } from "~/lib/format";
 import {
+  allAccountsCoolingDown,
   cooldownRemainingLabel,
+  cooldownUntilTitle,
   formatRemaining,
   isAccountCoolingDown,
   sourceLabel,
   sourceStatusWord,
   tierLabel,
   tierResolutionLabel,
+  tierResolutionReason,
+  tierResolutionReasonLabel,
 } from "~/lib/llm-sources";
 import { mcpAuthKindWord, mcpClientStatusWord, mcpConnectionUrlHint, mcpScopeLabel, sortMcpScopes } from "~/lib/mcp";
 import { relativeTimeLabel } from "~/lib/reports";
@@ -447,13 +451,39 @@ function LlmSourcesSection({
         <>
           {(llmSources.celeris_tiers ?? []).length > 0 && (
             <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm sm:grid-cols-3" data-testid="llm-tier-resolution">
-              {(llmSources.celeris_tiers ?? []).map((t) => (
-                <DataItem key={t.tier} label={`celeris/${tierLabel(t.tier)}`}>
-                  <span data-testid={`llm-tier-resolves-${t.tier}`}>{tierResolutionLabel(t.resolves_to)}</span>
-                </DataItem>
-              ))}
+              {(llmSources.celeris_tiers ?? []).map((t) => {
+                const reason = tierResolutionReason(t.resolves_to, llmSources.sources, nowSec);
+                return (
+                  <DataItem key={t.tier} label={`celeris/${tierLabel(t.tier)}`}>
+                    <span data-testid={`llm-tier-resolves-${t.tier}`}>{tierResolutionLabel(t.resolves_to)}</span>
+                    <span className="block text-sm text-fg-subtle" data-testid={`llm-tier-reason-${t.tier}`}>
+                      {tierResolutionReasonLabel(reason)}
+                    </span>
+                  </DataItem>
+                );
+              })}
             </dl>
           )}
+
+          {(() => {
+            const claude = llmSources.sources.find((s) => s.id === "claude-oauth");
+            return (
+              claude &&
+              allAccountsCoolingDown(claude.accounts, nowSec) && (
+                <Alert
+                  tone="warning"
+                  title="Claude のアカウントが全て cooldown 中です"
+                  data-testid="llm-claude-all-cooldown"
+                >
+                  <p>
+                    復帰するまで <Mono className="text-xs">claude/&lt;tier&gt;</Mono> は使えません。無料の Qwen
+                    が届いていれば <Mono className="text-xs">celeris/&lt;tier&gt;</Mono> はそちらへ倒れます
+                    （届いていなければ Codex の GPT に倒れます）。
+                  </p>
+                </Alert>
+              )
+            );
+          })()}
 
           {llmSources.sources.length === 0 ? (
             <EmptyState icon="server" title="供給元がありません" />
@@ -528,7 +558,7 @@ function LlmAccountRow({ account, nowSec }: { account: LlmSourceAccountView; now
         <span data-testid="llm-account-remaining-short">短期 {formatRemaining(account.remaining_short)}</span>
         <span data-testid="llm-account-remaining-long">長期 {formatRemaining(account.remaining_long)}</span>
         {cooling && account.cooldown_until != null && (
-          <Badge tone="warning" data-testid="llm-account-cooldown">
+          <Badge tone="warning" title={cooldownUntilTitle(account.cooldown_until)} data-testid="llm-account-cooldown">
             cooldown {cooldownRemainingLabel(account.cooldown_until, nowSec)}
           </Badge>
         )}

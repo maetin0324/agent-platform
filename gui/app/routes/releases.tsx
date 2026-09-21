@@ -28,9 +28,11 @@ import {
   promoteNeedsTypedSha,
   releaseGateBadgeLabel,
   releaseGateLabel,
+  releaseModeWord,
   releasePositionLabel,
   releaseSubtitle,
   releaseVerifyBadgeLabel,
+  releaseVerifyCheckGroups,
   releaseVerifyIcon,
   releaseVerifyLabel,
   releaseVerifyTone,
@@ -232,13 +234,18 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
   const [typed, setTyped] = useState("");
   const typedOk = typedShaMatches(item, typed);
   const shaInputId = useId();
+  const modeWord = releaseModeWord(item);
+  const checkGroups = releaseVerifyCheckGroups(item);
 
   return (
     <Card
       id={`release-${item.sha12}`}
       data-testid="release-row"
       data-release-sha12={item.sha12}
-      className="hover:shadow-md"
+      // Phase 86（ADR-0055、スマホの操作画面ラウンド 11）: スマホ幅（`xl:grid-cols-2` になる前）では
+      // 現行のリリースを先頭に出す。デスクトップ（`xl:` の 2 列グリッド）の並びは崩さない
+      // （`xl:order-none` で元の built_at 降順に戻す）。
+      className={`hover:shadow-md ${item.is_current ? "order-first xl:order-none" : ""}`}
     >
       <CardHeader
         icon="layers"
@@ -283,6 +290,20 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
               {releaseVerifyIcon(item) && <Icon name={releaseVerifyIcon(item) ?? "zap"} className="size-3" />}
               {releaseVerifyBadgeLabel(item)}
             </Badge>
+            {/* Phase 86（ADR-0055 ラウンド 11）: 上の「検証済み」バッジは ok_live/ok_stop_start を
+                同じ 1 語にまとめている（U13）ので、切替方法そのものを英語 1 語で見せる別バッジを足す。
+                未検証・NG のときは切替方法が定まらないので出さない。 */}
+            {modeWord !== "unknown" && (
+              <Badge
+                tone={releaseVerifyTone(item)}
+                data-testid="release-mode"
+                data-status-badge="release-mode"
+                title={releaseVerifyLabel(item)}
+              >
+                {releaseVerifyIcon(item) && <Icon name={releaseVerifyIcon(item) ?? "zap"} className="size-3" />}
+                {modeWord}
+              </Badge>
+            )}
             {sensitive && (
               <Badge tone="danger" dot data-testid="release-sensitive-badge">
                 {sensitive}
@@ -322,6 +343,24 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
             </span>
           </DataItem>
         </dl>
+
+        {/* Phase 86（ADR-0055 ラウンド 11）: 検証（1〜4・4b・6、5=N-1 互換）をコンパクトな一覧で。
+            `ReleaseVerify` はこの 2 つの集計値しか運ばないので、6 個の偽の内訳は作らない
+            （`~/lib/releases.ts::releaseVerifyCheckGroups` のコメント参照）。 */}
+        <ul className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-fg-muted" data-testid="release-verify-checks">
+          {checkGroups.map((group) => (
+            <li key={group.key} className="flex items-center gap-1.5" data-testid={`release-verify-check-${group.key}`}>
+              <span>{group.label}</span>
+              <Badge
+                tone={group.word === "通過" ? "success" : group.word === "失敗" ? "danger" : "neutral"}
+                data-status-badge="release-check"
+                data-testid={`release-verify-check-${group.key}-word`}
+              >
+                {group.word}
+              </Badge>
+            </li>
+          ))}
+        </ul>
 
         {notOnMain && (
           <Alert tone="warning" title="main に戻っていません" data-testid="release-not-on-main">

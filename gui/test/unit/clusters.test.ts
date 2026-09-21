@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CelerisClient } from "~/celeris/client.server";
 import { cancelClusterConnect, startClusterConnect, submitClusterConnectCode } from "~/celeris/clusters-admin.server";
 import type { ClusterConnectResult, ClusterConnectStart, Clusters } from "~/celeris/types";
-import { clusterConnectPanelState, loadClusters } from "~/routes/clusters";
+import { clusterConnectPanelState, clusterStatusWord, loadClusters } from "~/routes/clusters";
 import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 let mock: MockCeleris;
@@ -313,5 +313,40 @@ describe("clusterConnectPanelState", () => {
     const state = clusterConnectPanelState({ ...base, auth: "publickey", needsCode: true });
     expect(state.showCodeForm).toBe(false);
     expect(state.showConnectButton).toBe(true);
+  });
+});
+
+/**
+ * `/clusters` のスマホ版 1 語バッジ（ADR-0055 D1-3、Phase 86）: connected / login-needed / down。
+ * `tunnel_login_needed` を「down」より優先する（鍵認証も失敗して人の TOTP が要る状態を先に伝える）。
+ */
+describe("clusterStatusWord", () => {
+  it("tunnel_login_needed を最優先する（connected が false でも true でも）", () => {
+    expect(clusterStatusWord({ connected: false, tunnel_login_needed: true })).toBe("login-needed");
+    expect(clusterStatusWord({ connected: true, tunnel_login_needed: true })).toBe("login-needed");
+  });
+
+  it("tunnel_login_needed が無ければ connected をそのまま反映する", () => {
+    expect(clusterStatusWord({ connected: true, tunnel_login_needed: false })).toBe("connected");
+    expect(clusterStatusWord({ connected: false, tunnel_login_needed: false })).toBe("down");
+  });
+
+  it("観測が無ければ値を捏造せず unknown にする", () => {
+    expect(clusterStatusWord({ connected: null, tunnel_login_needed: false })).toBe("unknown");
+    expect(clusterStatusWord({ connected: undefined, tunnel_login_needed: undefined })).toBe("unknown");
+    expect(clusterStatusWord({})).toBe("unknown");
+  });
+
+  it("バッジ 1 語（空白なし・12 字以内）", () => {
+    for (const input of [
+      { connected: true, tunnel_login_needed: false },
+      { connected: false, tunnel_login_needed: false },
+      { connected: false, tunnel_login_needed: true },
+      {},
+    ]) {
+      const word = clusterStatusWord(input);
+      expect(word).not.toMatch(/\s/);
+      expect(word.length).toBeLessThanOrEqual(12);
+    }
   });
 });

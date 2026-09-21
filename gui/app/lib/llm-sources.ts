@@ -42,6 +42,51 @@ export function tierResolutionLabel(resolvesTo: string | null | undefined): stri
   return sourceLabel(resolvesTo);
 }
 
+/**
+ * `celeris/<tier>` が今の供給元に解決した理由の一語（ADR-0055 ラウンド 11、`/accounts` の
+ * 「LLM source」節）。**celeris の選択スコアを GUI 側で再計算しない**（gui/CLAUDE.md の禁止事項）:
+ * ADR-0053 D1 が文書化した規則（(a) 到達可能な無料源を最優先 → (b) アカウントプールの残量）を、
+ * `GET /llm/sources` が既に返している値（`kind`・`enabled`・`reachable`・`accounts[].cooldown_until`）
+ * だけを読んで説明する。
+ * - 解決先が無ければ `"no-source"`。
+ * - 解決先が `openai-compatible`（無料中継。Qwen 等）なら `"free-first"`（D1(a) どおり最優先で選ばれた）。
+ * - 解決先が oauth プールで、`openai-compatible` の供給元が設定されていて `reachable === false` なら
+ *   `"unreachable"`（無料源が落ちているのでアカウントに倒れた）。
+ * - 解決先が oauth プールで、そのプール内に cooldown 中のアカウントが 1 つでもあれば `"cooldown"`
+ *   （どのアカウントが実際に選ばれたかは celeris だけが知っている。「このプールに cooldown 中の
+ *   アカウントがいる」という既存の事実を示すだけで、選択の順位までは再現しない）。
+ * - それ以外は `"unknown"`（無料源が無い・cooldown も無い、普通のプール選択）。
+ */
+export type TierResolutionReason = "free-first" | "cooldown" | "unreachable" | "no-source" | "unknown";
+
+export function tierResolutionReason(
+  resolvesTo: string | null | undefined,
+  sources: readonly Pick<LlmSourceView, "id" | "kind" | "enabled" | "reachable" | "accounts">[],
+  nowSec: number,
+): TierResolutionReason {
+  if (!resolvesTo) return "no-source";
+  const resolved = sources.find((s) => s.id === resolvesTo);
+  if (!resolved) return "unknown";
+  if (resolved.kind === "openai-compatible") return "free-first";
+  const freeSource = sources.find((s) => s.kind === "openai-compatible");
+  if (freeSource?.enabled && freeSource.reachable === false) return "unreachable";
+  if (resolved.accounts.some((a) => isAccountCoolingDown(a, nowSec))) return "cooldown";
+  return "unknown";
+}
+
+const TIER_RESOLUTION_REASON_LABEL: Record<TierResolutionReason, string> = {
+  "free-first": "無料の Qwen が使えるため優先しています",
+  cooldown: "一部アカウントが cooldown 中です",
+  unreachable: "Qwen が届かないため Claude / GPT に倒れています",
+  "no-source": "使える供給元がありません",
+  unknown: "通常のアカウント選択です",
+};
+
+/** `tierResolutionReason` を一行の日本語にする。 */
+export function tierResolutionReasonLabel(reason: TierResolutionReason): string {
+  return TIER_RESOLUTION_REASON_LABEL[reason];
+}
+
 /** `"frontier"` / `"standard"` / `"cheap"` を画面の見出しに（未知の値はそのまま）。 */
 export function tierLabel(tier: string): string {
   const known: Record<string, string> = { frontier: "frontier", standard: "standard", cheap: "cheap" };
@@ -62,6 +107,26 @@ export function cooldownRemainingLabel(cooldownUntilSec: number, nowSec: number)
 /** アカウント 1 件が cooldown 中か（`cooldown_until` が未来か）。 */
 export function isAccountCoolingDown(account: Pick<LlmSourceAccountView, "cooldown_until">, nowSec: number): boolean {
   return account.cooldown_until != null && account.cooldown_until > nowSec;
+}
+
+/**
+ * cooldown の絶対時刻（`title` 属性用の RFC 3339。ADR-0055 D2「相対時刻＋`title` に絶対時刻」の規律を
+ * Unix 秒の `cooldown_until` にもそのまま適用する）。値を捏造しない: 呼び出し側は
+ * `isAccountCoolingDown`/`cooldown_until != null` を確認してから使うこと。
+ */
+export function cooldownUntilTitle(cooldownUntilSec: number): string {
+  return new Date(cooldownUntilSec * 1000).toISOString();
+}
+
+/**
+ * ある供給元のアカウントが 1 件以上あり、**全員**が cooldown 中か（`/accounts` の「Claude のアカウントが
+ * 全部 cooldown 中」の警告カード用）。0 件（アカウントが無い）は「全員 cooldown 中」とは言えないので false。
+ */
+export function allAccountsCoolingDown(
+  accounts: readonly Pick<LlmSourceAccountView, "cooldown_until">[],
+  nowSec: number,
+): boolean {
+  return accounts.length > 0 && accounts.every((a) => isAccountCoolingDown(a, nowSec));
 }
 
 /**

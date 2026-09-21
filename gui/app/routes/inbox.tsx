@@ -13,6 +13,7 @@ import { checkboxClass, hintClass, textareaClass } from "~/components/ui/form";
 import { Icon, type IconName } from "~/components/ui/Icon";
 import { Alert, EmptyState, PageHeader, SectionTitle, StatCard } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
+import { relativeTimeLabel } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import type { Route } from "./+types/inbox";
 
@@ -43,8 +44,19 @@ export async function loadInbox(client: CelerisClient, request: Request): Promis
 // 409 / 422 の action 後も再検証する（docs/adr/0005 D2）。
 export const shouldRevalidate = revalidateAfterActionErrors;
 
-export async function loader({ request }: Route.LoaderArgs): Promise<Inbox | null> {
-  return loadInbox(getCelerisClient(), request);
+/**
+ * `fetchedAt`（Phase 86、ADR-0055 ラウンド 11）は表示用の相対時刻の基準時刻でしかない
+ * （`~/lib/reports.ts::relativeTimeLabel` と同じ規律。celeris への問い合わせ自体は `loadInbox` のまま）。
+ * `loadInbox` 自体のテスト（`test/unit/inbox.loader.test.ts`）は変えない。
+ */
+export interface InboxLoaderData {
+  inbox: Inbox | null;
+  fetchedAt: string;
+}
+
+export async function loader({ request }: Route.LoaderArgs): Promise<InboxLoaderData> {
+  const inbox = await loadInbox(getCelerisClient(), request);
+  return { inbox, fetchedAt: new Date().toISOString() };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -75,7 +87,7 @@ function InboxFlash({ fetcher }: { fetcher: InboxFetcher }) {
 }
 
 export default function InboxPage({ loaderData }: Route.ComponentProps) {
-  const inbox = loaderData;
+  const { inbox, fetchedAt } = loaderData;
   if (!inbox) {
     return (
       <Alert tone="danger" icon="wifiOff" data-testid="inbox-unavailable">
@@ -136,7 +148,7 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
         ) : (
           <ul className="space-y-3">
             {inbox.approvals.map((item) => (
-              <ApprovalRow key={item.approval.id} item={item} />
+              <ApprovalRow key={item.approval.id} item={item} fetchedAt={fetchedAt} />
             ))}
           </ul>
         )}
@@ -154,7 +166,7 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
         ) : (
           <ul className="space-y-3">
             {inbox.questions.map((item) => (
-              <QuestionRow key={item.task.id} item={item} />
+              <QuestionRow key={item.task.id} item={item} fetchedAt={fetchedAt} />
             ))}
           </ul>
         )}
@@ -217,7 +229,7 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
   );
 }
 
-function ApprovalRow({ item }: { item: ApprovalItem }) {
+function ApprovalRow({ item, fetchedAt }: { item: ApprovalItem; fetchedAt: string }) {
   const fetcher = useFetcher<TransitionOutcome[]>({ key: `inbox-approval-${item.approval.id}` });
   const submitting = fetcher.state !== "idle";
   return (
@@ -225,10 +237,21 @@ function ApprovalRow({ item }: { item: ApprovalItem }) {
       data-testid="approval-item"
       className="rounded-lg border border-border bg-surface p-4 text-sm shadow-xs transition-shadow hover:shadow-sm"
     >
-      <p className="font-semibold text-fg" data-testid="approval-title">
+      <p
+        className="flex flex-wrap items-baseline justify-between gap-2 font-semibold text-fg"
+        data-testid="approval-title"
+      >
         <Link to={`/tasks/${item.approval.id}`} className="hover:underline">
           {item.approval.title}
         </Link>
+        <time
+          dateTime={item.requested_at}
+          title={item.requested_at}
+          className="text-xs font-normal text-fg-subtle"
+          data-testid="approval-requested-at"
+        >
+          {relativeTimeLabel(item.requested_at, fetchedAt)}
+        </time>
       </p>
       {item.parent && (
         <p className="mt-1 flex flex-wrap items-center gap-1.5 text-fg-muted" data-testid="approval-parent-title">
@@ -302,7 +325,7 @@ function ApprovalRow({ item }: { item: ApprovalItem }) {
   );
 }
 
-function QuestionRow({ item }: { item: QuestionItem }) {
+function QuestionRow({ item, fetchedAt }: { item: QuestionItem; fetchedAt: string }) {
   const fetcher = useFetcher<TransitionOutcome[]>({ key: `inbox-question-${item.task.id}` });
   const submitting = fetcher.state !== "idle";
   // 監査 H2: 質問への回答は「認可」の画面に一本化する（Phase 29 で `approval_id` が付いた）。
@@ -313,10 +336,20 @@ function QuestionRow({ item }: { item: QuestionItem }) {
       data-testid="question-item"
       className="rounded-lg border border-border bg-surface p-4 text-sm shadow-xs transition-shadow hover:shadow-sm"
     >
-      <p className="font-semibold text-fg">
+      <p className="flex flex-wrap items-baseline justify-between gap-2 font-semibold text-fg">
         <Link to={`/tasks/${item.task.id}`} className="hover:underline">
           {item.task.title}
         </Link>
+        {item.asked_at && (
+          <time
+            dateTime={item.asked_at}
+            title={item.asked_at}
+            className="text-xs font-normal text-fg-subtle"
+            data-testid="question-asked-at"
+          >
+            {relativeTimeLabel(item.asked_at, fetchedAt)}
+          </time>
+        )}
       </p>
       <p className="mt-1 text-fg" data-testid="question-text">
         {item.question}

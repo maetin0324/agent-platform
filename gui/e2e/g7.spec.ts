@@ -101,7 +101,8 @@ test.describe("受け入れ条件 1・2・3・6: /clusters、受信箱の cluste
 
     const offline = page.locator('[data-testid="cluster-row"][data-cluster-id="offline"]');
     await expect(offline.getByTestId("cluster-host")).toHaveText("celeris-no-such-host-for-tests");
-    await expect(offline.getByTestId("cluster-connected")).toHaveText("disconnected");
+    // Phase 86（ADR-0055 D1-3）: クラスタの状態バッジは connected / login-needed / down の 1 語。
+    await expect(offline.getByTestId("cluster-connected")).toHaveText("down");
     await expect(offline.getByTestId("cluster-login-hint")).toContainText(
       "scripts/cluster-login.sh celeris-no-such-host-for-tests",
     );

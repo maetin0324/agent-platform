@@ -18,9 +18,11 @@ import {
   promoteNeedsTypedSha,
   releaseGateBadgeLabel,
   releaseGateLabel,
+  releaseModeWord,
   releasePositionLabel,
   releaseSubtitle,
   releaseVerifyBadgeLabel,
+  releaseVerifyCheckGroups,
   releaseVerifyIcon,
   releaseVerifyLabel,
   releaseVerifyState,
@@ -117,6 +119,71 @@ describe("releaseVerifyState / ラベル（ADR-0040 D3）", () => {
   it("1 行の説明は built_at · ref · schema", () => {
     expect(releaseSubtitle(item())).toBe("2026-09-19T00:00:00Z · main · schema 11");
     expect(releaseSubtitle(item({ built_at: null, ref: null, schema_version: null }))).toBe("ビルド日時が読めません");
+  });
+});
+
+/** ADR-0055 ラウンド 11（Phase 86）: スマホの「現行リリース」カード向けの追加の 1 語。 */
+describe("releaseModeWord", () => {
+  it("maps ok_live / ok_stop_start to the literal english word (unlike the merged badge label)", () => {
+    expect(releaseModeWord(item())).toBe("live");
+    expect(releaseModeWord(item({ verify: { ok: true, live_ok: false, at: null } }))).toBe("stop-start");
+  });
+
+  it("is unknown when there is nothing to switch to (unverified or ng)", () => {
+    expect(releaseModeWord(item({ verify: null }))).toBe("unknown");
+    expect(releaseModeWord(item({ verify: { ok: false, live_ok: false, at: null } }))).toBe("unknown");
+  });
+
+  it("never produces a badge with whitespace or more than 12 characters", () => {
+    for (const candidate of [
+      item(),
+      item({ verify: { ok: true, live_ok: false, at: null } }),
+      item({ verify: null }),
+      item({ verify: { ok: false, live_ok: false, at: null } }),
+    ]) {
+      const word = releaseModeWord(candidate);
+      expect(word).not.toMatch(/\s/);
+      expect(word.length).toBeLessThanOrEqual(12);
+    }
+  });
+});
+
+/**
+ * ADR-0055 ラウンド 11（Phase 86）: `ReleaseVerify` は個別の検査結果を運ばない（`ok`/`live_ok`/`at`
+ * だけ）ので、GUI は 6 個の偽の内訳を作らず、この 2 つの実在する値をそのまま 2 グループとして見せる。
+ */
+describe("releaseVerifyCheckGroups", () => {
+  it("is 未実施 for both groups when unverified", () => {
+    const groups = releaseVerifyCheckGroups(item({ verify: null }));
+    expect(groups).toHaveLength(2);
+    expect(groups.map((g) => g.word)).toEqual(["未実施", "未実施"]);
+  });
+
+  it("reflects ok for the 1〜4・4b・6 group and live_ok for the 5 (N-1) group", () => {
+    const groups = releaseVerifyCheckGroups(item());
+    expect(groups.find((g) => g.key === "main")?.word).toBe("通過");
+    expect(groups.find((g) => g.key === "n1")?.word).toBe("通過");
+
+    const stopStart = releaseVerifyCheckGroups(item({ verify: { ok: true, live_ok: false, at: null } }));
+    expect(stopStart.find((g) => g.key === "main")?.word).toBe("通過");
+    expect(stopStart.find((g) => g.key === "n1")?.word).toBe("失敗");
+
+    const ng = releaseVerifyCheckGroups(item({ verify: { ok: false, live_ok: false, at: null } }));
+    expect(ng.find((g) => g.key === "main")?.word).toBe("失敗");
+    expect(ng.find((g) => g.key === "n1")?.word).toBe("失敗");
+  });
+
+  it("never produces a badge with whitespace or more than 12 characters", () => {
+    for (const candidate of [
+      item({ verify: null }),
+      item(),
+      item({ verify: { ok: false, live_ok: false, at: null } }),
+    ]) {
+      for (const group of releaseVerifyCheckGroups(candidate)) {
+        expect(group.word).not.toMatch(/\s/);
+        expect(group.word.length).toBeLessThanOrEqual(12);
+      }
+    }
   });
 });
 
@@ -339,7 +406,12 @@ describe("loadReleases", () => {
     mock.on("GET", "/api/v1/releases", (_req, res) => sendJson(res, 200, releasesView));
     const result = await loadReleases(client, new Request("http://gui.invalid/releases"));
     expect(result.releases).toEqual(releasesView);
-    expect(result.releases.items.map((i) => i.sha12)).toEqual(["bbbbbbbbbbbb", "aaaaaaaaaaaa"]);
+    expect(result.releases.items.map((i) => i.sha12)).toEqual([
+      "bbbbbbbbbbbb",
+      "aaaaaaaaaaaa",
+      "cccccccccccc",
+      "dddddddddddd",
+    ]);
     expect(result.fetchedAt).toMatch(/T/);
     expect(mock.requests.some((r) => r.method === "GET" && r.url === "/api/v1/releases")).toBe(true);
   });

@@ -128,6 +128,20 @@ export function clusterAuthKind(auth: string | null | undefined): ClusterAuthKin
 }
 
 /**
+ * クラスタ全体の状態を 1 語に（ADR-0055 D1-3、Phase 86）。`tunnel_login_needed` を「down」より優先する:
+ * ssh master が鍵認証でも繋がらず人の TOTP が要る状態は、ただの切断より先に伝えたい（下の
+ * 「接続（TOTP）」の全幅ボタンと対になる）。観測が無ければ `"unknown"`（値を捏造しない）。
+ */
+export type ClusterStatusWord = "connected" | "login-needed" | "down" | "unknown";
+
+export function clusterStatusWord(item: Pick<ClusterView, "connected" | "tunnel_login_needed">): ClusterStatusWord {
+  if (item.tunnel_login_needed) return "login-needed";
+  if (item.connected === true) return "connected";
+  if (item.connected === false) return "down";
+  return "unknown";
+}
+
+/**
  * 接続パネルのどの部分を出すかを決める（ADR-0032 D6）。**描画から切り離して単体テストできるようにしてある**:
  * 一度「進行中だと入力欄に戻れなくなる」不具合を実機で出したため（`gui/test/unit/clusters.test.ts`）。
  */
@@ -161,8 +175,8 @@ function ClusterCard({
   fetcher: FetcherWithComponents<ClusterConnectOutcome>;
   submitting: boolean;
 }) {
-  const tone: Tone = item.connected === true ? "success" : item.connected === false ? "danger" : "neutral";
-  const connectedLabel = item.connected === true ? "connected" : item.connected === false ? "disconnected" : "-";
+  const statusWord = clusterStatusWord(item);
+  const tone: Tone = statusWord === "connected" ? "success" : statusWord === "unknown" ? "neutral" : "danger";
   const auth = clusterAuthKind(item.auth);
   const pendingElsewhereCandidate = item.connect_pending === true;
 
@@ -205,8 +219,14 @@ function ClusterCard({
             <Badge tone="neutral" data-testid="cluster-auth">
               {auth}
             </Badge>
-            <Badge tone={tone} dot pulse={item.connected === true} data-testid="cluster-connected">
-              {connectedLabel}
+            <Badge
+              tone={tone}
+              dot
+              pulse={statusWord === "connected"}
+              data-status-badge="cluster"
+              data-testid="cluster-connected"
+            >
+              {statusWord}
             </Badge>
           </>
         }
@@ -236,8 +256,8 @@ function ClusterCard({
           <Alert tone="danger" title="ログインが必要（TOTP）" data-testid="cluster-tunnel-login-needed">
             <p>
               このクラスタのトンネル（下の一覧）を維持するための ssh 接続が切れ、鍵認証だけでは繋がりませんでした
-              （ADR-0053 D3）。下の「接続」から TOTP を入力してください。繋がれば celeris がトンネルを自動で
-              張り直します。
+              （ADR-0053 D3）。下の「接続（TOTP）」から TOTP を入力してください。繋がれば celeris がトンネルを
+              自動で張り直します。
             </p>
           </Alert>
         )}
@@ -248,6 +268,17 @@ function ClusterCard({
             {item.tunnel_forwards.map((forward) => (
               <TunnelForwardRow key={forward.listen} forward={forward} />
             ))}
+            <details className="rounded-lg border border-border bg-surface-2/40 px-3 py-2 text-sm text-fg-muted">
+              <summary className="cursor-pointer select-none font-medium text-fg" data-testid="tunnel-explainer-toggle">
+                これは何を意味しますか？
+              </summary>
+              <p className="mt-2">
+                このトンネルは Qwen（無料の LLM source、ADR-0053）への接続です。転送先（target）が応答しない間は、
+                <Mono className="text-xs">celeris/&lt;tier&gt;</Mono> は自動で Claude / GPT のアカウントに倒れます （
+                <Mono className="text-xs">/accounts</Mono> の「LLM source」節で今の解決先を確認できます）。
+                タスクは止まりません。
+              </p>
+            </details>
           </div>
         )}
 
@@ -302,9 +333,18 @@ function ClusterCard({
                 <fetcher.Form method="post">
                   <input type="hidden" name="intent" value="cluster_connect" />
                   <input type="hidden" name="id" value={item.id} />
-                  <Button type="submit" variant="primary" size="sm" disabled={submitting} data-testid="cluster-connect">
+                  {/* Phase 86（ADR-0055 D1）: TOTP の再ログインが要る状態は、スマホでも見つけやすい
+                      全幅の主操作にする。それ以外（初回の接続など）は従来どおり小さいボタン。 */}
+                  <Button
+                    type="submit"
+                    variant="primary"
+                    size="sm"
+                    disabled={submitting}
+                    className={item.tunnel_login_needed ? "w-full sm:w-auto" : undefined}
+                    data-testid="cluster-connect"
+                  >
                     <Icon name="link" />
-                    {showPendingElsewhere ? "接続し直す" : "接続"}
+                    {item.tunnel_login_needed ? "接続（TOTP）" : showPendingElsewhere ? "接続し直す" : "接続"}
                   </Button>
                 </fetcher.Form>
               )}
@@ -387,7 +427,7 @@ function TunnelForwardRow({ forward }: { forward: ClusterForwardView }) {
     word === "up" ? "success" : word === "unreachable" ? "warning" : word === "down" ? "danger" : "neutral";
   return (
     <div
-      className="flex min-w-0 flex-col gap-1 rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs"
+      className="flex min-w-0 flex-col gap-1 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm"
       data-testid="cluster-tunnel-forward-row"
     >
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">

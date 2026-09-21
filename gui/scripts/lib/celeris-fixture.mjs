@@ -265,7 +265,36 @@ export async function setupMockCeleris() {
           auth: "totp",
           connected: false,
           tunnel_login_needed: true,
-          tunnel_forwards: [{ listen: "127.0.0.1:18000", target: "bnode150:18000", up: false }],
+          // Phase 85（ADR-0053 追記）の実機と同じ形: listener はあるが target が応答しない
+          // （"unreachable" の 1 語バッジ + 理由の文を mobile-audit / e2e:mock に描画させる）。
+          tunnel_forwards: [
+            {
+              listen: "127.0.0.1:18000",
+              target: "bnode150:18000",
+              up: false,
+              listener: true,
+              target_healthy: false,
+              last_error: "target 127.0.0.1:18000 did not answer /v1/models within 2s",
+            },
+          ],
+        },
+        // Phase 86（ADR-0055 ラウンド 11）: tunnel_login_needed を伴わない、ただの切断
+        // （"down" の 1 語バッジ）も監査対象にする。`auth: "manual"` にする（`focus-order` の検査は
+        // 深さ 6 までの CSS パスで要素を照合するため、"pegasus" と同じ `auth != "manual"` にして
+        // 同じ形の「接続」フォームをもう 1 つ並べると、2 つの操作可能なボタンの署名が衝突して
+        // 誤検知の trap になる。実際に踏んで確認済み）。
+        {
+          id: "gpu2",
+          host: "gpu2.internal",
+          concurrency: 1,
+          delete_on_push: false,
+          env_keys: [],
+          has_setup: false,
+          rsync_excludes: [],
+          sync: "rsync",
+          auth: "manual",
+          connected: false,
+          tunnel_login_needed: false,
         },
       ],
     }),
@@ -278,13 +307,27 @@ export async function setupMockCeleris() {
           id: "claude-oauth",
           kind: "claude-oauth",
           enabled: true,
+          // Phase 86（ADR-0055 ラウンド 11）: 2 件とも cooldown 中にして、絶対 title 付きの相対時間の
+          // バッジと「Claude のアカウントが全て cooldown 中です」の警告カードの両方を監査対象にする
+          // （celeris/<tier> の「why」が cooldown になる経路もこれで確かめられる）。
           accounts: [
             {
               id: "claude-a",
               logged_in: true,
-              remaining: 0.62,
-              remaining_short: 0.62,
-              remaining_long: 0.81,
+              remaining: 0.1,
+              remaining_short: 0.1,
+              remaining_long: 0.3,
+              cooldown_until: 1_893_456_000, // 2030-01-01T00:00:00Z 相当（常に未来）
+              cooldown_reason: "exhausted",
+            },
+            {
+              id: "claude-b",
+              logged_in: true,
+              remaining: 0.05,
+              remaining_short: 0.05,
+              remaining_long: 0.2,
+              cooldown_until: 1_893_456_000,
+              cooldown_reason: "throttled",
             },
           ],
           last_hour_requests: 12,
@@ -292,10 +335,14 @@ export async function setupMockCeleris() {
           last_hour_completion_tokens: 900,
         },
         {
+          // Phase 86（ADR-0055 ラウンド 11）: reachable にして、`cheap` の解決先にする（"free-first"
+          // の理由を監査対象にする）。frontier/standard は claude-oauth に解決したままにし（無料源は
+          // 別 tier で使われている、という設定）、その claude-oauth のアカウントは 2 件とも cooldown 中
+          // なので、こちらは「cooldown」の理由を監査対象にする。
           id: "openai-compatible:qwen",
           kind: "openai-compatible",
           enabled: true,
-          reachable: false,
+          reachable: true,
           accounts: [],
           last_hour_requests: 40,
           last_hour_prompt_tokens: 9000,
@@ -305,7 +352,7 @@ export async function setupMockCeleris() {
       celeris_tiers: [
         { tier: "frontier", resolves_to: "claude-oauth" },
         { tier: "standard", resolves_to: "claude-oauth" },
-        { tier: "cheap", resolves_to: null },
+        { tier: "cheap", resolves_to: "openai-compatible:qwen" },
       ],
     }),
   );

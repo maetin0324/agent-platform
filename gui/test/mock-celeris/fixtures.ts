@@ -134,6 +134,19 @@ export const defaultReleases: Releases = {
       changes: releaseChanges(),
     }),
     releaseItem({ is_current: true, promoted_at: "2026-09-19T02:00:00Z" }),
+    // Phase 86（ADR-0055 ラウンド 11）: mobile-audit / e2e:mock がスマホの新しい状態
+    // （mode バッジ "stop-start"、検証チェックの一覧の「失敗」）も描画するように、`ok_stop_start` と
+    // `ng` の 2 状態を fixture に足す（既存の 2 件は `unverified`/`ok_live` のまま）。
+    releaseItem({
+      sha12: "cccccccccccc",
+      built_at: "2026-09-18T00:00:00Z",
+      verify: { ok: true, live_ok: false, at: "2026-09-18T01:00:00Z" },
+    }),
+    releaseItem({
+      sha12: "dddddddddddd",
+      built_at: "2026-09-17T00:00:00Z",
+      verify: { ok: false, live_ok: false, at: "2026-09-17T01:00:00Z" },
+    }),
   ],
 };
 

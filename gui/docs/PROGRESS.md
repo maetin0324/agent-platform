@@ -5627,3 +5627,203 @@ React が 1 回だけ静かに client 側の値に差し替える（相対表示
   削除（サーバー側 API が個別ファイル削除を提供していない）はできない。運用でファイル削除の要望が出たら、
   celeris 側に `DELETE /skills/{name}/files/{path}` 相当を足すかどうかの検討が要る（このワークトリーク
   からは `crates/` に触れないため提案のみ）。
+
+## Phase G38 — スマホ UX ラウンド 11: 運用画面（クラスタ・LLM source・リリース）を電話優先のステータスボードに（ADR-0055、celeris Phase 86。2026-09-21）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。`docs/adr/0055-mobile-ux.md` D3 のループどおり、Phase 65〜85 で
+作った運用系 3 画面（`/clusters`・`/accounts` の LLM source 節・`/releases`）を、既存の API 契約（`docs/celeris-api-v1.md` /
+`app/celeris/types.ts`）を変えずに、電話幅で最初に見る「ステータスボード」として磨いた。判断（何を選ぶか・何が正しいか）は
+celeris の中にあるまま、GUI 側は表示の言い換えだけを追加している（`gui/CLAUDE.md`「判断ロジックの再実装」の禁止）。
+
+### 1. `/clusters`（受け入れ条件 1）
+
+- **クラスタ全体の 1 語バッジ**: `app/routes/clusters.tsx::clusterStatusWord`（新規、`ClusterView.connected`/
+  `tunnel_login_needed` から `"connected"` / `"login-needed"` / `"down"` / `"unknown"` を返す純粋関数）。
+  `tunnel_login_needed` を「down」より優先する（鍵認証も失敗して人の TOTP が要る状態を、ただの切断より先に伝える）。
+  従来の `connectedLabel`（`"connected"`/`"disconnected"`/`"-"`）を置き換えた。**`"disconnected"` → `"down"` へのラベル
+  変更**に伴い、`e2e/g7.spec.ts`（受け入れ条件 1・2・3・6、実 celeris に対する Playwright）の該当アサーションを
+  `toHaveText("down")` に更新した（`pnpm e2e:mock`/`pnpm mobile-audit` の対象ではないが、実 celeris 向けの `pnpm e2e` を
+  壊さないため。実行はしていない — このスコープでは実 celeris を起動しないため未確認）。
+- **トンネル（forward）の表示**: Phase 85 で作った `listener`/`target_healthy`/`last_error` の 1 語バッジ＋理由の文
+  （`TunnelForwardRow`）はロジックとしては無変更。表示のためのコンテナの `text-xs` を `text-sm` にした（後述の
+  font-size 監査対応。中の `Mono`（host:port）は `font-mono` なので対象外のまま）。
+- **「接続（TOTP）」の全幅主操作**: `item.tunnel_login_needed` が真のときだけ、既存の「接続」ボタン（`data-testid=
+  "cluster-connect"`。フォーム・intent は無変更）のラベルを「接続（TOTP）」にし、`className="w-full sm:w-auto"`
+  （`/releases` の upgrade ボタンと同じ、スマホだけ全幅にしてタブレット以上は auto に戻すパターン）を付けた。
+  それ以外（初回接続・`tunnel_login_needed` を伴わない再接続）は従来どおり小さいボタン・「接続」/「接続し直す」の
+  ラベルのまま（ボタン自体・`data-testid`・action の intent は 1 つのまま増やしていない — 2 つの見た目違いの
+  ボタンを重ねて出す設計は避けた）。
+- **「これは何を意味しますか？」の disclosure**: トンネル一覧の下に `<details>` を足し、「このトンネルは Qwen への
+  接続で、target が応答しない間 `celeris/<tier>` は自動で Claude/GPT に倒れる（タスクは止まらない）」ことを説明する
+  1 段落。`/accounts` の LLM source 節への導線も添えた。
+
+### 2. `/accounts` の LLM source 節（受け入れ条件 2）
+
+- **`tierResolutionReason`（`app/lib/llm-sources.ts`、新規）**: `celeris/<tier>` が今の供給元に解決した理由を
+  `"free-first"` / `"cooldown"` / `"unreachable"` / `"no-source"` / `"unknown"` の 1 語で返す純粋関数。**celeris の
+  選択アルゴリズム（ADR-0053 D1 の「free 優先 → 残量スコア」）を GUI で再現・再計算するのではなく**、`GET /llm/sources`
+  が既に返している値（解決先の `kind`・無料中継の `enabled`/`reachable`・oauth プールの `accounts[].cooldown_until`）
+  だけを読んで、ADR が文書化した規則の一言説明を組み立てる:
+  - 解決先の `kind === "openai-compatible"` → `"free-first"`（D1(a) どおり最優先で選ばれた）。
+  - 解決先が oauth プールで、無料中継が `enabled && reachable === false` → `"unreachable"`（無料源が落ちているので
+    アカウントに倒れた）。
+  - 解決先が oauth プールで、そのプールに cooldown 中のアカウントが 1 件でもあれば → `"cooldown"`（**どのアカウントが
+    実際に選ばれたかは celeris だけが知っている**。「このプールに cooldown 中のアカウントがいる」という既存の事実を
+    示すだけで、celeris の内部の順位付けを再現してはいない — この不正確さは未解決事項に記載）。
+  - それ以外 → `"unknown"`（無料源が無い・cooldown も無い、普通のプール選択）。
+  `tierResolutionReasonLabel` が 1 行の日本語文にする。`LlmSourcesSection` の `celeris_tiers` の `dl` に、既存の
+  解決先ラベルの下へ `data-testid="llm-tier-reason-<tier>"` として追加した。
+- **cooldown の絶対時刻**: `cooldownUntilTitle`（新規、Unix 秒 → RFC 3339）を `LlmAccountRow` の cooldown バッジの
+  `title` に付けた（ADR-0055 D2「相対時刻＋`title` に絶対時刻」の規律を Unix 秒の `cooldown_until` にも適用）。
+- **全部 cooldown の警告カード**: `allAccountsCoolingDown`（新規、汎用の純粋関数）を `claude-oauth` の供給元に適用し、
+  1 件以上のアカウントがあって**全員**が cooldown 中のときだけ `Alert tone="warning"`
+  （`data-testid="llm-claude-all-cooldown"`）を出す。0 件（アカウントが無い）は「全員 cooldown」とは言えないので
+  出さない。
+
+### 3. `/releases`（受け入れ条件 3）
+
+- **`ReleaseVerify` は集計値しか運ばない**ことを確認した（`docs/celeris-api-v1.md` §3.67 相当、`crates/task-api/
+  src/types.rs::ReleaseVerify` は `ok`/`live_ok`/`at` の 3 フィールドのみ。`scripts/selfdeploy/verify.sh` の doc
+  コメントで「`ok` は検査 1〜4・4b・6 が全部真、`live_ok` は検査 5（N-1 互換）」と定義されている）。celeris が
+  個別の検査結果を返していない以上、GUI 側で 6 個の偽の内訳を作ることは `gui/CLAUDE.md`「派生値の再計算・判断
+  ロジックの再実装」の禁止に触れる。そこで:
+  - **`releaseVerifyCheckGroups`（`app/lib/releases.ts`、新規）**: 「検査 1〜4・4b・6」（`ok` を反映）と「検査 5
+    （N-1 互換）」（`live_ok` を反映）の**2 グループ**を返す。各グループの語は `"通過"`/`"失敗"`/`"未実施"`
+    （`verify` が無ければ両方 `"未実施"`）。`ReleaseCard` の CardBody に `<ul data-testid="release-verify-checks">`
+    として追加し、各語を `data-status-badge="release-check"` のバッジにした（受け入れ条件の「検査 1〜6・4b の
+    コンパクトな一覧・1 語の結果」を、実在する 2 つの集計値の範囲で満たした。個別の 6 検査の合否は celeris の外に
+    出ていないため表示できない — 未解決事項に記載）。
+  - **`releaseModeWord`（新規）**: 切替方法を `"live"`/`"stop-start"`/`"unknown"` の英語 1 語で返す（
+    `releaseVerifyState` の `ok_live`/`ok_stop_start` をそのまま英語にしただけ）。既存の `releaseVerifyBadgeLabel`
+    は U13（Phase 73）の判断どおり両方を「検証済み」の同じ日本語 1 語にまとめているが、今回追加したバッジは
+    逆に切替方法そのものを見せる（アイコン・色は既存の `releaseVerifyIcon`/`releaseVerifyTone`（Phase 73 割り当て）
+    をそのまま流用し、二重に定義していない）。未検証・NG のときは切替方法が定まらないので出さない。
+- **現行リリースのカードをスマホで先頭に**: `ReleaseCard` のルート `Card` に
+  `className={... item.is_current ? "order-first xl:order-none" : ""}` を付けた。`xl:grid-cols-2` になる前
+  （スマホ・タブレット幅）は現行が先頭に来て、デスクトップ（`xl:` の 2 列グリッド）は `built_at` 降順の既存の並びの
+  まま（`xl:order-none` で打ち消す）。
+- **upgrade ボタンの可否は無変更**: `promoteAvailability`/`canPromote` のロジックには触れていない。
+
+### 4. 通知/受信箱（受け入れ条件 4）
+
+`/inbox` というルートは存在するが、`docs/adr/0055-mobile-ux.md` D1 が挙げる機械検査対象の画面一覧
+（`/`、`/org`、`/projects`、`/tasks/<id>`、`/board`、`/approvals`、`/reports`、`/releases`、`/knowledge`、
+`/knowledge/inbox`、`/clusters`、`/accounts`、`/help`）には**含まれていない**（`/knowledge/inbox` は別ルートで、
+こちらは対象。裏方の `/inbox` は SPEC §4 の 6 画面にも入っていない、Phase G13f-1 の設計どおり）。
+`gui/scripts/lib/celeris-fixture.mjs::buildRoutes` にも `/inbox` は無く、`pnpm mobile-audit`/`pnpm e2e:mock` の
+対象外のまま（今回もこの一覧を広げていない — CLAUDE.md「今回のフェーズだけをやる」）。
+
+とはいえ受け入れ条件が「存在するなら」満たすことを求めていたので、軽い改善は加えた:
+- **相対時刻**: `app/routes/inbox.tsx` の `loader` を `{ inbox, fetchedAt }` を返す形にし（`loadInbox` 自体・
+  `test/unit/inbox.loader.test.ts` は無変更。`fetchedAt` は表示専用の基準時刻）、承認（`requested_at`）・質問
+  （`asked_at`、無ければ非表示）の行に `~/lib/reports.ts::relativeTimeLabel` の「n 前」を `<time dateTime title>`
+  で追加した（`title` に生の ISO を残す既存の規律のまま）。
+- **カード・主操作 1 つ**: 既存の `<li>` は角丸・枠線・背景色で既に「カード」の見た目になっていた（`Card` コンポーネント
+  そのものは使っていない）。承認の「承認」/「却下」は二者択一の決定であり主操作 1 つに絞れない性質のものなので、
+  そのまま残した（`variant="primary"` は使っておらず success/danger で並列、他画面の「主操作 1 つ」規律とは別枠と
+  判断）。この構造自体は今回のスコープではないので変更していない。
+
+### 5. fixture（受け入れ条件 6「新しい状態を描画させる」）
+
+`gui/scripts/lib/celeris-fixture.mjs`（`pnpm mobile-audit`/`pnpm e2e:mock` が共有）と
+`gui/test/mock-celeris/fixtures.ts`（`pnpm test` の `defaultReleases`）を拡張した:
+
+- **クラスタ**: `pegasus` のトンネルを Phase 85 の実機と同じ形（`listener: true`・`target_healthy: false`・
+  `last_error`）にして「unreachable」バッジと理由の文を監査対象にし、`gpu2`（`auth: "manual"`、`connected: false`、
+  `tunnel_login_needed: false`）を足して「down」バッジを監査対象にした。**`gpu2` を `auth: "publickey"` にすると
+  `focus-order` の機械検査が誤検知した**（下記「見つけて直したバグ」参照）ので `"manual"` にした。
+- **LLM source**: `claude-oauth` の 2 アカウントを両方 cooldown にして「Claude のアカウントが全て cooldown 中です」
+  警告カードと絶対 `title` 付きのバッジを監査対象にし、`openai-compatible:qwen` を `reachable: true` にして
+  `cheap` tier の解決先にした（`"free-first"` の理由を監査対象にする）。`frontier`/`standard` は引き続き
+  `claude-oauth` に解決したままなので、`"cooldown"`（無料源は reachable だが frontier/standard は別 tier として
+  claude-oauth に倒れており、そのプールが cooldown 中）の理由も同時に監査対象になる。
+- **リリース**: `defaultReleases.items` に `ok_stop_start`（`cccccccccccc`）と `ng`（`dddddddddddd`）の 2 件を足し、
+  既存の `unverified`/`ok_live` と合わせて `releaseVerifyState` の 4 状態すべてを監査対象にした
+  （`test/unit/releases.test.ts::loadReleases` の並び順アサーションを 4 件に更新）。
+
+### 見つけて直したバグ（`focus-order` の誤検知、実装ロジックのバグではない）
+
+`gpu2` を最初 `auth: "publickey"` にしたところ、`pnpm mobile-audit` の `focus-order` 検査が `/clusters` で
+「Tab did not move focus away from this element after step 6 (trap)」を報告した。調べたところ実際のキーボード
+トラップではなく、監査スクリプト（`gui/scripts/mobile-audit.mjs::cssPathRef`）が要素の識別に `element.id` を使って
+おり、`<input type="hidden" name="id" value={item.id} />` を含む `<form>` では HTML の「named form control」機構に
+より `form.id` が文字列ではなくその `<input>` 要素自身を返す（ブラウザの仕様上の挙動）。これが `"[object
+HTMLInputElement]"` という壊れた文字列に化け、**構造が同じ 2 つの接続フォーム**（`pegasus` と `gpu2`、どちらも
+`auth !== "manual"` で同じ形の「接続」ボタンを持つ）の CSS パス署名が深さ 6 で衝突し、「別の要素にフォーカスが
+移った」ことを「同じ要素のまま」と誤検知した。`gpu2` を `auth: "manual"`（フォームを持たない）にして衝突を避けた。
+**GUI の実装（フォーム・フォーカス移動そのもの）にバグは無い**ことをコードを読んで確認済み。監査スクリプト自体
+（`cssPathRef`）の修正はこの Phase のスコープ外（GUI 表示のみのスコープであり、`scripts/mobile-audit.mjs` の
+識別ロジックの改善は次のラウンドの課題として未解決事項に記載）。
+
+### テスト（新規・変更）
+
+- `test/unit/clusters.test.ts`: `clusterStatusWord` の全パターン（`tunnel_login_needed` 優先、`connected` の 3 値、
+  1 語バッジの検証）。
+- `test/unit/llm-sources.test.ts`: `tierResolutionReason`（no-source / free-first / unreachable / cooldown /
+  unknown の 5 パターン）・`tierResolutionReasonLabel`（全語で非空）・`cooldownUntilTitle`（Unix 秒 → RFC 3339）・
+  `allAccountsCoolingDown`（全員 cooldown / 一部だけ / 0 件）。
+- `test/unit/releases.test.ts`: `releaseModeWord`（live/stop-start/unknown、1 語バッジの検証）・
+  `releaseVerifyCheckGroups`（未検証は両方未実施、ok/live_ok の反映、1 語バッジの検証）。`loadReleases` の並び順
+  アサーションをフィクスチャの 4 件に更新。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（celeris の API 契約は変えていない） |
+| lint | `pnpm lint`（`pnpm exec biome check --write .` で自動整形、`--unsafe` で 1 件の optional chain 提案を適用） | exit 0。`Checked 243 files … No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 65 passed (65) / Tests 1004 passed (1004)**（Phase G37 の 982 から +22: `clusters.test.ts` +4、`llm-sources.test.ts` +9、`releases.test.ts` +9 の内訳） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は Phase G33 から変化なし |
+| mobile-audit | `pnpm mobile-audit` | **exit 0、`{"ok": true, "total": 0, "by_rule": {}, "by_scheme": {"light": 0, "dark": 0}}`**（25 route × light/dark）。1 回目は font-size 26 件・focus-order 2 件で落ち、`text-xs` → `text-sm`（4 箇所）と `gpu2` の `auth` 変更で解消したことを確認済み |
+| e2e:mock | `pnpm e2e:mock` | **`{"ok": true, "mode": "mock", "failures": []}`** |
+
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` はこの Phase の
+スコープ外（実行していない。Phase 80/82/83/84 と同じ扱い）。
+
+### 変更したファイル
+
+- `app/routes/clusters.tsx`（`clusterStatusWord` 新規、`ClusterCard` の状態バッジ・接続ボタン・disclosure）
+- `app/routes/accounts.tsx`（`LlmSourcesSection` の tier 理由・全員 cooldown 警告、`LlmAccountRow` の cooldown title）
+- `app/lib/llm-sources.ts`（`tierResolutionReason`/`tierResolutionReasonLabel`/`cooldownUntilTitle`/
+  `allAccountsCoolingDown` 新規）
+- `app/routes/releases.tsx`（`ReleaseCard` の mode バッジ・検査一覧・`order-first xl:order-none`）
+- `app/lib/releases.ts`（`releaseModeWord`/`releaseVerifyCheckGroups` 新規）
+- `app/routes/inbox.tsx`（`loader` の戻り値に `fetchedAt`、承認・質問行に相対時刻）
+- `scripts/lib/celeris-fixture.mjs`（クラスタ・LLM source の fixture 拡張）
+- `test/mock-celeris/fixtures.ts`（`defaultReleases` に `ok_stop_start`/`ng` の 2 件）
+- `e2e/g7.spec.ts`（`cluster-connected` の期待値を `"disconnected"` → `"down"` に更新）
+- `test/unit/clusters.test.ts`・`test/unit/llm-sources.test.ts`・`test/unit/releases.test.ts`（新規テスト、
+  `loadReleases` の並び順アサーション更新）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34。このサンドボックスに本物の celeris・本物のブラウザ・外向きネットワークが無い）。
+  特にスマホ実機での「接続（TOTP）」全幅ボタン・disclosure の開閉・現行リリースの並び替えは確認できていない。
+- **`releaseVerifyCheckGroups` は 2 グループの粒度まで**: `GET /releases` の `ReleaseVerify` が `ok`/`live_ok` の
+  集計値しか運ばないため、「検査 1〜6・4b の一覧」を個別の 8 項目には分解できていない。個別の合否が欲しいなら
+  celeris 側で `verify.json` に検査ごとの結果を残し、`ReleaseVerify` に運ぶ API 拡張が要る（このワークトリークは
+  `crates/` に触れないため提案のみ。下記「提案」参照）。
+- **`tierResolutionReason` の「cooldown」は近似**: プール内に 1 件でも cooldown 中のアカウントがいることを示す
+  だけで、「実際に選ばれたアカウントが cooldown 中かどうか」までは分からない（celeris は `resolves_to` に
+  供給元 id しか返さず、選ばれたアカウント id までは返さないため）。
+- **`/inbox` は ADR-0055 D1 の監査対象外のまま**: 今回の相対時刻の追加は機械検査（`pnpm mobile-audit`）を通っていない
+  （そもそも対象ルート一覧に無い）。次にこの画面を本格的に磨くなら、まず D1 の一覧に `/inbox` を足すかどうかを
+  ADR レベルで決める必要がある（このワークトリークは ADR を書き換えられないため、決定は次の Phase 起動時に）。
+- `e2e/g7.spec.ts` の更新（`"down"`）は実 celeris に対する `pnpm e2e` を実行して確認していない（`pnpm e2e:mock` の
+  スコープ外。celeris を実際に起こす環境で確認すること）。
+- **監査スクリプトの `cssPathRef` の脆さ**: `element.id` を素朴に読むと named-form-control の shadowing で壊れた
+  文字列になり、構造が同じ複数要素があると focus-order を誤検知しうる（今回は fixture 側の回避で凌いだ）。
+  `scripts/mobile-audit.mjs::cssPathRef` を `element.getAttribute("id")` に変える、または `id` 属性そのものを
+  持つ要素だけ id を使うようにすると根本的に直る（この Phase はスコープ外。次ラウンドの候補）。
+
+### 提案
+
+- **P-G38-1**: celeris 側に `ReleaseVerify.checks: { name: string; ok: bool }[]` 相当の内訳を足せば、
+  `releaseVerifyCheckGroups` を本当の 1〜6・4b の個別結果に置き換えられる（`docs/celeris-api-v1.md` の拡張が要る。
+  GUI 側の変更は表示の分解だけで済む）。
+- **P-G38-2**: `scripts/mobile-audit.mjs::cssPathRef` の `node.id` を `node.getAttribute("id")` に変える（安全側）。
+  named-form-control の shadowing はどのフォームでも起こりうる（`name="id"` の hidden input はこのリポジトリの
+  複数の画面パターン）ので、他の画面でも同じ誤検知が将来起きうる。
+- **P-G38-3**: `/inbox` を ADR-0055 D1 の監査対象に含めるかどうかを ADR レベルで判断してほしい（含めるなら、
+  カードの `Card` コンポーネント化・承認/却下の主操作の扱いも次のラウンドで検討する）。
