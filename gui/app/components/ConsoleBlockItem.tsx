@@ -8,14 +8,16 @@ import type {
 } from "~/celeris/action-types";
 import type { ConsoleBlock, EventsPage, OrgNode, Project } from "~/celeris/types";
 import { formatRunEventRow, progressSummaryLine, taskLineSummary } from "~/lib/console";
+import { shortId } from "~/lib/format";
 import { isKnowledgeFallback } from "~/lib/knowledge";
 import { milestoneDecisionValid } from "~/lib/milestone-review";
 import { cn } from "~/lib/utils";
 import { MarkdownViewer } from "./MarkdownViewer";
-import { Badge } from "./ui/badge";
+import { Badge, StatusBadge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { hintClass, textareaClass, touchLinkClass } from "./ui/form";
-import { Icon } from "./ui/Icon";
+import { Icon, type IconName } from "./ui/Icon";
+import { Mono } from "./ui/misc";
 
 /**
  * Console（ADR-0048 D1/D4、GUI Phase G22）の 1 ブロック。`kind` ごとに 1 分岐（8 種 + 予約の `knowledge`）。
@@ -113,6 +115,39 @@ function ReplyButton({ onClick }: { onClick: () => void }) {
   );
 }
 
+/**
+ * ブロック先頭の帯（フェーズ 71、ADR-0055 D2「状態はバッジ 1 語 + 色。理由・詳細は行の下か開閉に」の
+ * 精神を Console にも: 誰 / いつ を吹き出しの先頭にまとめ、本文中に「at」を重複させない）。
+ * `align="end"`（人の発言）は右寄せ、それ以外（CoS 側）は左寄せの帯にする。
+ */
+function BlockHeader({
+  icon,
+  who,
+  at,
+  align = "start",
+}: {
+  icon: IconName;
+  who: ReactNode;
+  at: string;
+  align?: "start" | "end";
+}) {
+  return (
+    // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+    <div
+      className={cn(
+        "mb-1.5 flex items-center gap-2 text-sm font-medium text-fg-subtle lg:text-xs",
+        align === "end" ? "flex-row-reverse justify-between opacity-80" : "justify-between",
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-1.5">
+        <Icon name={icon} className="size-3.5 shrink-0" />
+        <span className="min-w-0 truncate">{who}</span>
+      </span>
+      <span className="shrink-0">{at}</span>
+    </div>
+  );
+}
+
 function HumanBlockView({
   block,
   org,
@@ -124,12 +159,9 @@ function HumanBlockView({
 }) {
   return (
     <BlockShell testId="console-block-human" align="end">
+      <BlockHeader icon="send" who={`${orgNodeName(block.node_id, org)} へ`} at={block.at} align="end" />
       <p className="whitespace-pre-wrap">{block.text}</p>
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
-      <div className="mt-1 flex items-center justify-between gap-2 text-sm opacity-80 lg:text-[0.7rem]">
-        <span>
-          {orgNodeName(block.node_id, org)} へ ・ {block.at}
-        </span>
+      <div className="mt-1 flex justify-end">
         <ReplyButton onClick={() => onReply(block)} />
       </div>
     </BlockShell>
@@ -148,8 +180,7 @@ function ReplyBlockView({
   const result = block.actions_result;
   return (
     <BlockShell testId="console-block-reply">
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
-      <div className="mb-1 text-sm font-medium text-fg-subtle lg:text-xs">{orgNodeName(block.node_id, org)}</div>
+      <BlockHeader icon="message" who={orgNodeName(block.node_id, org)} at={block.at} />
       <MarkdownViewer content={block.text} />
       {result && (result.actions_executed?.length || result.actions_failed?.length) ? (
         <div className="mt-2 space-y-1 text-sm lg:text-xs" data-testid="console-actions-result">
@@ -167,16 +198,14 @@ function ReplyBlockView({
           ))}
         </div>
       ) : null}
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-sm text-fg-subtle lg:text-[0.7rem]">
-        <span className="flex items-center gap-2">
-          <span>{block.at}</span>
-          {block.run_id && block.task_id && (
-            <Link to={`/tasks/${block.task_id}`} className={cn(touchLinkClass, "underline underline-offset-2")}>
-              この返事を作った run
-            </Link>
-          )}
-        </span>
+      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
+        {block.run_id && block.task_id ? (
+          <Link to={`/tasks/${block.task_id}`} className={cn(touchLinkClass, "text-sm underline underline-offset-2")}>
+            この返事を作った run
+          </Link>
+        ) : (
+          <span />
+        )}
         <ReplyButton onClick={() => onReply(block)} />
       </div>
     </BlockShell>
@@ -200,21 +229,33 @@ function TaskBlockView({
   const projName = projectName(t.project_id, projects);
 
   return (
-    <BlockShell testId="console-block-task" className="w-full max-w-none">
+    // フェーズ 71: task ブロックは CoS の吹き出しの直下に付く「カード」として、通常の吹き出しより
+    // 一目盛りコンパクトに（他の CoS 側ブロックと同じ左寄せの列に積む。ADR-0054 D2 の
+    // 「作ったタスクは task ブロックとして返事の直下に出る」の見た目）。
+    <BlockShell testId="console-block-task" className="w-full max-w-none bg-surface-2/40 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
-        <Icon name="activity" className="size-3.5 text-fg-subtle" />
-        <Link to={`/tasks/${t.task_id}`} className={cn(touchLinkClass, "font-medium underline underline-offset-2")}>
+        <Icon name="activity" className="size-3.5 shrink-0 text-fg-subtle" />
+        <Link
+          to={`/tasks/${t.task_id}`}
+          className={cn(touchLinkClass, "min-w-0 flex-1 font-medium underline underline-offset-2")}
+        >
           {t.title}
         </Link>
-        {projName && <Badge tone="neutral">{projName}</Badge>}
+        {/* ADR-0055 D1-3: 状態は 1 語のバッジ（`to` = 遷移先の状態）。理由・経過は下の行へ。 */}
+        <StatusBadge status={t.to} />
       </div>
       {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
       <p className="mt-1 text-sm text-fg-subtle lg:text-xs" data-testid="console-task-summary">
         {taskLineSummary(t)}
         {t.assignee && <> ・ {orgNodeName(t.assignee, org)}</>}
+        {projName && <> ・ {projName}</>}
       </p>
       <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1 text-sm text-fg-subtle lg:text-[0.7rem]">
-        <span>{block.at}</span>
+        <span className="flex items-center gap-2">
+          {/* ADR-0055 D2: 長い id は末尾だけ、全文は title 属性。 */}
+          <Mono title={t.task_id}>{shortId(t.task_id)}</Mono>
+          <span>{block.at}</span>
+        </span>
         <ReplyButton onClick={() => setCommenting((v) => !v)} />
       </div>
       {commenting && (
@@ -384,13 +425,12 @@ function QuestionBlockView({
   const submitting = fetcher.state !== "idle";
   return (
     <BlockShell testId="console-block-question" className="w-full max-w-none border-warning-border bg-warning-soft/40">
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
-      <p className="text-sm font-medium text-fg-subtle lg:text-xs">
-        {block.node_id ? orgNodeName(block.node_id, org) : "-"} からの質問
-      </p>
-      <p className="mt-1" data-testid="console-question-text">
-        {block.text}
-      </p>
+      <BlockHeader
+        icon="alert"
+        who={`${block.node_id ? orgNodeName(block.node_id, org) : "-"} からの質問`}
+        at={block.at}
+      />
+      <p data-testid="console-question-text">{block.text}</p>
       {block.answered ? (
         <p className="mt-2 text-sm text-fg-muted" data-testid="console-question-answer">
           回答: {block.answer}
@@ -418,8 +458,6 @@ function QuestionBlockView({
           </Button>
         </fetcher.Form>
       )}
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
-      <p className="mt-1 text-sm text-fg-subtle lg:text-[0.7rem]">{block.at}</p>
     </BlockShell>
   );
 }
@@ -439,16 +477,15 @@ function ApprovalBlockView({
   const decided = a.decision != null;
   return (
     <BlockShell testId="console-block-approval" className="w-full max-w-none border-warning-border bg-warning-soft/40">
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
-      <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-fg-subtle lg:text-xs">
-        {orgNodeName(a.node_id, org)}
+      <BlockHeader icon="shield" who={orgNodeName(a.node_id, org)} at={block.at} />
+      <div className="flex flex-wrap items-center gap-2">
         {projectName(a.project_id, projects) && <Badge tone="neutral">{projectName(a.project_id, projects)}</Badge>}
         {a.task_id && (
           <Link to={`/tasks/${a.task_id}`} className={cn(touchLinkClass, "ml-auto underline underline-offset-2")}>
             裏方のタスク
           </Link>
         )}
-      </p>
+      </div>
       <div className="mt-1" data-testid="console-approval-question">
         <MarkdownViewer content={a.question} />
       </div>
@@ -504,8 +541,6 @@ function ApprovalBlockView({
           </div>
         </fetcher.Form>
       )}
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
-      <p className="mt-1 text-sm text-fg-subtle lg:text-[0.7rem]">{block.at}</p>
     </BlockShell>
   );
 }
@@ -536,11 +571,8 @@ function MilestoneBlockView({
 
   return (
     <BlockShell testId="console-block-milestone" className="w-full max-w-none border-primary-border bg-primary-soft/30">
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
-      <p className="flex items-center gap-2 text-sm font-medium text-fg-subtle lg:text-xs">
-        途中目標の提案
-        {projectName(m.project_id, projects) && <Badge tone="neutral">{projectName(m.project_id, projects)}</Badge>}
-      </p>
+      <BlockHeader icon="target" who="途中目標の提案" at={block.at} />
+      {projectName(m.project_id, projects) && <Badge tone="neutral">{projectName(m.project_id, projects)}</Badge>}
       <p className="mt-1 font-medium" data-testid="console-milestone-title">
         {m.title}
       </p>
@@ -611,8 +643,6 @@ function MilestoneBlockView({
           </Button>
         </div>
       </fetcher.Form>
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
-      <p className="mt-1 text-sm text-fg-subtle lg:text-[0.7rem]">{block.at}</p>
     </BlockShell>
   );
 }
@@ -630,22 +660,18 @@ function ReportBlockView({
   const r = block.report;
   return (
     <BlockShell testId="console-block-report" className="w-full max-w-none">
+      <BlockHeader icon="send" who={orgNodeName(r.node_id, org)} at={block.at} />
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="grid min-h-11 w-full grid-cols-[auto_auto_minmax(0,1fr)] items-center gap-2 text-left"
+        className="grid min-h-11 w-full grid-cols-[auto_minmax(0,1fr)] items-center gap-2 text-left"
       >
         <Icon name={open ? "chevronDown" : "chevronRight"} className="size-3.5 shrink-0 text-fg-subtle" />
-        <Icon name="send" className="size-3.5 text-fg-subtle" />
         <span className="min-w-0 break-words font-medium" data-testid="console-report-headline">
           {r.headline}
         </span>
-        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
-        <span className="col-span-3 min-w-0 break-words text-sm text-fg-subtle lg:text-xs">
-          {orgNodeName(r.node_id, org)}
-        </span>
         {projectName(r.project_id, projects) && (
-          <Badge tone="neutral" className="col-span-3 max-w-full justify-self-start truncate">
+          <Badge tone="neutral" className="col-span-2 max-w-full justify-self-start truncate">
             {projectName(r.project_id, projects)}
           </Badge>
         )}
@@ -655,8 +681,6 @@ function ReportBlockView({
           <MarkdownViewer content={r.body} />
         </div>
       )}
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
-      <p className="mt-1 text-sm text-fg-subtle lg:text-[0.7rem]">{block.at}</p>
     </BlockShell>
   );
 }
@@ -665,11 +689,10 @@ function KnowledgeBlockView({ block }: { block: Extract<ConsoleBlock, { kind: "k
   const total = (block.ingested ?? 0) + (block.inbox ?? 0) + (block.discarded ?? 0);
   return (
     <BlockShell testId="console-block-knowledge" className="w-full max-w-none">
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
-      <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-fg-subtle lg:text-xs">
-        <Icon name="send" className="size-3.5" />
-        <Link to={`/tasks/${block.task_id}`} className={cn(touchLinkClass, "underline underline-offset-2")}>
-          {block.task_title}
+      <BlockHeader icon="send" who={block.task_title} at={block.at} />
+      <div className="flex flex-wrap items-center gap-2">
+        <Link to={`/tasks/${block.task_id}`} className={cn(touchLinkClass, "text-sm underline underline-offset-2")}>
+          このタスクを見る
         </Link>
         {block.state === "failed" && <Badge tone="danger">失敗</Badge>}
         {/* ADR-0052 D2: Qwen に届かず tier cheap の汎用ハーネスで抽出した run。 */}
@@ -678,13 +701,12 @@ function KnowledgeBlockView({ block }: { block: Extract<ConsoleBlock, { kind: "k
             cheap のハーネスで抽出
           </Badge>
         )}
-      </p>
+      </div>
       <p className="mt-1 text-sm" data-testid="console-knowledge-line">
         この仕事から知識 {total} 件: 取り込み {block.ingested ?? 0} / 候補 {block.inbox ?? 0} / 破棄{" "}
         {block.discarded ?? 0}
       </p>
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1 text-sm text-fg-subtle lg:text-[0.7rem]">
-        <span>{block.at}</span>
+      <div className="mt-1.5 flex flex-wrap items-center justify-end gap-1 text-sm text-fg-subtle lg:text-[0.7rem]">
         {(block.inbox ?? 0) > 0 && (
           <Link
             to="/knowledge/inbox"

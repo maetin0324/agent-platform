@@ -3830,3 +3830,142 @@ U1・U2・U3 に手を付けた: D2 が求める下部固定タブを実装し�
   トリックなので、隣接する要素とレイアウト上重なる場合（詰まった行）は当たり判定が視覚的な境界を
   超えて隣の要素に食い込むことがある。今回はそれが実害になる詰まった行は見当たらなかったが、次の
   ラウンドで新しい画面に使うときは実機かブラウザの開発者ツールで確認するとよい。
+
+## Phase G25 — スマホ UX ラウンド 3（磨き。ADR-0055。2026-09-21）
+
+Phase 71 / ADR-0055 D2（規律）・D3（ラウンドを回し続ける）。機械検査（`pnpm mobile-audit`）は
+ラウンド 2 で違反 0 になったので、今回は数字ではなく「デザイナーの目」で画面ごとの階層・余白・
+タイポグラフィ・1 画面 1 主操作を見直した（`artifact-design` skill のガイド：余白・階層・トークンに
+倣う。celeris・Rust 側は変更していない）。
+
+### Console（`/`）
+
+- **入力欄を画面下固定にした**（ADR-0055 D2「入力欄は画面下固定、キーボード表示時に隠れない」。
+  Phase G24 の未解決事項 U5 の解消）。`~/components/Console.tsx` の `ConsoleInput` の外枠を
+  `fixed inset-x-0 bottom-16 z-20 ... lg:static`（下部固定タブ `h-16` の直上。タブ自身が
+  `env(safe-area-inset-bottom)` を確保しているので入力欄側では重ねて確保しない）にし、
+  `lg:` はこれまでどおりの通常フローに戻す。フローから外れた分の高さは、`BlockStream` の直後に置いた
+  `aria-hidden` の spacer（`h-52 lg:hidden`）で確保する（要素を複製せず 1 つの `ConsoleInput` のまま。
+  `~/scripts/mobile-audit.mjs` の D1-5（固定要素）検査で、実機を想定した「一番下までスクロールしても
+  内容が隠れない」ことを確認済み）。
+- **CoS 側の吹き出しに「誰・いつ」の帯を先頭に付けた**（human は右寄せ、それ以外は左寄せ。新設の
+  `BlockHeader`）。これまでは「誰」を先頭、「いつ」を末尾に別々に置く・置かないブロックが混在していた
+  （reply は先頭に名前だけ、milestone は無し、report/knowledge は末尾だけ）ので、8 種類の吹き出し全部を
+  同じ形（アイコン + 誰 + いつ、を先頭の 1 行）に揃え、本文中に「いつ」が重複する行を削った。
+- **task ブロックをカード化した**（ADR-0054 D2「作ったタスクは task ブロックとして返事の直下に出る」の
+  見た目）。状態は `StatusBadge`（`task.to`。1 語 + 色、ADR-0055 D1-3 のまま）にし、`project`
+  バッジではなく本文行に統合、`task_id` は `shortId` で末尾表示 + `title` 属性で全文（ADR-0055 D2
+  「id は末尾だけ、全文は title」）。
+- 人の発言（`HumanBlockView`）も同じ帯の形にし、返信ボタンを本文の下（右寄せ）に移した。
+
+### Board（`/board`）
+
+- **モバイルは segmented control で列を 1 つずつ見る方式を選んだ**（ADR-0055 D2「横スワイプの行、
+  または segmented control。どちらか選んで理由を書く」）。理由: 6 列（待ち/進行中/止まっている/完了/
+  失敗/中止）を横スワイプのカード列にすると、列の切れ目が分かりにくく誤ってスワイプで隣の列の
+  カードを操作してしまう事故が起きやすいと判断した。segmented control は「今どの状態を見ているか」が
+  常に文字で分かり、絞り込みフォームの「選ぶ」操作（既にこの画面にある `<select>` 群）と操作感が
+  揃う。`md:` 以上（タブレット・デスクトップの既存グリッド）は変更していない。
+  実装は `~/components/Console.tsx` の `ScopePicker` と同じ「`md:block` で常に表示、それ未満は
+  state で表示を切り替える」作り（要素は複製しない）。ピル行は `sticky top-14`（モバイル上部帯の
+  すぐ下）で、列を切り替えても常に見える。
+- **カードを「折り目の上」だけに絞った**: 題名・状態（1 語）・優先度・担当だけを常に出し、種類・
+  レベル・途中目標・ラベル・行内編集（優先度/レベル/担当の `<select>`）は「種類・レベル・ラベルを
+  見る」の開閉トグルに移した（`lg:` は常に開いたまま、既存の見た目を変えない）。
+
+### Task（`/tasks/<id>`）
+
+- **タブを横スクロールのピル行にした**（`overflow-x-auto`、折り返さない。`lg:` は元の折り返し行の
+  まま）。5 タブ（概要・タイムライン・変更・ファイル・成果物）が 393px に収まらないときは端が切れて
+  スクロールで見せる（D1-1/D1-6 の「overflow-x-auto の箱」と同じ扱い）。
+- **メタデータ（基本情報・タイマー）の `DataList` を 2 列既定にした**。`~/components/ui/misc.tsx` の
+  `DataList` の既定は `sm:`（640px）未満は 1 列なので、393px の実機では常に 1 列だった。この画面だけ
+  `className` で `grid-cols-1 min-[374px]:grid-cols-2 sm:grid-cols-2 lg:grid-cols-4` に上書きし、
+  374px 以上の実機は 2 列、それ未満のごく狭い端末だけ 1 列に戻す。
+  - **この変更で `~/components/ui/misc.tsx` の `DataItem` の `dt`（ラベル）に横はみ出しが 1 件出た**
+    （`consecutive_reviewer_requeues` のように区切りの無い長い 1 語の API フィールド名を、狭い列幅に
+    詰めると折り返せず突き破っていた）。`dt` に `break-words` を足して直した（`dd` は元から
+    `break-words` を持っていたが `dt` には無かった）。これは `DataItem` 全体に効くので、他の画面の
+    ラベルにも今後同じ種類の語が来ても安全になった副次効果がある。
+- **操作（承認・回答・中止など）を画面下の全幅ボタンにした**。以前は `max-w-xs`/`max-w-sm` が
+  ブレークポイント無しで常に効いていたため、モバイルでも 320px 止まりだった（`w-full` と併記されていて
+  も `max-w-xs` が勝っていた）。`sm:` からだけ効くように直し、モバイルは各操作カードを縦に積む
+  （`flex-col`）。approve/reject/answer/cancel/retry が同時に候補になる状態（例: approve と reject が
+  両方出る）では、どちらも等しく「今この場面の答え」なので、どちらか一方だけを残して他を隠すことは
+  しなかった（隠すとむしろ選べなくなる）。
+
+### Project（`/projects/<id>`）・Approvals（`/approvals`）
+
+- **Approvals**: 未決の要求カードの 3 つの決定ボタン（今回だけ／今後ずっと／認めない）のうち、最も
+  選ばれやすい「今後ずっと」を主役にして先頭・全幅にした（`order-*` はモバイルだけ、DOM の順序
+  自体は変えていないのでキーボード操作の順は変わらない）。「今後ずっと」の範囲（`<select>`）と
+  書き方の説明は、別々だった 2 つの `<details>` を 1 つ（「「今後ずっと」の範囲・書き方」）にまとめた
+  （secondary actions in a details disclosure。既定値 `node` は開かなくても効く）。
+- **Project**: 案件・途中目標のライフサイクル操作（一時停止/再開/中止/アーカイブ/アーカイブ解除）は
+  もともとカードの上に平積みだった。一時停止・再開・中止はこのカードの主役の操作として直接出す
+  （モバイルは縦積み全幅、`sm:` から元どおりの横並び）。使う頻度が低いアーカイブ／アーカイブ解除は
+  「その他の操作」の `<details>` に畳んだ。**この 1 点はデスクトップの見た目も変わる**（アーカイブは
+  今までは常に見えていたが、今は開かないと見えない）。この画面はすでに「タスクを追加」
+  （`AddTaskForm`）・「状態を直接変える（裏方）」がブレークポイントに関係なく常時 `<details>` に
+  畳まれている作りなので、それと同じ考え方（頻度が低い操作は開閉に）に揃えた方が画面全体で一貫すると
+  判断した。案件・途中目標カードは元々 `<Card>`/`<li>` で縦積みだった（この点は変更なし）。
+
+### 監査（機械検査。数値は変えていないことの確認）
+
+| rule | ラウンド 2 後 | ラウンド 3 後 |
+| --- | --- | --- |
+| overflow | 0 | **0**（維持。タスク画面のメタデータ 2 列化で 1 件出たが `DataItem.dt` の `break-words` で直した） |
+| status-badge | 0 | **0**（維持。Console の task ブロックに `StatusBadge` を新設したが 1 語のまま） |
+| fixed-overlay | 0 | **0**（維持。Console の入力欄を新たに `position: fixed` にしたが、spacer で確保できている） |
+| tap-target | 0 | **0**（維持） |
+| font-size | 0 | **0**（維持） |
+| 合計 | 0 | **0**（`pnpm mobile-audit` exit 0） |
+
+### 証跡
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint` | exit 0。`Checked 222 files. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0。**Test Files 60 passed (60) / Tests 856 passed (856)**（既存のまま。今回は新しい
+  純関数を作っていない — レイアウト・CSS のみの変更のため、新規ユニットテストは追加していない。
+  Phase G24 の `touchLinkClass` と同じ扱い） |
+| build | `pnpm build` | exit 0（client・server とも） |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（celeris API 契約は変えていない） |
+| mobile-audit | `pnpm mobile-audit` | **exit 0。violations 0 件**。20 route 全て 200 応答、`page-error` 0 |
+
+before/after のスクリーンショット（`gui/test/mobile-audit/*.png`、git には入れない。差分の目視用）:
+`gui/test/mobile-audit/home.png`（Console）、`board.png`、`task-overview.png`、`approvals.png`、
+`project-detail.png` の 5 枚で今回の変更を確認した（他 15 route は変更していないが同じ実行で
+再生成されている）。
+
+### 未解決事項
+
+- **U7（新規）**: Console 入力欄の spacer（`h-52`）は実測ではなく見積もり（返信先バナー表示時の
+  最大想定高さ）。`pnpm mobile-audit` の D1-5 検査（返信バナー非表示の既定状態）では 0 件だが、
+  返信バナー表示時に spacer が実際に足りているかは実機・ブラウザの開発者ツールで確認していない
+  （ResizeObserver で動的に高さを測る方法もあるが、今回は複雑さを避けて見積もりにした）。
+- **U8（新規、P-G23-1 の系譜）**: 入力欄を `position: fixed` にしたことで、ADR-0055 D2「キーボード
+  表示時に隠れない」（`100dvh`）の本来の対象になった。Playwright はソフトキーボードを再現できない
+  ため、実機（iOS Safari / Android Chrome）でキーボードを開いたときに入力欄が隠れないかは
+  未確認（手順は P-G23-1 のとおり、人またはネットワーク・実機が使える環境のエージェントに依頼）。
+- **U9（新規）**: Project 画面のアーカイブ／アーカイブ解除を `<details>` に畳んだ変更は、デスクトップ
+  でも「常時表示 → 開閉」に変わる（他の画面の項目は `lg:`/`sm:` で戻すのに対し、この 1 点だけは
+  ブレークポイントに関係ない）。既存の `AddTaskForm`/`milestone-status-details` と同じ規律に揃えた
+  判断だが、人が「アーカイブは今までどおり常に見せたい」と言うなら次のラウンドで戻す。
+- **U10（新規）**: Board の segmented control は 6 択の水平スクロールなので、6 番目（中止）が画面外に
+  隠れがち（スクロールしないと見えない）。よく使う列（進行中・止まっている）が左側に来るよう
+  `BOARD_COLUMNS` の並び順に依存している（並び順自体は変えていない）。
+- **U11（新規）**: MilestoneReviewPanel（ok/議論/ng の 3 ボタン）・MilestoneLifecycleActions と
+  AddTaskForm・状態変更 `<details>` が同じカードに同時に出るケースは、まだ縦に長い（1 画面 1 主操作
+  には全面的には揃っていない）。次のラウンドの候補。
+
+### 提案
+
+- **P-G25-1**: Console 入力欄の spacer を実測にする（`ResizeObserver` で `ConsoleInput` の実高さを
+  測り、spacer の `style.height` に反映する）と、返信バナーの有無に関わらず正確に隙間を詰められる。
+  今回は見積もりの `h-52` で 0 違反を確認できたので優先度は低いが、次に Console の入力欄の形を
+  変えるときはこの手当てもセットにするとよい。
+- **P-G25-2**: Board の segmented control を「横スワイプのカード列」に変える場合（人がそちらを好むなら）、
+  `scroll-snap-type` と各カードの `min-w-full` で作れる。今回選んだ segmented control との使い勝手の
+  比較は実機の人の声を待つ。

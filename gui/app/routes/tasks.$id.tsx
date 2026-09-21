@@ -647,15 +647,18 @@ function TaskTabs({
   counts: { timeline: number; artifacts: number };
 }) {
   return (
+    // フェーズ 71（ADR-0055 D2 ラウンド 3）: タブは横スクロールするピル行（`overflow-x-auto`、折り返さない）。
+    // 5 つのタブ名が並んでも 393px に収まらないことがあるため、切れた分はスクロールで見せる（D1-1/D1-6 の
+    // 「overflow-x-auto の箱」と同じ扱い。`lg:` は元の折り返し行のまま）。
     <nav aria-label="タスクの内訳" data-testid="task-tabs">
-      <ul className="flex flex-wrap gap-1 border-b border-border">
+      <ul className="-mx-4 flex gap-1 overflow-x-auto border-b border-border px-4 lg:mx-0 lg:flex-wrap lg:overflow-visible lg:px-0">
         {TASK_TABS.map((t) => {
           const params = new URLSearchParams(searchParams);
           params.set("tab", t);
           const active = t === current;
           const count = t === "timeline" ? counts.timeline : t === "artifacts" ? counts.artifacts : null;
           return (
-            <li key={t}>
+            <li key={t} className="shrink-0">
               <Link
                 to={`?${params.toString()}`}
                 replace
@@ -726,7 +729,10 @@ function OverviewTab({
                 {task.objective}
               </p>
             </DataItem>
-            <DataList>
+            {/* フェーズ 71（ADR-0055 D2 ラウンド 3）: メタデータは 2 列を既定にする（`~/components/ui/misc.tsx`
+                の既定 `DataList` は `sm:`（640px）未満は 1 列なので、393px の実機では常に 1 列になってしまう）。
+                374px 未満のごく狭い端末だけ 1 列に折り返す。 */}
+            <DataList className="grid-cols-1 min-[374px]:grid-cols-2 sm:grid-cols-2 lg:grid-cols-4">
               <DataItem label="priority">{`${detail.priority_label}（${task.priority}）`}</DataItem>
               <DataItem label="worker_hint">
                 {`tier=${task.worker_hint.tier}${task.worker_hint.adapter ? `, adapter=${task.worker_hint.adapter}` : ""}`}
@@ -780,7 +786,7 @@ function OverviewTab({
             }
           />
           <CardBody>
-            <DataList>
+            <DataList className="grid-cols-1 min-[374px]:grid-cols-2 sm:grid-cols-2 lg:grid-cols-4">
               <DataItem label="lease_expires_at">{detail.timers.lease_expires_at ?? "-"}</DataItem>
               <DataItem label="backoff_until">{detail.timers.backoff_until ?? "-"}</DataItem>
               <DataItem label="consecutive_requeues / max_requeues">
@@ -1095,14 +1101,16 @@ function OverviewTab({
           />
           <CardBody className="space-y-4">
             <TransitionFlash outcome={fetcher.data} />
+            {/* フェーズ 71（ADR-0055 D2 ラウンド 3）: 操作は画面下の全幅ボタン（モバイルは縦積み、
+                `sm:` からは元どおり横並び）。 */}
             {detail.actions.length === 0 ? (
               <EmptyState icon="ban" title="できる操作はありません。" />
             ) : (
-              <div className="flex flex-wrap gap-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:gap-4">
                 {detail.actions.includes("approve") && (
                   <fetcher.Form
                     method="post"
-                    className="flex w-full max-w-xs flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
+                    className="flex w-full flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto sm:max-w-xs"
                   >
                     <input type="hidden" name="intent" value="approve" />
                     <input type="hidden" name="expected_status" value={task.status} />
@@ -1119,6 +1127,7 @@ function OverviewTab({
                       size="sm"
                       disabled={submitting}
                       data-testid="action-approve"
+                      className="w-full sm:w-auto"
                     >
                       <Icon name="check" />
                       {ACTION_LABELS.approve}
@@ -1128,7 +1137,7 @@ function OverviewTab({
                 {detail.actions.includes("reject") && (
                   <fetcher.Form
                     method="post"
-                    className="flex w-full max-w-xs flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
+                    className="flex w-full flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto sm:max-w-xs"
                   >
                     <input type="hidden" name="intent" value="reject" />
                     <input type="hidden" name="expected_status" value={task.status} />
@@ -1139,7 +1148,14 @@ function OverviewTab({
                       placeholder="メモ（任意）"
                       className={textareaClass}
                     />
-                    <Button type="submit" variant="danger" size="sm" disabled={submitting} data-testid="action-reject">
+                    <Button
+                      type="submit"
+                      variant="danger"
+                      size="sm"
+                      disabled={submitting}
+                      data-testid="action-reject"
+                      className="w-full sm:w-auto"
+                    >
                       <Icon name="x" />
                       {ACTION_LABELS.reject}
                     </Button>
@@ -1148,7 +1164,7 @@ function OverviewTab({
                 {detail.actions.includes("answer") && (
                   <fetcher.Form
                     method="post"
-                    className="flex w-full max-w-sm flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
+                    className="flex w-full flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto sm:max-w-sm"
                   >
                     {detail.latest_question && (
                       <p className="text-sm text-fg" data-testid="action-question">
@@ -1164,6 +1180,7 @@ function OverviewTab({
                       size="sm"
                       disabled={submitting}
                       data-testid="action-answer-submit"
+                      className="w-full sm:w-auto"
                     >
                       <Icon name="send" />
                       回答する
@@ -1173,11 +1190,18 @@ function OverviewTab({
                 {detail.actions.includes("cancel") && (
                   <fetcher.Form
                     method="post"
-                    className="flex w-full max-w-xs flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
+                    className="flex w-full flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto sm:max-w-xs"
                   >
                     <input type="hidden" name="intent" value="cancel" />
                     <input type="hidden" name="expected_status" value={task.status} />
-                    <Button type="submit" variant="danger" size="sm" disabled={submitting} data-testid="action-cancel">
+                    <Button
+                      type="submit"
+                      variant="danger"
+                      size="sm"
+                      disabled={submitting}
+                      data-testid="action-cancel"
+                      className="w-full sm:w-auto"
+                    >
                       <Icon name="ban" />
                       {ACTION_LABELS.cancel}
                     </Button>
@@ -1186,14 +1210,21 @@ function OverviewTab({
                 {detail.actions.includes("retry") && (
                   <retryFetcher.Form
                     method="post"
-                    className="flex w-full max-w-xs flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto"
+                    className="flex w-full flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto sm:max-w-xs"
                   >
                     <input type="hidden" name="intent" value="retry" />
                     <label className="flex items-center gap-2 text-sm text-fg">
                       <input type="checkbox" name="accept" value="true" className={checkboxClass} />
                       受け入れ済み（ready）で始める
                     </label>
-                    <Button type="submit" variant="primary" size="sm" disabled={retrying} data-testid="action-retry">
+                    <Button
+                      type="submit"
+                      variant="primary"
+                      size="sm"
+                      disabled={retrying}
+                      data-testid="action-retry"
+                      className="w-full sm:w-auto"
+                    >
                       <Icon name="rotate" />
                       {ACTION_LABELS.retry}
                     </Button>
