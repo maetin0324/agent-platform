@@ -16,6 +16,7 @@ import {
   scopeForProject,
   taskLineSummary,
 } from "~/lib/console";
+import { consoleGrowingReplySteps } from "../mock-celeris/fixtures";
 
 /**
  * `~/lib/console.ts` の純粋関数（ADR-0048 D1/D3/D4、GUI Phase G22）。HTTP も React も持ち込まない
@@ -286,6 +287,102 @@ describe("appendConsoleBlock（SSE の積み上げ）", () => {
     const items = appendConsoleBlock([humanBlock()], block);
     const next = appendConsoleBlock(items, { ...block });
     expect(next).toHaveLength(2);
+  });
+
+  it("ADR-0054 D2: 育つ返事（state=streaming）は同じ run_id/task_id の吹き出しに text/steps を積み増す", () => {
+    const first = replyBlock({
+      cursor: "cr1",
+      run_id: "run-1",
+      task_id: "t1",
+      state: "streaming",
+      thinking: "考え中…",
+      text: "承知しま",
+      steps: [{ kind: "tool_use", tool: "celerisctl", text: "knowledge search rust" }],
+    });
+    const items = appendConsoleBlock([humanBlock()], first);
+    expect(items).toHaveLength(2);
+
+    const second = replyBlock({
+      cursor: "cr2",
+      run_id: "run-1",
+      task_id: "t1",
+      state: "streaming",
+      thinking: undefined,
+      text: "した。",
+      steps: [{ kind: "tool_result", text: "3 件" }],
+    });
+    const next = appendConsoleBlock(items, second);
+    expect(next).toHaveLength(2);
+    const reply = next[1];
+    expect(reply.kind).toBe("reply");
+    if (reply.kind !== "reply") throw new Error("unreachable");
+    expect(reply.text).toBe("承知しました。");
+    expect(reply.thinking).toBe("考え中…"); // 空の thinking は置き換えない
+    expect(reply.steps).toHaveLength(2);
+    expect(reply.steps?.[0].tool).toBe("celerisctl");
+    expect(reply.steps?.[1].text).toBe("3 件");
+  });
+
+  it("ADR-0054 D2: 確定した返事（state=done）は育つ返事を積み増しではなく置き換える", () => {
+    const streaming = replyBlock({
+      cursor: "cr1",
+      run_id: "run-1",
+      task_id: "t1",
+      state: "streaming",
+      text: "承知しました",
+      steps: [{ kind: "tool_use", tool: "celerisctl", text: "knowledge search rust" }],
+    });
+    const items = appendConsoleBlock([humanBlock()], streaming);
+
+    const done = replyBlock({
+      cursor: "cr-done",
+      run_id: "run-1",
+      task_id: "t1",
+      state: "done",
+      text: "承知しました。",
+    });
+    const next = appendConsoleBlock(items, done);
+    expect(next).toHaveLength(2);
+    expect(next[1]).toBe(done);
+  });
+
+  it("ADR-0054 D2: SSE の 4 段（thinking → tool_use → text → 確定）を順に足すと 1 つの吹き出しに育つ", () => {
+    const [step1, step2, step3, done] = consoleGrowingReplySteps();
+    let items: ConsoleBlock[] = [];
+
+    items = appendConsoleBlock(items, step1);
+    expect(items).toHaveLength(1);
+    let reply = items[0];
+    if (reply.kind !== "reply") throw new Error("unreachable");
+    expect(reply.state).toBe("streaming");
+    expect(reply.thinking).toBe("考え中…");
+    expect(reply.steps).toHaveLength(0);
+    expect(reply.text).toBe("");
+
+    items = appendConsoleBlock(items, step2);
+    expect(items).toHaveLength(1); // 同じ run_id/task_id なので新しいブロックにはならない
+    reply = items[0];
+    if (reply.kind !== "reply") throw new Error("unreachable");
+    expect(reply.thinking).toBe("考え中…"); // step2 の thinking は null なので直前の値を保つ
+    expect(reply.steps).toHaveLength(1);
+    expect(reply.steps?.[0]).toMatchObject({ kind: "tool_use", tool: "celerisctl" });
+
+    items = appendConsoleBlock(items, step3);
+    expect(items).toHaveLength(1);
+    reply = items[0];
+    if (reply.kind !== "reply") throw new Error("unreachable");
+    expect(reply.steps).toHaveLength(2);
+    expect(reply.steps?.[1]).toMatchObject({ kind: "tool_result", text: "3 件" });
+    expect(reply.text).toBe("承知しました。");
+
+    // 完了して `state = "done"` の reply が届くと、育つ状態を引きずらず確定した本文に差し替わる。
+    items = appendConsoleBlock(items, done);
+    expect(items).toHaveLength(1);
+    reply = items[0];
+    if (reply.kind !== "reply") throw new Error("unreachable");
+    expect(reply.state).toBe("done");
+    expect(reply.text).toBe("承知しました。関連研究の調査から始めます。");
+    expect(reply.steps ?? []).toHaveLength(0);
   });
 
   it("上限を超えたら古い方から落とす", () => {

@@ -425,8 +425,23 @@ pub(crate) fn event_blocks(
         }
     }
 
-    // 進行は run ごとに 1 件へ束ねる（ADR-0048 D1 / D2）。
-    for group in group_progress(mine.iter().copied()) {
+    // 進行は run ごとに 1 件へ束ねる（ADR-0048 D1 / D2）。**対話 run**（ADR-0054 D2。Phase 68）は
+    // 折り畳んだ `progress` ではなく、「育つ返事」（`reply`、`state = streaming`）として流す
+    // （human の直後に同じ吹き出しが thinking → tool call → text と育つ。それ以外の run は従来どおり
+    // 折り畳みの `progress`）。
+    let mut work_rows: Vec<&EventRow> = Vec::new();
+    let mut conv_rows: Vec<&EventRow> = Vec::new();
+    for row in mine.iter().copied() {
+        if !matches!(&row.event, Event::WorkerProgress { .. }) {
+            continue;
+        }
+        match tasks.get(store, row.task_id)? {
+            Some(task) if task_core::is_conversation(task) => conv_rows.push(row),
+            Some(_) => work_rows.push(row),
+            None => {}
+        }
+    }
+    for group in group_progress(work_rows.iter().copied()) {
         let Some(task) = tasks.get(store, group.task_id)? else {
             continue;
         };
@@ -453,6 +468,40 @@ pub(crate) fn event_blocks(
             tier: task.worker_hint.tier,
             project_id: task.project_id,
             progress: group,
+        });
+    }
+    for accum in task_ops::console::group_conversation_progress(conv_rows.iter().copied()) {
+        let Some(task) = tasks.get(store, accum.task_id)? else {
+            continue;
+        };
+        let last_id = mine
+            .iter()
+            .filter(|r| {
+                r.task_id == accum.task_id && progress_run(&r.event) == Some(accum.run_id.as_str())
+            })
+            .map(|r| r.id)
+            .max()
+            .unwrap_or(0);
+        let cursor = ConsoleCursor::new(
+            at_nanos(&accum.started_at),
+            task_ops::console::progress_tie(accum.task_id, &accum.run_id),
+            last_id,
+        );
+        blocks.push(ConsoleBlock::Reply {
+            at: accum.started_at.clone(),
+            cursor: cursor.encode(),
+            // まだ `messages` の行は無い（run 中）ので、run を指す合成 id にする（`GET /console` の
+            // 応答の中で一意であればよく、この文字列を別の API に渡すことはしない）。
+            message_id: format!("streaming:{}:{}", accum.task_id, accum.run_id),
+            node_id: task.assignee.clone().unwrap_or_default(),
+            project_id: task.project_id,
+            task_id: Some(task.id),
+            run_id: Some(accum.run_id.clone()),
+            text: accum.text.clone(),
+            actions_result: None,
+            state: task_ops::console::ConsoleReplyState::Streaming,
+            thinking: accum.thinking.clone(),
+            steps: accum.steps.clone(),
         });
     }
     Ok(blocks)
@@ -677,6 +726,11 @@ fn message_block(message: &Message) -> ConsoleBlock {
             run_id: message.run_id.clone(),
             text: message.text.clone(),
             actions_result: message.metadata.clone(),
+            // ADR-0054 D2（Phase 68）: `messages` に確定した返事は常に `done`（育つ途中の
+            // `thinking`/`steps` はもう意味を持たない）。
+            state: task_ops::console::ConsoleReplyState::Done,
+            thinking: None,
+            steps: Vec::new(),
         },
     }
 }
@@ -1008,6 +1062,45 @@ async fn poll_console(
                         task_ops::console::merge_progress(acc, progress);
                         if let ConsoleBlock::Progress { cursor: next, .. } = &block {
                             *cursor = next.clone();
+                        }
+                    }
+                    _ => {
+                        pending.blocks.insert(key, block);
+                    }
+                }
+            }
+            // ADR-0054 D2（Phase 68）: 育つ返事（`state = streaming`）も `progress` と同じく run ごとに
+            // 溜める（1 秒に 1 回まで流す）。`messages` から作った確定済みの `reply`（`side` 経由）は
+            // ここを通らない。
+            ConsoleBlock::Reply {
+                task_id: Some(task_id),
+                run_id: Some(run_id),
+                state: task_ops::console::ConsoleReplyState::Streaming,
+                ..
+            } => {
+                let key = task_ops::console::progress_tie(*task_id, run_id);
+                match pending.blocks.get_mut(&key) {
+                    Some(ConsoleBlock::Reply {
+                        text: acc_text,
+                        thinking: acc_thinking,
+                        steps: acc_steps,
+                        cursor: acc_cursor,
+                        ..
+                    }) => {
+                        if let ConsoleBlock::Reply {
+                            text,
+                            thinking,
+                            steps,
+                            cursor: next_cursor,
+                            ..
+                        } = &block
+                        {
+                            acc_text.push_str(text);
+                            if thinking.is_some() {
+                                *acc_thinking = thinking.clone();
+                            }
+                            acc_steps.extend(steps.iter().cloned());
+                            *acc_cursor = next_cursor.clone();
                         }
                     }
                     _ => {

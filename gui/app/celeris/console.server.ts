@@ -1,5 +1,5 @@
 import type { ConsoleData } from "~/lib/console";
-import type { ConsoleInstructOutcome } from "./action-types";
+import type { ConsoleInstructOutcome, ConsoleNewConversationOutcome } from "./action-types";
 import { toActionError } from "./actions.server";
 import type { CelerisClient } from "./client.server";
 import type { ConsoleInstructAccepted, ConsolePage, InstructBody, OrgList, ProjectList } from "./types";
@@ -44,4 +44,20 @@ export function buildInstructBodyFromForm(form: FormData): InstructBody {
   const text = (form.get("text") as string | null) ?? "";
   const scope = (form.get("scope") as string | null) || undefined;
   return scope ? { text, scope } : { text };
+}
+
+/**
+ * `POST /console/new-conversation`（ADR-0054 D1、Phase 67。GUI の配線は Phase 68、ADR-0054 D3）。
+ * CoS の継続セッションを捨てる（**管理系**、204・本文なし）。GUI の「新しい会話」ボタンの入口。
+ */
+export async function sendNewConversation(
+  client: CelerisClient,
+  signal?: AbortSignal,
+): Promise<ConsoleNewConversationOutcome> {
+  try {
+    await client.post<void>("/console/new-conversation", {}, { signal });
+    return { ok: true, op: "new_conversation" };
+  } catch (e) {
+    return { ok: false, op: "new_conversation", error: toActionError(e) };
+  }
 }

@@ -13,8 +13,9 @@ use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    EventRow, ListFilter, ListOrder, Milestone, MilestoneId, MilestoneStatus, OrgNode, Project,
-    ProjectId, ProjectStatus, SqliteStore, Status, StoreError, Task, TaskId, TaskKind, TaskStore,
+    EventRow, ListFilter, ListOrder, Milestone, MilestoneId, MilestoneStatus, NodeSessionStore,
+    OrgNode, Project, ProjectId, ProjectStatus, SqliteStore, Status, StoreError, Task, TaskId,
+    TaskKind, TaskStore,
 };
 use task_ops::OpsError;
 use task_ops::add::NewTaskSpec;
@@ -390,8 +391,28 @@ fn validate_profile_body(
 
 async fn org_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
-    let items = state
-        .blocking(|store| store.org_list().map_err(store_problem))
+    let (items, lead_sessions) = state
+        .blocking(|store| {
+            let items = store.org_list().map_err(store_problem)?;
+            // ADR-0054 D3（Phase 68）: 部門長（`OrgKind::Department`）の継続セッションがあれば拾う
+            // （無いノードは含めない。CoS はここに出さない。`crate::console::new_conversation` と同じ
+            // `NodeSessionStore` を薄く読むだけ）。
+            let mut lead_sessions = Vec::new();
+            for node in items.iter().filter(|n| n.kind == task_core::OrgKind::Department) {
+                if let Some(session) = store
+                    .node_session_active(&node.id, task_core::SessionKind::Lead, None)
+                    .map_err(store_problem)?
+                {
+                    lead_sessions.push(crate::types::NodeSessionSummary {
+                        node_id: session.node_id,
+                        turns: session.turns,
+                        approx_tokens: session.approx_tokens,
+                        last_used_at: session.last_used_at,
+                    });
+                }
+            }
+            Ok((items, lead_sessions))
+        })
         .await?;
     // ADR-0046 D1: 継いだ後の実効 profile も一緒に返す（計算は純粋関数。DB には保存しない）。
     let effective_profiles = items
@@ -403,6 +424,7 @@ async fn org_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
         &OrgList {
             items,
             effective_profiles,
+            lead_sessions,
         },
     ))
 }

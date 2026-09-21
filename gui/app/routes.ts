@@ -52,6 +52,7 @@ export default [
   route("events", "routes/events.ts"),
   // Console の SSE 中継（ADR-0048 D1、GUI Phase G22）。`~/routes/events.ts` と同じ作り
   route("console/stream", "routes/console.stream.ts"),
+  route("console/new-conversation", "routes/console.new-conversation.ts"),
   route("files/tasks/:id/runs/:runId/:name", "routes/files.runs.ts"),
   route("files/tasks/:id/artifacts/:idx", "routes/files.artifacts.ts"),
   // 未定義パスも root middleware を通す（docs/adr/0008 D15）。必ず最後に置く

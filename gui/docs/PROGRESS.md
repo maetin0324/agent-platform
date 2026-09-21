@@ -4213,3 +4213,99 @@ before/after のスクリーンショット（`gui/test/mobile-audit/*.png`、gi
   ボタンの追加等）を変えても spacer 側は自動で追随する。この仕組み（`ResizeObserver` +
   `onHeightChange`）は他の「モバイルで固定表示にしている要素」（例えば将来ボードの segmented
   control を `sticky` から `fixed` にする等）にも転用できる。
+
+## Phase G28 — Console のチャット吹き出し・「新しい会話」・部門長の継続セッション表示（ADR-0054 D3、celeris Phase 68。2026-09-21）
+
+celeris 側（`crates/task-api`/`task-ops`/`task-worker`/`celerisctl`）と同じ Phase の GUI 側。celeris が
+`ConsoleBlock::Reply` に `state`/`thinking`/`steps[]` を、`OrgList` に `lead_sessions[]` を足したのを
+受けて、GUI を対応させた。celeris 側の詳細は `docs/PROGRESS.md`（このリポジトリの親）の
+`## Phase 68`、ADR は `docs/adr/0054-stateful-sessions-and-streaming-chat.md`（celeris 側）を参照。
+
+### 受け入れ条件ごとの結果
+
+1. **育つ吹き出し**: `app/components/ConsoleBlockItem.tsx::ReplyBlockView` が `block.state ===
+   "streaming"` のとき、BlockHeader の横にパルスする丸のインジケータ（`console-reply-streaming-dot`）、
+   「考え中…」の 1 行（`console-reply-thinking`。`block.thinking` が空ならプレースホルダ文言）、
+   `steps[]` の行（新規 `ReplyStepRow`。`tool_use` は `[tool] 要約`、`tool_result` は `→ 要約`、
+   `error` ならバッジと背景色。`ProgressLineRow` と同じ見た目）、本文（`MarkdownViewer`）の順に描く。
+   `state === "done"`（既定）は従来どおり確定した吹き出しのまま（actions_result・run へのリンク・
+   返信ボタンも従来どおりそこだけに出す。育つ最中は「返信」を出さない — 育っている返事に「返信」しても
+   まだ実体の `message_id` が無いため）。
+2. **SSE の積み上げ規約**: `app/lib/console.ts::appendConsoleBlock` を、`reply` かつ `run_id` があるとき
+   `run_id`/`task_id` が一致する既存の吹き出しを探し、**`state === "streaming"` のときだけ**
+   `text` を連結・`steps` を積み増す・`thinking` は届いた値が非 null のときだけ置き換える、という
+   規約にした（celeris の SSE は「その接続で見た増分だけ」を送るため。docs/PROGRESS.md Phase 68 の
+   「Phase 68 追記」2 参照）。`state === "done"` の `reply` は確定した本文そのものなので**置き換える**
+   （育つ最中の `thinking`/`steps` を残さない）。
+3. **「新しい会話」**: `app/routes/console.new-conversation.ts`（新規リソースルート、`POST
+   /console/new-conversation` の中継。`~/routes/logout.ts` と同じ作り、画面は持たない）。
+   `Console.tsx` の `NewConversationButton`（`window.confirm` で確認。ブラウザ以外では確認せずそのまま
+   送る。`~/components/ProjectRepos.tsx` の「削除」と同じ作り）。celeris 側の応答が 204・本文なしなので、
+   `CelerisClient.post`（`delete` にしか無かった 204 の扱いを追加。`app/celeris/client.server.ts`）。
+   `ConsoleNewConversationOutcome`（`app/celeris/action-types.ts`）。
+4. **「この案件の文脈で話す」**: 既存の scope 機構（`?scope=project:<id>` のときの既定の返信先。
+   Phase G22 から機能）を変えず、`ConsoleInput` に明示のラベル（`console-scope-context` バッジ）を
+   追加しただけ（返信先バナーが出ているときは規則が競合しないよう出さない）。
+5. **部門長の継続セッション**: `/org?selected=<department>` の `OrgNodeDetail` に「継続中のセッション:
+   turns / tokens / 最終使用」（`org-node-lead-session`）を、`GET /org` の `lead_sessions[]` から
+   `node_id` で対応づけて出す（無いノードには出さない。`app/routes/org.tsx`）。CoS は対象外（Console
+   のチャット欄自身が状態を見せるため）。
+6. **fixture / テスト**: `test/mock-celeris/fixtures.ts` に `consoleReplyBlock()`（確定した `reply`）と
+   `consoleGrowingReplySteps()`（1 本の run が thinking → tool_use → text → 確定、の 4 段で育つ様子を
+   4 件の `ConsoleBlock` として持つ）を追加。`test/unit/console.test.ts` に
+   `appendConsoleBlock`（SSE の積み上げ）の新規テスト 3 本（増分の積み上げ／`state=done` での置き換え／
+   `consoleGrowingReplySteps()` を順に足すと 1 つの吹き出しに育つことを通しで検査）。G10-U1 の方針
+   （DOM を描画する unit テストは置かない）どおり、育つ様子の検証は純粋関数（`appendConsoleBlock`）の
+   レベルで行い、`consoleBlocks()`（Console の既定モック）には混ぜていない（後述の未解決事項）。
+
+### 監査（機械検査。数値は 0 を維持したことの確認）
+
+| rule | ラウンド 4 後（Phase G26） | G28 後 |
+| --- | --- | --- |
+| overflow / status-badge / fixed-overlay / tap-target / font-size | 0 | **0**（維持） |
+| 合計 | 0 | **0**（`pnpm mobile-audit` exit 0、21 route） |
+
+`/org?selected=coding`（部門長の継続セッション表示）を新しく監査対象に加えた（ADR-0055 D1 の元の
+一覧には無い、Phase 68 の新しい UI のための追加。`gui/scripts/mobile-audit.mjs` の `ROUTES` に
+`org-detail` を追加し、`org` の mock に `lead_sessions` を足した）。この route を初めて監査したことで、
+Phase 68 以前から潜在していた違反（`OrgNodeDetail` の「追加・削除は「認可」から」リンクが
+`tap-target`（144.8×16 < 44×44）・`font-size`（12px < 14px）の両方に違反）が見つかったので、
+`touchLinkClass` + `text-sm` に直した（`app/routes/org.tsx`）。Phase 68 の新規コード（`console-reply-*`）
+自体は違反 0 だった（既存の `BlockShell`/`ProgressLineRow` と同じスタイルの土台を再利用したため）。
+
+### 証跡（コマンドと出力の要点）
+
+- `pnpm gen:types && git diff --exit-code app/celeris/types.ts`: 差分あり（`ConsoleBlock.reply` の
+  `state`/`thinking`/`steps`、`ConsoleReplyStep`、`OrgList.lead_sessions`、`NodeSessionSummary` が
+  追加。celeris のスキーマ変更をそのまま反映。再生成しても安定することを 2 回連続実行で確認）。
+- `pnpm typecheck` exit 0。
+- `pnpm lint` exit 0（`biome check --write` で import 順・フォーマット差分を自動修正してから確認）。
+- `pnpm test` exit 0（**881 passed / 61 files**。Phase G26 の 878 から +3）。
+- `pnpm build` exit 0（client・server とも）。
+- `pnpm mobile-audit` exit 0（**違反 0 件**。21 route、`org-detail` を新規追加）。
+
+### 未解決事項
+
+- **U-G28-1（実機未確認）**: 実際の celeris + claude-code/codex/acp に対して、スマホ幅で CoS に 1 往復し、
+  「考え中…」→ tool call の行 → 本文の順に同じ吹き出しが育ち、`actions` を出したときに `task` カードが
+  返事の直下に出ることを目視で確認していない（認証・ネットワークが使えるサンドボックスではないため。
+  celeris 側 ADR-0009 P-34 と同じ扱い）。
+- **U-G28-2**: 育つ返事の fixture（`consoleGrowingReplySteps()`）を Console の既定モック
+  （`consolePage()`/`consoleBlocks()`）には混ぜていない。混ぜると `checkFixedOverlays`（D1-5）が
+  `console-stream`（内側で `overflow-y-auto` する箱）の中身を文書全体のスクロールでしか判定できず、
+  実際にはスクロールで届く末尾要素を偽陽性で「固定バーに隠れている」と報告する（`mobile-audit.mjs` の
+  既知の限界。Phase 68 で実際に踏んだ）。次にこの検査を触る Phase で、内側の `overflow-y-auto` 要素も
+  末尾までスクロールしてから判定するよう `checkFixedOverlays` を直すことを提案する（P-G28-1）。
+- **U-G28-3**: 「継続中のセッション」の表示形式（`3 turns ・ 12,345 tokens ・ 最終使用
+  2026-09-21T01:00:00Z`）は RFC 3339 の生文字列のまま（`console` の他のブロックの `at` 表示と同じ
+  流儀に合わせた）。人が読みやすい相対時刻（「3 分前」等）にする専用の整形は無い（既存の
+  `~/lib/time-delta.ts` は経過秒数の差分表示だけで、絶対時刻→相対時刻の変換関数が無いため今回は
+  追加しなかった）。
+
+### 提案
+
+- **P-G28-1**: 上記 U-G28-2 のとおり、`checkFixedOverlays` に「`overflow-y: auto` な子孫要素もその
+  scrollHeight まで一時的にスクロールしてから判定する」処理を足すと、Console のような内側スクロール
+  領域を持つ画面の検査精度が上がる。
+- celeris 側の提案（ACP の読み取り道具の許可が fail-closed であること等）は
+  `docs/adr/0054-stateful-sessions-and-streaming-chat.md`（celeris 側）の「Phase 68 追記」を参照。

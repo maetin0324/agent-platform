@@ -653,7 +653,16 @@ export function knowledgeTree(overrides: Partial<KnowledgeTree> = {}): Knowledge
   };
 }
 
-/** `GET /console` / `GET /console/stream` の 1 本の流れ（4 ブロック）。 */
+/**
+ * `GET /console` / `GET /console/stream` の 1 本の流れ（4 ブロック）。
+ *
+ * ADR-0054 D2（Phase 68）の育つ返事（`reply`、`state: "streaming"`）は、ここには**加えない**:
+ * `~/scripts/mobile-audit.mjs` の `checkFixedOverlays`（D1-5）は文書全体だけをスクロールし、
+ * `console-stream`（`overflow-y-auto` の内側のボックス）自身のスクロールは行わないため、この既定の
+ * 流れにブロックを足すと（実際にはスクロールで届く）末尾の要素が「固定の入力欄より下」という
+ * 偽陽性を生む。育つ返事の見た目・積み上げの検証は `consoleReplyBlock()` /
+ * `consoleGrowingReplySteps()`（このすぐ下）を使う単体テスト（`~/test/unit/console.test.ts`）で行う。
+ */
 export function consoleBlocks(): ConsoleBlock[] {
   return [
     {
@@ -766,6 +775,90 @@ export function consoleProgressBlock(overrides: Partial<ConsoleProgress> = {}): 
       ...overrides,
     },
   };
+}
+
+/**
+ * 確定した `reply` ブロック（`state: "done"`、既定）。CoS の返事。ADR-0048 D3 の `actions_result` は
+ * 含めない既定（Phase 60b のテストは別に用意されている）。
+ */
+export function consoleReplyBlock(overrides: Partial<Extract<ConsoleBlock, { kind: "reply" }>> = {}): ConsoleBlock {
+  return {
+    kind: "reply",
+    at: "2026-09-21T01:00:10Z",
+    cursor: "00001789000010000000.2.m01REPLY",
+    message_id: "01REPLY",
+    node_id: "cos",
+    text: "承知しました。関連研究の調査から始めます。",
+    ...overrides,
+  };
+}
+
+/**
+ * ADR-0054 D2（Phase 68）: CoS の対話 run が育っていく様子（1 本の run の 4 段階）。celeris の
+ * `GET /console/stream` はこの並びで `reply` ブロックを流す（`state: "streaming"` の 3 件 → 確定した
+ * `state: "done"` の 1 件）。`run_id`/`task_id` は 4 件とも同じで、GUI 側は `appendConsoleBlock`
+ * （`~/lib/console.ts`）がこれを 1 つの育つ吹き出しにまとめる。SSE は**増分だけ**を送るので、
+ * `text`/`steps` は各段階の増分（積み上げは GUI 側）。
+ */
+export function consoleGrowingReplySteps(): ConsoleBlock[] {
+  const run_id = "01RUNCOS0000000000000001";
+  const task_id = "01TASKCOS0000000000000001";
+  return [
+    {
+      kind: "reply",
+      at: "2026-09-21T01:00:00Z",
+      cursor: "00001789000000000000.1.p01TASKCOS0000000000000001:01RUNCOS0000000000000001",
+      message_id: `streaming:${task_id}:${run_id}`,
+      node_id: "cos",
+      project_id: null,
+      task_id,
+      run_id,
+      text: "",
+      state: "streaming",
+      thinking: "考え中…",
+      steps: [],
+    },
+    {
+      kind: "reply",
+      at: "2026-09-21T01:00:01Z",
+      cursor: "00001789000001000000.2.p01TASKCOS0000000000000001:01RUNCOS0000000000000001",
+      message_id: `streaming:${task_id}:${run_id}`,
+      node_id: "cos",
+      project_id: null,
+      task_id,
+      run_id,
+      text: "",
+      state: "streaming",
+      thinking: null,
+      steps: [{ kind: "tool_use", tool: "celerisctl", text: "knowledge search 降水予測" }],
+    },
+    {
+      kind: "reply",
+      at: "2026-09-21T01:00:02Z",
+      cursor: "00001789000002000000.3.p01TASKCOS0000000000000001:01RUNCOS0000000000000001",
+      message_id: `streaming:${task_id}:${run_id}`,
+      node_id: "cos",
+      project_id: null,
+      task_id,
+      run_id,
+      text: "承知しました。",
+      state: "streaming",
+      thinking: null,
+      steps: [{ kind: "tool_result", text: "3 件" }],
+    },
+    {
+      kind: "reply",
+      at: "2026-09-21T01:00:00Z",
+      cursor: "00001789000003000000.4.m01REPLYCOS",
+      message_id: "01REPLYCOS",
+      node_id: "cos",
+      project_id: null,
+      task_id,
+      run_id,
+      text: "承知しました。関連研究の調査から始めます。",
+      state: "done",
+    },
+  ];
 }
 
 /** `GET /knowledge/tree` の応答（`celerisctl knowledge init` がまだ）。 */

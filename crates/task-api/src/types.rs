@@ -759,6 +759,23 @@ pub struct OrgList {
     /// ADR-0046 D1: `items` と同じ並びの実効 profile（`EffectiveProfile.node_id` で対応づく）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effective_profiles: Vec<task_core::EffectiveProfile>,
+    /// ADR-0054 D1/D3（Phase 67/68）: 部門長（`OrgKind::Department`）の継続セッション（`kind = lead`）が
+    /// あるノードだけ、`node_id` で対応づけて渡す（無いノードは含めない。CoS の対話セッションは
+    /// 組織画面ではなく Console のチャット欄自身が見せるので、ここには乗せない）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lead_sessions: Vec<NodeSessionSummary>,
+}
+
+/// `OrgList.lead_sessions[]` の 1 件（ADR-0054 D3。Phase 68）: 「継続中のセッション: turns / tokens /
+/// 最終使用」を組織画面に出すための最小限の読み取り。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct NodeSessionSummary {
+    pub node_id: String,
+    pub turns: i64,
+    pub approx_tokens: i64,
+    #[serde(with = "time::serde::rfc3339")]
+    #[schemars(with = "String")]
+    pub last_used_at: time::OffsetDateTime,
 }
 
 // ---- ADR-0046（Phase 59）: ここまで ----
@@ -1336,6 +1353,17 @@ pub enum ConsoleBlock {
         /// （実行できた / できなかった）。GUI は「→ タスクを作りました: …」をここから出す。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         actions_result: Option<task_core::MessageMetadata>,
+        /// ADR-0054 D2（Phase 68）: `streaming`（run 中。`text` はここまでの積み上げ）か
+        /// `done`（`messages` に確定した返事）。無ければ `done`（過去のブロック・このフィールドを
+        /// 知らないクライアントとの後方互換）。
+        #[serde(default)]
+        state: task_ops::console::ConsoleReplyState,
+        /// 育つ返事の「考え中…」の最新の 1 行（`state = streaming` のときだけ意味がある。置き換え式）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking: Option<String>,
+        /// 育つ返事の中の tool_use/tool_result（`state = streaming` のときだけ意味がある）。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        steps: Vec<task_ops::console::ConsoleReplyStep>,
     },
     /// タスクの開始・終了・失敗・中止・割り込み（`Event::Transitioned` の 1 行）。
     Task {

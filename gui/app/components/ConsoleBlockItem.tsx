@@ -6,7 +6,7 @@ import type {
   TaskCommentOutcome,
   TransitionOutcome,
 } from "~/celeris/action-types";
-import type { ConsoleBlock, EventsPage, OrgNode, Project } from "~/celeris/types";
+import type { ConsoleBlock, ConsoleReplyStep, EventsPage, OrgNode, Project } from "~/celeris/types";
 import { formatRunEventRow, progressSummaryLine, taskLineSummary } from "~/lib/console";
 import { shortId } from "~/lib/format";
 import { isKnowledgeFallback } from "~/lib/knowledge";
@@ -168,6 +168,35 @@ function HumanBlockView({
   );
 }
 
+/**
+ * ADR-0054 D2（Phase 68）: 育つ返事の中の 1 手（`tool_use`/`tool_result`）を 1 行に。
+ * `ProgressLineRow`（折り畳んだ `progress` の展開）と見た目を揃える（長い出力も `break-words` で
+ * 393px を飛び出さない。ADR-0055 D2）。
+ */
+function ReplyStepRow({ step }: { step: ConsoleReplyStep }) {
+  return (
+    <div
+      data-testid="console-reply-step"
+      className={cn(
+        "rounded-md px-2 py-1 font-mono text-xs break-words",
+        step.error ? "bg-danger-soft text-danger-soft-fg" : "bg-surface-2/60",
+      )}
+    >
+      {step.kind === "tool_result" ? (
+        <span className="text-fg-subtle">→ </span>
+      ) : (
+        step.tool && <span className="text-fg-subtle">[{step.tool}] </span>
+      )}
+      {step.text}
+      {step.error && (
+        <Badge tone="danger" className="ml-2">
+          エラー
+        </Badge>
+      )}
+    </div>
+  );
+}
+
 function ReplyBlockView({
   block,
   org,
@@ -178,10 +207,44 @@ function ReplyBlockView({
   onReply: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
 }) {
   const result = block.actions_result;
+  // ADR-0054 D2（Phase 68）: run 中は「育つ返事」（考え中…の 1 行 → tool call の行 → 本文）、
+  // 完了すると確定した本文だけの、これまでどおりの吹き出しになる。
+  const streaming = block.state === "streaming";
+  const steps = block.steps ?? [];
   return (
     <BlockShell testId="console-block-reply">
-      <BlockHeader icon="message" who={orgNodeName(block.node_id, org)} at={block.at} />
-      <MarkdownViewer content={block.text} />
+      <BlockHeader
+        icon="message"
+        who={
+          streaming ? (
+            <span className="flex items-center gap-1.5">
+              {orgNodeName(block.node_id, org)}
+              <span
+                className="inline-block size-1.5 animate-pulse rounded-full bg-primary"
+                aria-hidden="true"
+                data-testid="console-reply-streaming-dot"
+              />
+            </span>
+          ) : (
+            orgNodeName(block.node_id, org)
+          )
+        }
+        at={block.at}
+      />
+      {streaming && (
+        <p className="mb-1.5 text-sm text-fg-subtle italic lg:text-xs" data-testid="console-reply-thinking">
+          {block.thinking || "考え中…"}
+        </p>
+      )}
+      {streaming && steps.length > 0 && (
+        <div className="mb-2 space-y-1" data-testid="console-reply-steps">
+          {steps.map((step, i) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: `steps` はサーバの積み上げで安定した id を持たない
+            <ReplyStepRow key={i} step={step} />
+          ))}
+        </div>
+      )}
+      {block.text && <MarkdownViewer content={block.text} />}
       {result && (result.actions_executed?.length || result.actions_failed?.length) ? (
         <div className="mt-2 space-y-1 text-sm lg:text-xs" data-testid="console-actions-result">
           {result.actions_executed?.map((a, i) => (
@@ -198,16 +261,18 @@ function ReplyBlockView({
           ))}
         </div>
       ) : null}
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
-        {block.run_id && block.task_id ? (
-          <Link to={`/tasks/${block.task_id}`} className={cn(touchLinkClass, "text-sm underline underline-offset-2")}>
-            この返事を作った run
-          </Link>
-        ) : (
-          <span />
-        )}
-        <ReplyButton onClick={() => onReply(block)} />
-      </div>
+      {!streaming && (
+        <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
+          {block.run_id && block.task_id ? (
+            <Link to={`/tasks/${block.task_id}`} className={cn(touchLinkClass, "text-sm underline underline-offset-2")}>
+              この返事を作った run
+            </Link>
+          ) : (
+            <span />
+          )}
+          <ReplyButton onClick={() => onReply(block)} />
+        </div>
+      )}
     </BlockShell>
   );
 }

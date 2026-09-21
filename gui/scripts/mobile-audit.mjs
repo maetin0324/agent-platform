@@ -58,6 +58,8 @@ const ROUTES = [
   { route: "home", path: "/" },
   { route: "org", path: "/org" },
   { route: "org-node", path: "/org/coding-poc" },
+  // ADR-0054 D3（Phase 68 追加。ADR-0055 D1 の元の一覧には無い）: 部門長ノードの詳細（継続セッション表示）。
+  { route: "org-detail", path: "/org?selected=coding" },
   { route: "projects", path: "/projects" },
   { route: "project-detail", path: `/projects/${PROJECT_ID}` },
   { route: "project-docs", path: `/projects/${PROJECT_ID}/docs` },
@@ -164,6 +166,9 @@ async function setupMockCeleris() {
       orgNode("coding", { kind: "department", parent_id: "cos", name: "Coding" }),
       orgNode("coding-poc", { parent_id: "coding", genre: "coding", name: "PoC" }),
     ],
+    // ADR-0054 D3（Phase 68）: 部門長の継続セッション表示（`/org?selected=coding`）が 393px を
+    // 飛び出さないことも、この固定データで確かめられるようにしておく。
+    lead_sessions: [{ node_id: "coding", turns: 3, approx_tokens: 123456, last_used_at: "2026-09-21T01:00:00Z" }],
   };
   mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, org));
 

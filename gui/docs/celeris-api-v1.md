@@ -1086,8 +1086,15 @@ Phase 27 の監査 M-4）。読み取りと途中目標の操作は通常の要�
                         "harness_default":"conversation","policy":["…"]},
                        {"node_id":"software-engineering","chain":["cos","engineering","software-engineering"],
                         "skills":["software","rust","sqlite"],"harnesses_allowed":["coding"],
-                        "harness_default":"coding","tools":["gh"],"policy":["…","…"]}]}
+                        "harness_default":"coding","tools":["gh"],"policy":["…","…"]}],
+ "lead_sessions":[{"node_id":"engineering","turns":3,"approx_tokens":12345,"last_used_at":"…"}]}
 ```
+
+**Phase 68（ADR-0054 D3）**: `lead_sessions[]`（`NodeSessionSummary`）は部門長（`kind = "department"`）
+の継続セッション（`node_sessions`、`kind = "lead"`。ADR-0054 D1）が**あるノードだけ**、`node_id` で
+対応づけて渡す（無いノードは配列に出ない。空なら `lead_sessions` 自体を省略）。組織画面はこれで
+「継続中のセッション: turns / tokens / 最終使用」を部門長ノードに出す。CoS の対話セッションはここには
+出ない（Console のチャット欄自身が状態を見せるため）。
 
 - `effective_profiles[]` は `items[]` と**同じ並び**で、`node_id` で対応づく。`chain` は根から葉までの
   ノード id（GUI の「どこから継いだか」）。
@@ -2239,7 +2246,7 @@ CoS の `actions` は ADR-0048 D3（Phase 60b。§3.107）。
 | `kind` | 中身 | 由来 |
 |---|---|---|
 | `human` | 人の発言（`text` / `node_id` / `project_id` / `task_id`） | `messages`（`role = user`） |
-| `reply` | CoS・部署ノードの返事（Markdown。`run_id` 付き）。CoS が `actions`（§3.107）を宣言していれば `actions_result`（`MessageMetadata`: `actions_executed[]` / `actions_failed[]`） | `messages`（`role = node`） |
+| `reply` | CoS・部署ノードの返事（Markdown。`run_id` 付き）。CoS が `actions`（§3.107）を宣言していれば `actions_result`（`MessageMetadata`: `actions_executed[]` / `actions_failed[]`）。ADR-0054 D2（Phase 68）: `state`（`streaming` \| `done`。省略時 `done`）・`thinking`（run 中の最新の思考 1 行。置き換え式）・`steps[]`（`{kind: tool_use\|tool_result, tool?, text, error?}`。run 中の道具の呼び出しを順番どおり） | `messages`（`role = node`）。`state = streaming` のときは対話 run の `Event::WorkerProgress` から合成（まだ `messages` に確定していない） |
 | `task` | 開始・終了・失敗・中止・割り込みの 1 行（`task`: `from` / `to` / `reason` / `assignee` / `harness` / `tier` / `mode` / `elapsed_secs`） | `Event::Transitioned` |
 | `progress` | run ごとに束ねたワーカーの進行。`progress`: `run_id` / `count` / `tool_count` / `last_status` / `started_at` / `updated_at` / `first[]` / `last[]` / `truncated`。見出し用に `title` / `assignee` / `harness` / `tier` | `Event::WorkerProgress`（ADR-0048 D2 の正規化） |
 | `question` | ディスパッチャの質問（`text` / `answered` / `answer` / `run_id`） | `Event::QuestionRaised` + `Event::Answered` |
@@ -2260,6 +2267,15 @@ CoS の `actions` は ADR-0048 D3（Phase 60b。§3.107）。
 （`truncated = true` なら間が省かれている）。全行は §3.100 で取る。1 行は
 `{at, seq, kind?, tool?, text, error?}` で、`text` は `summary` があればそれ、無ければ `msg`。
 
+**育つ返事（ADR-0054 D2、Phase 68）**: 対話 run（`task.conversation` あり。CoS の対話・ノードとの対話の
+どちらも）の進行は、他のタスクのような折り畳んだ `progress` ではなく、**`reply`（`state = "streaming"`）**
+として出る。`kind = thinking` の行は `thinking` を**置き換え**（積み上げない。最新の 1 行）、
+`kind = text` の行は `text` に**そのまま追記**（アダプタが部分文字列で送るぶんだけ）、
+`kind = tool_use` / `tool_result` の行は `steps[]` に**順番どおり追加**する（`tool_use` は `tool` +
+`summary`、`tool_result` は折り畳み用に 1 行）。`kind = status` の行はここには出さない。
+run が終わり `messages` に確定すると、**別の `reply` ブロック**（`state = "done"`、`thinking`/`steps` は
+空）が届く。GUI は同じ `run_id` の `reply` を 1 つの吹き出しとして扱う（§3.99 の SSE の積み方を参照）。
+
 #### 3.99 `GET /console/stream?scope=&since=`
 
 `GET /stream` と同じ枠組み（認証・同時接続数 16・`heartbeat`・停止で閉じる）。`scope` は §3.98 と同じ。
@@ -2276,10 +2292,12 @@ data: {"now":"…"}
 ```
 
 - `since` を渡さなければ**「今」から**（履歴は §3.98 で取る）。
-- `progress` は **run ごとに 1 秒に 1 回まで**にまとめて流す（1 回の道具呼び出しごとにフレームが飛ばない）。
-  流れてくる `progress` ブロックは**その run の積み上げ**（`count` / `tool_count` はその接続で見た合計）。
-- `task` / `human` / `reply` / `question` / `approval` / `milestone` / `report` はまとめずにそのまま流す
-  （対話・認可・報告は 1 秒ごとに見に行く）。
+- `progress` と、対話 run の育つ `reply`（`state = "streaming"`）は **run ごとに 1 秒に 1 回まで**にまとめて
+  流す（1 回の道具呼び出しごとにフレームが飛ばない）。流れてくる `progress` ブロックは**その run の積み上げ**
+  （`count` / `tool_count` はその接続で見た合計）。育つ `reply` は**その接続で見た増分だけ**（`text` は
+  その回で届いた分だけ・GUI 側が同じ `run_id` の既存の吹き出しに追記する。`thinking` は最新の値で置き換え）。
+- `task` / `human` / `question` / `approval` / `milestone` / `report` と、確定した `reply`
+  （`state = "done"`）はまとめずにそのまま流す（対話・認可・報告は 1 秒ごとに見に行く）。
 - `Last-Event-ID` は使わない（`id:` を付けない。再開は `since` で行う）。
 
 #### 3.100 `GET /tasks/{id}/runs/{run_id}/events?after_seq=&limit=` → 200 `EventsPage`
@@ -2416,6 +2434,20 @@ Console の入力欄の文の入口。`POST /org/{id}/messages`（§3.47）と�
     「実行できなかった action: …」の節が付き、`reply` ブロックの `actions_result.actions_failed[]` にも理由が残る。
   - 実行結果は `Message.metadata`（`MessageMetadata`）に残り、`GET /console` の `reply` ブロックが
     `actions_result` として運ぶ（§3.98 の表）。**同じ run の actions は 1 回だけ実行される**（冪等）。
+  - CoS が `actions` を出すと run はそこで終わる（サブエージェントに一通り投げたら一旦止まる。ADR-0054
+    D2）。作った `create_task` は `task` ブロックとして返事の直下に出て、その後の進行はそのタスク**自身**
+    の run として折り畳みの `progress` で流れる（既定は折り畳み。§3.98）。
+- **入力のキュー（ADR-0054 D2、Phase 68）**: 同じノード（**CoS は案件をまたいでも 1 つの列**。D1 の継続
+  セッションが `project_id` に関わらず全体で 1 本のため。CoS 以外のノードは案件ごとに別の列）に未終了の
+  対話用タスクがあれば、新しい `POST /console/instruct` は 202 を返しつつ、その対話用タスクを**依存**
+  （`depends_on`）として作る。run は前の対話が終わるまで始まらない（202 の応答自体はすぐ返る。「投げた」
+  ことと「run が始まった」ことは別）。
+- **CoS の対話 run に許す読み取りの道具（ADR-0054 D2、Phase 68）**: `celerisctl knowledge search|get`・
+  `celerisctl ls|show`（タスク）・`celerisctl projects ls|show`（案件・Phase 68 で追加）だけ。書く操作は
+  §3.107 の `actions` 経由だけ（対話 run 自身は道具を使わない、という ADR-0033 D4 の原則の例外はこれだけ）。
+  アダプタごとの実現（GUI からは見えない、taskd 内部の話）は claude-code が `--allowedTools`、codex が
+  `sandbox_mode="read-only"`、ACP は道具単位の許可が無いため対話 run 中は道具の許可要求を一律拒否
+  （`docs/adr/0054-stateful-sessions-and-streaming-chat.md` の「Phase 68 追記」参照）。
 
 ### 3.108 `GET /llm/sources`（ADR-0053 D4、Phase 65/66。**97**）→ 200 `LlmSourcesView`
 
@@ -2475,8 +2507,10 @@ GUI の「新しい会話」ボタンの入口。**薄い**: ディスパッチ�
   逼迫（`[sessions] rollover_tokens`）かアカウント変更が起きるまで、前置きは差分だけ（`session_diff`）が
   続く。
 - 部門長（engineering/research/operations の根ノード）のレビュー・切り分け run（ADR-0051）の継続セッション
-  （`kind = lead`）はこの API の対象外（部署ごとに 1 本、GUI からの操作は今回のスコープに無い。組織画面の
-  「継続中のセッション」表示は Phase 68 の D3）。
+  （`kind = lead`）はこの API の対象外（部署ごとに 1 本、GUI からの操作は今回のスコープに無い）。
+- Phase 68（ADR-0054 D3）: GUI の「新しい会話」ボタンが実際にこの API を呼ぶようになった（確認ダイアログ
+  付き）。組織画面の部門長ノードには `GET /org`（§3.42）の `lead_sessions[]`（`NodeSessionSummary`）から
+  「継続中のセッション: turns / tokens / 最終使用」を出す（§6.2 参照。無いノードには出さない）。
 
 ---
 
@@ -2980,7 +3014,12 @@ pub struct SecretPutResult { pub id: String, pub updated_at: String, pub fingerp
 pub struct OrgNode { pub id: String, pub parent_id: Option<String>, pub name: String, pub kind: OrgKind /* secretary|department|section */,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub genre: Option<String>,
     #[serde(default)] pub brief: String, #[serde(default)] pub position: i64, pub created_at: String, pub updated_at: String }
-pub struct OrgList { pub items: Vec<OrgNode> /* position 昇順、同値は id 昇順 */ }
+pub struct OrgList { pub items: Vec<OrgNode> /* position 昇順、同値は id 昇順 */,
+    #[serde(default)] pub effective_profiles: Vec<EffectiveProfile>, /* Phase 59, ADR-0046 D1 */
+    #[serde(default)] pub lead_sessions: Vec<NodeSessionSummary>, /* Phase 68, ADR-0054 D3。部門長（OrgKind::Department）の
+        継続セッションがあるノードだけ、node_id で対応づけて渡す。無ければ出さない */ }
+/// ADR-0054 D3（Phase 68）: 組織画面の「継続中のセッション: turns / tokens / 最終使用」の元。
+pub struct NodeSessionSummary { pub node_id: String, pub turns: i64, pub approx_tokens: i64, pub last_used_at: String }
 #[serde(deny_unknown_fields)]
 pub struct OrgCreateBody { pub id: String, pub name: String, pub kind: OrgKind, #[serde(default)] pub parent_id: Option<String>,
     #[serde(default)] pub genre: Option<String>, #[serde(default)] pub brief: Option<String>, #[serde(default)] pub position: Option<i64> }
@@ -3146,7 +3185,11 @@ pub struct ConsoleHello { pub cursor: String, pub scope: String, pub now: String
 /// 9 種のブロック（`#[serde(tag = "kind", rename_all = "snake_case")]`）。どれも `at`（RFC 3339）と `cursor` を持つ。
 pub enum ConsoleBlock {
     Human { at: String, cursor: String, message_id: String, node_id: String, project_id: Option<ProjectId>, task_id: Option<TaskId>, text: String },
-    Reply { at: String, cursor: String, message_id: String, node_id: String, project_id: Option<ProjectId>, task_id: Option<TaskId>, run_id: Option<String>, text: String },
+    /// ADR-0054 D2（Phase 68）: `state` は省略時 `done`。`state = "streaming"` のときだけ `thinking`/`steps` に意味がある。
+    Reply { at: String, cursor: String, message_id: String, node_id: String, project_id: Option<ProjectId>, task_id: Option<TaskId>, run_id: Option<String>, text: String,
+        actions_result: Option<MessageMetadata>,
+        #[serde(default)] state: ConsoleReplyState /* "streaming" | "done" */,
+        thinking: Option<String>, #[serde(default)] steps: Vec<ConsoleReplyStep> },
     Task { at: String, cursor: String, task: ConsoleTaskLine },
     Progress { at: String, cursor: String, progress: ConsoleProgress, title: String, assignee: Option<String>, harness: Option<String>, tier: Tier, project_id: Option<ProjectId> },
     Question { at: String, cursor: String, task_id: TaskId, run_id: String, node_id: Option<String>, project_id: Option<ProjectId>, text: String, answered: bool, answer: Option<String> },
@@ -3180,6 +3223,13 @@ pub struct ConsoleProgressLine {
     /// `summary` があればそれ、無ければ `msg`。
     pub text: String, pub error: bool,
 }
+
+/// ADR-0054 D2（Phase 68）: 育つ返事（`reply` ブロック）の状態。過去のブロック・このフィールドを
+/// 知らないクライアントとの互換のため既定は `Done`。
+pub enum ConsoleReplyState { Streaming, Done } // #[serde(rename_all = "snake_case")]
+
+/// 育つ返事の中の 1 手（`tool_use` / `tool_result` だけ。ADR-0054 D2）。
+pub struct ConsoleReplyStep { pub kind: ProgressKind, pub tool: Option<String>, pub text: String, pub error: bool }
 ```
 
 `Option<String>` の時刻フィールドは RFC 3339 文字列（`OffsetDateTime` を持つ型は `#[serde(with = "time::serde::rfc3339")] #[schemars(with = "String")]`）。`BTreeMap<Status, u64>` は JSON ではキーが status 名のオブジェクト。

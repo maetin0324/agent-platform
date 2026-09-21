@@ -1959,6 +1959,18 @@
                 "null"
               ]
             },
+            "state": {
+              "$ref": "#/$defs/ConsoleReplyState",
+              "default": "done",
+              "description": "ADR-0054 D2（Phase 68）: `streaming`（run 中。`text` はここまでの積み上げ）か\n`done`（`messages` に確定した返事）。無ければ `done`（過去のブロック・このフィールドを\n知らないクライアントとの後方互換）。"
+            },
+            "steps": {
+              "description": "育つ返事の中の tool_use/tool_result（`state = streaming` のときだけ意味がある）。",
+              "items": {
+                "$ref": "#/$defs/ConsoleReplyStep"
+              },
+              "type": "array"
+            },
             "task_id": {
               "anyOf": [
                 {
@@ -1971,6 +1983,13 @@
             },
             "text": {
               "type": "string"
+            },
+            "thinking": {
+              "description": "育つ返事の「考え中…」の最新の 1 行（`state = streaming` のときだけ意味がある。置き換え式）。",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -2463,6 +2482,39 @@
       "required": [
         "at",
         "seq",
+        "text"
+      ],
+      "type": "object"
+    },
+    "ConsoleReplyState": {
+      "description": "`reply` ブロックの状態（Phase 68）。`streaming` は run 中（`text` はここまでの積み上げ）、`done` は\n`messages` に確定した返事（従来どおり）。`Default` は `Done`（過去の `messages` 由来の返事や\nこのフィールドを知らないテスト・クライアントが黙って「確定済み」を読めるようにするため）。",
+      "enum": [
+        "streaming",
+        "done"
+      ],
+      "type": "string"
+    },
+    "ConsoleReplyStep": {
+      "description": "育つ返事の中の 1 手（`tool_use` / `tool_result` だけ。ADR-0054 D2: 「tool_use は tool + summary を\n1 行、tool_result は折り畳み」）。",
+      "properties": {
+        "error": {
+          "type": "boolean"
+        },
+        "kind": {
+          "$ref": "#/$defs/ProgressKind"
+        },
+        "text": {
+          "type": "string"
+        },
+        "tool": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
         "text"
       ],
       "type": "object"
@@ -6311,6 +6363,32 @@
       ],
       "type": "object"
     },
+    "NodeSessionSummary": {
+      "description": "`OrgList.lead_sessions[]` の 1 件（ADR-0054 D3。Phase 68）: 「継続中のセッション: turns / tokens /\n最終使用」を組織画面に出すための最小限の読み取り。",
+      "properties": {
+        "approx_tokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "last_used_at": {
+          "type": "string"
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "turns": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node_id",
+        "turns",
+        "approx_tokens",
+        "last_used_at"
+      ],
+      "type": "object"
+    },
     "NotificationKind": {
       "description": "判断待ち・返事・成果の引き渡し（ADR-0037 / ADR-0050）。進行中の細かな更新は通知しない。",
       "oneOf": [
@@ -6567,6 +6645,13 @@
         "items": {
           "items": {
             "$ref": "#/$defs/OrgNode"
+          },
+          "type": "array"
+        },
+        "lead_sessions": {
+          "description": "ADR-0054 D1/D3（Phase 67/68）: 部門長（`OrgKind::Department`）の継続セッション（`kind = lead`）が\nあるノードだけ、`node_id` で対応づけて渡す（無いノードは含めない。CoS の対話セッションは\n組織画面ではなく Console のチャット欄自身が見せるので、ここには乗せない）。",
+          "items": {
+            "$ref": "#/$defs/NodeSessionSummary"
           },
           "type": "array"
         }

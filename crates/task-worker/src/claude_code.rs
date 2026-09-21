@@ -772,6 +772,18 @@ async fn run_claude_code(
     if let Some(model) = &config.model {
         command.arg("--model").arg(model);
     }
+    // ADR-0054 D2（Phase 68）: CoS の対話 run だけ、読み取りだけの `celerisctl` を許す
+    // （`Bash(celerisctl <サブコマンド>:*)` の形。claude-code の `--allowedTools` はこの許可リストに
+    // 無い道具を拒否する＝それ以外は禁止のまま。ADR-0033 D4 の「対話 run は道具を使わない」の例外）。
+    if req.context.conversation_addressee == Some(crate::protocol::ConversationAddressee::Secretary)
+    {
+        let allowed = crate::protocol::CONVERSATION_READONLY_CELERISCTL
+            .iter()
+            .map(|sub| format!("Bash(celerisctl {sub}:*)"))
+            .collect::<Vec<_>>()
+            .join(",");
+        command.arg("--allowedTools").arg(allowed);
+    }
     command.args(&config.extra_args);
     command
         .envs(config.env.iter().cloned())
@@ -2750,6 +2762,63 @@ printf '%s\n' '{"type":"turn.completed"}'
             .unwrap();
         let args = captured_args(dir.path());
         assert!(args.contains(&"--no-session-persistence".to_string()));
+    }
+
+    /// ADR-0054 D2（Phase 68）: CoS の対話 run（`conversation_addressee = Secretary`）だけ
+    /// `--allowedTools` に読み取り専用の `celerisctl` サブコマンドが渡る。それ以外の run には
+    /// 付かない（対話 run は道具を使わないという ADR-0033 D4 の原則のまま）。
+    #[tokio::test]
+    async fn the_cos_conversation_run_gets_a_readonly_tool_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.conversation_addressee =
+            Some(crate::protocol::ConversationAddressee::Secretary);
+        let _ = adapter
+            .run(req, "run-cos", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        let idx = args
+            .iter()
+            .position(|a| a == "--allowedTools")
+            .expect("--allowedTools present");
+        let allowed = &args[idx + 1];
+        assert!(allowed.contains("Bash(celerisctl knowledge search:*)"), "{allowed}");
+        assert!(allowed.contains("Bash(celerisctl knowledge get:*)"), "{allowed}");
+        assert!(allowed.contains("Bash(celerisctl ls:*)"), "{allowed}");
+        assert!(allowed.contains("Bash(celerisctl show:*)"), "{allowed}");
+        assert!(allowed.contains("Bash(celerisctl projects ls:*)"), "{allowed}");
+        assert!(allowed.contains("Bash(celerisctl projects show:*)"), "{allowed}");
+    }
+
+    /// 対話でない run・CoS 以外の対話（`Other`）には `--allowedTools` は付かない。
+    #[tokio::test]
+    async fn non_cos_runs_get_no_tool_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        assert_eq!(req.context.conversation_addressee, None);
+        let _ = adapter
+            .run(req, "run-plain", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(!args.contains(&"--allowedTools".to_string()));
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let config2 = stub_claude(dir2.path(), args_log_script());
+        let adapter2 = ClaudeCodeAdapter::new(config2);
+        let mut req2 = sample_req(dir2.path().to_path_buf());
+        req2.context.conversation_addressee = Some(crate::protocol::ConversationAddressee::Other);
+        let _ = adapter2
+            .run(req2, "run-other", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args2 = captured_args(dir2.path());
+        assert!(!args2.contains(&"--allowedTools".to_string()));
     }
 
     /// `runs/<run_id>/request.json` に `context.session` がそのまま残る（実装依頼の受け入れ条件:

@@ -378,3 +378,8 @@ export type KnowledgeOpOutcome =
 export type ConsoleInstructOutcome =
   | { ok: true; op: "instruct"; accepted: ConsoleInstructAccepted }
   | { ok: false; op: "instruct"; error: ActionError };
+
+/** ADR-0054 D1/D3（Phase 67/68）: `POST /console/new-conversation`（「新しい会話」ボタン）の結果。 */
+export type ConsoleNewConversationOutcome =
+  | { ok: true; op: "new_conversation" }
+  | { ok: false; op: "new_conversation"; error: ActionError };

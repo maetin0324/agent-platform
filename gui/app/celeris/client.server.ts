@@ -135,6 +135,9 @@ export class CelerisClient {
       },
       this.#timeoutMs,
     );
+    // ADR-0054 D1（Phase 67）: `POST /console/new-conversation`（docs/gui/api.md §3.109）は 204・本文なし
+    // で返る（`delete()` の同じ扱いと同じ理由。空文字列を `res.json()` すると例外になる）。
+    if (res.status === 204) return {} as T;
     return (await res.json()) as T;
   }
 
