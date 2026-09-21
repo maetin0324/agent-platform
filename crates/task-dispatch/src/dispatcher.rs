@@ -1614,6 +1614,14 @@ impl Dispatcher {
     /// 見るだけで即座に返る。ネットワークにも認証にも触れない）。結果は dispatch の判断とスナップショットの `connected` に使う。
     /// 接続が戻っていれば cooldown を解く（人がログインし直したら、次の tick から再開できるように）。
     fn refresh_cluster_liveness(&mut self) {
+        // ADR-0041 D5 / Phase 66c: `--mode verify` は「migrations、API と `smoke` の煙試験だけ。他の
+        // dispatch も裏方の仕事も無い」（`self.eligible.is_some()` が `--mode verify` の煙試験だけを
+        // 目印。ADR-0041 D5、`set_eligible_tasks` の doc を参照）。`refresh_cluster_liveness` は DB へは
+        // 書かないが、実クラスタへ `ssh -O check` を打つ副作用（生の ssh 呼び出し）は「裏方の仕事」その
+        // ものなので、verify では走らせない。
+        if self.eligible.is_some() {
+            return;
+        }
         if self.config.clusters.is_empty() {
             return;
         }
@@ -1652,6 +1660,15 @@ impl Dispatcher {
     /// 2. master が生きていれば、forward ごとに probe → 届かなければ `tunnel_forward_ensurer` で
     ///    (再)確立 → 再 probe。最終的な到達性の変化を `tunnel_events` に積む（Up/Down/Restored）。
     fn refresh_cluster_tunnels(&mut self) {
+        // ADR-0041 D5 / Phase 66c（実機 2026-09-21、release 2b3aaf1d633a）: `--mode verify` は
+        // dispatch も裏方の仕事もしない。しかしこれは無条件に呼ばれていたため、staging の verify
+        // インスタンスでも forward の(再)確立・`cluster_login_needed` の報告書き込みが起こり、
+        // `verify.sh` check 2（本番のコピーと件数が一致すること）が `reports(snapshot=135
+        // staging=136)` で落ちた。`refresh_cluster_liveness` と同じ目印
+        // （`self.eligible.is_some()` = `--mode verify` の煙試験）で丸ごと止める。
+        if self.eligible.is_some() {
+            return;
+        }
         if !self.config.clusters.values().any(|c| !c.forwards.is_empty()) {
             return;
         }
@@ -8468,6 +8485,99 @@ mod tests {
                 && e.listen == "127.0.0.1:19004"
                 && e.kind == TunnelEventKind::Down),
             "{events:?}"
+        );
+    }
+
+    /// ADR-0041 D5 / Phase 66c（実機 2026-09-21）: `--mode verify` の celeris（`set_eligible_tasks` で
+    /// 「`smoke` の煙試験だけ」に絞られたインスタンス）は「migrations、API と煙試験だけ。他の裏方の仕事は
+    /// 無い」はずなのに、`[[clusters.forwards]]` を持つクラスタが設定されていると
+    /// `refresh_cluster_tunnels` が forward の(再)確立と `cluster_login_needed` の報告書き込みを行い、
+    /// staging と本番のコピーで `reports` の件数がずれて `verify.sh` check 2 が落ちた
+    /// （`reports(snapshot=135 staging=136)`）。`set_eligible_tasks` を呼んだ（＝ verify）インスタンスは
+    /// `refresh_cluster_tunnels` を丸ごと素通りし、フック（`cluster_connector` / `tunnel_forward_ensurer`
+    /// / `tunnel_probe`）を一切呼ばず、報告も書かないことを確かめる。
+    #[tokio::test]
+    async fn verify_mode_does_not_refresh_cluster_tunnels_or_write_a_report() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.clusters.insert(
+            "pegasus".into(),
+            cluster_spec_with_forward(
+                "pegasus",
+                "pegasus",
+                "totp",
+                "127.0.0.1:19005",
+                "bnode150:19005",
+            ),
+        );
+        // master は死んでいる（`cluster_connected` に何も入っていない）ので、verify でなければ
+        // `cluster_connector` → 失敗 → `cluster_login_needed` の報告書き込みに至るはずの状態。
+        let connector_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connector_calls_hook = connector_calls.clone();
+        d.set_cluster_connector(Arc::new(move |_id: &str, _host: &str| {
+            connector_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("permission denied (keyboard-interactive)".to_string())
+        }));
+        let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ensure_calls_hook = ensure_calls.clone();
+        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
+            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+        let probe_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let probe_calls_hook = probe_calls.clone();
+        d.set_tunnel_probe(Arc::new(move |_listen: &str| {
+            probe_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        }));
+
+        let reports_before = store
+            .report_list(&task_core::ReportFilter::default())
+            .unwrap()
+            .len();
+
+        // ADR-0041 D5: `--mode verify` の目印（celeris は verify のときだけこれを呼ぶ）。
+        d.set_eligible_tasks(Arc::new(|task: &Task| {
+            task.genre.as_deref() == Some("smoke")
+        }));
+
+        d.refresh_cluster_liveness();
+        d.refresh_cluster_tunnels();
+
+        assert_eq!(
+            connector_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "verify mode must not touch the cluster connector"
+        );
+        assert_eq!(
+            ensure_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "verify mode must not (re-)establish forwards"
+        );
+        assert_eq!(
+            probe_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "verify mode must not probe forwards"
+        );
+        assert!(d.clusters_needing_login().is_empty());
+        assert!(d.take_tunnel_events().is_empty());
+        assert_eq!(d.cluster_connected.get("pegasus"), None);
+
+        let reports_after = store
+            .report_list(&task_core::ReportFilter::default())
+            .unwrap()
+            .len();
+        assert_eq!(
+            reports_after, reports_before,
+            "verify mode must not write a cluster_login_needed report"
         );
     }
 
