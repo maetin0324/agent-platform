@@ -11657,3 +11657,83 @@ OPTIONS（抜粋）: -c/--config <key=value>, --last, --all, -m/--model <MODEL>,
   → **Phase 68c**（resume の argv を usage の許可リストだけにする）を同じエージェントに依頼。codex セッションは再び `new-conversation` で retire。
 - 影響: CoS が codex に割り当たると 2 通目から失敗する（Claude なら 2 往復とも成功。67c で確認済み）。68c 配備までの間、人が Console を使う
   ときは「新しい会話」を押せば 1 通目は通る。
+## Phase 68c — codex exec resume の argv をホワイトリスト方式に（2026-09-21）
+
+Phase 68b の続き。本番反映後、`--add-dir` は直ったが別のフラグ（`--approve-for-me`）が resume で
+拒否される事象が出たため、「引き算方式」から「ホワイトリスト方式」に変更した。詳細は
+`docs/adr/0054-stateful-sessions-and-streaming-chat.md` の「Phase 68c 追記」。
+
+### 観測（本番障害、2026-09-21 15:44 UTC、release `a2942d5d8a94`。Phase 68b が本番に乗った状態）
+
+CoS の対話が codex に割り当たった。fresh run は成功（Codex 自身が確定させた thread id
+`01a0c4a2-ce4e-7751-8726-fc35845322a9` を捕捉、`done`）。続く resume run が 2 回とも exit 2:
+
+```
+error: unexpected argument '--approve-for-me' found
+  tip: to pass '--approve-for-me' as a value, use '-- --approve-for-me'
+Usage: codex exec resume --json --skip-git-repo-check --config <key=value> <SESSION_ID> [PROMPT]
+```
+
+`--approve-for-me` は `[adapters.codex] extra_args`（運用側設定）由来。Phase 68b は `--add-dir` だけを
+resume で落としていたが、`extra_args` は無条件に付け続けていたため拒否された。
+
+### 原因の確認（`~/.local/bin/codex exec resume --help` を再実行。codex-cli 0.155.1）
+
+Phase 68b の確認と同一テキスト（`--add-dir`・`-s/--sandbox`・`--approve-for-me` はどれも無い）だが、
+**OPTIONS 一覧には `-m/--model` が載っているのに、本番の実際のエラーが示した usage 行は
+`--json`・`--skip-git-repo-check`・`--config`（＋位置引数）だけに絞られていた**。「`--help` に載って
+いる＝実際に受け付けられる」という Phase 68b の前提が崩れた可能性がある。この Phase で許可された
+コマンドは `--help` の再実行だけで、`codex exec resume` 自体の実行による裏取りはできていない。
+
+### 変更
+
+- `crates/task-worker/src/codex.rs::run_codex`: `exec resume` の argv を、本番のエラーが示した usage
+  行が列挙する形だけに絞るホワイトリスト方式にした: `--json`・`--skip-git-repo-check`・
+  `-c/--config <key=value>`（複数可）・`<SESSION_ID>`・`[PROMPT]`。
+  - `--json`・`--skip-git-repo-check`・`-c sandbox_mode="..."` は fresh・resume とも変更なし。
+  - `--model` は resume のときだけ `-c model="..."` に変換（`codex exec --help` 自身の
+    `-c model="o3"` 例が `-c` 経由の等価形として明記されている）。
+  - `--add-dir` は Phase 68b のまま resume で落とす。
+  - **`[adapters.codex] extra_args`（運用側の任意フラグ。`--approve-for-me` 等）は resume では丸ごと
+    落とす**（個々のフラグに `-c` 等価があるかは一般に分からないため、既知のフラグを 1 個ずつ引き算
+    する方式には戻さない）。空でなければ `tracing::warn!` で運用側に見えるようにした。
+
+### テスト（`crates/task-worker/src/codex.rs`）
+
+- `phase_68c_resume_argv_contains_no_flag_outside_the_whitelist`（新規）: model と
+  `extra_args = ["--approve-for-me"]` を仕込んだ resume run で、argv 中の `-` で始まるトークンが
+  すべて `["--json", "--skip-git-repo-check", "-c"]` のいずれかであることを検査。`--approve-for-me`・
+  `--add-dir`・`--model` が無いこと、`model="gpt-5-codex"`・`sandbox_mode="read-only"` が `-c` 経由で
+  乗っていることを確認（production の再現・回帰）。
+- Phase 68b の 3 本 + 既存の sandbox/resume 系テストは変更なしで green のまま。
+
+### 検証（証拠コマンドと結果）
+
+- `cargo test -p task-worker --lib codex::` → **exit 0、39 passed**（Phase 68b の 38 + 新規 1）。
+- `cargo test --workspace --no-fail-fast` → **exit 0。1711 passed / 0 failed**（73 個の
+  `test result:` ブロックを合計。`grep -c "test result: FAILED"` = 0）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0、警告 0**。
+- `unwrap()`: 今回の diff で追加した `unwrap()` はすべてテストコード内のみ（`git diff` で確認）。
+- 変更ファイルは `crates/task-worker/src/codex.rs` のみ（`git status --short` で確認）。`gui/`・本番
+  パス・ports・systemctl・credential には触れていない。ディスパッチャ・ストアに LLM 呼び出しなし。
+  schema 変更なし。
+
+### 実機での確認（未実施。ADR-0009 P-34。デプロイ後に人 or エージェントが実施）
+
+1. `release.sh` → `verify.sh` → `promote.sh` でこの修正をデプロイする。
+2. CoS の対話セッションが codex に割り当たった状態で fresh → resume と連続で指示を送り、resume 側が
+   運用の `extra_args`（`--approve-for-me` 等）があっても exit 2 にならず正常終了することを確認する。
+3. resume run が `artifacts/result.json` を実際に書けること（`--add-dir` を落としても fresh 時の
+   writable-roots が引き継がれるという前提の裏取り。Phase 68b から持ち越し、今回も未検証）。
+4. resume run で運用が期待する承認モード（`extra_args` 相当）が実際に効いているか。
+
+### 未解決事項
+
+- `codex exec resume --help` の OPTIONS 一覧（`-m/--model` を含む）と、本番の実際の受理集合
+  （`--json`・`--skip-git-repo-check`・`--config` のみ）が食い違う理由は不明（`--help` の再実行以外の
+  実機操作がこの Phase では許されていないため特定できていない）。`-c model="..."` が実際に resume で
+  受理されるかも実機未検証。
+- resume 先のスレッドが fresh 時の `--add-dir`（writable-roots）や `extra_args`（承認・サンドボックス
+  設定）を引き継ぐという前提はどちらも実機未検証のまま（Phase 68b から持ち越し）。
+- ホワイトリスト方式にしたことで、今後 `exec resume` が別の未知フラグを拒否する事態そのものは
+  celeris 側で明示的に追加しない限り再発しない（`-c` の値が resume で実際に効くかどうかの検証は残る）。

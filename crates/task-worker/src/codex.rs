@@ -201,22 +201,33 @@ async fn run_codex(
     let mut command = Command::new(&config.command);
     // CoS and standalone task workspaces need not be Git repositories.
     command.arg("exec");
-    // ADR-0054 Phase 68b: `codex exec resume` is a distinct clap subcommand from `codex exec`, and
-    // it does not accept every flag the parent does. Usage lines captured 2026-09-21 from
-    // `~/.local/bin/codex exec --help` / `~/.local/bin/codex exec resume --help` (codex-cli 0.155.1,
-    // the same binary/version that produced the production exit-2 below):
-    //   `codex exec --help`:
-    //     Usage: codex exec [OPTIONS] [PROMPT]
-    //            codex exec [OPTIONS] <COMMAND> [ARGS]
-    //     OPTIONS include: -c/--config <key=value>, -m/--model, --add-dir <DIR>, --json,
-    //     --skip-git-repo-check, ...
-    //   `codex exec resume --help`:
-    //     Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
-    //     OPTIONS include: -c/--config <key=value>, --last, --all, -m/--model, --json,
-    //     --skip-git-repo-check, ... — **no `--add-dir`, no `-s/--sandbox`** (both listed under
-    //     `exec` but absent from `exec resume`).
-    // `-c/--config` is accepted by both, so `-c sandbox_mode="..."` (below) still works unchanged on
-    // resume. Only `--add-dir` needs to be dropped for the `resume` subcommand form.
+    // ADR-0054 Phase 68b/68c: `codex exec resume` is a distinct clap subcommand from `codex exec`,
+    // and does not accept every flag the parent does — production hit this twice:
+    //   Phase 68b (2026-09-21 15:04 UTC, release b24bae9a796a): `--add-dir` rejected on resume.
+    //   Phase 68c (2026-09-21 15:44 UTC, release a2942d5d8a94, this worktree's 68b already live):
+    //     `--approve-for-me` (from `[adapters.codex] extra_args`) rejected on resume too, with a
+    //     *narrower* usage line than `exec resume --help`'s OPTIONS list actually documents:
+    //       error: unexpected argument '--approve-for-me' found
+    //       Usage: codex exec resume --json --skip-git-repo-check --config <key=value> <SESSION_ID> [PROMPT]
+    //     `~/.local/bin/codex exec resume --help` (codex-cli 0.155.1, re-checked for Phase 68c) still
+    //     lists a broader OPTIONS set (-c/--config, --last, --all, --enable, --disable, -i/--image,
+    //     --strict-config, -m/--model, --dangerously-bypass-approvals-and-sandbox,
+    //     --dangerously-bypass-hook-trust, --worktree, --thread-source, --skip-git-repo-check,
+    //     --ephemeral, --ignore-user-config, --ignore-rules, --output-schema, --json,
+    //     -o/--output-last-message, -h/--help — no `--add-dir`, no `-s/--sandbox`, no
+    //     `--approve-for-me`), same as it did for Phase 68b. Since the deployed binary's actual
+    //     accepted set is narrower than what `--help` documents (and we cannot exec `codex exec
+    //     resume` itself to verify further — only `--help` is allowed), we now treat resume as
+    //     **whitelist-based** rather than "subtract the flags we know are missing": for the `resume`
+    //     subcommand form we emit only `--json`, `--skip-git-repo-check`, and any number of
+    //     `-c/--config <key=value>` pairs, plus the session id and prompt positionals — i.e. exactly
+    //     the flags the production usage line above shows. Everything else the fresh form uses
+    //     (`--add-dir`, `--model`, operator `extra_args` such as `--approve-for-me`/`--sandbox`) is
+    //     either routed through an equivalent `-c key=value` (only `--model` has a documented one:
+    //     `codex exec --help`'s own example is `-c model="o3"`) or dropped for resume with a comment
+    //     below explaining why (the resumed thread already carries whatever approval/sandbox/
+    //     writable-roots settings were set on the *first*, non-resume `exec` invocation that created
+    //     it — unverified against the real CLI beyond `--help`, see PROGRESS.md Phase 68c 未解決事項).
     let mut is_exec_resume_subcommand = false;
     if let (Some(id), CodexResumeMode::ExecResume) = (&resume_id, config.resume_mode) {
         command.arg("resume").arg(id);
@@ -224,7 +235,7 @@ async fn run_codex(
     }
     // ADR-0054 D2（Phase 68）: CoS の対話 run だけ read-only sandbox（読み取りの道具の代わり。codex には
     // claude-code の `--allowedTools` に相当する道具単位の許可リストが無いため、書き込みそのものを
-    // 塞ぐ）。`--add-dir` した `artifacts_dir`（下。fresh run のみ。Phase 68b 参照）は read-only でも
+    // 塞ぐ）。`--add-dir` した `artifacts_dir`（下。fresh run のみ。Phase 68b/68c 参照）は read-only でも
     // 書ける（celeris が渡す「結果ファイルを書く場所」の明示的な例外。codex の writable_roots の扱いに依る）。
     // それ以外の run は従来どおり `workspace-write`（result.json の契約に書き込みが要る）。
     let sandbox_mode = if req.context.conversation_addressee
@@ -234,6 +245,8 @@ async fn run_codex(
     } else {
         "workspace-write"
     };
+    // `--json` / `--skip-git-repo-check` / `-c key=value` are on the `exec resume` whitelist above,
+    // so this trio is identical for fresh and resume runs.
     command
         .arg("--json")
         .arg("--skip-git-repo-check")
@@ -244,7 +257,13 @@ async fn run_codex(
         command.arg("-c").arg(format!("experimental_resume={id}"));
     }
     if let Some(model) = &config.model {
-        command.arg("--model").arg(model);
+        if is_exec_resume_subcommand {
+            // `--model` isn't on the Phase 68c whitelist; `-c model="..."` is the documented
+            // equivalent (`codex exec --help`'s own `-c model="o3"` example).
+            command.arg("-c").arg(format!("model=\"{model}\""));
+        } else {
+            command.arg("--model").arg(model);
+        }
     }
     // Worktrees and shared workspaces keep results outside cwd. Grant only the
     // dispatcher-selected artifact directory, not its parent or other tasks — but only on the forms
@@ -254,10 +273,24 @@ async fn run_codex(
     // and does pass `--add-dir`; `-c experimental_resume=<id>` runs also go through plain `codex exec`
     // and keep getting `--add-dir` here.
     tokio::fs::create_dir_all(&req.artifacts_dir).await?;
-    if !is_exec_resume_subcommand {
+    if is_exec_resume_subcommand {
+        // Operator-configured `extra_args` (e.g. `--approve-for-me`, `--sandbox ...`) are arbitrary
+        // strings celeris does not validate; Phase 68c's production incident shows `exec resume`
+        // rejects at least one of them (`--approve-for-me`) and there is no documented `-c`
+        // equivalent for arbitrary flags in general, so they are dropped wholesale on resume rather
+        // than risk another exit 2 from an unknown future flag. The resumed thread already carries
+        // whatever approval/sandbox mode was in effect on the run that created it.
+        if !config.extra_args.is_empty() {
+            warn!(
+                "run {run_id}: dropping codex extra_args on `exec resume` (not on its \
+                 accepted-flag whitelist; ADR-0054 Phase 68c): {:?}",
+                config.extra_args
+            );
+        }
+    } else {
         command.arg("--add-dir").arg(&req.artifacts_dir);
+        command.args(&config.extra_args);
     }
-    command.args(&config.extra_args);
     command.arg(&prompt);
     command
         .envs(config.env.iter().cloned())
@@ -1740,6 +1773,80 @@ printf '%s\n' '{"type":"turn.completed"}'
             "{args:?}"
         );
         assert!(args[7].contains("# Task:"), "prompt is last: {args:?}");
+    }
+
+    // ADR-0054 Phase 68c（本番障害 2026-09-21 15:44 UTC、release a2942d5d8a94。68b 配備後、fresh run は
+    // 成功したが resume run が `--approve-for-me`（`[adapters.codex] extra_args` 由来）で exit 2）:
+    //
+    //   error: unexpected argument '--approve-for-me' found
+    //   Usage: codex exec resume --json --skip-git-repo-check --config <key=value> <SESSION_ID> [PROMPT]
+    //
+    // `~/.local/bin/codex exec resume --help`（codex-cli 0.155.1。Phase 68c で再確認。テキストは
+    // Phase 68b の確認と同一）:
+    //
+    //   Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
+    //   Options（全量）: -c/--config <key=value>, --last, --all, --enable <FEATURE>,
+    //   --disable <FEATURE>, -i/--image <FILE>, --strict-config, -m/--model <MODEL>,
+    //   --dangerously-bypass-approvals-and-sandbox, --dangerously-bypass-hook-trust, --worktree,
+    //   --thread-source <SOURCE>, --skip-git-repo-check, --ephemeral, --ignore-user-config,
+    //   --ignore-rules, --output-schema <FILE>, --json, -o/--output-last-message <FILE>, -h/--help
+    //   （`--add-dir`・`-s/--sandbox`・`--approve-for-me` は無い）。
+    //
+    // `--help` の OPTIONS 一覧は `-m/--model` を含むが、本番の実際のエラーが示した usage 行は
+    // `--json`・`--skip-git-repo-check`・`--config`（＋位置引数）だけに絞られていた。`--help` の記載と
+    // 実際に受け付けられる集合が一致しない疑いがあるため、`exec resume` の argv はここから
+    // **ホワイトリスト方式**にした: `--json`・`--skip-git-repo-check`・`-c/--config`（複数可）＋
+    // session id ＋ prompt 以外は一切乗せない。
+
+    /// resume run の argv に、model・operator の `extra_args`（`--approve-for-me` 相当）を仕込んでも
+    /// ホワイトリスト外のフラグが一切乗らないこと（production の `--approve-for-me` 拒否の回帰）。
+    #[tokio::test]
+    async fn phase_68c_resume_argv_contains_no_flag_outside_the_whitelist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_codex(dir.path(), args_log_script());
+        config.model = Some("gpt-5-codex".into());
+        config.extra_args = vec!["--approve-for-me".into()];
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.conversation_addressee =
+            Some(crate::protocol::ConversationAddressee::Secretary);
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "thread-68c".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-68c-resume", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        // The whitelist pasted in the module comment above: --json, --skip-git-repo-check,
+        // -c/--config (repeatable). Every other token that looks like a flag (starts with '-') is a
+        // regression.
+        const WHITELIST: &[&str] = &["--json", "--skip-git-repo-check", "-c"];
+        for arg in &args {
+            if arg.starts_with('-') {
+                assert!(
+                    WHITELIST.contains(&arg.as_str()),
+                    "flag {arg:?} is not on the `exec resume` whitelist: {args:?}"
+                );
+            }
+        }
+        assert!(
+            !args.contains(&"--approve-for-me".to_string()),
+            "operator extra_args must be dropped on resume: {args:?}"
+        );
+        assert!(!args.contains(&"--add-dir".to_string()), "{args:?}");
+        assert!(!args.contains(&"--model".to_string()), "{args:?}");
+        // The model still reaches codex, just via `-c model="..."` instead of `--model`.
+        assert!(
+            args.contains(&"model=\"gpt-5-codex\"".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            args.contains(&"sandbox_mode=\"read-only\"".to_string()),
+            "{args:?}"
+        );
     }
 
     /// ADR-0054 D1（Phase 67）: 継続セッション（`resume: true`）かつ `resume_mode = ExecResume`（既定）
