@@ -276,8 +276,8 @@ fn path_problem(e: PathError) -> ApiProblem {
     }
 }
 
-/// KB の根（設定していなければ 409）。
-fn root_of(state: &ApiState) -> Result<PathBuf, ApiProblem> {
+/// KB の根（設定していなければ 409）。Phase 82: `crate::skills` も同じ KB を見るので `pub(crate)`。
+pub(crate) fn root_of(state: &ApiState) -> Result<PathBuf, ApiProblem> {
     state.inner.knowledge_root.clone().ok_or_else(|| {
         knowledge_unavailable(
             "`[knowledge] root` が設定されていません（config.toml に `[knowledge]` を足す）",
@@ -285,8 +285,8 @@ fn root_of(state: &ApiState) -> Result<PathBuf, ApiProblem> {
     })
 }
 
-/// 書き込み系は KB が用意されていることを要求する。
-fn require_kb(root: &std::path::Path) -> Result<(), ApiProblem> {
+/// 書き込み系は KB が用意されていることを要求する。Phase 82: `crate::skills` も使う。
+pub(crate) fn require_kb(root: &std::path::Path) -> Result<(), ApiProblem> {
     if ops_kb::exists(root) {
         Ok(())
     } else {

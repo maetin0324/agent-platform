@@ -24,6 +24,8 @@ export default [
   // 知識ベース（ADR-0047 D5、Phase 61 / G21）。候補（`_inbox`）は兄弟のルートに分ける
   route("knowledge", "routes/knowledge.tsx"),
   route("knowledge/inbox", "routes/knowledge.inbox.tsx"),
+  // skills（ADR-0056 D3 続き、Phase 82 / G35）。知識の候補と同じく兄弟のルートに分ける
+  route("knowledge/skills", "routes/knowledge.skills.tsx"),
   route("reports", "routes/reports.tsx"),
   // resource route（コンポーネント無し）。`/reports` の行の展開・`sources_expanded` の追い掛けに使う
   route("reports/:id", "routes/reports.$id.tsx"),

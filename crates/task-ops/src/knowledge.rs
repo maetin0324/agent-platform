@@ -1547,6 +1547,46 @@ pub fn skills_list(root: &Path) -> Vec<SkillSummary> {
     out
 }
 
+/// Phase 82（ADR-0056 D3 続き）: skill 全体を消す（`skills/<name>/` をまるごと）。**mount されているかの
+/// 判断は呼び出し側**（`task-api`/`celeris-mcp` は組織の profile を読めるが、task-ops は KB のことしか
+/// 知らないため。呼び出し側が 409 相当を先に判断してから呼ぶ）。無い skill は `Failed`。
+pub fn skills_delete(root: &Path, name: &str) -> Result<String, SkillError> {
+    let dir = skill_dir(root, name)?;
+    if !dir.join(SKILL_FILE).exists() {
+        return Err(SkillError::Failed(format!("skill not found: {name}")));
+    }
+    std::fs::remove_dir_all(&dir)
+        .map_err(|e| SkillError::Failed(format!("{} を消せませんでした: {e}", dir.display())))?;
+    let scope = format!("{SKILLS_ROOT_DIR}/{name}");
+    commit_paths(
+        root,
+        &format!("knowledge: skills/{name} を削除"),
+        (kb::HUMAN_AUTHOR_NAME, kb::HUMAN_AUTHOR_EMAIL),
+        &[scope.as_str()],
+    )
+    .map_err(SkillError::Failed)
+}
+
+/// Phase 82（ADR-0056 D3 続き）: ノードの `profile.skills_mounts` に skill 名を足す・外す
+/// （`celeris-mcp` の `org_mount_skill`/`org_unmount_skill` と、task-api の `POST/DELETE
+/// /org/{id}/skills…` が**同じこの関数**を呼ぶ。挙動が食い違わないようにするため）。
+/// 名前の形が不正なら触らずに `Err`（mount 済みの一覧はそのまま）。
+pub fn set_skill_mount(mounts: &mut Vec<String>, skill: &str, mount: bool) -> Result<(), SkillError> {
+    if !kb::is_valid_skill_name(skill) {
+        return Err(SkillError::InvalidName {
+            name: skill.to_string(),
+        });
+    }
+    if mount {
+        if !mounts.iter().any(|s| s == skill) {
+            mounts.push(skill.to_string());
+        }
+    } else {
+        mounts.retain(|s| s != skill);
+    }
+    Ok(())
+}
+
 /// ADR-0056 D2: skill 1 件（`SKILL.md` 本文と付属ファイルの一覧）。無ければ `None`。
 pub fn skills_get(root: &Path, name: &str) -> Option<SkillDetail> {
     if !kb::is_valid_skill_name(name) {
@@ -2276,5 +2316,49 @@ mod tests {
             ),
             Err(SkillError::BadFilePath { .. })
         ));
+    }
+
+    /// Phase 82: `skills_delete` は `skills/<name>/` をまるごと消してコミットし、消えたことが
+    /// `skills_get`/`skills_list` から見えなくなる。無い skill は `Failed`。
+    #[test]
+    fn skills_delete_removes_the_directory_and_commits() {
+        let (_dir, root) = kb_dir();
+        skills_put(
+            &root,
+            "rust-review",
+            SAMPLE_SKILL_MD,
+            &[("checklist.md".to_string(), "- fmt\n".to_string())],
+            None,
+        )
+        .expect("put");
+        assert!(root.join("skills/rust-review/SKILL.md").exists());
+
+        let sha = skills_delete(&root, "rust-review").expect("delete");
+        assert!(!sha.is_empty());
+        assert!(!root.join("skills/rust-review").exists());
+        assert!(skills_get(&root, "rust-review").is_none());
+        assert!(skills_list(&root).is_empty());
+
+        assert!(matches!(
+            skills_delete(&root, "rust-review"),
+            Err(SkillError::Failed(_))
+        ));
+    }
+
+    /// Phase 82: `set_skill_mount` は名前を検証し、重複を足さず、外すと消える。
+    #[test]
+    fn set_skill_mount_toggles_without_duplicates_and_validates_the_name() {
+        let mut mounts = vec!["writing".to_string()];
+        set_skill_mount(&mut mounts, "rust-review", true).expect("mount");
+        set_skill_mount(&mut mounts, "rust-review", true).expect("mount again");
+        assert_eq!(mounts, vec!["writing".to_string(), "rust-review".to_string()]);
+
+        set_skill_mount(&mut mounts, "writing", false).expect("unmount");
+        set_skill_mount(&mut mounts, "writing", false).expect("unmount again (no-op)");
+        assert_eq!(mounts, vec!["rust-review".to_string()]);
+
+        let err = set_skill_mount(&mut mounts, "Not Valid", true).unwrap_err();
+        assert!(matches!(err, SkillError::InvalidName { .. }));
+        assert_eq!(mounts, vec!["rust-review".to_string()], "不正な名前は触らない");
     }
 }

@@ -111,6 +111,17 @@ export default function KnowledgePageRoute({ loaderData }: Route.ComponentProps)
                   </Badge>
                 )}
               </Link>
+              {/* ADR-0056 D3 続き（Phase 82 / G35）: skills は `_inbox`/`_retired` と同じ KB の専用ディレクトリ
+                  （`skills/`）だが、知識ページの索引には出ないので別の兄弟ルートに分ける（`knowledge.inbox.tsx`
+                  と同じ形）。 */}
+              <Link
+                to="/knowledge/skills"
+                className={buttonClass({ variant: "secondary", size: "xs" })}
+                data-testid="knowledge-skills-nav"
+              >
+                <Icon name="sparkles" />
+                skills
+              </Link>
             </span>
           ) : null
         }

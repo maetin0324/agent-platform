@@ -329,3 +329,61 @@ skill のディレクトリを上書きする」だけで、**前回 mount さ�
 - **やっていないこと**: マーカーファイル自体（`.celeris/skills.json`）を消すタイミング
   （タスクの worktree/workspace 自体が削除されるときの掃除は既存の worktree 削除処理に任せる。
   マーカー単体を消す専用の経路は無い）。
+## Phase 82 追記（2026-09-21。D3 続き: skills を GUI から見る・作る・mount する）
+
+Phase 78 の PROGRESS 節が残した「GUI（skills 節）は後続の GUI Phase」（`docs/PROGRESS.md` の当時の
+「未解決事項」）と、D2 が「skills（KB の置き場）」を MCP tools（`skills_list`/`skills_get`/`skills_put`）
+としてしか出していなかったのを埋め、task-api（`GET/PUT/DELETE /skills…`、`POST/DELETE
+/org/{id}/skills…`。ADR は本文を改訂していないが、これは D2/D3 の「一覧取得・閲覧・作成」を GUI にも
+開いただけで、D6「採らない」に触れる変更は無い）と GUI（`gui/docs/PROGRESS.md`「Phase G35」）を実装した。
+**決定を変えた点は無い**。API を task-api にも生やしたことで見えた細部だけを残す。
+
+### 決めた細部（ADR が「MCP tools」としてしか書いていなかったこと）
+
+- **P-82-a: mount/unmount は celeris-mcp と task-api が\*\*同じ task-ops 関数\*\*を呼ぶ。**
+  Phase 78 時点の `celeris-mcp::tools::org::mount_common` は `node.profile.skills_mounts` の
+  push/retain を直接書いていた（task-ops を経由しない、celeris-mcp 内で完結する小さいロジック）。
+  今回 task-api にも同じ「足す・外す」が要ったので、`task_ops::knowledge::set_skill_mount(&mut
+  Vec<String>, &str, bool) -> Result<(), SkillError>`（名前の検証 + push/retain）を新設し、
+  `celeris-mcp::tools::org::mount_common` をこれを呼ぶようリファクタした（celeris-mcp 側の既存の
+  事前検証 `is_valid_skill_name` はそのまま残し、二重チェックになるが呼び出し順序・挙動は 1 バイトも
+  変えていない）。task-api の `POST/DELETE /org/{id}/skills…` も同じ関数を呼ぶ。「MCP 経由でも GUI
+  経由でも mount の挙動は同一」を、テストで確認するのではなく**コードの共有そのもので担保**する形
+  （task-ops 側に `set_skill_mount_toggles_without_duplicates_and_validates_the_name` を追加）。
+- **P-82-b: `skills_delete`（`DELETE /skills/{name}`）は D2 に無かった操作なので、task-ops に
+  `skills_delete(root, name) -> Result<String, SkillError>` を新設した。** `skills/<name>/` を
+  `std::fs::remove_dir_all` してから `commit_paths`（既存の `git add -A -- <path>` が削除も拾う。
+  `crates/task-ops/src/knowledge.rs` の `skills_delete_removes_the_directory_and_commits` で
+  「消した後に `git add -A` が削除を拾うか」を確認）。MCP tools には `skills_delete` を**足していない**
+  （D2 は「一覧取得・閲覧・作成」であって削除は無く、外部エージェントに削除権限を渡す判断はこの
+  Phase の範囲外。将来 MCP からも消せるようにするなら別途スコープ `skills:write` の再検討が要る）。
+- **P-82-c: 削除の 409（`skill_mounted`）は「継いだ後」（`EffectiveProfile.skills_mounts`）で判定する。**
+  `task-api::skills::mounted_by_map` が `org_list()` の全ノードに `task_core::resolve_profile` を通し、
+  平坦化した mount 先の一覧を作る（`GET /skills`/`GET /skills/{name}` の `mounted_by` も同じ関数）。
+  親ノードで mount して子が継いでいるだけの状態でも、その skill は「使われている」ので削除は断る
+  （`own` だけで判定すると、子が実際に使っている skill を親の `own` が空だからと消せてしまう）。
+- **P-82-d: GUI からの `skills_put` は frontmatter に `source: gui` を残す。** D3「出典
+  `mcp:<client_id>` を frontmatter に残す」は MCP 経由の書き込みの話で、GUI は人の操作だが
+  「どの経路で作られた skill か」を後から辿れるよう、task-api 側が `Some("gui")` を渡す（`skills_put`
+  の冪等性 — 既に `source:` があれば触らない — はそのまま効く）。
+- **P-82-e: `org_mount_skill`/`POST /org/{id}/skills` は KB に実在しない skill 名も mount できる
+  （Phase 78 のまま、変更していない）。** GUI の picker は `GET /skills` の一覧から選ばせるので
+  実際には実在するものしか送らないが、API 自体は「mount が門」（D3）の設計どおり名前の綴りしか
+  検証しない。task-api の統合テストでこれを明示した（`mount_validates_the_node_and_the_skill_name…`
+  は存在検査が無いことの直接確認はしていないが、`skills_put` していない名前を mount するテストは
+  `crates/task-api/tests/skills.rs` には無い — celeris-mcp 側 Phase 78 の既存テストと同じ前提を
+  引き継いだだけで、今回新しく決めたことではない）。
+
+### やっていないこと（Phase 82 のスコープ外）
+
+- MCP tools に `skills_delete`（P-82-b）・`org_mount_skill`/`org_unmount_skill` 以外の skill 系の
+  変更は無い（D2 の道具の数・スコープは変えていない）。
+- GUI からの skill 作成フォームは付属ファイル（`files`）の入力欄が無い（`gui/docs/PROGRESS.md`
+  「Phase G35」の未解決事項 U-G35-2）。
+
+### 実機（このセッションでは未実施。ADR-0009 P-34）
+
+`docs/PROGRESS.md` の「Phase 82」節に手順を書いた（GUI の `/knowledge/skills` で 1 つ作る →
+`/org` の担当詳細で mount する → `GET /skills` の `mounted_by` に現れることを見る → unmount して
+消せることを確認する）。認証・ネットワークが使える環境の人（またはエージェント）が実行し、結果を
+同節に追記すること。

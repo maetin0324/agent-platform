@@ -50,6 +50,9 @@ mod reports;
 pub mod repos;
 pub mod schema;
 pub mod secrets;
+/// Phase 82（ADR-0056 D3 続き）: skills を GUI から見る・作る・mount する（`GET/PUT/DELETE /skills…`、
+/// `POST/DELETE /org/{id}/skills…`）。
+pub mod skills;
 mod sse;
 mod state;
 mod stats;

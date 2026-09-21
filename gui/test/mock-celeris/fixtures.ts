@@ -34,6 +34,10 @@ import type {
   Releases,
   RepoChangesView,
   RepoList,
+  SkillDetailView,
+  SkillList,
+  SkillPutResult,
+  SkillSummaryView,
   Task,
   TaskComment,
   TaskIntegration,
@@ -591,7 +595,15 @@ export function orgList(overrides: Partial<OrgList> = {}): OrgList {
   return {
     items: [
       orgNode("cos", { kind: "secretary", name: "CoS" }),
-      orgNode("coding", { kind: "department", parent_id: "cos", name: "Coding", position: 0 }),
+      orgNode("coding", {
+        kind: "department",
+        parent_id: "cos",
+        name: "Coding",
+        position: 0,
+        // Phase 82（ADR-0056 D3 続き、G35）: 「mount された skills」節（own / inherited の区別）を
+        // 実データで機械検査・単体テストの両方で確かめられるように、`coding` に 1 つ mount しておく。
+        profile: { skills_mounts: ["rust-review"] },
+      }),
       orgNode("coding-poc", { parent_id: "coding", genre: "coding", name: "PoC", position: 0 }),
       orgNode("coding-poc-alpha", { parent_id: "coding-poc", name: "PoC・alpha 班", position: 0 }),
       orgNode("coding-poc-alpha-1", { parent_id: "coding-poc-alpha", name: "alpha・第 1 陣", position: 0 }),
@@ -599,6 +611,14 @@ export function orgList(overrides: Partial<OrgList> = {}): OrgList {
       orgNode("coding-poc-beta", { parent_id: "coding-poc", name: "PoC・beta 班", position: 1 }),
       orgNode("research", { kind: "department", parent_id: "cos", name: "Research", position: 1 }),
       orgNode("research-survey", { parent_id: "research", genre: "research", name: "調査課", position: 0 }),
+    ],
+    // Phase 82（G35）: `coding` が mount した `rust-review` が、継いだ子（`coding-poc` 以下）の
+    // 実効 profile にも現れることを実データで確かめられるように、2 ノード分だけ持たせる
+    // （celeris の `resolve_profile` の平坦化そのものは GUI で再計算しない。他のノードは
+    // 未設定＝「まだ何も設定していません」のままでよい）。
+    effective_profiles: [
+      { node_id: "coding", skills_mounts: ["rust-review"] },
+      { node_id: "coding-poc", skills_mounts: ["rust-review"] },
     ],
     lead_sessions: orgLeadSessions(),
     ...overrides,
@@ -1129,4 +1149,54 @@ export function knowledgeCandidate(overrides: Partial<KnowledgeCandidate> = {}):
     target_exists: true,
     ...overrides,
   };
+}
+
+// ---------------------------------------------------------------------------
+// skills（ADR-0056 D3 続き、docs/celeris-api-v1.md §3.112〜3.117。Phase 82 / G35）
+// ---------------------------------------------------------------------------
+
+const RUST_REVIEW_SKILL_MD =
+  "---\nname: rust-review\ndescription: Rust のコードレビューの手順\nsource: gui\n---\n\n# rust-review\n\n手順...\n";
+
+/** `GET /skills` の 1 件（既定は mount 済み。GUI の badge 表示を確かめられるように）。 */
+export function skillSummary(overrides: Partial<SkillSummaryView> = {}): SkillSummaryView {
+  return {
+    name: "rust-review",
+    description: "Rust のコードレビューの手順",
+    updated: "2026-09-21T10:00:00Z",
+    mounted_by: ["coding"],
+    ...overrides,
+  };
+}
+
+/** `GET /skills` の既定応答（1 件。`coding` に mount 済み）。 */
+export function skillList(overrides: Partial<SkillList> = {}): SkillList {
+  return {
+    root: "/home/celeris/knowledge",
+    initialized: true,
+    items: [skillSummary()],
+    ...overrides,
+  };
+}
+
+/** `[knowledge] root` はあるが `skills/` が空。 */
+export function skillListEmpty(overrides: Partial<SkillList> = {}): SkillList {
+  return skillList({ items: [], ...overrides });
+}
+
+/** `GET /skills/{name}` の既定応答。 */
+export function skillDetail(overrides: Partial<SkillDetailView> = {}): SkillDetailView {
+  return {
+    name: "rust-review",
+    skill_md: RUST_REVIEW_SKILL_MD,
+    files: ["checklist.md"],
+    updated: "2026-09-21T10:00:00Z",
+    mounted_by: ["coding"],
+    ...overrides,
+  };
+}
+
+/** `PUT /skills/{name}` の既定応答。 */
+export function skillPutResult(overrides: Partial<SkillPutResult> = {}): SkillPutResult {
+  return { path: "skills/rust-review/SKILL.md", ...overrides };
 }

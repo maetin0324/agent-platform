@@ -296,13 +296,11 @@ async fn mount_common(
             let Some(mut node) = store.org_get(&args.node_id).map_err(|e| ToolError::internal(e.to_string()))? else {
                 return Err(ToolError::not_found(format!("org node {:?} was not found", args.node_id)));
             };
-            if mount {
-                if !node.profile.skills_mounts.iter().any(|s| s == &args.skill) {
-                    node.profile.skills_mounts.push(args.skill.clone());
-                }
-            } else {
-                node.profile.skills_mounts.retain(|s| s != &args.skill);
-            }
+            // Phase 82（ADR-0056 D3 続き）: task-api の `POST/DELETE /org/{id}/skills…` と**同じ**
+            // task-ops 関数を呼ぶ（挙動が食い違わないようにするため）。名前は呼び出し元で検証済みなので
+            // ここで失敗することは無いが、`?` で素直に伝える。
+            task_ops::knowledge::set_skill_mount(&mut node.profile.skills_mounts, &args.skill, mount)
+                .map_err(|e| ToolError::invalid_params(e.to_string()))?;
             node.updated_at = OffsetDateTime::now_utc();
             store.org_upsert(&node).map_err(|e| ToolError::internal(e.to_string()))
         })

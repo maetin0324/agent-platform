@@ -34,6 +34,7 @@ import type {
   ReportsReadResult,
   RetryResult,
   SecretPutResult,
+  SkillPutResult,
   StandingRule,
   Task,
   TransitionResult,
@@ -383,3 +384,26 @@ export type ConsoleInstructOutcome =
 export type ConsoleNewConversationOutcome =
   | { ok: true; op: "new_conversation" }
   | { ok: false; op: "new_conversation"; error: ActionError };
+
+/**
+ * skills（ADR-0056 D3 続き、docs/celeris-api-v1.md §3.114〜3.115。**管理系**。Phase 82 / G35）:
+ * `PUT /skills/{name}` / `DELETE /skills/{name}` の結果。celeris のエラーは例外にせず `{ok:false, error}`
+ * にする（404 `skill_not_found` / 409 `skill_mounted`＝「mount されている間は消せない」/ 422 `validation`
+ * ＝「frontmatter の `name`/`description` が無い・URL と食い違う」/ 401 `unauthorized` を含む）。
+ */
+export type SkillOpOutcome =
+  | { ok: true; op: "skill_put"; name: string; result: SkillPutResult }
+  | { ok: true; op: "skill_delete"; name: string }
+  | { ok: false; op: "skill_put" | "skill_delete"; name: string; error: ActionError };
+
+/**
+ * skill の mount / unmount（ADR-0056 D3 続き、docs/celeris-api-v1.md §3.116〜3.117。**管理系**。
+ * Phase 82 / G35）: `POST /org/{id}/skills` / `DELETE /org/{id}/skills/{skill}` の結果。応答は
+ * どちらも更新後の `OrgNode`（`OrgOpOutcome` の `patch` と同じ形だが、celeris-mcp の
+ * `org_mount_skill`/`org_unmount_skill` と同じ関数を通ることを画面のコードからも辿れるよう、
+ * `op` を分けて別の型にした）。celeris のエラーは例外にせず `{ok:false, error}` にする（404
+ * `org_node_not_found` / 422 `validation`＝「skill 名の綴り」/ 401 `unauthorized` を含む）。
+ */
+export type OrgSkillMountOutcome =
+  | { ok: true; op: "skill_mount" | "skill_unmount"; id: string; skill: string; node: OrgNode }
+  | { ok: false; op: "skill_mount" | "skill_unmount"; id: string; skill: string; error: ActionError };

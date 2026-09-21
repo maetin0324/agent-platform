@@ -180,6 +180,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::llm_sources::routes())
         // ADR-0056 D4（Phase 78）: MCP クライアント / 呼び出しログの観測。実装は `crate::mcp_admin`。
         .merge(crate::mcp_admin::routes())
+        // ADR-0056 D3 続き（Phase 82）: skills を GUI から見る・作る・mount する。実装は `crate::skills`。
+        .merge(crate::skills::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -342,7 +344,7 @@ async fn method_not_allowed() -> ApiProblem {
 // 案件と途中目標の作成・状態変更は人の操作（`POST /tasks` と同じ扱い）なので通常の認証だけ。
 
 /// `id` を組織のノードとして読む（存在しなければ 404）。
-fn load_org_node(store: &SqliteStore, id: &str) -> Result<OrgNode, ApiProblem> {
+pub(crate) fn load_org_node(store: &SqliteStore, id: &str) -> Result<OrgNode, ApiProblem> {
     store
         .org_get(id)
         .map_err(store_problem)?

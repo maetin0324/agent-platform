@@ -81,6 +81,9 @@ const ROUTES = [
   { route: "releases", path: "/releases" },
   { route: "knowledge", path: "/knowledge" },
   { route: "knowledge-inbox", path: "/knowledge/inbox" },
+  // ADR-0056 D3 続き（Phase 82 / G35）: skills の一覧・詳細。
+  { route: "knowledge-skills", path: "/knowledge/skills" },
+  { route: "knowledge-skill-detail", path: "/knowledge/skills?name=rust-review" },
   { route: "clusters", path: "/clusters" },
   { route: "accounts", path: "/accounts" },
   { route: "help", path: "/help" },
@@ -192,6 +195,11 @@ async function setupMockCeleris() {
   mock.on("GET", "/api/v1/knowledge/tree", (_req, res) => sendJson(res, 200, fx.knowledgeTree()));
   mock.on("GET", "/api/v1/knowledge/page", (_req, res) => sendJson(res, 200, fx.knowledgePage()));
   mock.on("GET", "/api/v1/knowledge/inbox", (_req, res) => sendJson(res, 200, fx.knowledgeInbox()));
+
+  // ADR-0056 D3 続き（Phase 82 / G35）: skills（一覧・詳細。`fx.orgList()` の `coding` が mount した
+  // `rust-review` と名前を揃える。§3.112〜3.113）。
+  mock.on("GET", "/api/v1/skills", (_req, res) => sendJson(res, 200, fx.skillList()));
+  mock.on("GET", "/api/v1/skills/rust-review", (_req, res) => sendJson(res, 200, fx.skillDetail()));
 
   // フェーズ 73（ADR-0055 D2 ラウンド 5、U12）: `gui/test/mock-celeris/fixtures.ts` の `orgList()`
   // （`coding-poc` の下に 3 段のサブツリーを持つ）をそのまま使う。以前はここに 3 ノードだけの
