@@ -76,8 +76,8 @@ import type { Tone } from "~/components/ui/tone";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { isValidLabel, MAX_LABELS, PRIORITY_LABELS } from "~/lib/board";
 import { defaultPromotePath, docsHref, isMarkdownName } from "~/lib/docs";
-import { isKnowledgeFallback } from "~/lib/knowledge";
 import { shortId } from "~/lib/format";
+import { isKnowledgeFallback } from "~/lib/knowledge";
 import {
   ASSIGNED_WHY_LABEL,
   assignedScoreLabel,
