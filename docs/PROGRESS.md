@@ -12443,3 +12443,10 @@ celeris-mcp の `org_mount_skill`/`org_unmount_skill` と**同じ** `task_ops::k
 
 - MCP から skill を消したい運用が出てきたら、`skills:write` スコープに `skills_delete` ツールを足す
   かどうかを別 ADR 追記で検討する（今回はスコープ外、D6「採らない」の精神を保つため足さなかった）。
+
+### Phase 82 の本番反映（2026-09-21 20:02 UTC。`618708a1c954`、ライブ切替）
+
+- main `618708a` = Phase 82 merge（skills の API 6 本と GUI: `/knowledge/skills`、`/org` の mount/unmount）。ゲート: cargo test **1784 passed / 0 failed**、
+  clippy exit 0、`pnpm gen:types` 差分なし、typecheck / lint exit 0、`pnpm test` 965 passed、`pnpm mobile-audit` 違反 0（23 route × light/dark）。
+  `release.sh` → `618708a1c954`（schema 24）。`verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（20:02:46→50）。
+- 実機: `GET /skills` に `celeris-commit-style`（`mounted_by: engineering`）が出る（次行の出力を参照）。GUI からの mount/unmount の目視は人に依頼。
