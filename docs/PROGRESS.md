@@ -11844,3 +11844,12 @@ Console の入力欄は元々 aria-label や DOM 順が適切だった）ため�
   認証・ネットワークが使えるサンドボックスではないため）。
 - 詳細は gui/docs/PROGRESS.md「Phase G32」の未解決事項を参照（`role="status"` を Console の task ブロックだけに
   絞った理由、フォーカスリングのコントラストは機械検査のルールにはしていない件など）。
+
+### Phase 76 の本番反映（2026-09-21 16:48–16:53 UTC。`7e75f27a61a5`、ライブ切替）
+
+- main `7e75f27` = Phase 76 merge（GUI のみ）。GUI ゲート: typecheck / lint exit 0、`pnpm test` 925 passed、`pnpm mobile-audit` 違反 0
+  （新ルール `a11y-name` / `a11y-structure` / `focus-order` を含む、light / dark）。`release.sh` → `7e75f27a61a5`（schema 23）。
+  `verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（16:53:16→19）。Phase 77（性能予算）を Sonnet で起動。
+- 人からの追加依頼（16:50 UTC、機内から）: **外部から Celeris を操作する MCP サーバー**（知識・タスク/案件・組織の一覧/閲覧/作成、skills の注入）。
+  質問 4 件への回答を受けて ADR-0056 を起こした（接続は ChatGPT の Secure MCP tunnel で手元 HTTP、案件・タスクは CoS に渡す、知識は `_inbox`、
+  skills は SKILL.md を KB に置きノードに mount）。Phase 78（サーバー）→ Phase 79（skills の届け方）。
