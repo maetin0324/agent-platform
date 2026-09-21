@@ -76,6 +76,10 @@ export function Console({ data }: { data: ConsoleData }) {
 
   return (
     <div className="space-y-4" data-testid="console-screen" data-console-scope={scope}>
+      {/* Phase 76（ADR-0055 D1 拡張、画面の骨格）: Console（`/`・`/org/:id`）は他の画面と違い
+          `~/components/ui/misc.tsx::PageHeader`（既定 `h1`）を使わないので、可視な見出しが 0 個になって
+          いた。見た目は変えずに（既存のデザインに `h1` の見た目を足したくない）構造だけ足す `sr-only`。 */}
+      <h1 className="sr-only">Console</h1>
       <div className="flex flex-wrap items-center gap-2">
         <div className="min-w-0 flex-1">
           <WaitingStrip counts={counts} />

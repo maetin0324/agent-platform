@@ -149,6 +149,21 @@ export default function App({ loaderData }: Route.ComponentProps) {
   const connected = !disconnected && problem === null;
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[16rem_1fr]">
+      {/* Phase 76（ADR-0055 D1 拡張、フォーカスの可視性）: キーボード・スクリーンリーダー利用者が
+          ナビ（サイドバー / モバイル上部の帯）を毎回たどらずに本文へ飛べるようにする。既定は視覚的に隠し、
+          フォーカスが当たったときだけ見せる（`sr-only focus:not-sr-only`。`focus-visible:` ではなく
+          `focus:` にしているのは、Tab で来た人にだけ見えれば十分で、かつスクリーンリーダーの仮想カーソルが
+          フォーカスを当てる操作も拾いたいため）。 */}
+      <a
+        href="#main-content"
+        // ADR-0055 D1-2 のタップ領域検査の対象外（`data-touch-ok`）: `sr-only` は未フォーカス時わざと
+        // 1×1 に潰す（フォーカスが当たったときだけ `focus:not-sr-only` で 44×44 を超える大きさに戻る）。
+        // タッチでは狙って押す対象ではなく、キーボード・スクリーンリーダー専用のリンクなので除外する。
+        data-touch-ok
+        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-primary-fg focus:shadow-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      >
+        本文へ
+      </a>
       <NotificationsWatcher reportsLive={reportsLive} />
       <Sidebar
         approvals={counts?.approvals ?? 0}
@@ -163,7 +178,11 @@ export default function App({ loaderData }: Route.ComponentProps) {
       {/* 下部固定タブ（`h-16` + `env(safe-area-inset-bottom)`）に隠れないよう、本文側に余白を積む
           （ADR-0055 D1-5。数値は `pb-28`（112px） > タブ高さ 64px + 実機の safe-area の余裕）。 */}
       <div className="flex min-w-0 flex-col pb-28 lg:pb-0">
-        <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
+        <main
+          id="main-content"
+          tabIndex={-1}
+          className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-10"
+        >
           {showBanner && <CelerisBanner celerisApiUrl={gui.celerisApiUrl} problem={problem} />}
           <div className="animate-fade-in">
             <Outlet />

@@ -1,7 +1,13 @@
 /** フォーム部品のクラス（docs/adr/0011 D2）。要素・name・aria は各画面のまま、見た目だけを揃える。 */
 
+// Phase 76（ADR-0055 D1 拡張、フォーカスの可視性）: 以前は `focus:ring-3 focus:ring-primary/20` だけで、
+// 不透明度 20% の box-shadow リングはトークンの背景（surface/bg）に対して実測 1.3:1 前後しか無く
+// WCAG の 3:1 を満たさなかった（`docs/PROGRESS.md` Phase 76 参照、Python で実測）。`~/components/ui/button.tsx`
+// と同じ `focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring`
+// （不透明な `--ring` トークン、light 4:1 以上・dark 5.7:1 以上）に揃える。`focus:border-primary` は
+// マウスでのクリック時も含めて枠線の色が変わる見た目としてそのまま残す（アクセシビリティ上の問題では無い）。
 const FIELD =
-  "w-full rounded-lg border border-border bg-surface px-3 text-sm text-fg shadow-xs transition-[border-color,box-shadow] placeholder:text-fg-subtle hover:border-border-strong focus:border-primary focus:outline-none focus:ring-3 focus:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-60 aria-invalid:border-danger aria-invalid:ring-danger/20";
+  "w-full rounded-lg border border-border bg-surface px-3 text-sm text-fg shadow-xs transition-[border-color,box-shadow] placeholder:text-fg-subtle hover:border-border-strong focus:border-primary focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring disabled:cursor-not-allowed disabled:opacity-60 aria-invalid:border-danger aria-invalid:ring-danger/20";
 
 // ADR-0055 D1-2: タップ領域 44×44 以上。モバイルは `h-11`、デスクトップは `lg:` で元の `h-9` に戻す。
 export const inputClass = `${FIELD} h-11 lg:h-9`;

@@ -11803,3 +11803,39 @@ GUI のみ（`crates/` 無変更）。`docs/adr/0055-mobile-ux.md` D2/D3 のル�
   未実施（ADR-0009 P-34。認証・ネットワークが使えるサンドボックスではないため）。
 - 詳細は gui/docs/PROGRESS.md「Phase G31」の未解決事項を参照（`contrast` ルールがアイコン・フォーカス
   リングを見ていない件、絶対日付フォールバックが UTC 基準である件など）。
+
+## Phase 76 — スマホ UX ラウンド 8（アクセシブルな名前・フォーカス・ライブリージョン。ADR-0055。2026-09-21）
+
+GUI のみ（`crates/` 無変更）。`docs/adr/0055-mobile-ux.md` D2/D3 のループを続け、Phase G31（ラウンド 7）
+の続きとして、機械検査に「アクセシブルな名前」「画面の骨格（見出し・ランドマーク・代替情報）」
+「フォーカス順（罠の検知）」の 3 ルールを足し、それが見つけた違反と、目で見て気づいたフォーカスリングの
+コントラスト不足・ライブリージョン未対応を直した。詳細・証跡は `gui/docs/PROGRESS.md`「Phase G32」を参照
+（このリポジトリの慣例どおり、GUI の実装詳細は gui 側に書く）。
+
+### ゲート（詳細は gui/docs/PROGRESS.md Phase G32）
+
+`pnpm lint` / `pnpm typecheck` / `pnpm test`（925 passed、Phase G31 から変わらず。新規の純粋関数は
+追加していない） / `pnpm build` / `pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ）/
+`pnpm mobile-audit`（**exit 0、違反 0 件。21 route × light/dark の 2 scheme = 42 通り全て 200**。新設した
+`a11y-name`・`a11y-structure`・`focus-order` も light/dark とも 0 件）すべて exit 0。
+
+### 新ルールの違反数（ルール実装直後 → 全修正後）
+
+| rule | 実装直後（before） | 全修正後（after） |
+| --- | --- | --- |
+| `a11y-name` | 0 | 0 |
+| `a11y-structure` | 4（`home`/`org-node` の light/dark、可視な h1 が 0 個） | 0 |
+| `focus-order` | 0 | 0 |
+| （副作用）`tap-target` | 42（新設したスキップリンクが `sr-only` で 1×1 になり、既存ルールに引っかかった。アプリ本体の既存欠陥ではない） | 0（`data-touch-ok` で除外） |
+
+`a11y-name` と `focus-order` は実装直後の時点で違反 0 だった（既存のアイコンのみボタン・下部固定タブ・
+Console の入力欄は元々 aria-label や DOM 順が適切だった）ため、ルールが実際に違反を検出できることは
+意図的に壊してから元に戻す形の実機確認で別途確かめた（`gui/docs/PROGRESS.md` Phase G32 の「ルールの検証」
+を参照）。
+
+### 未解決事項
+
+- 実機（iOS Safari / Android Chrome、VoiceOver / TalkBack）での目視・操作確認は今回も未実施（ADR-0009 P-34。
+  認証・ネットワークが使えるサンドボックスではないため）。
+- 詳細は gui/docs/PROGRESS.md「Phase G32」の未解決事項を参照（`role="status"` を Console の task ブロックだけに
+  絞った理由、フォーカスリングのコントラストは機械検査のルールにはしていない件など）。
