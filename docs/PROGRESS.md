@@ -11081,3 +11081,10 @@ ADR-0054 D1 の設計）は CoS 対話 run の `StoreSink` には実装されて
 4. 部門長のレビュー run（`Check::Reviewer` を持つタスクで担当が engineering/research/operations 配下）
    でも同様に `node_sessions` の `kind='lead'` 行が UUID の `session_id` を持ち、`turns` が増えることを
    確認する。
+
+### Phase 67b の本番反映（2026-09-21 14:26 UTC。`5b3b0a649bfa`、ライブ切替）
+
+- main `5b3b0a6` = Phase 67b merge。ゲート: cargo test **1683 passed / 0 failed**、clippy exit 0。`release.sh` → `5b3b0a649bfa`（schema 23 のまま）。
+  `verify.sh` check 1–6 true、`live_ok=true` → `promote.sh 5b3b0a649bfa` **mode=live**（14:26:34→37、API 停止なし）。
+- 障害の窓: 13:53（Phase 67 昇格）〜14:26 の 33 分間、CoS 対話と claude-code の部門長レビューは失敗する状態だった（実害は動作確認の 2 タスクのみ）。
+- 実機確認（UUID セッションで 2 往復、`node_sessions` の自己修復、turns=2）は次節。
