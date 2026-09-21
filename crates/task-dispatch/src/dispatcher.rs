@@ -29,7 +29,7 @@ use task_core::{
 };
 use task_ops::daemon::{
     AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot,
-    InFlight, InFlightKind, ProviderCheckView, ProviderLive,
+    InFlight, InFlightKind, ProviderCheckView, ProviderLive, TunnelForwardLive,
 };
 use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
@@ -96,13 +96,79 @@ pub struct ClusterSpec {
     /// ADR-0032 D1: `"manual"`（既定） / `"publickey"` / `"totp"`。`"publickey"` のときだけディスパッチャが
     /// 自動で接続を試みる（D3）。
     pub auth: String,
+    /// ADR-0053 D3（Phase 66）: このクラスタの ssh master に張る port forward（Qwen トンネル等）。
+    /// 空なら `refresh_cluster_tunnels` は何もしない（従来どおり）。
+    pub forwards: Vec<ClusterForwardSpec>,
+}
+
+/// ADR-0053 D3: 1 本の port forward（`ssh -O forward -L <listen>:<target> <host>` 相当）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterForwardSpec {
+    /// ローカル（celeris が bind する側）。`"127.0.0.1:18000"` の形。
+    pub listen: String,
+    /// master のホスト側から見た転送先。`"bnode150:18000"` の形。
+    pub target: String,
 }
 
 /// ADR-0032 D3: `auth = "publickey"` のクラスタに未接続なら、cooldown にする前にディスパッチャが 1 回だけ
 /// 接続を試みるためのフック。引数は `(cluster_id, host)`。同期でブロックしてよい（`control_master_alive_blocking`
 /// と同じ扱い）。本番では celeris が `task_worker::cluster_login::start_connect` 相当の実装を挿す。テストでは
 /// 偽物を挿す。未設定（`None`）なら自動接続はせず、従来どおり cooldown に落ちる。
+///
+/// ADR-0053 D3（Phase 66）: `refresh_cluster_tunnels` もこの同じフックを再利用する。「TOTP を要求する前に
+/// 鍵認証を試す」ため、`auth` の値に関わらず（`"totp"` のクラスタでも）まず呼ぶ。`"totp"` クラスタでは
+/// 通常失敗する（鍵だけでは入れない）が、既にセッションが有効ならそのまま繋がることがある。
 pub type ClusterConnector = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+
+/// ADR-0053 D3: master 上に forward を用意する（無ければ張る、あれば何もしない。冪等）フック。
+/// 引数は `(host, listen, target)`。本番では celeris が `ssh -O forward -L <listen>:<target> <host>`
+/// （届かなければ master 上で `ssh -N -L` を張るフォールバック）を挿す。テストは偽物を挿す。
+pub type TunnelForwardEnsurer = Arc<dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync>;
+
+/// ADR-0053 D3: forward の生存を見るフック。引数は `listen`（`"127.0.0.1:18000"`）。本番では
+/// `GET http://<listen>/v1/models` の probe（`task_worker::probe_models`）を挿す。テストは偽物を挿す。
+pub type TunnelProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
+/// ADR-0053 D3: トンネル 1 本の状態遷移（Console / cluster API に出す。`take_tunnel_events` で取り出す）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelEvent {
+    pub cluster: String,
+    /// `"login_needed"` のときは空。
+    pub listen: String,
+    pub kind: TunnelEventKind,
+    pub at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TunnelEventKind {
+    /// forward が初めて（または前回の観測が無い状態から）繋がった。
+    Up,
+    /// forward が届かなくなった（master は生きているが、probe が失敗）。
+    Down,
+    /// 一度 `Down` を観測した forward が繋がり直した。
+    Restored,
+    /// master が落ち、鍵認証も失敗した（人の TOTP が要る）。
+    LoginNeeded,
+}
+
+impl TunnelEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TunnelEventKind::Up => "up",
+            TunnelEventKind::Down => "down",
+            TunnelEventKind::Restored => "restored",
+            TunnelEventKind::LoginNeeded => "login_needed",
+        }
+    }
+}
+
+/// ADR-0053 D3: `tunnel_events` に積む上限（古いものから捨てる。無限に溜め込まない）。
+const TUNNEL_EVENTS_CAP: usize = 100;
+
+/// `Dispatcher::tunnel_up` のキー。
+fn tunnel_key(cluster: &str, listen: &str) -> String {
+    format!("{cluster}\u{0}{listen}")
+}
 
 /// ADR-0041 D5: この celeris が**面倒を見てよいタスク**の述語。`None`（既定）は「全部」＝従来どおり。
 ///
@@ -904,6 +970,18 @@ pub struct Dispatcher {
     knowledge_probe: KnowledgeProbe,
     /// ADR-0052 D1: 検査の結果のキャッシュ（`base_url` → (いつ調べたか, 結果)）。60 秒。
     knowledge_probe_cache: HashMap<String, (Instant, Reachability)>,
+    /// ADR-0053 D3（Phase 66）: `[[clusters]].forwards` を(再)確立するフック。`None` なら何もしない。
+    tunnel_forward_ensurer: Option<TunnelForwardEnsurer>,
+    /// ADR-0053 D3: forward の生存を見るフック。`None` なら常に「届かない」扱い。
+    tunnel_probe: Option<TunnelProbe>,
+    /// ADR-0053 D3: forward ごとの直近の観測（キーは `tunnel_key`）。`true` = 届く。
+    tunnel_up: HashMap<String, bool>,
+    /// ADR-0053 D3: 「TOTP ログインが要る」と判定済みのクラスタ id（重複通知を防ぐ。master が戻れば消す）。
+    cluster_login_needed: std::collections::HashSet<String>,
+    /// ADR-0053 D3: 直近のトンネル状態遷移（Console / cluster API 向け。`take_tunnel_events` で取り出す）。
+    tunnel_events: std::collections::VecDeque<TunnelEvent>,
+    /// ADR-0053 D3: 最後にトンネルの生存を見た時刻（`refresh_cluster_liveness` と同じ間隔で間引く）。
+    last_cluster_tunnel_refresh: Option<Instant>,
 }
 
 /// ADR-0052 D1（Phase 65b で `bearer_token` を追加）: 到達性の検査のフック（差し替えられるようにして
@@ -999,6 +1077,12 @@ impl Dispatcher {
                 task_worker::probe_models(base_url, task_worker::PROBE_TIMEOUT, bearer_token)
             }),
             knowledge_probe_cache: HashMap::new(),
+            tunnel_forward_ensurer: None,
+            tunnel_probe: None,
+            tunnel_up: HashMap::new(),
+            cluster_login_needed: std::collections::HashSet::new(),
+            tunnel_events: std::collections::VecDeque::new(),
+            last_cluster_tunnel_refresh: None,
         }
     }
 
@@ -1129,6 +1213,37 @@ impl Dispatcher {
         } else {
             self.connect_pending_clusters.remove(id);
         }
+    }
+
+    /// ADR-0053 D3（Phase 66）: `[[clusters]].forwards` を(再)確立するフックを挿す。呼ばなければ
+    /// `refresh_cluster_tunnels` は forward を張り直さない（届かないまま観測するだけ）。
+    pub fn set_tunnel_forward_ensurer(&mut self, ensurer: TunnelForwardEnsurer) {
+        self.tunnel_forward_ensurer = Some(ensurer);
+    }
+
+    /// ADR-0053 D3: forward の生存を見るフックを挿す。呼ばなければ常に「届かない」扱い。
+    pub fn set_tunnel_probe(&mut self, probe: TunnelProbe) {
+        self.tunnel_probe = Some(probe);
+    }
+
+    /// ADR-0053 D3: 直近のトンネル状態遷移を取り出す（呼ぶと空になる。celeris はこれを Discord/Console に流す）。
+    pub fn take_tunnel_events(&mut self) -> Vec<TunnelEvent> {
+        self.tunnel_events.drain(..).collect()
+    }
+
+    /// ADR-0053 D3: 現在「TOTP ログインが要る」状態のクラスタ id（昇順）。
+    pub fn clusters_needing_login(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.cluster_login_needed.iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// ADR-0053 D3: forward が今届いているか（無ければ観測が無い＝`false`）。
+    pub fn tunnel_reachable(&self, cluster: &str, listen: &str) -> bool {
+        self.tunnel_up
+            .get(&tunnel_key(cluster, listen))
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn set_delivery_policy(&mut self, policy: task_ops::delivery::DeliveryPolicy) {
@@ -1363,6 +1478,8 @@ impl Dispatcher {
         let recover_ms = lap(&mut at);
         self.refresh_cluster_liveness();
         let cluster_ms = lap(&mut at);
+        self.refresh_cluster_tunnels();
+        let tunnel_ms = lap(&mut at);
         report.dispatched = if self.accepting_new_work {
             self.dispatch_ready()?
         } else {
@@ -1381,6 +1498,7 @@ impl Dispatcher {
                 abort_ms,
                 recover_ms,
                 cluster_ms,
+                tunnel_ms,
                 dispatch_ms,
                 idle_ms,
                 "slow tick phases"
@@ -1494,6 +1612,169 @@ impl Dispatcher {
         }
     }
 
+    /// ADR-0053 D3（Phase 66）: `[[clusters]].forwards` を持つクラスタのトンネルを見て、必要なら張り直す。
+    /// `refresh_cluster_liveness` の直後に呼ぶ（`cluster_connected` を読むため、同じ間隔で間引く）。
+    ///
+    /// 1. master が死んでいたら、まず鍵認証だけで繋ぎ直す（`cluster_connector`。`auth` の値に関わらず試す
+    ///    — 「TOTP を要求する前に鍵認証を試す」。ADR-0053 D3）。それでも駄目なら「TOTP ログインが要る」を
+    ///    立てる（クラスタごとに 1 回だけ報告する。`cluster_login_needed` が同じ outage の間の重複を防ぐ）。
+    /// 2. master が生きていれば、forward ごとに probe → 届かなければ `tunnel_forward_ensurer` で
+    ///    (再)確立 → 再 probe。最終的な到達性の変化を `tunnel_events` に積む（Up/Down/Restored）。
+    fn refresh_cluster_tunnels(&mut self) {
+        if !self.config.clusters.values().any(|c| !c.forwards.is_empty()) {
+            return;
+        }
+        let now_instant = Instant::now();
+        if let Some(last) = self.last_cluster_tunnel_refresh
+            && now_instant.duration_since(last) < CLUSTER_LIVENESS_INTERVAL
+        {
+            return;
+        }
+        self.last_cluster_tunnel_refresh = Some(now_instant);
+
+        let mut specs: Vec<ClusterSpec> = self
+            .config
+            .clusters
+            .values()
+            .filter(|c| !c.forwards.is_empty())
+            .cloned()
+            .collect();
+        specs.sort_by(|a, b| a.id.cmp(&b.id));
+
+        for spec in specs {
+            let alive = self.ensure_cluster_master_for_tunnel(&spec);
+            if !alive {
+                for fwd in &spec.forwards {
+                    self.observe_tunnel(&spec.id, &fwd.listen, false);
+                }
+                continue;
+            }
+            for fwd in spec.forwards.clone() {
+                self.refresh_one_forward(&spec, &fwd);
+            }
+        }
+    }
+
+    /// master が生きているか確認し、死んでいれば鍵認証を 1 回試す（D3: TOTP の前に鍵認証）。
+    /// 成功したら `cluster_connected` / cooldown を更新し、「ログインが要る」を解除する。
+    /// 失敗したら「TOTP ログインが要る」を立てる（初めてのときだけ報告する）。
+    fn ensure_cluster_master_for_tunnel(&mut self, spec: &ClusterSpec) -> bool {
+        if self
+            .cluster_connected
+            .get(&spec.id)
+            .copied()
+            .unwrap_or(false)
+        {
+            self.clear_login_needed(&spec.id);
+            return true;
+        }
+        if let Some(connector) = self.cluster_connector.clone() {
+            match connector(&spec.id, &spec.host) {
+                Ok(()) => {
+                    self.cluster_connected.insert(spec.id.clone(), true);
+                    self.cluster_cooldown.remove(&spec.id);
+                    self.clear_login_needed(&spec.id);
+                    tracing::info!(cluster = %spec.id, host = %spec.host, "tunnel: key auth reconnected the ssh master");
+                    return true;
+                }
+                Err(detail) => {
+                    tracing::debug!(cluster = %spec.id, host = %spec.host, %detail, "tunnel: key auth did not reconnect; a TOTP login is needed");
+                }
+            }
+        }
+        self.mark_login_needed(spec);
+        false
+    }
+
+    fn clear_login_needed(&mut self, cluster_id: &str) {
+        if self.cluster_login_needed.remove(cluster_id) {
+            tracing::info!(cluster = %cluster_id, "tunnel: login is no longer needed");
+        }
+    }
+
+    /// 初めて「ログインが要る」状態に入ったときだけ、イベントを積み報告を 1 件記録する（重複排除）。
+    fn mark_login_needed(&mut self, spec: &ClusterSpec) {
+        if !self.cluster_login_needed.insert(spec.id.clone()) {
+            return;
+        }
+        let now = OffsetDateTime::now_utc();
+        self.push_tunnel_event(&spec.id, "", TunnelEventKind::LoginNeeded, now);
+        if let Err(e) = crate::reports::record_cluster_login_needed_report(
+            self.store.as_ref(),
+            &spec.id,
+            &spec.host,
+            now,
+        ) {
+            tracing::warn!(cluster = %spec.id, error = %e, "failed to record the cluster login-needed report");
+        }
+    }
+
+    /// 1 本の forward: 届いているか probe し、届かなければ(再)確立を試して再 probe する。
+    fn refresh_one_forward(&mut self, spec: &ClusterSpec, fwd: &ClusterForwardSpec) {
+        let mut reachable = self.probe_forward(&fwd.listen);
+        if !reachable
+            && let Some(ensure) = self.tunnel_forward_ensurer.clone()
+        {
+            match ensure(&spec.host, &fwd.listen, &fwd.target) {
+                Ok(()) => {
+                    reachable = self.probe_forward(&fwd.listen);
+                }
+                Err(detail) => {
+                    tracing::warn!(cluster = %spec.id, listen = %fwd.listen, target = %fwd.target, %detail, "tunnel: could not (re-)establish the forward");
+                }
+            }
+        }
+        self.observe_tunnel(&spec.id, &fwd.listen, reachable);
+    }
+
+    fn probe_forward(&self, listen: &str) -> bool {
+        self.tunnel_probe
+            .as_ref()
+            .map(|p| p(listen))
+            .unwrap_or(false)
+    }
+
+    /// 状態遷移を記録する（`tunnel_up` を更新し、変化があれば `tunnel_events` に積む）。
+    fn observe_tunnel(&mut self, cluster: &str, listen: &str, reachable: bool) {
+        let key = tunnel_key(cluster, listen);
+        let was_up = self.tunnel_up.get(&key).copied();
+        let now = OffsetDateTime::now_utc();
+        match (was_up, reachable) {
+            (Some(true), true) | (Some(false), false) => {}
+            (_, true) => {
+                let kind = if was_up == Some(false) {
+                    TunnelEventKind::Restored
+                } else {
+                    TunnelEventKind::Up
+                };
+                self.push_tunnel_event(cluster, listen, kind, now);
+            }
+            (_, false) => {
+                self.push_tunnel_event(cluster, listen, TunnelEventKind::Down, now);
+            }
+        }
+        self.tunnel_up.insert(key, reachable);
+    }
+
+    fn push_tunnel_event(
+        &mut self,
+        cluster: &str,
+        listen: &str,
+        kind: TunnelEventKind,
+        at: OffsetDateTime,
+    ) {
+        tracing::info!(cluster, listen, kind = kind.as_str(), "tunnel: state transition");
+        self.tunnel_events.push_back(TunnelEvent {
+            cluster: cluster.to_string(),
+            listen: listen.to_string(),
+            kind,
+            at,
+        });
+        while self.tunnel_events.len() > TUNNEL_EVENTS_CAP {
+            self.tunnel_events.pop_front();
+        }
+    }
+
     /// ADR-0013 D4: メモリ上の状態からスナップショットを作り `watch` に送る（DB には書かない。受け手がいなくても無害）。
     fn publish_snapshot(&mut self) {
         if self.publisher.is_none() {
@@ -1581,6 +1862,17 @@ impl Dispatcher {
                     .map(|until| rfc3339(now + until.saturating_duration_since(now_instant))),
                 auth: spec.auth.clone(),
                 connect_pending: self.connect_pending_clusters.contains(&spec.id),
+                // ADR-0053 D3（Phase 66）: トンネル（forward）の生存。`forwards` が無いクラスタは空。
+                tunnel_login_needed: self.cluster_login_needed.contains(&spec.id),
+                tunnel_forwards: spec
+                    .forwards
+                    .iter()
+                    .map(|f| TunnelForwardLive {
+                        listen: f.listen.clone(),
+                        target: f.target.clone(),
+                        up: self.tunnel_reachable(&spec.id, &f.listen),
+                    })
+                    .collect(),
             })
             .collect();
         clusters.sort_by(|a, b| a.id.cmp(&b.id));
@@ -7758,6 +8050,7 @@ mod tests {
                 rsync_excludes: vec![],
                 worktree: Default::default(),
                 auth: "manual".into(),
+                forwards: vec![],
             },
         );
         if !control_master_alive_blocking(&["ssh".to_string()], "celeris-localhost") {
@@ -7833,6 +8126,7 @@ mod tests {
                 rsync_excludes: vec![],
                 worktree: Default::default(),
                 auth: "manual".into(),
+                forwards: vec![],
             },
         );
         let (tx, rx) = tokio::sync::watch::channel(None);
@@ -7913,7 +8207,237 @@ mod tests {
             rsync_excludes: vec![],
             worktree: Default::default(),
             auth: auth.into(),
+            forwards: vec![],
         }
+    }
+
+    /// ADR-0053 D3（Phase 66）: forward 付きの `ClusterSpec` を作る（`refresh_cluster_tunnels` 用）。
+    fn cluster_spec_with_forward(id: &str, host: &str, auth: &str, listen: &str, target: &str) -> ClusterSpec {
+        let mut spec = cluster_spec_with_auth(id, host, auth);
+        spec.forwards = vec![ClusterForwardSpec {
+            listen: listen.into(),
+            target: target.into(),
+        }];
+        spec
+    }
+
+    // ---- ADR-0053 D3: `refresh_cluster_tunnels` の状態機械（偽の ssh/probe で完全に決定的） ----
+
+    /// down → 鍵認証 ok → forward up: master が死んでいても `cluster_connector` が繋ぎ直し、
+    /// 続けて forward が(再)確立されて `Up` イベントが立つ。
+    #[tokio::test]
+    async fn tunnel_down_then_key_auth_ok_brings_the_forward_up() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.clusters.insert(
+            "pegasus".into(),
+            cluster_spec_with_forward(
+                "pegasus",
+                "pegasus",
+                "totp",
+                "127.0.0.1:19001",
+                "bnode150:19001",
+            ),
+        );
+        // master は死んでいる（cluster_connected に何も入っていない）。
+        d.set_cluster_connector(Arc::new(|_id: &str, _host: &str| Ok(())));
+        let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let forward_present = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ensure_calls_hook = ensure_calls.clone();
+        let forward_present_hook = forward_present.clone();
+        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
+            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            forward_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+        let forward_present_probe = forward_present.clone();
+        d.set_tunnel_probe(Arc::new(move |_listen: &str| {
+            forward_present_probe.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+
+        d.refresh_cluster_tunnels();
+
+        assert_eq!(d.cluster_connected.get("pegasus"), Some(&true));
+        assert!(d.clusters_needing_login().is_empty());
+        assert_eq!(ensure_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(d.tunnel_reachable("pegasus", "127.0.0.1:19001"));
+        let events = d.take_tunnel_events();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.cluster == "pegasus" && e.listen == "127.0.0.1:19001" && e.kind == TunnelEventKind::Up),
+            "{events:?}"
+        );
+    }
+
+    /// down → 鍵認証も失敗 → login_needed が立つ。同じ outage の間は 2 回目の tick で再度立てない
+    /// （イベントも報告も 1 回だけ）。
+    #[tokio::test]
+    async fn tunnel_down_and_key_auth_fails_marks_login_needed_once() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.clusters.insert(
+            "pegasus".into(),
+            cluster_spec_with_forward(
+                "pegasus",
+                "pegasus",
+                "totp",
+                "127.0.0.1:19002",
+                "bnode150:19002",
+            ),
+        );
+        d.set_cluster_connector(Arc::new(|_id: &str, _host: &str| {
+            Err("permission denied (keyboard-interactive)".to_string())
+        }));
+
+        d.refresh_cluster_tunnels();
+        assert_eq!(d.clusters_needing_login(), vec!["pegasus".to_string()]);
+        let first_events = d.take_tunnel_events();
+        assert_eq!(
+            first_events
+                .iter()
+                .filter(|e| e.kind == TunnelEventKind::LoginNeeded)
+                .count(),
+            1,
+            "{first_events:?}"
+        );
+
+        // 2 回目の tick（間引きを避けるため、間隔を過ぎさせる）。まだ同じ outage の間なので、
+        // login_needed の再検出（新しいイベント）は起きない。
+        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.refresh_cluster_tunnels();
+        assert_eq!(d.clusters_needing_login(), vec!["pegasus".to_string()]);
+        let second_events = d.take_tunnel_events();
+        assert!(
+            second_events
+                .iter()
+                .all(|e| e.kind != TunnelEventKind::LoginNeeded),
+            "login_needed must not fire twice for the same outage: {second_events:?}"
+        );
+    }
+
+    /// forward が消えている（probe が失敗する）が master は生きている: `tunnel_forward_ensurer` で
+    /// 張り直しを試みる（呼ばれたことを確認する。「forward missing → re-add」）。
+    #[tokio::test]
+    async fn tunnel_forward_missing_while_master_alive_is_re_added() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.clusters.insert(
+            "pegasus".into(),
+            cluster_spec_with_forward(
+                "pegasus",
+                "pegasus",
+                "totp",
+                "127.0.0.1:19003",
+                "bnode150:19003",
+            ),
+        );
+        d.cluster_connected.insert("pegasus".into(), true);
+        let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let forward_present = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let ensure_calls_hook = ensure_calls.clone();
+        let forward_present_hook = forward_present.clone();
+        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
+            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            forward_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+        let forward_present_probe = forward_present.clone();
+        d.set_tunnel_probe(Arc::new(move |_listen: &str| {
+            forward_present_probe.load(std::sync::atomic::Ordering::SeqCst)
+        }));
+
+        // 1 回目: 最初から届いている。ensure は呼ばれない。
+        d.refresh_cluster_tunnels();
+        assert_eq!(ensure_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(d.tunnel_reachable("pegasus", "127.0.0.1:19003"));
+
+        // forward が消える（誰かが master 側を再起動した、等）。
+        forward_present.store(false, std::sync::atomic::Ordering::SeqCst);
+        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.refresh_cluster_tunnels();
+        assert_eq!(
+            ensure_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "missing forward must be re-added"
+        );
+        assert!(d.tunnel_reachable("pegasus", "127.0.0.1:19003"));
+    }
+
+    /// probe が失敗する間、master は生きている: 張り直しを試みるが失敗する場合は `Down` イベントになる
+    /// （「probe fails while master alive → re-forward」で、再確立できなければ down のまま観測する）。
+    #[tokio::test]
+    async fn tunnel_probe_failure_while_master_alive_tries_to_reforward_then_reports_down() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.clusters.insert(
+            "pegasus".into(),
+            cluster_spec_with_forward(
+                "pegasus",
+                "pegasus",
+                "totp",
+                "127.0.0.1:19004",
+                "bnode150:19004",
+            ),
+        );
+        d.cluster_connected.insert("pegasus".into(), true);
+        // 最初から up の状態を作っておく（`observe_tunnel` の前回値を `Some(true)` にする）。
+        d.tunnel_up.insert(tunnel_key("pegasus", "127.0.0.1:19004"), true);
+        let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ensure_calls_hook = ensure_calls.clone();
+        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
+            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err("bnode150 is unreachable from pegasus right now".to_string())
+        }));
+        d.set_tunnel_probe(Arc::new(|_listen: &str| false));
+
+        d.refresh_cluster_tunnels();
+
+        assert_eq!(
+            ensure_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a failed probe while the master is alive must try to re-establish the forward"
+        );
+        assert!(!d.tunnel_reachable("pegasus", "127.0.0.1:19004"));
+        let events = d.take_tunnel_events();
+        assert!(
+            events.iter().any(|e| e.cluster == "pegasus"
+                && e.listen == "127.0.0.1:19004"
+                && e.kind == TunnelEventKind::Down),
+            "{events:?}"
+        );
     }
 
     /// ADR-0032 D3: `auth = "publickey"` かつ接続フックが刺さっていれば、未接続のクラスタは cooldown にする前に
@@ -8200,6 +8724,7 @@ mod tests {
                 rsync_excludes: vec![],
                 worktree: Default::default(),
                 auth: "manual".into(),
+                forwards: vec![],
             },
         );
         d.cluster_cooldown

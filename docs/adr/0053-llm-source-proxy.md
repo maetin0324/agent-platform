@@ -172,3 +172,65 @@
 - **実機確認は未実施**（このセッションには本物の Codex 資格情報も外向きネットワークも無い。
   ADR-0009 P-34）。`docs/llm-source.md` §8 の手順 4b（`gpt/cheap` への 1 回の curl）を、認証が
   使える環境の人（またはエージェント）が実行し、結果を PROGRESS に追記すること。
+
+## Phase 66 追記（D3・D4。2026-09-21）
+
+D3（Qwen トンネルを celeris が張る）と D4（`GET /llm/sources` の可視化を GUI に出す）を実装した。
+決定・逸脱は次のとおり。
+
+- **D3 の構成**: `[[clusters]]` に `forwards`（`[[clusters.forwards]] listen / target`）を足した
+  （`task_dispatch::dispatcher::ClusterForwardSpec`。Qwen 専用ではなく、ssh master 越しの port
+  forward 全般として作った）。`Dispatcher::refresh_cluster_tunnels`（`refresh_cluster_liveness` と
+  同じ 5 秒間隔）が: (1) master が死んでいれば、**既存の `ClusterConnector`（ADR-0032 D3 の鍵認証
+  フック）をそのまま再利用して**接続を試す（`auth` の値に関わらず呼ぶ — `"totp"` のクラスタでも
+  「TOTP を要求する前に鍵認証を試す」ため）。(2) 成功すれば forward ごとに `TunnelForwardEnsurer`
+  で(再)確立 → `TunnelProbe` で再確認。(3) 鍵認証も失敗したクラスタは `cluster_login_needed`
+  に立て、**同じ outage の間は 1 回だけ**報告を書く（`clear_login_needed` で解除するまで再度は
+  立たない。`refresh_cluster_liveness`/`ClusterConnector` を流用したことで、ADR-0032 の「TOTP は
+  人の操作でだけ」の原則をそのまま守れている）。
+- **celeris 側の実装**（`crates/celeris/src/lib.rs`）: `tunnel_forward_ensurer` は
+  `ssh -o BatchMode=yes -O forward -L <listen>:<target> <host>` を試し、失敗したら
+  **フォールバックとして `ssh -o BatchMode=yes -N -L <listen>:<target> <host>` を別プロセスとして
+  spawn**（ADR-0053 D3 の「bnode150 が直接届かないなら master 上で `ssh -N -L` を起こす」を
+  文字どおり実装）。この子プロセスは `TunnelForwardRegistry`（`Arc<Mutex<HashMap<String,
+  std::process::Child>>>`、Drop で全部 kill）に保持し、生きている間は二重に起こさない。
+  `tunnel_probe` は `task_worker::probe_models(&format!("http://{listen}/v1"), …, None)`
+  （Qwen 中継そのものは celeris の外なので bearer は付けない。ADR-0052/Phase 65b の
+  `bearer_token` 引数はプロキシの `/v1/models` 用で、これとは別物）。
+  **どちらも `std::process::Command` の同期呼び出し**（`ClusterConnector` と同じ流儀。tick は
+  同期関数なので、非同期ランタイムを持ち出さない。`cluster_connector` が使う一時ランタイムより
+  単純: forward の確立はブロッキングな `ssh` 呼び出し 1 回で終わる）。
+- **逸脱（D3）**: ADR は「tick ごとに `-O check`」と書いていたが、実装は既存の
+  `refresh_cluster_liveness`（5 秒間隔、`CLUSTER_LIVENESS_INTERVAL`）が求めた `cluster_connected`
+  を**そのまま読む**（`ensure_cluster_master_for_tunnel` は `cluster_connected` が `true` ならそこで
+  終わる）。二重に `-O check` を打たない設計判断で、ADR の「tick ごとに `-O check`」の精神
+  （新鮮さを保つ）は間隔を共有することで満たしている。
+- **通知（Discord）**: 新しい `NotificationKind::ClusterLoginNeeded`（`"cluster_login_needed"`）を
+  `task_core::notify` に足した。`ReportKind` は増やさず、`report_for_cluster_login_needed` が
+  `bad_news` の見出しに `"<host> は TOTP ログインが必要"` という決まった接尾辞を付け、
+  `celeris::notify::scan_cluster_login_needed` がその接尾辞だけを拾う（`scan_bad_news` 側は同じ
+  接尾辞を除外し、二重に鳴らさない）。`key` = 報告 id なので、outage ごとに新しい報告 → 新しい
+  key → 次の outage でまた 1 回鳴る（DB の `(kind, key)` 恒久 dedup と「1 outage = 1 回」を
+  両立させる、Dispatcher の in-memory dedup との組み合わせ）。
+- **可観測性**: `Dispatcher` は直近のトンネル状態遷移（Up/Down/Restored/LoginNeeded）を
+  `tunnel_events`（上限 100 件の VecDeque、`take_tunnel_events` で取り出す）に積む。celeris は
+  今回これを Discord/報告以外の専用ログ・GUI タイムラインには配線していない（`tracing::info!` には
+  出る）。**「Console に見える」は `GET /clusters` の `tunnel_forwards[].up` / `tunnel_login_needed`
+  （GUI の /clusters 画面）で満たした**。task 単位のイベント列（`task_core::Event`）に積む設計は
+  採らなかった（トンネルはタスクに紐づかないシステム全体の状態なので、per-task イベントログに
+  混ぜるのは筋が悪いと判断した）。`take_tunnel_events` は将来 GUI 専用のタイムラインを追加すると
+  きのための取り出し口として残してある。
+- **D4 の拡張**: `LlmSourceAccountView` に `remaining_short`（5 時間 / Codex 週内相当）・
+  `remaining_long`（7 日）を追加（`remaining` は従来どおり両者のうち厳しい方）。
+  `LlmSourcesView` に `celeris_tiers: [{tier, resolves_to}]` を追加（`server.rs::resolves_tier` が
+  `attempts_for` と**同じ決定的な選択**を副作用なしでなぞり、先頭候補の `source_label()` を返す。
+  3 tier とも同じ選択規則なので実質同じ結果になりうるが、tier ごとのモデル写像が無ければ候補が
+  空になりうるため tier ごとに計算する）。
+- **GUI**（Phase G27、`gui/docs/PROGRESS.md` に詳細）: `/accounts` に「LLM source」節
+  （供給元カード・`celeris/<tier>` の解決先・短期/長期残量・cooldown）、`/clusters` に
+  トンネル（forward）の一覧と「ログインが必要（TOTP）」の明示（Alert。バッジには入れず全文で
+  出す。ADR-0055 D1-3 の「状態バッジは 1 語」はトンネルの `up`/`down` バッジにだけ適用した）。
+- **実機**: このセッションには本物の pegasus/bnode150 も TOTP も無いため、**トンネルが切れた状態
+  から GUI の TOTP 1 回で復帰し `celeris/cheap` が Qwen に戻ることは未確認**（ADR-0009 P-34）。
+  `docs/PROGRESS.md` の「Phase 66」節に本番の運用手順（設定キー・人が一度だけ行うこと・確認方法）
+  を書いた。認証・ネットワークが使える環境の人（またはエージェント）が実行し、結果を追記すること。

@@ -433,10 +433,23 @@ pub struct ClusterConfigView {
     /// ADR-0032 D1: `"manual"` | `"publickey"` | `"totp"`。
     #[serde(default = "default_cluster_auth")]
     pub auth: String,
+    /// ADR-0053 D3（Phase 66）: `[[clusters.forwards]]`。空なら Qwen トンネル等の管理対象ではない。
+    #[serde(default)]
+    pub forwards: Vec<ClusterForwardView>,
 }
 
 fn default_cluster_auth() -> String {
     "manual".to_string()
+}
+
+/// ADR-0053 D3（Phase 66）: `[[clusters.forwards]]` 1 本の要約と生存（`GET /clusters` にそのまま出す）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterForwardView {
+    pub listen: String,
+    pub target: String,
+    /// forward 越しに `GET <listen>/v1/models` が届くか。スナップショットが無ければ `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub up: Option<bool>,
 }
 
 /// `GET /clusters`（ADR-0018 受け入れ条件8）。
@@ -474,6 +487,13 @@ pub struct ClusterView {
     /// ADR-0032 D5: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中か。スナップショットが無ければ `false`。
     #[serde(default)]
     pub connect_pending: bool,
+    /// ADR-0053 D3（Phase 66）: `[[clusters.forwards]]` の設定と生存を結合したもの。
+    #[serde(default)]
+    pub tunnel_forwards: Vec<ClusterForwardView>,
+    /// ADR-0053 D3: 鍵認証を試しても ssh master が繋がらず、人の TOTP 入力が要る状態か。
+    /// スナップショットが無ければ `false`。
+    #[serde(default)]
+    pub tunnel_login_needed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1412,9 +1432,16 @@ pub enum ConsoleBlock {
 pub struct LlmSourceAccountView {
     pub id: String,
     pub logged_in: bool,
-    /// 0.0〜1.0（測れないときは `null`。値を捏造しない。ADR-0024 D3 と同じ規律）。
+    /// 0.0〜1.0（測れないときは `null`。値を捏造しない。ADR-0024 D3 と同じ規律）。短期・長期のうち
+    /// **厳しい方**（残りが少ない方）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remaining: Option<f64>,
+    /// ADR-0053 D4（Phase 66）: 短期枠（Claude の 5 時間 / Codex の週内相当）だけの残り。測れないときは `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_short: Option<f64>,
+    /// ADR-0053 D4: 長期枠（7 日）だけの残り。測れないときは `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_long: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cooldown_until: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1437,9 +1464,22 @@ pub struct LlmSourceView {
     pub last_hour_completion_tokens: u64,
 }
 
+/// ADR-0053 D4（Phase 66）: `celeris/<tier>` が今どこに解決するか。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LlmCelerisTierView {
+    /// `"frontier"` / `"standard"` / `"cheap"`。
+    pub tier: String,
+    /// 解決先の供給元 id（`sources[].id` と同じ形）。今選べる候補が無ければ `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolves_to: Option<String>,
+}
+
 /// `GET /llm/sources`（ADR-0053 D4）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LlmSourcesView {
     pub sources: Vec<LlmSourceView>,
+    /// 古いスナップショットには無いので既定は空。
+    #[serde(default)]
+    pub celeris_tiers: Vec<LlmCelerisTierView>,
 }
 // ========== ADR-0053（Phase 65）: ここまで ==========

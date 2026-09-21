@@ -723,11 +723,11 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
 
 コミット済み `docs/api/v1/api-v1.schema.json` を `include_str!` で返す（開発・型生成の確認用。GUI の型生成はリポジトリのファイルから行い、この応答には依存しない）。
 
-### 3.23 `GET /clusters` → 200 `Clusters`（ADR-0018、Phase 12）
+### 3.23 `GET /clusters` → 200 `Clusters`（ADR-0018、Phase 12。トンネルは ADR-0053 D3、Phase 66）
 
 `items[]` は `[[clusters]]` の順。定義（`id` / `host` / `concurrency` / `sync` / `delete_on_push` / `has_setup` = `setup` の有無 / `env_keys` = **キー名だけ** / `rsync_excludes` / `auth`）は設定から、
-`in_use`（そのクラスタで走っている run + 判定の数）/ `connected`（この tick の `ssh -O check` の結果 = 多重接続があるか）/ `cooldown_until` / `cooldown_remaining_secs` / `connect_pending` は
-スナップショットから（無ければ `null` / `false`）。`env` の値と `setup` の中身は出さない（ADR-0018 D7）。
+`in_use`（そのクラスタで走っている run + 判定の数）/ `connected`（この tick の `ssh -O check` の結果 = 多重接続があるか）/ `cooldown_until` / `cooldown_remaining_secs` / `connect_pending` /
+`tunnel_forwards` / `tunnel_login_needed` は スナップショットから（無ければ `null` / `false` / `[]`）。`env` の値と `setup` の中身は出さない（ADR-0018 D7）。
 
 - `auth`: `"manual"`（既定）/ `"publickey"` / `"totp"`（ADR-0032 D1）。GUI はこれで「クラスタ」画面の案内を出し分ける
   （3.39〜3.41、§10）。
@@ -738,6 +738,24 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
   接続が戻れば cooldown はその tick で解ける。`auth = "publickey"` のクラスタは、未接続を見つけると cooldown にする前に
   1 回だけ自動で接続を試みる（ADR-0032 D3）。
 - GUI は `connected == false` のクラスタに、`auth` に応じた案内を出す（3.39〜3.41）。受信箱の `attention[].cluster_unavailable`（§5.1 (d)）と対。
+- `tunnel_forwards[]`（ADR-0053 D3、Phase 66）: `[[clusters.forwards]]`（`listen` / `target`）と、forward
+  越しに `GET <listen>/v1/models` が届くか（`up`。観測が無ければ `null`）。`forwards` を持たないクラスタは
+  空配列。
+- `tunnel_login_needed`（ADR-0053 D3）: `[[clusters.forwards]]` を持つクラスタで、ssh master が落ち、
+  **鍵認証を試しても**繋がらなかった状態（人の TOTP 入力が要る）。`GET /clusters` にはこれだけが出る
+  （プロンプト文字列やコードは `POST /clusters/{id}/connect`/`connect/code` の応答にだけ載る。§3.39〜3.41
+  と同じ経路で接続する）。この状態は Discord にも `cluster_login_needed`（§5.1）で 1 回だけ知らせる。
+
+```json
+{"items": [
+  {"id": "pegasus", "host": "pegasus", "concurrency": 2, "sync": "rsync", "delete_on_push": false,
+   "has_setup": false, "env_keys": [], "rsync_excludes": [], "auth": "totp",
+   "in_use": 0, "connected": false, "cooldown_until": null, "cooldown_remaining_secs": null,
+   "connect_pending": false,
+   "tunnel_forwards": [{"listen": "127.0.0.1:18000", "target": "bnode150:18000", "up": false}],
+   "tunnel_login_needed": true}
+]}
+```
 
 ### 3.24〜3.28 プロバイダ管理（ADR-0017、Phase 11。**すべて管理系: `token_file` 未設定でも 401**）
 
@@ -1489,10 +1507,13 @@ Go か再設計」を**人の 3 つの答え**にしたもの（ADR-0038 D2）�
 **判定と送信は celeris の tick が決定的に行う**（LLM は関与しない）。API は台帳（`notifications` 表）を
 読むだけで、送信は celeris に委譲する。
 
-知らせるのは 5 種だけ（ADR-0037 D1）: `milestone_ready` / `approval_pending` / `question_blocked` /
-`bad_news` / `secretary_reply`。`result` / `progress` は**知らせない**（SPEC §3.5 の数時間単位の流れは
-GUI の報告の仕事）。同じ `(kind, key)` は 1 回だけ送り、失敗したら次の tick で再送する（最大 3 回。
-429 はここに数えない）。
+知らせるのは「人の判断が要る」出来事だけ（ADR-0037 D1）: `milestone_ready` / `approval_pending` /
+`question_blocked` / `bad_news` / `secretary_reply` / `task_ready` / `cluster_login_needed`
+（`cluster_login_needed` は ADR-0053 D3、Phase 66。クラスタの ssh master が落ち、鍵認証も失敗して
+人の TOTP 入力が要る状態。`key` = クラスタ id。celeris が outage ごとに 1 回だけ台帳へ書くので、
+同じ outage で 2 通目が来ることはない）。`result` / `progress` は**知らせない**（SPEC §3.5 の
+数時間単位の流れは GUI の報告の仕事）。同じ `(kind, key)` は 1 回だけ送り、失敗したら次の tick で
+再送する（最大 3 回。429 はここに数えない）。
 
 Phase 40（実機 2026-09-18）で変わった点:
 
@@ -2390,11 +2411,11 @@ Console の入力欄の文の入口。`POST /org/{id}/messages`（§3.47）と�
   - 実行結果は `Message.metadata`（`MessageMetadata`）に残り、`GET /console` の `reply` ブロックが
     `actions_result` として運ぶ（§3.98 の表）。**同じ run の actions は 1 回だけ実行される**（冪等）。
 
-### 3.108 `GET /llm/sources`（ADR-0053 D4、Phase 65。**97**）→ 200 `LlmSourcesView`
+### 3.108 `GET /llm/sources`（ADR-0053 D4、Phase 65/66。**97**）→ 200 `LlmSourcesView`
 
 LLM source のローカル OpenAI 互換プロキシ（`crates/llm-proxy`。`127.0.0.1:18100`、`/api/v1` の外）が
 使っている供給元の観測。判断（選択・cooldown）はプロキシの中で決定的に行われる。ここは**見えるように
-するだけ**（GUI の表示は Phase 66。ここでは API と型だけ用意する）。
+するだけ**（GUI の表示は `/accounts` の「LLM source」節、Phase 66）。
 
 - 認証は必要（読み取り専用だが Bearer 必須。トークン不要の `GET /health` とは違う）。
 - `[llm_proxy]` が無効（`enabled = false`、または `claude_oauth`/`codex_oauth`/`openai_compatible` が
@@ -2403,11 +2424,17 @@ LLM source のローカル OpenAI 互換プロキシ（`crates/llm-proxy`。`127
 ```json
 {"sources": [
   {"id": "claude-oauth", "kind": "claude-oauth", "enabled": true,
-   "accounts": [{"id": "acct-a", "logged_in": true, "remaining": 0.62}],
+   "accounts": [{"id": "acct-a", "logged_in": true, "remaining": 0.62,
+                 "remaining_short": 0.62, "remaining_long": 0.81}],
    "last_hour_requests": 12, "last_hour_prompt_tokens": 3400, "last_hour_completion_tokens": 900},
   {"id": "openai-compatible:qwen", "kind": "openai-compatible", "enabled": true, "reachable": true,
    "accounts": [], "last_hour_requests": 40, "last_hour_prompt_tokens": 9000,
    "last_hour_completion_tokens": 5000}
+],
+"celeris_tiers": [
+  {"tier": "frontier", "resolves_to": "claude-oauth"},
+  {"tier": "standard", "resolves_to": "claude-oauth"},
+  {"tier": "cheap", "resolves_to": "openai-compatible:qwen"}
 ]}
 ```
 
@@ -2415,12 +2442,18 @@ LLM source のローカル OpenAI 互換プロキシ（`crates/llm-proxy`。`127
 - `reachable`: `openai-compatible` だけ `GET <base_url>/models` の probe 結果（60 秒キャッシュ）。
   `claude-oauth`/`codex-oauth` は到達性ではなくアカウントの残量で見るので、フィールド自体が省略される
   （`null` を書かない。省略 = 「この供給元には意味が無い」）。
-- `accounts[].remaining`: 0.0〜1.0。測れないとき（観測が古い・無い）はフィールドを省略する（値を捏造
-  しない。ADR-0024 D3 と同じ規律）。`cooldown_until`/`cooldown_reason` も 429/401 を受けた直後だけ載る
-  （このアカウントプールは CLI ワーカーの dispatch と**同じ帳簿**を共有するので、`GET /accounts` の
-  cooldown とも一致する）。
+- `accounts[].remaining`: 0.0〜1.0。短期・長期のうち**厳しい方**（残りが少ない方）。測れないとき
+  （観測が古い・無い）はフィールドを省略する（値を捏造しない。ADR-0024 D3 と同じ規律）。
+  `cooldown_until`/`cooldown_reason` も 429/401 を受けた直後だけ載る（このアカウントプールは CLI
+  ワーカーの dispatch と**同じ帳簿**を共有するので、`GET /accounts` の cooldown とも一致する）。
+- `accounts[].remaining_short` / `remaining_long`（ADR-0053 D4、Phase 66）: 短期枠（Claude の 5 時間 /
+  Codex の週内相当）・長期枠（7 日）それぞれ単独の残り。`remaining` と同じ「測れないときは省略」の規律。
 - `last_hour_*`: `llm_proxy_requests`（migration 0022）の直近 1 時間の集計。本文は記録しないので
   ここにも出ない。
+- `celeris_tiers[]`（ADR-0053 D4、Phase 66）: `celeris/<tier>` が**今**どこに解決するか（`server.rs` の
+  実際の選択と同じ決定的な計算を、副作用なしでなぞるだけ）。`resolves_to` は `sources[].id` と同じ形。
+  選べる候補が無ければ `null`（`no_source_available` になる状態）。古いスナップショットには無いので
+  省略時は空配列として扱う。
 
 ---
 

@@ -1265,6 +1265,8 @@ mod tests {
                 cooldown_until: None,
                 auth: "manual".into(),
                 connect_pending: false,
+                tunnel_login_needed: false,
+                tunnel_forwards: vec![],
             }],
             providers: vec![],
             accounts_root: None,
@@ -1298,6 +1300,8 @@ mod tests {
                 cooldown_until: None,
                 auth: "manual".into(),
                 connect_pending: false,
+                tunnel_login_needed: false,
+                tunnel_forwards: vec![],
             }],
             ..disconnected_snapshot
         };

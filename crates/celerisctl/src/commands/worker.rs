@@ -879,6 +879,7 @@ mod tests {
             worktree_base: "HEAD".into(),
             worktree_paths: vec![],
             remove_worktree_when: "never".into(),
+            forwards: vec![],
         }
     }
 

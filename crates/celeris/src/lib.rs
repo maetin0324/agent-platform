@@ -555,6 +555,12 @@ pub fn build_dispatcher(
         config.dispatch_config(),
     );
     dispatcher.set_cluster_connector(cluster_connector(masters));
+    // ADR-0053 D3（Phase 66）: `[[clusters.forwards]]`（Qwen トンネル等）の(再)確立と生存監視。
+    // 設定に forward が無ければ `refresh_cluster_tunnels` 自体が早期に戻るので、挿しても無害。
+    let tunnel_forward_children: TunnelForwardChildren =
+        Arc::new(std::sync::Mutex::new(TunnelForwardRegistry::default()));
+    dispatcher.set_tunnel_forward_ensurer(tunnel_forward_ensurer(tunnel_forward_children));
+    dispatcher.set_tunnel_probe(tunnel_probe());
     // ADR-0043 D3（Phase 56）: 起動時に 1 度だけコンテナ runtime を調べる（`podman info` → `docker info`）。
     // 結果はログと `GET /daemon` の `containers` に出る。使えなければ `run = container` のタスクは
     // dispatch されず `blocked`（「コンテナ runtime が使えません」）になる。
@@ -647,6 +653,99 @@ fn cluster_connector(masters: ClusterMasters) -> task_dispatch::dispatcher::Clus
     })
 }
 
+/// ADR-0053 D3（Phase 66）: celeris が spawn したフォールバックの `ssh -N -L` 子を保持する場所。
+/// `-O forward` が届かないとき（bnode150 が pegasus から直接届かない等）だけここに増える。
+/// Drop で全部落とす（celeris の終了とともに閉じる。`ClusterMaster` の Drop と同じ理由）。
+#[derive(Default)]
+struct TunnelForwardRegistry(HashMap<String, std::process::Child>);
+
+impl Drop for TunnelForwardRegistry {
+    fn drop(&mut self) {
+        for (_, mut child) in self.0.drain() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+type TunnelForwardChildren = Arc<std::sync::Mutex<TunnelForwardRegistry>>;
+
+/// ADR-0053 D3: `[[clusters.forwards]]` を(再)確立するフック。
+///
+/// 1. まず master に `-O forward -L <listen>:<target> <host>` を頼む（軽い。master が `target` に
+///    届けば十分。ADR-0053 D3 の本筋）。
+/// 2. 届かなければ（`-O forward` が失敗）、master 上で別プロセスとして `ssh -N -L <listen>:<target> <host>`
+///    を張る（ADR-0053 D3「bnode150 が直接届かないなら master 上で ssh -N -L を起こす」フォールバック）。
+///    この子プロセスは `TunnelForwardChildren` に保持し、生きている間は二重に起こさない。
+fn tunnel_forward_ensurer(
+    children: TunnelForwardChildren,
+) -> task_dispatch::dispatcher::TunnelForwardEnsurer {
+    Arc::new(move |host: &str, listen: &str, target: &str| {
+        let key = format!("{host}\u{0}{listen}\u{0}{target}");
+        {
+            let mut guard = children
+                .lock()
+                .map_err(|_| "the tunnel forward registry is poisoned".to_string())?;
+            if let Some(child) = guard.0.get_mut(&key) {
+                if matches!(child.try_wait(), Ok(None)) {
+                    // まだ立ち上げ中／生きている。二重に起こさない。
+                    return Ok(());
+                }
+                guard.0.remove(&key);
+            }
+        }
+        let spec = format!("{listen}:{target}");
+        let status = std::process::Command::new("ssh")
+            .args(["-o", "BatchMode=yes", "-O", "forward", "-L", &spec, host])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if matches!(status, Ok(s) if s.success()) {
+            tracing::info!(host, listen, target, "tunnel: forward added via -O forward");
+            return Ok(());
+        }
+        tracing::warn!(
+            host,
+            listen,
+            target,
+            "tunnel: -O forward failed; falling back to a separate ssh -N -L"
+        );
+        let mut cmd = std::process::Command::new("ssh");
+        cmd.args(["-o", "BatchMode=yes", "-N", "-L", &spec, host])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("could not start the fallback `ssh -N -L`: {e}"))?;
+        tracing::info!(
+            host,
+            listen,
+            target,
+            "tunnel: forward added via a fallback ssh -N -L child"
+        );
+        let mut guard = children
+            .lock()
+            .map_err(|_| "the tunnel forward registry is poisoned".to_string())?;
+        guard.0.insert(key, child);
+        Ok(())
+    })
+}
+
+/// ADR-0053 D3: forward の生存を `GET http://<listen>/v1/models` で見る（既存の probe をそのまま使う）。
+fn tunnel_probe() -> task_dispatch::dispatcher::TunnelProbe {
+    Arc::new(|listen: &str| {
+        let base = format!("http://{listen}/v1");
+        // Qwen 側の中継はトンネルの向こう（bnode150）そのものであり、celeris の llm-proxy を経由しない
+        // ので bearer は要らない（ADR-0052 の knowledge probe と同じ Qwen エンドポイントに対する既定）。
+        matches!(
+            task_worker::probe_models(&base, task_worker::PROBE_TIMEOUT, None),
+            task_worker::Reachability::Ok
+        )
+    })
+}
+
 /// ADR-0013 / `docs/gui/api.md` §3.21: `GET /api/v1/config` に出す設定の要約。env は**キー名だけ**、トークンとその場所は出さない。
 pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
     let models = effective_models(config);
@@ -710,6 +809,16 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                     has_setup: !c.setup.is_empty(),
                     env_keys,
                     rsync_excludes: c.rsync_excludes.clone(),
+                    // ADR-0053 D3（Phase 66）。
+                    forwards: c
+                        .forwards
+                        .iter()
+                        .map(|f| task_api::ClusterForwardView {
+                            listen: f.listen.clone(),
+                            target: f.target.clone(),
+                            up: None,
+                        })
+                        .collect(),
                 }
             })
             .collect(),
@@ -773,6 +882,8 @@ impl task_api::LlmSourcesReader for LlmSourcesAdapter {
                             id: a.id,
                             logged_in: a.logged_in,
                             remaining: a.remaining,
+                            remaining_short: a.remaining_short,
+                            remaining_long: a.remaining_long,
                             cooldown_until: a.cooldown_until,
                             cooldown_reason: a.cooldown_reason,
                         })
@@ -780,6 +891,14 @@ impl task_api::LlmSourcesReader for LlmSourcesAdapter {
                     last_hour_requests: s.last_hour_requests,
                     last_hour_prompt_tokens: s.last_hour_prompt_tokens,
                     last_hour_completion_tokens: s.last_hour_completion_tokens,
+                })
+                .collect(),
+            celeris_tiers: view
+                .celeris_tiers
+                .into_iter()
+                .map(|t| task_api::LlmCelerisTierView {
+                    tier: t.tier,
+                    resolves_to: t.resolves_to,
                 })
                 .collect(),
         }

@@ -295,6 +295,22 @@ impl ProxyState {
             },
         }
     }
+
+    /// ADR-0053 D4（Phase 66）: `celeris/<tier>` が今どこに解決するか（表示専用。実際の要求は送らない。
+    /// `attempts_for` と同じ決定的な選択をなぞるだけ）。候補が無ければ `None`。
+    pub(crate) async fn resolves_tier(&self, tier: task_core::Tier, now: i64) -> Option<String> {
+        self.attempts_for(
+            &ModelRequest::Tiered {
+                scope: SourceScope::Any,
+                tier,
+            },
+            now,
+        )
+        .await
+        .into_iter()
+        .next()
+        .map(|(attempt, _)| attempt.source_label())
+    }
 }
 
 // ---------------------------------------------------------------------------

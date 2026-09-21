@@ -3969,3 +3969,77 @@ before/after のスクリーンショット（`gui/test/mobile-audit/*.png`、gi
 - **P-G25-2**: Board の segmented control を「横スワイプのカード列」に変える場合（人がそちらを好むなら）、
   `scroll-snap-type` と各カードの `min-w-full` で作れる。今回選んだ segmented control との使い勝手の
   比較は実機の人の声を待つ。
+## Phase G27 — LLM source の可視化とクラスタのトンネル表示（ADR-0053 D4、celeris Phase 66。2026-09-21）
+
+celeris 側（`docs/PROGRESS.md` の Phase 66）が D3（Qwen トンネルを celeris が張る）・D4（`GET
+/llm/sources` の拡張）を実装したのを受け、GUI 側の受け入れ条件を実装した。`GET /llm/sources` と
+`GET /clusters` の新フィールドはどちらも既存エンドポイントの追加フィールドなので、新しい画面は
+作らず既存の `/accounts`・`/clusters` に節を足した。celeris の crate には触れていない
+（`gui/CLAUDE.md` の境界どおり）。番号は G25/G26 が別ラウンドで使用済みのため G27。
+
+### 実装
+
+- **`app/lib/llm-sources.ts`（新規）**: 表示専用の純関数だけを集めた（`sourceLabel` / `sourceStatusWord`
+  / `formatRemaining` / `tierResolutionLabel` / `tierLabel` / `cooldownRemainingLabel` /
+  `isAccountCoolingDown` / `forwardStatusWord`）。celeris が返した値をそのまま整形するだけで、
+  選択・到達性・残量の判断はしない（celeris が既に決定済み。ADR-0055 の既存方針と同じ）。
+- **`/accounts`**: `loadAccounts` が `GET /llm/sources` を追加で呼ぶ（`AccountsData.llmSources` /
+  `llmSourcesUnavailable`（409 `llm_proxy_unavailable`）/ `llmSourcesError`）。`[llm_proxy]` 未設定でも
+  `/accounts` 全体は壊れない（`secrets` と同じ 3 分岐: エラー / 未設定 / 表示）。「LLM source」節
+  （`LlmSourcesSection`）: `celeris/<tier>` の解決先を `<dl>` で 3 tier 分、供給元ごとにカード
+  （`LlmSourceCard`。一語の状態バッジ `data-status-badge="llm-source"` = `reachable` /
+  `unreachable` / `enabled` / `disabled`、直近 1 時間の要求/token 数）、アカウントごとの行
+  （`LlmAccountRow`。`shortId` で id を短縮、短期/長期の残量 %、cooldown 中なら残り時間のバッジ）。
+- **`/clusters`**: `tunnel_login_needed` が立っているクラスタに `Alert tone="danger"` で
+  「ログインが必要（TOTP）」を**全文**で出す（バッジには入れない。状態バッジの 1 語規約はトンネルの
+  `up`/`down` バッジ側にだけ適用）。`tunnel_forwards[]` は 1 本ごとに `listen → target` と一語の状態
+  バッジ（`data-status-badge="tunnel"` = `up` / `down` / `unknown`）。
+- 通知の種類が 1 つ増えた（`cluster_login_needed`。celeris ADR-0037/ADR-0053 D3）ので、
+  `app/celeris/types.ts` の `NotificationKind` に追従し、`app/lib/notify.ts` の
+  `NOTIFY_KIND_LABEL`（「クラスタのログインが必要（TOTP）」）と `notifyTargetHref`（`/clusters` へ）に
+  足した（`/reports` の Discord 区画がこの型を直接使っているため）。
+
+### 検証
+
+- `pnpm gen:types`: `docs/api/v1/api-v1.schema.json`（celeris 側で再生成済み）からの差分は
+  `NotificationKind` に `cluster_login_needed` を追加、`ClusterView`/`ClusterConfigView` に
+  `tunnel_forwards`/`tunnel_login_needed`/`forwards`、`ClusterForwardView`（新規）、
+  `LlmSourcesView` に `celeris_tiers`、`LlmCelerisTierView`（新規）、`LlmSourceAccountView` に
+  `remaining_short`/`remaining_long`。再実行しても差分ゼロ（安定）。
+- `pnpm vitest run test/unit/llm-sources.test.ts`: **17 passed**（`sourceLabel` の 3 マッピング、
+  `sourceStatusWord`/`forwardStatusWord` の一語・12 字以内保証を含む、`formatRemaining` の丸め・
+  非数の扱い・範囲外のクランプ、`tierResolutionLabel`、`cooldownRemainingLabel`、
+  `isAccountCoolingDown`）。
+- `test/unit/notify.test.ts`: `cluster_login_needed` を `KINDS` に追加、`notifyTargetHref` の新しい
+  ケース（`/clusters` へのリンク）のテストを追加。
+- `pnpm lint` / `pnpm typecheck`: exit 0。
+- `pnpm test`: **61 files / 877 passed**（新規 17 件を含む）。
+- `pnpm build`: exit 0。
+- `scripts/sync-gui-docs.sh --check`（celeris 側から実行）: up to date（`docs/gui/api.md` §3.23 /
+  §3.108 / §3.64〜3.65 の更新分を反映）。
+- `pnpm mobile-audit`: **`{"ok": true, "total": 0, "by_rule": {}}`**（393×851、Nothing Phone 2a UA、
+  20 route）。フィクスチャに `pegasus`（`auth: "totp"`、`tunnel_login_needed: true`、
+  `tunnel_forwards`）と `GET /llm/sources`（claude-oauth 1 アカウント・openai-compatible:qwen
+  unreachable・tier 解決 3 件）を追加した上での結果。
+  - **before/after**（Phase G24 の main、`git worktree add --detach` で `4b3e7ec` を別ディレクトリに
+    checkout して同じ監査を実行): before も `{"ok": true, "total": 0}`（tap-target 0 / font-size 0）。
+    今回の追加後も `total: 0`。overflow・status-badge・fixed-element も両方 0（そもそも新しい
+    バッジは `data-status-badge` を付けて 1 語に収めた: `reachable`/`unreachable`/`enabled`/
+    `disabled`/`up`/`down`/`unknown`、すべて 12 字以内・空白なし）。
+  - 実装の途中で `LlmAccountRow` の残量表示（`text-xs`）と `TunnelForwardRow` の見出し（`text-xs`）が
+    font-size 違反を一時的に増やした（`text-sm`/`text-sm` へ修正して解消）ことを、`report.json` の
+    差分で確認した。最終的にゼロを維持した。
+
+### 未解決事項
+
+- **実機のトンネル切断/復帰の見た目は未確認**（celeris 側 Phase 66 の未確認事項と同じ。本物の
+  pegasus/bnode150 が無いため）。`data-status-badge="tunnel"` のバッジが実際に `up`→`down`→`up` と
+  切り替わるのを実機で確認すること。
+- G23 の U1（孤立リンクの当たり判定）・U5（Console 入力欄の真の固定）・U6（「その他」シートの拡張）は
+  今回のスコープ外（celeris 側の依頼どおり LLM source/クラスタの表示に限定した）。
+
+### 提案
+
+- `LlmSourceCard`/`LlmAccountRow` は `/accounts` に埋め込んだが、供給元の数が増えると縦に長くなる。
+  celeris 側の運用で供給元が 4〜5 を超えるようなら、専用タブ（Console の下部タブに準じる形）への
+  切り出しを検討してよい（今回は 2〜3 供給元想定のフィクスチャなので据え置いた）。

@@ -1305,6 +1305,14 @@
           },
           "type": "array"
         },
+        "forwards": {
+          "default": [],
+          "description": "ADR-0053 D3（Phase 66）: `[[clusters.forwards]]`。空なら Qwen トンネル等の管理対象ではない。",
+          "items": {
+            "$ref": "#/$defs/ClusterForwardView"
+          },
+          "type": "array"
+        },
         "has_setup": {
           "description": "`setup` が 1 行以上あるか（中身は出さない）。",
           "type": "boolean"
@@ -1384,6 +1392,29 @@
       ],
       "type": "object"
     },
+    "ClusterForwardView": {
+      "description": "ADR-0053 D3（Phase 66）: `[[clusters.forwards]]` 1 本の要約と生存（`GET /clusters` にそのまま出す）。",
+      "properties": {
+        "listen": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "up": {
+          "description": "forward 越しに `GET <listen>/v1/models` が届くか。スナップショットが無ければ `null`。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "listen",
+        "target"
+      ],
+      "type": "object"
+    },
     "ClusterLive": {
       "description": "クラスタ（`[[clusters]]` の行）の稼働状況（ADR-0018 D2 / D5）。`env` の値・`setup` の中身は含めない。",
       "properties": {
@@ -1425,6 +1456,19 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "tunnel_forwards": {
+          "default": [],
+          "description": "ADR-0053 D3: このクラスタの port forward（`[[clusters]].forwards`）の生存。無ければ空\n（forward を持たないクラスタ、または古いスナップショット）。",
+          "items": {
+            "$ref": "#/$defs/TunnelForwardLive"
+          },
+          "type": "array"
+        },
+        "tunnel_login_needed": {
+          "default": false,
+          "description": "ADR-0053 D3（Phase 66）: 鍵認証を試しても ssh master が繋がらず、人の TOTP 入力が要る状態か。\n古いスナップショットには無いので既定は `false`。",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1516,6 +1560,19 @@
         "sync": {
           "description": "`\"rsync\"` | `\"none\"`。",
           "type": "string"
+        },
+        "tunnel_forwards": {
+          "default": [],
+          "description": "ADR-0053 D3（Phase 66）: `[[clusters.forwards]]` の設定と生存を結合したもの。",
+          "items": {
+            "$ref": "#/$defs/ClusterForwardView"
+          },
+          "type": "array"
+        },
+        "tunnel_login_needed": {
+          "default": false,
+          "description": "ADR-0053 D3: 鍵認証を試しても ssh master が繋がらず、人の TOTP 入力が要る状態か。\nスナップショットが無ければ `false`。",
+          "type": "boolean"
         }
       },
       "required": [
@@ -5155,6 +5212,26 @@
       ],
       "type": "object"
     },
+    "LlmCelerisTierView": {
+      "description": "ADR-0053 D4（Phase 66）: `celeris/<tier>` が今どこに解決するか。",
+      "properties": {
+        "resolves_to": {
+          "description": "解決先の供給元 id（`sources[].id` と同じ形）。今選べる候補が無ければ `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tier": {
+          "description": "`\"frontier\"` / `\"standard\"` / `\"cheap\"`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tier"
+      ],
+      "type": "object"
+    },
     "LlmSourceAccountView": {
       "description": "`GET /llm/sources` の 1 アカウント（`llm-proxy` の `claude-oauth`/`codex-oauth` のプール）。",
       "properties": {
@@ -5178,7 +5255,23 @@
           "type": "boolean"
         },
         "remaining": {
-          "description": "0.0〜1.0（測れないときは `null`。値を捏造しない。ADR-0024 D3 と同じ規律）。",
+          "description": "0.0〜1.0（測れないときは `null`。値を捏造しない。ADR-0024 D3 と同じ規律）。短期・長期のうち\n**厳しい方**（残りが少ない方）。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "remaining_long": {
+          "description": "ADR-0053 D4: 長期枠（7 日）だけの残り。測れないときは `null`。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "remaining_short": {
+          "description": "ADR-0053 D4（Phase 66）: 短期枠（Claude の 5 時間 / Codex の週内相当）だけの残り。測れないときは `null`。",
           "format": "double",
           "type": [
             "number",
@@ -5248,6 +5341,14 @@
     "LlmSourcesView": {
       "description": "`GET /llm/sources`（ADR-0053 D4）。",
       "properties": {
+        "celeris_tiers": {
+          "default": [],
+          "description": "古いスナップショットには無いので既定は空。",
+          "items": {
+            "$ref": "#/$defs/LlmCelerisTierView"
+          },
+          "type": "array"
+        },
         "sources": {
           "items": {
             "$ref": "#/$defs/LlmSourceView"
@@ -6241,6 +6342,11 @@
         {
           "const": "task_ready",
           "description": "途中目標のない通常仕事の成果を引き渡す。key = task id:完了遷移。",
+          "type": "string"
+        },
+        {
+          "const": "cluster_login_needed",
+          "description": "ADR-0053 D3（Phase 66）: クラスタの ssh master が落ち、鍵認証も失敗した（人の TOTP が要る）。\n`key` = クラスタ id（Dispatcher が outage ごとに 1 回だけ報告を作るので、同じ key の再送は\n起きない。復旧して再び落ちれば `celeris::reports::record_cluster_login_needed_report` が\n新しい報告 id を作り、`scan_cluster_login_needed` の `key`（報告 id）もそのぶん変わる）。",
           "type": "string"
         }
       ]
@@ -10582,6 +10688,27 @@
         "path",
         "repos",
         "entries"
+      ],
+      "type": "object"
+    },
+    "TunnelForwardLive": {
+      "description": "ADR-0053 D3（Phase 66）: 1 本の port forward の生存（`GET /clusters` にそのまま出す）。",
+      "properties": {
+        "listen": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        },
+        "up": {
+          "description": "forward 越しに `GET <listen>/v1/models` が届くか（直近の観測）。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "listen",
+        "target",
+        "up"
       ],
       "type": "object"
     },

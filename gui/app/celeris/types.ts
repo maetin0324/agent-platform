@@ -497,7 +497,13 @@ export type PriorityInput = ("P0" | "P1" | "P2" | "P3") | number;
  * 判断待ち・返事・成果の引き渡し（ADR-0037 / ADR-0050）。進行中の細かな更新は通知しない。
  */
 export type NotificationKind =
-  "milestone_ready" | "approval_pending" | "question_blocked" | "bad_news" | "secretary_reply" | "task_ready";
+  | "milestone_ready"
+  | "approval_pending"
+  | "question_blocked"
+  | "bad_news"
+  | "secretary_reply"
+  | "task_ready"
+  | "cluster_login_needed";
 /**
  * 組織のノードの種類（ADR-0033 D1）。`secretary` は根で 1 つだけ。
  */
@@ -1265,6 +1271,26 @@ export interface ClusterView {
    * `"rsync"` | `"none"`。
    */
   sync: string;
+  /**
+   * ADR-0053 D3（Phase 66）: `[[clusters.forwards]]` の設定と生存を結合したもの。
+   */
+  tunnel_forwards?: ClusterForwardView[];
+  /**
+   * ADR-0053 D3: 鍵認証を試しても ssh master が繋がらず、人の TOTP 入力が要る状態か。
+   * スナップショットが無ければ `false`。
+   */
+  tunnel_login_needed?: boolean;
+}
+/**
+ * ADR-0053 D3（Phase 66）: `[[clusters.forwards]]` 1 本の要約と生存（`GET /clusters` にそのまま出す）。
+ */
+export interface ClusterForwardView {
+  listen: string;
+  target: string;
+  /**
+   * forward 越しに `GET <listen>/v1/models` が届くか。スナップショットが無ければ `null`。
+   */
+  up?: boolean | null;
 }
 /**
  * ADR-0044 D2: コメント（`GET`/`POST /tasks/{id}/comments`）と再開（`POST /tasks/{id}/reopen`）。
@@ -1368,6 +1394,10 @@ export interface ClusterConfigView {
    * `env` のキー名だけ（昇順）。
    */
   env_keys: string[];
+  /**
+   * ADR-0053 D3（Phase 66）: `[[clusters.forwards]]`。空なら Qwen トンネル等の管理対象ではない。
+   */
+  forwards?: ClusterForwardView[];
   /**
    * `setup` が 1 行以上あるか（中身は出さない）。
    */
@@ -1901,6 +1931,27 @@ export interface ClusterLive {
    * このクラスタで走っている run（ワーカー run + 判定）の数。
    */
   in_use: number;
+  /**
+   * ADR-0053 D3: このクラスタの port forward（`[[clusters]].forwards`）の生存。無ければ空
+   * （forward を持たないクラスタ、または古いスナップショット）。
+   */
+  tunnel_forwards?: TunnelForwardLive[];
+  /**
+   * ADR-0053 D3（Phase 66）: 鍵認証を試しても ssh master が繋がらず、人の TOTP 入力が要る状態か。
+   * 古いスナップショットには無いので既定は `false`。
+   */
+  tunnel_login_needed?: boolean;
+}
+/**
+ * ADR-0053 D3（Phase 66）: 1 本の port forward の生存（`GET /clusters` にそのまま出す）。
+ */
+export interface TunnelForwardLive {
+  listen: string;
+  target: string;
+  /**
+   * forward 越しに `GET <listen>/v1/models` が届くか（直近の観測）。
+   */
+  up: boolean;
 }
 /**
  * ADR-0043 D3（Phase 56）: コンテナ実行の設定と起動時の検出（**観測値**。DB には書かない）。
@@ -2771,7 +2822,24 @@ export interface KnowledgeItem {
  * Phase 65（ADR-0053 D4）: `GET /llm/sources`（API と型のみ。GUI 表示は Phase 66）。
  */
 export interface LlmSourcesView {
+  /**
+   * 古いスナップショットには無いので既定は空。
+   */
+  celeris_tiers?: LlmCelerisTierView[];
   sources: LlmSourceView[];
+}
+/**
+ * ADR-0053 D4（Phase 66）: `celeris/<tier>` が今どこに解決するか。
+ */
+export interface LlmCelerisTierView {
+  /**
+   * 解決先の供給元 id（`sources[].id` と同じ形）。今選べる候補が無ければ `null`。
+   */
+  resolves_to?: string | null;
+  /**
+   * `"frontier"` / `"standard"` / `"cheap"`。
+   */
+  tier: string;
 }
 /**
  * `GET /llm/sources` の 1 供給元。
@@ -2801,9 +2869,18 @@ export interface LlmSourceAccountView {
   id: string;
   logged_in: boolean;
   /**
-   * 0.0〜1.0（測れないときは `null`。値を捏造しない。ADR-0024 D3 と同じ規律）。
+   * 0.0〜1.0（測れないときは `null`。値を捏造しない。ADR-0024 D3 と同じ規律）。短期・長期のうち
+   * **厳しい方**（残りが少ない方）。
    */
   remaining?: number | null;
+  /**
+   * ADR-0053 D4: 長期枠（7 日）だけの残り。測れないときは `null`。
+   */
+  remaining_long?: number | null;
+  /**
+   * ADR-0053 D4（Phase 66）: 短期枠（Claude の 5 時間 / Codex の週内相当）だけの残り。測れないときは `null`。
+   */
+  remaining_short?: number | null;
 }
 /**
  * GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。

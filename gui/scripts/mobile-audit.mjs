@@ -203,6 +203,61 @@ async function setupMockCeleris() {
           rsync_excludes: [],
           sync: "rsync",
         },
+        // ADR-0053 D3（Phase 66）: トンネルを持つクラスタ。ログインが要る状態も一緒に検査する。
+        {
+          id: "pegasus",
+          host: "pegasus",
+          concurrency: 2,
+          delete_on_push: false,
+          env_keys: [],
+          has_setup: false,
+          rsync_excludes: [],
+          sync: "rsync",
+          auth: "totp",
+          connected: false,
+          tunnel_login_needed: true,
+          tunnel_forwards: [{ listen: "127.0.0.1:18000", target: "bnode150:18000", up: false }],
+        },
+      ],
+    }),
+  );
+
+  // ADR-0053 D4（Phase 66）: 「LLM source」節。到達する/しない・oauth プール・tier 解決の 3 パターン。
+  mock.on("GET", "/api/v1/llm/sources", (_req, res) =>
+    sendJson(res, 200, {
+      sources: [
+        {
+          id: "claude-oauth",
+          kind: "claude-oauth",
+          enabled: true,
+          accounts: [
+            {
+              id: "claude-a",
+              logged_in: true,
+              remaining: 0.62,
+              remaining_short: 0.62,
+              remaining_long: 0.81,
+            },
+          ],
+          last_hour_requests: 12,
+          last_hour_prompt_tokens: 3400,
+          last_hour_completion_tokens: 900,
+        },
+        {
+          id: "openai-compatible:qwen",
+          kind: "openai-compatible",
+          enabled: true,
+          reachable: false,
+          accounts: [],
+          last_hour_requests: 40,
+          last_hour_prompt_tokens: 9000,
+          last_hour_completion_tokens: 5000,
+        },
+      ],
+      celeris_tiers: [
+        { tier: "frontier", resolves_to: "claude-oauth" },
+        { tier: "standard", resolves_to: "claude-oauth" },
+        { tier: "cheap", resolves_to: null },
       ],
     }),
   );

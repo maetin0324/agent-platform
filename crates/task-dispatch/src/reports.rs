@@ -248,6 +248,25 @@ pub(crate) fn record_cluster_unavailable_report(
     append_with_escalation(store, &org, report).map(Some)
 }
 
+/// ADR-0053 D3（Phase 66）: クラスタの ssh master が落ち、鍵認証も失敗したこと（人の TOTP が要る）を
+/// `infra` 相当のノードの `bad_news` として 1 件記録する。案件に紐づかないので `project_id` は「案件なし」。
+/// 呼び出し側（`Dispatcher::mark_login_needed`）が同じ outage の間の重複を防ぐので、ここでは間引きしない。
+pub(crate) fn record_cluster_login_needed_report(
+    store: &dyn TaskStore,
+    cluster: &str,
+    host: &str,
+    now: OffsetDateTime,
+) -> Result<Option<Report>, StoreError> {
+    let org = store.org_list()?;
+    let Some(node) = report::infra_node(&org) else {
+        return Ok(None);
+    };
+    let node_id = node.id.clone();
+    let level = report::level_of(&org, &node_id);
+    let report = report::report_for_cluster_login_needed(&node_id, level, cluster, host, now);
+    append_with_escalation(store, &org, report).map(Some)
+}
+
 /// 同じクラスタの障害を毎 tick 報告しないための間引き（直近 `within_secs` 以内に同じ見出しの
 /// 未読の報告があれば作らない）。決定的な判定。
 pub(crate) fn cluster_report_recently_recorded(

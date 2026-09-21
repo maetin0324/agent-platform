@@ -35,7 +35,8 @@ use crate::state::ApiState;
 use crate::types::{
     AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult,
     AccountLoginStart, AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody,
-    ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters,
+    ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterForwardView,
+    ClusterView, Clusters,
     CommentBody, CommentList, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
     MilestoneCreateBody, MilestonePatchBody, MilestoneReviewView, MilestoneView, OrgCreateBody,
     OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody,
@@ -2483,6 +2484,26 @@ async fn clusters(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
                 cooldown_remaining_secs,
                 auth: cluster.auth.clone(),
                 connect_pending: live.map(|live| live.connect_pending).unwrap_or(false),
+                // ADR-0053 D3（Phase 66）: forward の生存は `live` から。設定にしか forward が無い
+                // （まだスナップショットが無い）ときは `up` を `null` にする。
+                tunnel_forwards: cluster
+                    .forwards
+                    .iter()
+                    .map(|f| {
+                        let up = live.and_then(|live| {
+                            live.tunnel_forwards
+                                .iter()
+                                .find(|tf| tf.listen == f.listen)
+                                .map(|tf| tf.up)
+                        });
+                        ClusterForwardView {
+                            listen: f.listen.clone(),
+                            target: f.target.clone(),
+                            up,
+                        }
+                    })
+                    .collect(),
+                tunnel_login_needed: live.map(|live| live.tunnel_login_needed).unwrap_or(false),
             }
         })
         .collect();
