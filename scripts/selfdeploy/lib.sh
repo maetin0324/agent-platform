@@ -415,10 +415,13 @@ SD_VERIFY_LOCK_WAIT="${SD_VERIFY_LOCK_WAIT:-1800}"
 # `sd_lock_leaked_holders <lockfile>`: そのファイルを開いている全プロセスの `pid cmd` を 1 行ずつ出す。
 # 1 つでも selfdeploy のスクリプト（bash …/selfdeploy/*.sh）が含まれていれば何も出さない（＝本物の持ち主がいる）。
 sd_lock_leaked_holders() {
-  local file="$1" abs pid target cmd holders="" script_alive=false
+  local file="$1" abs pid target cmd holders="" script_alive=false ppid
   abs="$(readlink -f "$file" 2>/dev/null)" || return 0
   for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
-    [ "$pid" = "$$" ] && continue
+    # 自分自身（スクリプト本体・この関数を動かすサブシェル）と、その直接の子（`flock` など）は持ち主として数えない。
+    [ "$pid" = "$$" ] || [ "$pid" = "$BASHPID" ] && continue
+    ppid="$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null)"
+    [ "$ppid" = "$$" ] || [ "$ppid" = "$BASHPID" ] && continue
     for target in /proc/"$pid"/fd/*; do
       [ "$(readlink "$target" 2>/dev/null)" = "$abs" ] || continue
       cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-120)"
