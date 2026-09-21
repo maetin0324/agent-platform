@@ -96,7 +96,7 @@ describe("tierLabel", () => {
 
 describe("cooldownRemainingLabel", () => {
   it("formats the remaining time when still cooling down", () => {
-    expect(cooldownRemainingLabel(1_000, 940)).toBe("1m0s");
+    expect(cooldownRemainingLabel(1_000, 940)).toBe("1分");
   });
 
   it("says it has expired once past the deadline", () => {

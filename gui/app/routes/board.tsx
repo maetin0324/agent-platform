@@ -521,7 +521,9 @@ function BoardCard({
       data-status={item.status}
       className="rounded-lg border border-border bg-surface p-3 shadow-xs"
     >
-      <div className="flex flex-wrap items-center gap-1.5">
+      {/* Phase 75（ADR-0055 D2 ラウンド 7）: カードの余白・間隔を 4/8/12/16 のスケールに揃える
+          （6px の gap-1.5 をやめて gap-2 = 8px に）。 */}
+      <div className="flex flex-wrap items-center gap-2">
         <StatusBadge status={item.status} />
         <Badge tone="primary" data-testid="board-card-priority">
           {priority}
@@ -530,9 +532,13 @@ function BoardCard({
       <Link
         to={`/tasks/${item.id}`}
         data-testid="board-card-title"
-        className="mt-1.5 flex min-h-11 items-center font-medium text-fg no-underline hover:text-primary hover:underline"
+        title={item.title}
+        className="mt-2 flex min-h-11 items-center font-medium text-fg no-underline hover:text-primary hover:underline"
       >
-        {item.title}
+        {/* 題名は 2 行までに丸め、全文は `title` 属性（ホバー）に残す。`overflow-wrap: anywhere` で
+            日本語混じりの長い題名（id やパスを含む等）が単語の途中でも折り返せるようにする
+            （`line-clamp-2` と両立させるため、`flex` を持つ Link 自身ではなく内側の `span` に掛ける）。 */}
+        <span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">{item.title}</span>
       </Link>
       {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
       <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-fg-subtle lg:text-xs">
@@ -551,7 +557,7 @@ function BoardCard({
       </button>
 
       <div className={cn("mt-2 space-y-2 lg:mt-1.5 lg:block", detailsOpen ? "block" : "hidden")}>
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-2">
           <Badge tone="neutral" data-testid="board-card-category">
             {taskCategoryLabel(item.category)}
           </Badge>
@@ -574,7 +580,7 @@ function BoardCard({
           </div>
         )}
         {editable && (
-          <div className="flex flex-wrap gap-1.5" data-testid="board-card-edit">
+          <div className="flex flex-wrap gap-2" data-testid="board-card-edit">
             <select
               aria-label={`${item.title} の優先度`}
               value={priority}

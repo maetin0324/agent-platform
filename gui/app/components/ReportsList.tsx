@@ -167,7 +167,8 @@ function ReportRow({
         <span className="hidden shrink-0 text-sm text-fg-subtle md:inline lg:text-xs">
           {reportNodeName(report, org)}
         </span>
-        <span className="shrink-0 text-sm tabular-nums text-fg-subtle lg:text-xs">
+        {/* ADR-0055 D2 ラウンド 7（Phase 75）: 相対表示は `title` に絶対時刻を残す（他画面と同じ規律）。 */}
+        <span className="shrink-0 text-sm tabular-nums text-fg-subtle lg:text-xs" title={report.created_at}>
           {relativeTimeLabel(report.created_at, fetchedAt)}
         </span>
         {!isRead && (
