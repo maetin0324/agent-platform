@@ -12978,3 +12978,12 @@ GUI のみ（`crates/` 無変更。`gui/CLAUDE.md`「GUI から celeris に入�
   `tierResolutionReason` の「cooldown」判定が「選ばれたアカウント自身」ではなく「プール内に 1 件でも cooldown 中の
   アカウントがいる」ことを示すだけであること、`/inbox` が ADR-0055 D1 の監査対象外であることなど）。
 - 本番 = Phase 65〜85（すべて）。実装中: Phase 86（このワークトリーク。GUI のみ）。
+
+### Phase 86 の本番反映（2026-09-21 22:5x UTC。`688a5c590982`、ライブ切替）
+
+- main `688a5c5` = Phase 86（GUI ラウンド 11: クラスタ・LLM source・リリースの運用画面、`/inbox` の相対時刻）。GUI ゲート: typecheck / lint exit 0、
+  `pnpm test` 1004 passed、`pnpm mobile-audit` 違反 0（25 route × light/dark）、`pnpm e2e:mock` ok。`release.sh` → `688a5c590982`（schema 24）。
+  `verify.sh` `ok=true live_ok=true` → `promote.sh` mode=live。
+- 本番 = Phase 65〜86。人に残っている作業: pegasus の TOTP 接続と bnode150 の vLLM 確認、`install-units.sh --remove-qwen-tunnel`、
+  `~/.local/celeris/workspaces`（193 GB）と `releases/.cargo-target-pre-celeris`（41 GB）の整理、ChatGPT の Secure MCP tunnel を 18201 に、
+  Claude Code の MCP 登録（`~/.config/celeris/secrets/mcp-token-claude-code`）。
