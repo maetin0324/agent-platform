@@ -92,7 +92,8 @@ run_step() {
   sd_log "step $name: $* (cwd $workdir)"
   start="$(date +%s.%N)"
   rc=0
-  ( cd "$workdir" && "$@" ) >"$log" 2>&1 || rc=$?
+  # lock の fd（8, 9）を子に継がせない（応答しない子が残ると lock が外れない。lib.sh の sd_lock_or_tempfail 参照）。
+  ( cd "$workdir" && "$@" ) >"$log" 2>&1 8>&- 9>&- || rc=$?
   end="$(date +%s.%N)"
   secs="$(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.3f", b - a }')"
   printf '%s\t%s\t%s\t%s\n' "$name" "$rc" "$secs" ".gate-$name.log" >>"$GATE_TSV"
@@ -173,7 +174,7 @@ for f in server.js package.json pnpm-lock.yaml pnpm-workspace.yaml; do
 done
 
 sd_log "gui: pnpm install --prod --frozen-lockfile in $STAGE/gui"
-( cd "$STAGE/gui" && pnpm install --prod --frozen-lockfile ) >&2 \
+( cd "$STAGE/gui" && pnpm install --prod --frozen-lockfile ) >&2 8>&- 9>&- \
   || sd_die "pnpm install --prod failed in the release gui directory"
 
 SCHEMA_VERSION="$(sd_schema_version_of_tree "$BUILD")" \

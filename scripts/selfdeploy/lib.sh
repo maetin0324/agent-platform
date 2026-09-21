@@ -403,13 +403,53 @@ SD_VERIFY_LOCK_WAIT="${SD_VERIFY_LOCK_WAIT:-1800}"
 # `sd_lock_or_tempfail <fd> <lockfile> <wait-secs> <what>`
 #   `<wait-secs>` が 0 なら `flock -n`（待たずに諦める）。取れなければ exit 75。
 #   取れたロックは**このシェルが終わるまで**（fd が閉じるまで）持ち続ける。
+#
+# 実機 2026-09-21 09:19: `cargo test` の中で起こされた `podman info`（container の runtime probe）が
+# 応答せずに残り、release.sh から**継承した lock の fd** を握ったまま PID 1 の子になった。release.sh 自体は
+# 終わっているのに次の release.sh が 1800 秒待って exit 75 になった。対策は 2 つ:
+#   1. 子プロセスに lock の fd を継がせない（release.sh の run_step 等で `8>&- 9>&-`）。
+#   2. それでも「持ち主が selfdeploy のスクリプトではない」ロックは**漏れた fd**なので、持ち主を記録して
+#      ロックファイルを `<file>.leaked-<日時>` に退け、新しい inode で取り直す（`sd_lock_leaked_holders`）。
+#      生きている release.sh / verify.sh が 1 つでも fd を持っていれば退けない（本物の直列化はそのまま）。
+
+# `sd_lock_leaked_holders <lockfile>`: そのファイルを開いている全プロセスの `pid cmd` を 1 行ずつ出す。
+# 1 つでも selfdeploy のスクリプト（bash …/selfdeploy/*.sh）が含まれていれば何も出さない（＝本物の持ち主がいる）。
+sd_lock_leaked_holders() {
+  local file="$1" abs pid target cmd holders="" script_alive=false
+  abs="$(readlink -f "$file" 2>/dev/null)" || return 0
+  for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+    [ "$pid" = "$$" ] && continue
+    for target in /proc/"$pid"/fd/*; do
+      [ "$(readlink "$target" 2>/dev/null)" = "$abs" ] || continue
+      cmd="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-120)"
+      case "$cmd" in *selfdeploy/*.sh*) script_alive=true ;; esac
+      holders="${holders}${pid} ${cmd}
+"
+      break
+    done
+  done
+  [ "$script_alive" = true ] && return 0
+  printf '%s' "$holders"
+}
+
 sd_lock_or_tempfail() {
-  local fd="$1" file="$2" wait="$3" what="$4"
+  local fd="$1" file="$2" wait="$3" what="$4" leaked
   command -v flock >/dev/null 2>&1 \
     || sd_die "flock not found (util-linux); refusing to run without serialization"
   mkdir -p "$(dirname "$file")"
   : >>"$file"
   eval "exec $fd>>\"\$file\""
+  if ! flock -n "$fd"; then
+    leaked="$(sd_lock_leaked_holders "$file")"
+    if [ -n "$leaked" ]; then
+      sd_log "lock $file is held only by processes that are not selfdeploy scripts (the script that took it has exited; the fd leaked to a child):"
+      printf '%s' "$leaked" | while IFS= read -r line; do [ -n "$line" ] && sd_log "  leaked holder: $line"; done
+      local aside="$file.leaked-$(date -u +%Y%m%dT%H%M%SZ)"
+      mv "$file" "$aside" && sd_log "moved the leaked lock aside to $aside; taking a fresh lock"
+      : >>"$file"
+      eval "exec $fd>>\"\$file\""
+    fi
+  fi
   if [ "$wait" = 0 ]; then
     if flock -n "$fd"; then return 0; fi
     sd_log "another $what is already running (lock: $file); nothing was changed"
