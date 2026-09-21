@@ -10729,3 +10729,12 @@ thread while the thread is being used to drive asynchronous tasks.
   → Router）では解決されなかったと判断し、`celeris-proxy.json` から `api_key` を全部外した（litellm の openai provider は未指定なら
   `OPENAI_API_KEY` を使う）。3 回目のタスクを作成（結果は次節）。この失敗タスクの知識整理 run が `scheduled` になったので、LangMem が
   プロキシ経由（bearer 付き probe）で走るかもここで確認する。
+
+### LangMem がプロキシ経由で走った（2026-09-21 13:33 UTC）
+
+- PaperQA 動作確認（2 回目）の失敗を終端として `knowledge_runs` に run が積まれ、**13:33:50 `done` `via = langmem`**
+  （`{"candidates":0,…,"via":"langmem"}`。失敗タスクなので候補 0 は妥当）。同時刻の `llm_proxy_requests` に
+  `celeris/cheap → claude-oauth / claude-haiku-4-5-20251001 ok` が 1 件 = LangMem の抽出呼び出し。Phase 65b の bearer 付き probe が
+  `GET http://127.0.0.1:18100/v1/models` を 200 で通し、fallback ではなく本来の `langmem` 経路で動いた。
+- これで ADR-0053 D2 の 4 プロバイダのうち **LDR / PaperQA / LangMem がプロキシ経由**（PaperQA は pqa 側の api_key 解決を直して 3 回目を実行中）。
+  `opencode-qwen` は Phase 65 の判断どおり据え置き（opencode の model id にスラッシュを含められるか未確認）。
