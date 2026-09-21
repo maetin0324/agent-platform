@@ -111,8 +111,22 @@ export type ConsoleBlock =
        * 返事を作った run。
        */
       run_id?: string | null;
+      /**
+       * ADR-0054 D2（Phase 68）: `streaming`（run 中。`text` はここまでの積み上げ）か
+       * `done`（`messages` に確定した返事）。無ければ `done`（過去のブロック・このフィールドを
+       * 知らないクライアントとの後方互換）。
+       */
+      state?: "streaming" | "done";
+      /**
+       * 育つ返事の中の tool_use/tool_result（`state = streaming` のときだけ意味がある）。
+       */
+      steps?: ConsoleReplyStep[];
       task_id?: TaskId | null;
       text: string;
+      /**
+       * 育つ返事の「考え中…」の最新の 1 行（`state = streaming` のときだけ意味がある。置き換え式）。
+       */
+      thinking?: string | null;
     }
   | {
       at: string;
@@ -1555,6 +1569,16 @@ export interface MessageActionResult {
 export interface MessageActionFailure {
   kind: string;
   reason: string;
+}
+/**
+ * 育つ返事の中の 1 手（`tool_use` / `tool_result` だけ。ADR-0054 D2: 「tool_use は tool + summary を
+ * 1 行、tool_result は折り畳み」）。
+ */
+export interface ConsoleReplyStep {
+  error?: boolean;
+  kind: ProgressKind;
+  text: string;
+  tool?: string | null;
 }
 /**
  * `task` ブロックの中身（ADR-0048 D1: 開始・終了・失敗・中止・割り込みを 1 行で）。
@@ -3342,6 +3366,12 @@ export interface OrgList {
    */
   effective_profiles?: EffectiveProfile[];
   items: OrgNode[];
+  /**
+   * ADR-0054 D1/D3（Phase 67/68）: 部門長（`OrgKind::Department`）の継続セッション（`kind = lead`）が
+   * あるノードだけ、`node_id` で対応づけて渡す（無いノードは含めない。CoS の対話セッションは
+   * 組織画面ではなく Console のチャット欄自身が見せるので、ここには乗せない）。
+   */
+  lead_sessions?: NodeSessionSummary[];
 }
 /**
  * ADR-0046 D1: 根から葉まで merge した結果。前置き・matching・道具の受け渡しはこれだけを見る。
@@ -3432,6 +3462,16 @@ export interface Profile1 {
    * ADR-0046 D8 の語彙。親と和。
    */
   tools?: string[];
+}
+/**
+ * `OrgList.lead_sessions[]` の 1 件（ADR-0054 D3。Phase 68）: 「継続中のセッション: turns / tokens /
+ * 最終使用」を組織画面に出すための最小限の読み取り。
+ */
+export interface NodeSessionSummary {
+  approx_tokens: number;
+  last_used_at: string;
+  node_id: string;
+  turns: number;
 }
 /**
  * `PATCH /org/{id}` の要求本文（管理系）。書いた項目だけを変える。

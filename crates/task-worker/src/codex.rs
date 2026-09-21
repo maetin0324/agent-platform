@@ -204,12 +204,24 @@ async fn run_codex(
     if let (Some(id), CodexResumeMode::ExecResume) = (&resume_id, config.resume_mode) {
         command.arg("resume").arg(id);
     }
+    // ADR-0054 D2（Phase 68）: CoS の対話 run だけ read-only sandbox（読み取りの道具の代わり。codex には
+    // claude-code の `--allowedTools` に相当する道具単位の許可リストが無いため、書き込みそのものを
+    // 塞ぐ）。`--add-dir` した `artifacts_dir`（下）は read-only でも書ける（celeris が渡す
+    // 「結果ファイルを書く場所」の明示的な例外。codex の writable_roots の扱いに依る）。
+    // それ以外の run は従来どおり `workspace-write`（result.json の契約に書き込みが要る）。
+    let sandbox_mode = if req.context.conversation_addressee
+        == Some(crate::protocol::ConversationAddressee::Secretary)
+    {
+        "read-only"
+    } else {
+        "workspace-write"
+    };
     command
         .arg("--json")
         .arg("--skip-git-repo-check")
         // The result.json contract needs writes; explicit extra_args override this default.
         .arg("-c")
-        .arg("sandbox_mode=\"workspace-write\"");
+        .arg(format!("sandbox_mode=\"{sandbox_mode}\""));
     if let (Some(id), CodexResumeMode::ExperimentalResume) = (&resume_id, config.resume_mode) {
         command.arg("-c").arg(format!("experimental_resume={id}"));
     }
@@ -1526,6 +1538,46 @@ printf '%s\n' '{"type":"turn.completed"}'
         let args = captured_args(dir.path());
         assert!(!args.contains(&"resume".to_string()));
         assert!(!args.iter().any(|a| a.starts_with("experimental_resume=")));
+    }
+
+    /// ADR-0054 D2（Phase 68）: CoS の対話 run（`conversation_addressee = Secretary`）だけ
+    /// `sandbox_mode="read-only"`。それ以外は従来どおり `workspace-write`。
+    #[tokio::test]
+    async fn the_cos_conversation_run_gets_a_readonly_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.conversation_addressee =
+            Some(crate::protocol::ConversationAddressee::Secretary);
+        let _ = adapter
+            .run(req, "run-cos", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(
+            args.contains(&"sandbox_mode=\"read-only\"".to_string()),
+            "{args:?}"
+        );
+        assert!(!args.contains(&"sandbox_mode=\"workspace-write\"".to_string()));
+    }
+
+    /// 対話でない run・CoS 以外の対話には従来どおり `workspace-write`。
+    #[tokio::test]
+    async fn non_cos_runs_keep_the_workspace_write_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let _ = adapter
+            .run(req, "run-plain", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(
+            args.contains(&"sandbox_mode=\"workspace-write\"".to_string()),
+            "{args:?}"
+        );
     }
 
     /// ADR-0054 D1（Phase 67）: 継続セッション（`resume: true`）かつ `resume_mode = ExecResume`（既定）

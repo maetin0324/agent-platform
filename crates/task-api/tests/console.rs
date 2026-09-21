@@ -212,6 +212,87 @@ async fn a_fake_run_becomes_one_task_progress_and_report_stream() {
     assert!(page["next_cursor"].is_string());
 }
 
+/// ADR-0054 D2（Phase 68）: 対話 run（`task.conversation` あり）の進行は、折り畳んだ `progress` では
+/// なく「育つ返事」（`reply`、`state = streaming`）として出る。`thinking` は置き換え、`text` は連結、
+/// `tool_use`/`tool_result` は `steps` に順番どおり積む。
+#[tokio::test]
+async fn a_conversation_runs_progress_becomes_a_growing_streaming_reply() {
+    let env = TestEnv::new();
+    let mut task = new_task(TaskKind::Execute, Status::Running);
+    task.assignee = Some(COS_ID.into());
+    task.conversation = Some(MessageId::new());
+    env.seed(&task);
+    env.store
+        .append_event(
+            task.id,
+            &Event::worker_progress_with(
+                RUN,
+                "考え中",
+                ProgressFields::of(ProgressKind::Thinking).with_summary("考え中…"),
+            ),
+        )
+        .expect("progress");
+    env.store
+        .append_event(
+            task.id,
+            &Event::worker_progress_with(
+                RUN,
+                "tool",
+                ProgressFields::of(ProgressKind::ToolUse)
+                    .with_tool("celerisctl")
+                    .with_summary("knowledge search rust"),
+            ),
+        )
+        .expect("progress");
+    env.store
+        .append_event(
+            task.id,
+            &Event::worker_progress_with(
+                RUN,
+                "tool result",
+                ProgressFields::of(ProgressKind::ToolResult).with_summary("3 件"),
+            ),
+        )
+        .expect("progress");
+    env.store
+        .append_event(
+            task.id,
+            &Event::worker_progress_with(
+                RUN,
+                "text1",
+                ProgressFields::of(ProgressKind::Text).with_summary("承知しま"),
+            ),
+        )
+        .expect("progress");
+    env.store
+        .append_event(
+            task.id,
+            &Event::worker_progress_with(
+                RUN,
+                "text2",
+                ProgressFields::of(ProgressKind::Text).with_summary("した。"),
+            ),
+        )
+        .expect("progress");
+
+    let app = env.router();
+    let page = send(&app, get("/api/v1/console")).await.json();
+    assert_eq!(kinds(&page), vec!["reply"], "{page:#}");
+    let block = &page["items"][0];
+    assert_eq!(block["state"], "streaming");
+    assert_eq!(block["run_id"], RUN);
+    assert_eq!(block["node_id"], COS_ID);
+    assert_eq!(block["thinking"], "考え中…");
+    assert_eq!(block["text"], "承知しました。");
+    let steps = block["steps"].as_array().expect("steps");
+    assert_eq!(steps.len(), 2);
+    assert_eq!(steps[0]["kind"], "tool_use");
+    assert_eq!(steps[0]["tool"], "celerisctl");
+    assert_eq!(steps[0]["text"], "knowledge search rust");
+    assert_eq!(steps[1]["kind"], "tool_result");
+    assert_eq!(steps[1]["text"], "3 件");
+}
+
 /// ADR-0048 D3（Phase 60b）: `reply` ブロックは `Message.metadata`（CoS の `actions` の実行結果）を
 /// `actions_result` として運ぶ。metadata の無い返事は `actions_result` を出さない。
 #[tokio::test]
@@ -673,6 +754,88 @@ async fn the_stream_emits_a_progress_block_and_then_the_finished_task_block() {
     };
     assert_eq!(frame.data["task"]["to"], "done");
     assert_eq!(frame.data["task"]["assignee"], "coding");
+}
+
+/// ADR-0054 D2（Phase 68）: SSE でも対話 run の進行は「育つ返事」として流れ、同じ run の続きは
+/// **その場で置き換わる**（`text` は積み上がる。GUI の `appendConsoleBlock` と同じ規約。`console.ts`）。
+/// run が終わり `messages` に確定すると、`state = done` の `reply` が別途届く。
+#[tokio::test]
+async fn the_stream_grows_a_reply_block_for_a_conversation_run_then_settles_it() {
+    let env = TestEnv::new();
+    let mut task = new_task(TaskKind::Execute, Status::Running);
+    task.assignee = Some(COS_ID.into());
+    task.conversation = Some(MessageId::new());
+    env.seed(&task);
+    let app = task_api::router(fast(&env));
+
+    let mut sse = open_stream(&app, get("/api/v1/console/stream?scope=all")).await;
+    assert_eq!(sse.status, 200);
+    sse.next_frame(Duration::from_millis(500))
+        .await
+        .expect("hello");
+
+    env.store
+        .append_event(
+            task.id,
+            &Event::worker_progress_with(
+                RUN,
+                "text1",
+                ProgressFields::of(ProgressKind::Text).with_summary("承知しま"),
+            ),
+        )
+        .expect("progress");
+    let frame = sse
+        .next_named("console.block", Duration::from_secs(3))
+        .await
+        .expect("reply block");
+    assert_eq!(frame.data["kind"], "reply");
+    assert_eq!(frame.data["state"], "streaming");
+    assert_eq!(frame.data["text"], "承知しま");
+
+    env.store
+        .append_event(
+            task.id,
+            &Event::worker_progress_with(
+                RUN,
+                "text2",
+                ProgressFields::of(ProgressKind::Text).with_summary("した。"),
+            ),
+        )
+        .expect("progress");
+    let frame = sse
+        .next_named("console.block", Duration::from_secs(3))
+        .await
+        .expect("reply block 2");
+    assert_eq!(frame.data["kind"], "reply");
+    assert_eq!(frame.data["state"], "streaming");
+    assert_eq!(
+        frame.data["text"], "した。",
+        "SSE は積み増し分だけを送る（GUI 側が run_id で置き換えて積み上げる）"
+    );
+
+    // run が終わり、`messages` に確定した返事が別途 `state = done` で届く。
+    let reply = Message {
+        id: MessageId::new(),
+        node_id: COS_ID.into(),
+        project_id: None,
+        role: MessageRole::Node,
+        text: "承知しました。".into(),
+        run_id: Some(RUN.into()),
+        task_id: Some(task.id),
+        metadata: None,
+        created_at: OffsetDateTime::now_utc(),
+    };
+    env.store.message_append(&reply).expect("reply");
+    let frame = loop {
+        let frame = sse
+            .next_named("console.block", Duration::from_secs(3))
+            .await
+            .expect("done reply block");
+        if frame.data["kind"] == "reply" && frame.data["state"] == "done" {
+            break frame;
+        }
+    };
+    assert_eq!(frame.data["text"], "承知しました。");
 }
 
 /// 受け入れ 2: 折り畳んだ進行を開いたときの全行（`GET /tasks/{id}/runs/{run}/events`）。

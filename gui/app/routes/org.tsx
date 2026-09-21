@@ -23,6 +23,7 @@ import type {
   ConfigView,
   EffectiveProfile,
   MemoryView,
+  NodeSessionSummary,
   OrgKind,
   OrgList,
   OrgNode,
@@ -48,6 +49,7 @@ import {
   labelClass,
   selectClass,
   textareaClass,
+  touchLinkClass,
 } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
@@ -265,6 +267,7 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
                 org={org.items}
                 genres={genres}
                 effectiveProfile={org.effective_profiles?.find((p) => p.node_id === selected.id)}
+                leadSession={org.lead_sessions?.find((s) => s.node_id === selected.id)}
                 workload={workload[selected.id]}
                 tasks={nodeTasks}
                 standingRules={standingRules}
@@ -522,6 +525,7 @@ function OrgNodeDetail({
   org,
   genres,
   effectiveProfile,
+  leadSession,
   workload,
   tasks,
   standingRules,
@@ -536,6 +540,8 @@ function OrgNodeDetail({
   org: OrgNode[];
   genres: string[];
   effectiveProfile: EffectiveProfile | undefined;
+  /** ADR-0054 D3（Phase 68）: 部門長（`kind = "department"`）の継続セッション。無ければ `undefined`。 */
+  leadSession: NodeSessionSummary | undefined;
   workload: Workload | undefined;
   tasks: TaskSummary[];
   standingRules: StandingRule[];
@@ -570,6 +576,16 @@ function OrgNodeDetail({
           <DataItem label="担当した仕事（累計）">
             <span className="tabular-nums">{workload?.total ?? 0}</span>
           </DataItem>
+          {/* ADR-0054 D3（Phase 68）: 部門長（レビュー・切り分け run。ADR-0051）の継続セッション。
+              無いノード（部門長でない・まだ 1 度もレビューしていない）には出さない。 */}
+          {leadSession && (
+            <DataItem label="継続中のセッション" wide>
+              <span data-testid="org-node-lead-session" className="tabular-nums">
+                {leadSession.turns} turns ・ {leadSession.approx_tokens.toLocaleString("ja-JP")} tokens ・ 最終使用{" "}
+                {leadSession.last_used_at}
+              </span>
+            </DataItem>
+          )}
         </dl>
 
         {/* SPEC §4 の 2「ノードを選ぶとその『人』に直接話せる」（Phase G13b-2）。 */}
@@ -692,7 +708,7 @@ function OrgNodeDetail({
           )}
           <Link
             to="/approvals"
-            className="mt-1.5 inline-block text-xs text-fg-subtle underline underline-offset-2 hover:text-fg"
+            className={cn(touchLinkClass, "mt-1.5 text-sm text-fg-subtle underline underline-offset-2 hover:text-fg")}
           >
             追加・削除は「認可」から
           </Link>

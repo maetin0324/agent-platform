@@ -8,6 +8,8 @@ pub mod knowledge;
 /// ADR-0046 D7（Phase 59）: `celerisctl org migrate-v2`。
 pub mod org;
 pub mod plan;
+/// ADR-0054 D2（Phase 68）: `celerisctl projects ls|show`（CoS の対話 run に許す読み取りの道具）。
+pub mod projects;
 pub mod query;
 pub mod replay;
 pub mod worker;

@@ -210,3 +210,85 @@
 - **ゲート**: 各コマンドの結果は `docs/PROGRESS.md` の「Phase 67b」節に記録。
 - **本番での確認**（未実施。デプロイ後に人 or エージェントが実施）: `docs/PROGRESS.md` の
   「Phase 67b」節「本番で確認すること」を参照。
+## Phase 68 追記（実装時の逸脱・明確化。2026-09-21）
+
+1. **「育つ返事」は `progress` の別ブロックではなく、`reply` の新しい状態にした**。本文は D2 で
+   「その対話 run の progress を run 中に流す」としか書いていないが、実装は既存の `progress` ブロック
+   （run ごとに折り畳む）を対話 run にも使うのではなく、`ConsoleBlock::Reply` に
+   `state`（`streaming` | `done`、既定 `done`）・`thinking`（置き換え式の 1 行）・`steps[]`
+   （`tool_use`/`tool_result` を順番どおり）を追加した。理由: `progress` の折り畳み（`first`/`last` が
+   始め 3 行・終わり 3 行だけ）は「開いて見る」設計で、育つ吹き出しには使えない（本文を全部見せる必要が
+   ある）。対話でない run（`task.conversation` が無い）は従来どおり `progress` のまま（`task_core::is_conversation`
+   で振り分け。`crates/task-api/src/console.rs::event_blocks`）。対象は CoS の対話に限らず、**ノードとの
+   対話（`@node`）も同じ扱い**にした（同じコードパスで自然にそうなる。D2 の本文は CoS に限定していない）。
+   組み立ては `crates/task-ops/src/console.rs::group_conversation_progress`（thinking は置き換え、text は
+   連結、tool_use/tool_result は先頭・末尾で切らずに積む。対話 run は `CONVERSATION_MAX_TURNS` で
+   際限なく伸びないため）。
+2. **SSE は「その接続で見た増分」を送る（`progress` と同じ実装の性質に合わせた）**。`poll_console` の
+   `pending.blocks` は 1 秒ごとにその時点の値を送って**取り除く**ため、次のティックの育つ `reply` は
+   增分（そのティックで新たに来た `text`/`steps`）だけを持つ（`progress` の `count`/`tool_count` も同じ
+   性質で、実は「run 全体の累計」ではなく「前回送信からの増分」——コメントの「その run の合計」という
+   記述と実装がずれているのは Phase 60a からの既存の状態で、今回は触っていない）。GUI 側
+   （`~/lib/console.ts::appendConsoleBlock`）が `run_id`/`task_id` が同じ `reply` を見つけたら
+   `text` を連結・`steps` を積み増す・`thinking` は空でなければ置き換える、という規約でクライアント側の
+   積み上げを担う。`state = "done"` の `reply`（`messages` から来る、確定した本文そのもの）は増分では
+   ないので置き換える。`GET /console`（履歴の初期表示）は `since` 無しなら窓の中の全イベントから
+   1 回で組むので、こちらは最初から累計が乗る。
+3. **CoS の対話 run に許す読み取りの道具は、アダプタごとに実現の強さが違う**（D2 は「celerisctl
+   knowledge search|get、タスク・案件の一覧と詳細の read API」とだけ書いていて、道具単位で守れる保証までは
+   規定していない）:
+   - `claude-code`: `--allowedTools` に `Bash(celerisctl <サブコマンド>:*)` の形で 6 つ渡す
+     （`knowledge search`/`knowledge get`/`ls`/`show`/`projects ls`/`projects show`）。claude-code の
+     許可リストの仕組みそのものが「無いものは拒否」なので、この 6 つ以外は使えない。
+   - `codex`: 道具単位の許可リストが無いため、`sandbox_mode="read-only"` にした（読み取り以外の
+     ファイル書き込み・任意コマンド実行を丸ごと塞ぐ、より粗い保証）。`--add-dir <artifacts_dir>` は
+     read-only でも書ける前提（celeris が「結果ファイルを書く場所」として明示している例外。**実機の
+     codex CLI で確認していない**。ADR-0009 P-34 のとおり、認証・ネットワークが使える環境の人or
+     エージェントに確認を依頼する）。
+   - `acp`: `session/request_permission` に道具の識別子がこのコードベースが解釈できる形で乗らない
+     （ACP エージェント実装依存。オープンな `toolCall` 構造で、celerisctl のサブコマンドと機械的に
+     対応づける手段が無い）。**読み取りの許可リストを作る代わりに、対話 run 中は道具の許可要求を
+     一律拒否（fail-closed）にした**。効果は「D2 が意図した読み取りの道具が使えることの保証」ではなく
+     「D2 が禁止したかった書き込みが誤って通ることが無い保証」だけ。ACP 経由の CoS 対話は、モデルが
+     許可要求を経ない組み込みの読み取りに頼るしかない（採用しない場合は次善: `celerisctl` を MCP
+     サーバとして ACP エージェントに登録し道具名で識別する経路を別途設計する。今回は見送り）。
+   - `celerisctl` に新しい読み取り専用コマンド `projects ls|show`（`crates/celerisctl/src/commands/projects.rs`）
+     を足した（既存の `ls`/`show` はタスクだけで、案件の一覧・詳細が無かった）。
+   - 新しい `[adapters.*]` 設定は増やしていない（固定の一覧・固定のフラグで決定的に決まる。
+     `req.context.conversation_addressee == Some(ConversationAddressee::Secretary)` で判定。
+     `RunContext` は Phase 28 から既にこの値を持っている）。
+4. **入力のキューは、既存の直列化（Phase 27 監査 M-3 の `depends_on`）に 1 つバグがあった**。
+   `task_ops::conversation::open_conversation_tasks` は「同じノード・**同じ `project_id`**」の未終了の
+   対話タスクだけを直列化していたが、CoS の継続セッション（`node_sessions`）は D1 のとおり
+   `project_id` に関わらず全体で 1 本なので、案件つきの一言（`scope=project:<id>`）と案件なしの一言
+   （`scope=all`）を続けて打つと、直列化されずに 2 つの run が同じ継続セッションにぶつかる余地があった。
+   `node_id == task_core::COS_ID` のときだけ `project_id` を無視して直列化するよう直した（他のノードは
+   従来どおり案件ごと）。「投げると run 中でも打てて、次の run になる」という D2 の入力欄の挙動自体は
+   Phase 27 からの `depends_on` の仕組みでそのまま満たされていた（`ready_tasks` は `depends_on` が
+   全部 `done` のタスクしか返さない）ので、新しいキューの実装は追加していない。
+5. **`ConsoleAction` 実行後の `task` ブロックは、新しいコードを足さずに自然に「返事の直下」に出る**。
+   D2 の「actions を出したら run はそこで終わる」「作ったタスクは task ブロックとして返事の直下に出る」は、
+   Phase 60b の `absorb_console_actions`（run の完了処理の中で 1 回だけ実行）と、通常の
+   `Event::Transitioned` → `task` ブロックの経路（`crates/task-api/src/console.rs`）がそのまま満たす。
+   時刻順に並べる Console の一本の流れの性質上、作成イベントの時刻が返事の確定より後ろに来るため
+   「直下」になる。Phase 68 で変更した点は無い（既存テスト
+   `absorb_console_actions_executes_the_declared_actions_for_the_cos_only` /
+   `record_conversation_reply_runs_actions_and_attaches_the_result` が green のままなことで確認）。
+6. **組織画面の「継続中のセッション」は `GET /org` に `lead_sessions[]` を足しただけ**（新しい
+   エンドポイントは作らなかった）。`OrgList` に `effective_profiles[]` と同じ「`items` とは別に、対応する
+   ものだけ渡す配列」の形で追加した（`NodeSessionSummary { node_id, turns, approx_tokens,
+   last_used_at }`）。部門長（`OrgKind::Department`）だけを対象にし、CoS の対話セッションは対象外
+   （Console のチャット欄自身が状態を見せるため。D3 の「部門長のセッションは…組織画面のノードに出す
+   （会話 UI は作らない）」の記述どおり）。
+7. **未解決事項**:
+   - codex の `sandbox_mode="read-only"` + `--add-dir` の組み合わせで実際に `artifacts/result.json` を
+     書けるかは実機で確認していない（上記 3）。書けないと分かれば、`artifacts_dir` を writable_roots に
+     別途明示する codex 側の設定（`-c sandbox_workspace_write.writable_roots=[...]`）が要るかもしれない。
+   - ACP の読み取り道具の許可は fail-closed（上記 3）。ACP を CoS の主アダプタとして使う運用になったら、
+     MCP 経由の道具登録を検討する（別 Phase）。
+   - claude-code の `--allowedTools` に渡した `Bash(celerisctl <サブコマンド>:*)` が、実際の claude-code CLI
+     のグロブ構文と一致するかは実機で確認していない（`Bash(cmd:*)` は claude-code のドキュメントに
+     ある書式のつもりだが、サンドボックスにはネットワーク・実 CLI が無いため fake アダプタでの
+     引数検査までしかできていない）。
+   - Phase 67 の未解決事項 1（要約と直近のやり取りの重複）は今回も直していない（対話の前置きに
+     触れる別の Phase でまとめて直す方が良いと判断）。

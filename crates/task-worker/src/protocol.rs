@@ -215,6 +215,20 @@ pub enum ConversationAddressee {
     Other,
 }
 
+/// ADR-0054 D2（Phase 68）: CoS の対話 run に許す**読み取りだけの道具**（`celerisctl` のサブコマンド。
+/// `docs/adr/0054-stateful-sessions-and-streaming-chat.md` D2: 「celerisctl knowledge search|get、
+/// タスク・案件の一覧と詳細の read API」）。CoS 以外の対話・作業 run には効かない（`ConversationAddressee`
+/// が `Secretary` のときだけ、各アダプタがこの一覧を自分のツール許可の書式に写す）。
+/// 書く操作（`add` / `plan` / `approve` / `cancel` 等）は含めない。
+pub const CONVERSATION_READONLY_CELERISCTL: &[&str] = &[
+    "knowledge search",
+    "knowledge get",
+    "ls",
+    "show",
+    "projects ls",
+    "projects show",
+];
+
 /// `context.recent_work[]`（ADR-0033 D4 / Phase 33: 実機の事故 — 担当が自分の直近の仕事を知らずに
 /// 「対象タスク ID が必要です」と聞き返した — の再発防止）。対話 run にだけ、その担当の直近の仕事を渡す。
 /// 生成は決定的（ストアのタスクとイベントから組む。LLM は使わない。DESIGN 原則 1）。

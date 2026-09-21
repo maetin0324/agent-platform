@@ -1,6 +1,6 @@
 import { type ChangeEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { useFetcher, useNavigate } from "react-router";
-import type { ConsoleInstructOutcome } from "~/celeris/action-types";
+import type { ConsoleInstructOutcome, ConsoleNewConversationOutcome } from "~/celeris/action-types";
 import type { ConsoleBlock, OrgNode, Project } from "~/celeris/types";
 import { useConsoleStream } from "~/hooks/useConsoleStream";
 import {
@@ -73,7 +73,12 @@ export function Console({ data }: { data: ConsoleData }) {
 
   return (
     <div className="space-y-4" data-testid="console-screen" data-console-scope={scope}>
-      <WaitingStrip counts={counts} />
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <WaitingStrip counts={counts} />
+        </div>
+        <NewConversationButton />
+      </div>
       <div className="grid gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
         <ScopePicker parsedScope={parsedScope} org={org} projects={projects} />
         <div className="min-w-0 space-y-3">
@@ -91,6 +96,7 @@ export function Console({ data }: { data: ConsoleData }) {
           />
           <ConsoleInput
             org={org}
+            projects={projects}
             replyTarget={replyTarget}
             onClearReply={() => setReplyTarget(null)}
             defaultScope={parsedScope.kind === "all" ? null : scope}
@@ -99,6 +105,38 @@ export function Console({ data }: { data: ConsoleData }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * ADR-0054 D1/D3（Phase 67/68）: CoS の継続セッションを捨てる（`POST /console/new-conversation`）。
+ * 確認は `window.confirm`（ブラウザ以外では聞かずそのまま送る。`~/components/ProjectRepos.tsx` の
+ * 「削除」と同じ作り）。過去のやり取り自体は消えない（次に CoS へ話しかけたときの前置きが全量に戻るだけ）。
+ */
+function NewConversationButton() {
+  const fetcher = useFetcher<ConsoleNewConversationOutcome>();
+  const submitting = fetcher.state !== "idle";
+  const done = fetcher.data?.ok === true;
+  return (
+    <fetcher.Form method="post" action="/console/new-conversation" className="shrink-0">
+      <Button
+        type="submit"
+        variant="secondary"
+        size="sm"
+        disabled={submitting}
+        data-testid="console-new-conversation"
+        onClick={(e) => {
+          if (typeof window !== "undefined" && typeof window.confirm === "function") {
+            if (!window.confirm("CoS との会話をリセットします（過去のやり取りは消えません）。よろしいですか？")) {
+              e.preventDefault();
+            }
+          }
+        }}
+      >
+        <Icon name="message" />
+        {done ? "新しい会話にしました" : "新しい会話"}
+      </Button>
+    </fetcher.Form>
   );
 }
 
@@ -297,12 +335,14 @@ function BlockStream({
 
 function ConsoleInput({
   org,
+  projects,
   replyTarget,
   onClearReply,
   defaultScope,
   onHeightChange,
 }: {
   org: readonly OrgNode[];
+  projects: readonly Project[];
   replyTarget: InstructReplyTarget | null;
   onClearReply: () => void;
   defaultScope: string | null;
@@ -399,6 +439,16 @@ function ConsoleInput({
       className="fixed inset-x-0 bottom-16 z-20 space-y-2 border-t border-border bg-surface/95 px-4 py-3 backdrop-blur-xl lg:static lg:inset-auto lg:border-0 lg:bg-transparent lg:px-0 lg:py-0 lg:backdrop-blur-none"
     >
       <ErrorFlash error={error} />
+      {/* ADR-0054 D3（Phase 68）: 「この案件の文脈で話す」— 案件の画面（`scope=project:<id>`）を見ながら
+          打つと、返信先を選んでいなくてもその案件に紐づいた CoS への発言になる（`buildInstructBody` の
+          規則 3）。返信先バナーが出ているときは規則 2 が勝つので、二重に出さない。 */}
+      {!replyTarget && defaultScope?.startsWith("project:") && (
+        <p className="flex items-center gap-2 text-xs text-fg-subtle" data-testid="console-scope-context">
+          <Badge tone="info">
+            この案件の文脈で話す: {projectName(defaultScope.slice("project:".length), projects) ?? "案件"}
+          </Badge>
+        </p>
+      )}
       {replyTarget && (
         <p className="flex items-center gap-2 text-xs text-fg-subtle" data-testid="console-reply-target">
           <Badge tone="info">

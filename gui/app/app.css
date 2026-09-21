@@ -272,6 +272,9 @@
     color: var(--fg);
     font-size: 0.9375rem;
     line-height: 1.75;
+    /* ADR-0055 D2: 長い id・パス・URL が 393px を飛び出さないよう、どこでも折り返す（Phase 68 で
+       Console の育つ返事に長いツール出力が混ざりうると分かって追記）。 */
+    overflow-wrap: anywhere;
   }
   .markdown > * + * {
     margin-top: 0.85em;
