@@ -11893,3 +11893,10 @@ CSS（最大 73.7KB→59.0KB）・DOM ノード数（最大 674。予算 1500）
 - 詳細は gui/docs/PROGRESS.md「Phase G33」の未解決事項を参照（JS 予算 532KB が実測+10%である点、
   `components`/`Icon` 共有チャンクをこれ以上削るなら使用頻度の低い画面の部品を分離する方が筋が良い、
   という提案など）。
+
+### Phase 77 の本番反映（2026-09-21 17:28–17:29 UTC。`95f689ce669a`、ライブ切替）
+
+- main `95f689c` = Phase 77 merge（GUI のみ。react-markdown / CodeMirror / xyflow を React.lazy 化、遷移中スケルトン、`perf` ルール）。
+  GUI ゲート: typecheck / lint exit 0、`pnpm test` 925 passed、`pnpm mobile-audit` 違反 0（12 ルール、light / dark）。最重量 route の初回 JS
+  907.5 KB → 483.8 KB。`release.sh` → `95f689ce669a`（schema 23）。`verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（17:29:03→07）。
+- 本番 = Phase 65〜68（b/c 含む）、69〜77。実装中: Phase 78（MCP サーバー。ADR-0056）。
