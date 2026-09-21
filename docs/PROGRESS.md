@@ -12065,3 +12065,11 @@ Phase 79）を実装した。詳細な決定・逸脱は `docs/adr/0056-mcp-serv
 - 人がやること: ChatGPT の Secure MCP tunnel の手元側エージェントを `http://127.0.0.1:18201/mcp` に向ける（`docs/mcp.md` §2・§8）。
   Claude Code は `claude mcp add --transport http celeris http://127.0.0.1:18200/mcp --header "Authorization: Bearer $(cat ~/.config/celeris/secrets/mcp-token-claude-code | tail -1)"`
   の要領（ファイルの形式は `celerisctl mcp client add` の出力そのまま。`token:` 行の値）。
+
+### MCP 経由の CoS 往復（2026-09-21 18:19 UTC）— ADR-0056 Phase 78 の実機確認が全部そろった
+
+- 18201（chatgpt 固定）から `console_instruct`（「今日の日付を一言で。タスクは作らない」）→ `message_id 01M32K0S4P87R1PSG443VNWA6H`、
+  対話タスク `01M32K0S4PG0MMVDDQQX0S9M00`。`console_reply { wait_secs: 60 }` の 1 回目で **`{"reply": "2026年9月21日", "state": "done"}`**。
+  発言の author は `mcp:chatgpt`（Console には「外部（chatgpt）」の帯）。CoS は既存の継続セッション（Claude）で応答した。
+- これで ADR-0056 §3 Phase 78 の実機項目（client add、initialize / tools/list、knowledge_propose → `_inbox`、console_instruct → CoS の返事）は全部確認済み。
+  残りは人側の接続（ChatGPT の Secure MCP tunnel を 18201 に、Claude Code を 18200 にトークンで）と、Phase 79（skills の届け方）・Phase 80（GUI）。
