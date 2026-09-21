@@ -11259,3 +11259,15 @@ main` で自分のブランチを進めてから着手した（このブラン�
   残り: Phase 67c（継続セッションを同じアカウントに固定・Codex の thread id）と Phase 73（チャットの磨き）が実装中。
 - 実機確認（ADR-0054 Phase 68「1 往復して考え → tool call → タスクのカードが順に出る」）: `/console/stream` を購読しながら CoS に 1 回指示して
   `reply` ブロックの `state: streaming → done`・`steps`・`thinking` を観測中（結果は次節）。
+
+### Phase 68 の実機確認（2026-09-21 15:04 UTC）— ストリームの reply ブロックは流れた、Codex の resume が exit 2
+
+- `/console/stream` を購読しながら CoS に 1 回指示。SSE には `kind: task`（draft→ready→running）に続いて **`kind: reply` の
+  `message_id: streaming:<task>:<run>`**（育つ返事のブロック。Phase 68 D2 の配線が本番で動いている）が出た。
+- しかし run は **codex**（67c 未配備なので ADR-0049 の残量スコアで Codex）に割り当てられ、`session.resume=true` で
+  `codex exec resume --json --skip-git-repo-check --config … <SESSION_ID>` に Phase 68 が足した **`--add-dir`（read-only サンドボックス用）が
+  `exec resume` では受け付けられず exit 2**（`error: unexpected argument '--add-dir'`）。2 回試して failed。しかも SESSION_ID は
+  celeris が発行した UUID（Codex の thread id ではない）なので、仮に argv が通っても resume は拒否される。
+  → **Phase 67c に追加依頼**（`exec` と `exec resume` の両方で通る argv、Codex の thread id を捕まえるまで resume しない、テスト）。
+- 影響: 今この瞬間、CoS の対話が Codex に割り当てられると失敗する（Claude に割り当てられれば成功。67b で確認済み）。67c の配備で
+  CoS は Claude のセッションに固定される。streaming の目視（thinking → tool call → タスクカード）は 67c 配備後にやり直す。
