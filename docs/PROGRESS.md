@@ -11776,3 +11776,9 @@ GUI のみ（`crates/` 無変更）。`docs/adr/0055-mobile-ux.md` D2/D3 のル�
   の読み上げは実機で確認するとよい。
 - 詳細は gui/docs/PROGRESS.md「Phase G30」の未解決事項・提案を参照（`formatDuration` が時間・日の単位を
   持たない件など）。
+
+### Phase 74 の本番反映（2026-09-21 16:08–16:09 UTC。`f5e62c18fd78`、ライブ切替）
+
+- main `f5e62c1` = Phase 74 merge（GUI のみ）。GUI ゲート: typecheck / lint exit 0、`pnpm test` 904 passed、`pnpm mobile-audit` 違反 0。
+  `release.sh` → `f5e62c18fd78`（schema 23）。`verify.sh` check 1–6 true、`live_ok=true` → `promote.sh` **mode=live**（16:08:50→55）。
+- 本番 = Phase 65〜68（各 b/c 含む）、69〜74。Phase 75（時刻表記・ダークモード contrast 監査・カード密度）を Sonnet で起動。
