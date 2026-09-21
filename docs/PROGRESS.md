@@ -12696,3 +12696,19 @@ board/task の状態バッジに `~/lib/live-status.ts::isLiveStatusScreen`（�
 - 詳細は `gui/docs/PROGRESS.md`「Phase G37」の未解決事項を参照（MCP のコピー機能・接続 URL ヒントの
   既定値であること・`isLiveStatusScreen` の対象範囲など）。
 - 本番 = Phase 65〜68（b/c 含む）、69〜83。実装中: Phase 84（このワークトリーク。GUI のみ）。
+
+### pegasus が繋がった後の観測と、Phase 84 の release ゲート失敗（2026-09-21 21:00–21:12 UTC）
+
+- 21:00 UTC に **pegasus の ssh master が立った**（`~/.ssh/mux-rmaeda@pegasus03…` が出現、`ssh -M -N pegasus` pid 827186。人が接続したと思われる）。
+  本番デーモンは `tunnel: login is no longer needed` → 毎 tick `tunnel: forward added via -O forward pegasus 127.0.0.1:18000 → bnode150:18000`。
+  18000 は master プロセスが LISTEN（forward は張れている）。**しかし `GET http://127.0.0.1:18000/v1/models` は応答なし（curl http=000）**、
+  `GET /llm/sources` の qwen は `reachable: false` のまま → **bnode150 の vLLM が落ちているか pegasus→bnode150 が通らない**（celeris 側ではなく先方）。
+  人が pegasus 上で `bnode150:18000` を確認する必要がある。
+- 副作用: forward はあるのに probe が失敗するので celeris が毎 tick `-O forward` を打ち直し、`slow tick phases tunnel_ms≈6040`（tick が 6 秒に伸びている）。
+  「forward は存在するが target が不健全」を「forward が無い」と区別してバックオフすべき → **Phase 85 の候補**（dispatcher の tunnel 更新）。
+- 旧 `celeris-qwen-tunnel.service` は timer で起動を試みて失敗し続けている（18000 を celeris の forward が使っているため）。人が
+  `install-units.sh --remove-qwen-tunnel` で撤去する（ADR-0053 D3 の手順どおり）。
+- **Phase 84 の release ゲート失敗**（`331aab724fa4`、cargo-test exit 101）: `a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b` が
+  `connector_calls == 0` で落ちた。原因は上の ssh master: テストが `host = "pegasus"` で**実機の `ssh -O check` を叩いており**、master が生きたことで
+  「落ちている → connector を呼ぶ」経路を通らなくなった（環境依存のテスト）。→ **Phase 84b**（liveness probe を注入可能にしてテストは偽物を使う、
+  テストのホスト名から実クラスタ名を排除）を Sonnet で起動。Phase 84（GUI）の配備はその後。
