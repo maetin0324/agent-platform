@@ -10629,3 +10629,16 @@ thread while the thread is being used to drive asynchronous tasks.
 - 提案: `migrate-to-celeris.sh`（もう使わない）の教訓として、venv を移すときは `uv venv` で作り直すか shebang を書き換える手順を
   `docs/knowledge.md` / 運用メモに残す。`verify.sh` の smoke は fake アダプタなので実アダプタの起動可否は見ていない — アダプタごとに
   `<command> --help` を叩く「起動できるか」の check を verify に足すと今回のような移行漏れを昇格前に拾える（提案）。
+
+### Phase 66b の本番反映（2026-09-21 13:14–13:18 UTC。`2b3aaf1d633a`、ライブ切替）
+
+- main `2b3aaf1` = Phase 66b merge。ゲート: cargo test **1628 passed / 0 failed**、clippy exit 0。`release.sh` → `2b3aaf1d633a`（schema 22）。
+- **forwards を設定した状態で `verify.sh`**: check 1（起動）**true** — `tunnel: state transition pegasus kind=login_needed` → `down` と記録され、
+  panic しない（Phase 66b の修正が実機で効いた）。ただし check 2 が `reports(snapshot=135 staging=136)` で false（verify モードの staging でも
+  tunnel の `login_needed` 通知が report 行を書く）、check 5 が false（N-1 = 8a979f2 は Phase 66b 前なので同じ panic）。
+  → **Phase 66c**（verify モードでは tunnel 更新を止める）を同じエージェントに依頼。
+- forwards を外して再 verify → check 1–6 true、`live_ok=true` → `promote.sh 2b3aaf1d633a` **mode=live**（13:17:24→27、API 停止なし）。
+- 昇格後に forwards を本番設定へ戻した（`config.toml` = `.with-forwards-20260921`）。**今の本番（2b3aaf1）は次の起動でこの設定を安全に読める**。
+  注意: rollback 先の 8a979f2 は forwards があると起動時に panic するので、rollback するなら先に forwards を外す（`config.toml.bak-20260921f`）。
+  トンネル自体は次の昇格（Phase 66c / 67）でデーモンが起動し直したときに有効になり、pegasus の master が無い間は `login_needed`
+  （GUI クラスタ画面の「接続」で TOTP）になる。
