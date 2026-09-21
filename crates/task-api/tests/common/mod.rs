@@ -67,6 +67,8 @@ pub struct EnvOptions {
     pub role: task_core::SharedRole,
     /// ADR-0043 D5（Phase 54）: `[github]`（既定は `gh` / `merge`）。
     pub github: task_api::GithubSettings,
+    /// ADR-0053 D4（Phase 65）: `GET /llm/sources` が読む係。`None` なら 409 `llm_proxy_unavailable`。
+    pub llm_sources: Option<task_api::SharedLlmSourcesReader>,
 }
 
 impl Default for EnvOptions {
@@ -93,6 +95,7 @@ impl Default for EnvOptions {
             mode: task_core::DaemonMode::Normal,
             role: task_core::SharedRole::new(task_core::InstanceRole::Active),
             github: task_api::GithubSettings::default(),
+            llm_sources: None,
         }
     }
 }
@@ -319,6 +322,7 @@ pub fn settings(
         docs_repo_root: Some(docs_repo_root.to_path_buf()),
         // ADR-0047（Phase 61）: 知識ベースも tempdir の中。
         knowledge_root: Some(knowledge_root.to_path_buf()),
+        llm_sources: options.llm_sources,
     }
 }
 

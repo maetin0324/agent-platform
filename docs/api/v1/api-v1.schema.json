@@ -5148,6 +5148,111 @@
       ],
       "type": "object"
     },
+    "LlmSourceAccountView": {
+      "description": "`GET /llm/sources` の 1 アカウント（`llm-proxy` の `claude-oauth`/`codex-oauth` のプール）。",
+      "properties": {
+        "cooldown_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cooldown_until": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "logged_in": {
+          "type": "boolean"
+        },
+        "remaining": {
+          "description": "0.0〜1.0（測れないときは `null`。値を捏造しない。ADR-0024 D3 と同じ規律）。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "logged_in"
+      ],
+      "type": "object"
+    },
+    "LlmSourceView": {
+      "description": "`GET /llm/sources` の 1 供給元。",
+      "properties": {
+        "accounts": {
+          "items": {
+            "$ref": "#/$defs/LlmSourceAccountView"
+          },
+          "type": "array"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "id": {
+          "description": "`claude-oauth` / `codex-oauth` / `openai-compatible:<id>`。",
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "last_hour_completion_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_hour_prompt_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last_hour_requests": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reachable": {
+          "description": "`openai-compatible` だけ probe した結果。oauth のプールは `null`。",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "enabled",
+        "accounts",
+        "last_hour_requests",
+        "last_hour_prompt_tokens",
+        "last_hour_completion_tokens"
+      ],
+      "type": "object"
+    },
+    "LlmSourcesView": {
+      "description": "`GET /llm/sources`（ADR-0053 D4）。",
+      "properties": {
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/LlmSourceView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sources"
+      ],
+      "type": "object"
+    },
     "MemoryView": {
       "description": "`GET /org/{id}/memory` の応答。",
       "properties": {
@@ -10775,6 +10880,10 @@
       "$ref": "#/$defs/KnowledgeTree",
       "description": "Phase 61（ADR-0047 D3 / D5）: 知識ベース。ツリー・ページ・編集・`_inbox`。"
     },
+    "llm_sources": {
+      "$ref": "#/$defs/LlmSourcesView",
+      "description": "Phase 65（ADR-0053 D4）: `GET /llm/sources`（API と型のみ。GUI 表示は Phase 66）。"
+    },
     "memory": {
       "$ref": "#/$defs/MemoryView",
       "description": "GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。"
@@ -11087,7 +11196,8 @@
     "stream_event",
     "stream_daemon",
     "stream_heartbeat",
-    "stream_reset"
+    "stream_reset",
+    "llm_sources"
   ],
   "title": "ApiV1Schema",
   "type": "object"

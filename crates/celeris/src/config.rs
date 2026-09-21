@@ -143,6 +143,12 @@ pub struct Config {
     #[serde(default)]
     pub knowledge: KnowledgeConfig,
     // ---- ADR-0047（Phase 61）: ここまで ----
+    // ---- ADR-0053 D1/D2（Phase 65）: LLM source のローカル OpenAI 互換プロキシ。ここから ----
+    /// `[llm_proxy]`。`claude_oauth`/`codex_oauth` の `accounts_dir` は省略時 `[accounts]` から埋める
+    /// （`Config::load` が行う。`Config::validate` が「必要なのに埋まらない」を弾く）。
+    #[serde(default)]
+    pub llm_proxy: llm_proxy::config::LlmProxyConfig,
+    // ---- ADR-0053（Phase 65）: ここまで ----
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -1443,6 +1449,30 @@ impl Config {
                 }
             }
         }
+        // ADR-0053 D1（Phase 65）: `[llm_proxy.sources.claude_oauth/codex_oauth] accounts_dir` は
+        // 省略時（空パス）に `[accounts] claude_dir` / `codex_dir`（すでに絶対化済み）を写す。
+        // 明示されていれば（相対なら設定ファイル基準で絶対化して）そちらを使う。
+        let home = task_core::home_dir();
+        if let Some(claude) = &mut cfg.llm_proxy.sources.claude_oauth {
+            if claude.accounts_dir.as_os_str().is_empty() {
+                if let Some(accounts) = &cfg.accounts {
+                    claude.accounts_dir = accounts.claude_dir.clone().unwrap_or_default();
+                }
+            } else {
+                let expanded = task_core::expand_home(&claude.accounts_dir, home.as_deref());
+                claude.accounts_dir = if expanded.is_relative() { base.join(expanded) } else { expanded };
+            }
+        }
+        if let Some(codex) = &mut cfg.llm_proxy.sources.codex_oauth {
+            if codex.accounts_dir.as_os_str().is_empty() {
+                if let Some(accounts) = &cfg.accounts {
+                    codex.accounts_dir = accounts.codex_dir.clone().unwrap_or_default();
+                }
+            } else {
+                let expanded = task_core::expand_home(&codex.accounts_dir, home.as_deref());
+                codex.accounts_dir = if expanded.is_relative() { base.join(expanded) } else { expanded };
+            }
+        }
         // ADR-0030 D1 / ADR-0045 D2: `[secrets] dir` は `~` を展開し、相対なら設定ファイルのディレクトリ基準。
         if let Some(secrets) = &mut cfg.secrets {
             secrets.dir = task_core::expand_home(&secrets.dir, task_core::home_dir().as_deref());
@@ -2050,6 +2080,35 @@ impl Config {
             return Err(ConfigError::Invalid(
                 "retry_backoff_max_secs must be >= retry_backoff_base_secs".into(),
             ));
+        }
+        // ADR-0053 D1（Phase 65）: `claude_oauth`/`codex_oauth` を有効にしたのに `accounts_dir` が埋まらない
+        // （`[accounts] claude_dir`/`codex_dir` が無い）のは設定エラー（黙って空のプールにしない）。
+        if let Some(claude) = &self.llm_proxy.sources.claude_oauth
+            && claude.enabled
+            && claude.accounts_dir.as_os_str().is_empty()
+        {
+            return Err(ConfigError::Invalid(
+                "[llm_proxy.sources.claude_oauth] needs [accounts] claude_dir (or an explicit accounts_dir)".into(),
+            ));
+        }
+        if let Some(codex) = &self.llm_proxy.sources.codex_oauth
+            && codex.enabled
+            && codex.accounts_dir.as_os_str().is_empty()
+        {
+            return Err(ConfigError::Invalid(
+                "[llm_proxy.sources.codex_oauth] needs [accounts] codex_dir (or an explicit accounts_dir)".into(),
+            ));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            for s in &self.llm_proxy.sources.openai_compatible {
+                if !seen.insert(s.id.as_str()) {
+                    return Err(ConfigError::Invalid(format!(
+                        "[llm_proxy.sources.openai_compatible]: duplicate id {:?}",
+                        s.id
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -3580,14 +3639,14 @@ host = "h"
                 .env
                 .get("OPENAI_BASE_URL")
                 .map(String::as_str),
-            Some("http://127.0.0.1:18000/v1")
+            Some("http://127.0.0.1:18100/v1")
         );
         let paperqa_provider = cfg
             .providers
             .iter()
             .find(|p| p.adapter == "paperqa")
             .expect("paperqa provider");
-        assert_eq!(paperqa_provider.model, "openai/qwen3.8-27b");
+        assert_eq!(paperqa_provider.model, "openai/celeris/standard");
         let genre_ids: Vec<&str> = cfg.genres.iter().map(|g| g.id.as_str()).collect();
         assert_eq!(genre_ids, vec!["coding", "literature"]);
         let literature = cfg
@@ -3722,7 +3781,7 @@ host = "h"
             .iter()
             .find(|p| p.adapter == "local-deep-research")
             .expect("ldr provider");
-        assert_eq!(ldr_provider.model, "qwen3.8-27b");
+        assert_eq!(ldr_provider.model, "celeris/cheap");
         // ADR-0031 D2: 既定の証拠ゲート閾値を明示している。
         assert_eq!(
             cfg.adapters.local_deep_research.evidence.min_search_results,

@@ -859,6 +859,7 @@ mod tests {
             github: Default::default(),
             containers: Default::default(),
             knowledge: Default::default(),
+            llm_proxy: Default::default(),
             source_path: None,
         }
     }

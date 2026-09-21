@@ -29,6 +29,8 @@ pub mod conversation;
 pub mod docs;
 mod files;
 mod handlers;
+/// ADR-0053 D4（Phase 65）: `GET /llm/sources`。celeris が `LlmSourcesReader` の実装を渡す。
+pub mod llm_sources;
 /// ADR-0047（Phase 61）: 知識ベース（`~/.local/share/celeris/knowledge` の Markdown が正本）。ツリー・ページ・`_inbox`。
 pub mod knowledge;
 /// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
@@ -65,6 +67,7 @@ pub use approvals::{
     StandingRuleList,
 };
 pub use conversation::{MessageAccepted, MessageList, MessagePostBody};
+pub use llm_sources::{LlmSourcesReader, SharedLlmSourcesReader};
 pub use memory::MemoryView;
 pub use milestones::{MilestoneDecideBody, MilestoneDecided};
 pub use notify::{NotifyRecent, NotifyTestResult, NotifyView};
@@ -104,6 +107,8 @@ pub use console::{
     MAX_LIMIT as CONSOLE_MAX_LIMIT,
 };
 pub use types::{ConsoleBlock, ConsolePage};
+// ---- ADR-0053 D4（Phase 65）: LLM source のローカルプロキシの観測 ----
+pub use types::{LlmSourceAccountView, LlmSourceView, LlmSourcesView};
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use types::{
     ChangeDiffView, ChangesView, IntegrateBody, IntegrateResult, ProjectIntegrationItem,
@@ -201,6 +206,11 @@ pub struct ApiSettings {
     /// （`/knowledge/*` は 409 `knowledge_unavailable`）。
     pub knowledge_root: Option<PathBuf>,
     // ---- ADR-0047（Phase 61）: ここまで ----
+    // ---- ADR-0053 D4（Phase 65）: LLM source のローカルプロキシの観測 ----
+    /// `[llm_proxy]` が有効なときだけ `Some`（celeris が渡す）。`None` なら `GET /llm/sources` は 409
+    /// `llm_proxy_unavailable`。
+    pub llm_sources: Option<llm_sources::SharedLlmSourcesReader>,
+    // ---- ADR-0053（Phase 65）: ここまで ----
 }
 
 /// ADR-0043 D5（Phase 54）: `[github]` の写し。celeris が設定から渡す（task-api は TOML を読まない）。
@@ -253,6 +263,7 @@ impl std::fmt::Debug for ApiSettings {
             .field("release", &self.release)
             .field("mode", &self.mode)
             .field("role", &self.role.get())
+            .field("llm_sources", &self.llm_sources.as_ref().map(|_| "<reader>"))
             .finish()
     }
 }

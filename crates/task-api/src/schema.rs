@@ -177,6 +177,8 @@ pub struct ApiV1Schema {
     pub stream_daemon: DaemonSnapshot,
     pub stream_heartbeat: StreamHeartbeat,
     pub stream_reset: StreamReset,
+    /// Phase 65（ADR-0053 D4）: `GET /llm/sources`（API と型のみ。GUI 表示は Phase 66）。
+    pub llm_sources: crate::types::LlmSourcesView,
 }
 
 /// 生成したスキーマ（`serde_json::Value`）。

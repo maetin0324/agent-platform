@@ -60,10 +60,20 @@ const MIGRATION_0017: &str = include_str!("../migrations/0017_console_actions.sq
 const MIGRATION_0020: &str = include_str!("../migrations/0020_deliveries.sql");
 const MIGRATION_0019: &str = include_str!("../migrations/0019_notification_scan.sql");
 const MIGRATION_0018: &str = include_str!("../migrations/0018_knowledge_runs.sql");
+/// **予約のみ**。Phase 64（ADR-0052 の知識整理 run リトライ）が同じ番号に実体
+/// （`0021_knowledge_run_retry.sql`）を作る予定。merge 時にこの行とファイルを Phase 64 の本物に
+/// 置き換える（Phase 65 / ADR-0053 の追記。`docs/PROGRESS.md` 参照）。
+const MIGRATION_0021: &str = include_str!("../migrations/0021_reserved_for_knowledge_run_retry.sql");
+/// ADR-0053 D1（Phase 65）: `llm_proxy_requests`（LLM source ローカルプロキシの要求記録）。
+const MIGRATION_0022: &str = include_str!("../migrations/0022_llm_proxy_requests.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 20;
+///
+/// Phase 65（ADR-0053）追記: 21 は Phase 64（ADR-0052）が並行して使う予約番号
+/// （このワークツリーではプレースホルダ、`docs/PROGRESS.md` 参照）。22 が Phase 65 の
+/// `llm_proxy_requests`。
+pub const SCHEMA_VERSION: u32 = 22;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -1118,6 +1128,8 @@ impl SqliteStore {
             18 => Ok(MIGRATION_0018),
             19 => Ok(MIGRATION_0019),
             20 => Ok(MIGRATION_0020),
+            21 => Ok(MIGRATION_0021),
+            22 => Ok(MIGRATION_0022),
             other => Err(StoreError::Invalid(format!(
                 "unknown migration version: {other}"
             ))),
@@ -5765,7 +5777,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 22);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -6305,7 +6317,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 22);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -6796,7 +6808,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 22);
 
         let project = store.project_get(project_id).unwrap().expect("project");
         assert_eq!(project.status, ProjectStatus::Active);
@@ -6862,7 +6874,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 22);
 
         // 導入前の行は `metadata = None` として読める。
         let messages = store.message_list("secretary", None, 10).unwrap();
@@ -6954,7 +6966,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 22);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn

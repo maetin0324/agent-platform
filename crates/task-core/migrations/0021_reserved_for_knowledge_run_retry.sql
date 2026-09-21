@@ -1,0 +1,11 @@
+-- Migration 21 (schema_version=21): placeholder — RESERVE ONLY.
+--
+-- Phase 64（ADR-0052。知識整理 run のリトライ）が並行して同じ番号 `0021_knowledge_run_retry.sql` に
+-- 実体を作っている。この worktree にはその変更がまだ無いので、Phase 65（ADR-0053）の
+-- `0022_llm_proxy_requests.sql` を版数 22 のまま適用できるよう、版数の連番を切らさないための
+-- no-op を置く。
+--
+-- **merge 時にすること**: このファイルと下の `MIGRATION_0021` / `21 => Ok(MIGRATION_0021)` を削除し、
+-- Phase 64 の本物の `0021_knowledge_run_retry.sql` に置き換える（`SCHEMA_VERSION` は 22 のまま。
+-- `docs/PROGRESS.md` の Phase 65 追記を参照）。
+SELECT 1;

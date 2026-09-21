@@ -81,3 +81,31 @@
 - **Phase 66（D3・D4）**: master 経由の forward、生存監視、鍵→TOTP の順、Discord の種、`GET /llm/sources` と GUI。実機: トンネルが切れた状態から
   GUI の TOTP 1 回で復帰し、`celeris/cheap` が Qwen に戻ること。systemd の tunnel unit の撤去。
 - どの Phase も `cargo test --workspace --no-fail-fast` / clippy / GUI 一式、PROGRESS の実機の証跡。**認証情報の値はログ・応答・PROGRESS に出さない。**
+
+## Phase 65 追記（2026-09-21。D1・D2 の実装）
+
+- `crates/llm-proxy`（新クレート。`task-core`/`task-dispatch` に依存し、`task-worker`/`task-api` からは
+  依存されない側に置いた。`GET /llm/sources` は task-api が `LlmSourcesReader` トレイトで受け取る
+  薄い包みを celeris が渡す形にし、task-api が `task-dispatch`/`task-worker` を知る境界を破らないように
+  した。ADR-0017 M2 と同じ配慮）。
+- **migration の番号**: Phase 64（ADR-0052 の知識整理 run リトライ）と並行して開発したため、この
+  worktree には Phase 64 の `0021_knowledge_run_retry.sql` が無い。連番を切らさずに `0022` を
+  当てるため、`crates/task-core/migrations/0021_reserved_for_knowledge_run_retry.sql`（no-op の
+  予約）を置いた。**merge 時**: このファイルと `store.rs` の `21 => Ok(MIGRATION_0021)` を消し、
+  Phase 64 の本物の `0021_knowledge_run_retry.sql` に置き換える（`SCHEMA_VERSION` は `22` のまま）。
+- **claude-oauth のトークン更新エンドポイント / client_id は実機で確認していない**（Claude Code CLI の
+  公知の値を既定にしたが、このセッションでは本物の資格情報ファイルを読まない制約のため検証できず、
+  `[llm_proxy.sources.claude_oauth] token_url` / `client_id` で上書きできるようにしてある）。
+- **opencode（D2 の 4 プロバイダのうち 1 つ）は明示的に無効のまま出した**: opencode の
+  `"model": "<providerId>/<modelId>"` が `modelId` 内のスラッシュ（`celeris/cheap`）をどう扱うか、
+  実機（またはソース）で確認できなかったため。`config/celeris.acp-opencode.example.toml` は既定を
+  直接 Qwen のままにし、JSON テンプレートと注意点は `docs/llm-source.md` §7 にコメントで示した
+  （too hard な部分を偽装しない、という受け入れ条件どおりの判断）。
+- 他の 3 プロバイダ（PaperQA / LDR / LangMem）は素直な `env`/`settings` の書き換えで確認できたので、
+  `config/celeris.research.example.toml` / `celeris.web-research.example.toml` /
+  `celeris.example.toml`（`[knowledge.langmem]`）/ `docs/knowledge.md` をプロキシへ向けた（既存の
+  `Config::load`/`validate` のテストで実際に読めることを確認済み）。
+- **実機確認**: このサンドボックスには実際の Claude/Codex 資格情報も外向きネットワークも無い
+  （CLAUDE.md の禁止事項、かつ ADR-0009 P-34 の「使えなければ手順を書いて人間に依頼する」に従う）。
+  `docs/llm-source.md` §8 に curl での確認手順を書いたので、認証が使える環境の人（またはエージェント）
+  が実行し、結果を PROGRESS に追記すること。

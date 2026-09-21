@@ -1151,7 +1151,10 @@ impl Dispatcher {
             .contains(&Self::login_pending_key(adapter, id))
     }
 
-    fn account_book(&self, adapter: AccountAdapter) -> Option<Arc<StdMutex<AccountBook>>> {
+    /// ADR-0053 D1（Phase 65）: `llm-proxy` が同じアカウントプールの cooldown・観測値を共有するための
+    /// アクセサでもある（CLI ワーカーの dispatch と**同じ帳簿**を返す。別の写しを作らない）。
+    /// そのアダプタの `[accounts]` 根が設定されていなければ `None`。
+    pub fn account_book(&self, adapter: AccountAdapter) -> Option<Arc<StdMutex<AccountBook>>> {
         self.account_books.get(&adapter).cloned()
     }
 

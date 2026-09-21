@@ -141,11 +141,59 @@ dir = "../memory"
 #   max_related_pages   — 依頼文に入れる関連ページの上限（既定 10）。
 [knowledge.langmem]
 # enabled = false
+# ADR-0053 D2（Phase 65）: [llm_proxy] を有効にしたら、直接 Qwen を指すのではなくプロキシに向ける
+# （Qwen が落ちていれば celeris/cheap が自動で Claude/GPT のアカウントプールに倒れる。ADR-0052 の
+# フォールバックはプロキシの中に吸収される）。
 # provider = "openai-compatible"
-# base_url = "http://127.0.0.1:18000/v1"
-# model = "qwen3.8-27b"
-# api_key_secret = "langmem-openai-key"
+# base_url = "http://127.0.0.1:18100/v1"
+# model = "celeris/cheap"
 # max_related_pages = 10
+
+# ---------------------------------------------------------------------------
+# LLM source のローカル OpenAI 互換プロキシ（ADR-0053 D1/D2、Phase 65）。**既定は無効**
+# （どの source も設定していなければ `effective_enabled() == false`）。
+#
+# ログイン済みの Claude Code / Codex の資格情報（`[accounts] claude_dir` / `codex_dir`。
+# config/celeris.multi-account.example.toml を参照）を使って、opencode・PaperQA・Local Deep
+# Research・LangMem のような「adapter を選ばない」ハーネスから Claude / GPT / Qwen を
+# OpenAI 互換 API 越しに使えるようにする。ハーネス側は `celeris/<tier>`（供給元はプロキシが選ぶ）、
+# `claude/<tier>` / `gpt/<tier>` / `qwen/<tier>`（供給元を固定）、または `<source>:<具体モデル名>`
+# （素通り。例 `claude:claude-sonnet-5`）のどれかをモデル名に書く。
+# ---------------------------------------------------------------------------
+[llm_proxy]
+# enabled = true                 # 省略時は「どれかの source が設定されていれば有効」
+# listen = "127.0.0.1:18100"     # 既定。loopback のみ。認証は [api] の token_file と同じ
+# prefer_free = true             # celeris/<tier> は到達可能な無料の openai_compatible を最優先
+# max_concurrent_per_account = 4
+# cooldown_fallback_secs = 300
+
+# [llm_proxy.sources.claude_oauth]
+# accounts_dir は省略可（[accounts] claude_dir をそのまま使う）。明示すればそちらが勝つ
+# accounts_dir = "~/.local/celeris/claude-accounts"
+# base_url / token_url / client_id は Anthropic 側の実装が変わったときの上書き用（既定で足りるはず）
+
+# [llm_proxy.sources.codex_oauth]
+# accounts_dir = "~/.local/celeris/codex-accounts"
+
+# 既存の Qwen トンネル（ADR-0026）をそのまま中継する source。
+# [[llm_proxy.sources.openai_compatible]]
+# id = "qwen"
+# base_url = "http://127.0.0.1:18000/v1"
+
+# tier → 供給元ごとの実モデル ID。既定値は `docs/llm-source.md` に注記した通り**未確認**
+# （celeris.model-tiers.example.toml と同じ注意）。運用前に必ず確認・上書きする。
+# [llm_proxy.models.claude]
+# frontier = "claude-opus-4-5"
+# standard = "claude-sonnet-5"
+# cheap = "claude-haiku-4-5"
+# [llm_proxy.models.gpt]
+# frontier = "gpt-5-codex"
+# standard = "gpt-5"
+# cheap = "gpt-5-mini"
+# [llm_proxy.models.qwen]
+# frontier = "qwen3.8-27b"
+# standard = "qwen3.8-27b"
+# cheap = "qwen3.8-27b"
 
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]

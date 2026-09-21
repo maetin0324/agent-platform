@@ -174,6 +174,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::timeline::routes())
         // ADR-0048 D1（Phase 60a）: Console の読み取り側。実装は `crate::console`。
         .merge(crate::console::routes())
+        // ADR-0053 D4（Phase 65）: LLM source の観測。実装は `crate::llm_sources`。
+        .merge(crate::llm_sources::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -2839,6 +2841,48 @@ async fn schema(RawQuery(raw): RawQuery) -> ApiResult {
     Ok(response)
 }
 
+fn check_model_routing(file: &crate::admin::ProviderConfigFile) -> Result<(), ApiProblem> {
+    if file
+        .account_id
+        .as_ref()
+        .is_some_and(|id| !crate::accounts::valid_account_id(id))
+    {
+        return Err(ApiProblem::bad_request("invalid account_id"));
+    }
+    if file.account_id.is_some() && !file.account_pool {
+        return Err(ApiProblem::bad_request("account_id requires account_pool"));
+    }
+    if !file.tier_models.is_empty() && !matches!(file.adapter.as_str(), "claude-code" | "codex") {
+        return Err(ApiProblem::bad_request(
+            "tier_models supported only for Claude/GPT",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_credential_refs(
+    refs: &std::collections::HashMap<String, String>,
+) -> Result<(), ApiProblem> {
+    if refs.iter().any(|(key, id)| {
+        !task_core::model_routing::CREDENTIAL_KEYS.contains(&key.as_str())
+            || !crate::secrets::valid_secret_id(id)
+    }) {
+        return Err(ApiProblem::bad_request(
+            "credential_refs requires an LLM credential environment key and a valid secret ID",
+        ));
+    }
+    Ok(())
+}
+fn migrate_credentials(
+    state: &ApiState,
+    file: &mut crate::admin::ProviderConfigFile,
+) -> Result<(), ApiProblem> {
+    let Some(dir) = &state.inner.secrets_dir else {
+        return Ok(());
+    };
+    crate::admin::migrate_credentials(file, dir).map_err(|e| ApiProblem::internal(e.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -2920,6 +2964,7 @@ mod tests {
             github: crate::GithubSettings::default(),
             knowledge_root: None,
             docs_repo_root: Some(dir.join("workspace")),
+            llm_sources: None,
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))
@@ -2986,46 +3031,4 @@ mod tests {
         assert_eq!(ok.status(), StatusCode::OK);
         let _ = PathBuf::new();
     }
-}
-
-fn check_model_routing(file: &crate::admin::ProviderConfigFile) -> Result<(), ApiProblem> {
-    if file
-        .account_id
-        .as_ref()
-        .is_some_and(|id| !crate::accounts::valid_account_id(id))
-    {
-        return Err(ApiProblem::bad_request("invalid account_id"));
-    }
-    if file.account_id.is_some() && !file.account_pool {
-        return Err(ApiProblem::bad_request("account_id requires account_pool"));
-    }
-    if !file.tier_models.is_empty() && !matches!(file.adapter.as_str(), "claude-code" | "codex") {
-        return Err(ApiProblem::bad_request(
-            "tier_models supported only for Claude/GPT",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_credential_refs(
-    refs: &std::collections::HashMap<String, String>,
-) -> Result<(), ApiProblem> {
-    if refs.iter().any(|(key, id)| {
-        !task_core::model_routing::CREDENTIAL_KEYS.contains(&key.as_str())
-            || !crate::secrets::valid_secret_id(id)
-    }) {
-        return Err(ApiProblem::bad_request(
-            "credential_refs requires an LLM credential environment key and a valid secret ID",
-        ));
-    }
-    Ok(())
-}
-fn migrate_credentials(
-    state: &ApiState,
-    file: &mut crate::admin::ProviderConfigFile,
-) -> Result<(), ApiProblem> {
-    let Some(dir) = &state.inner.secrets_dir else {
-        return Ok(());
-    };
-    crate::admin::migrate_credentials(file, dir).map_err(|e| ApiProblem::internal(e.to_string()))
 }

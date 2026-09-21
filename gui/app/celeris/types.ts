@@ -647,6 +647,7 @@ export interface ApiV1Schema {
   knowledge_page_result: KnowledgePageResult;
   knowledge_reject_result: KnowledgeRejectResult;
   knowledge_tree: KnowledgeTree;
+  llm_sources: LlmSourcesView;
   memory: MemoryView;
   message_accepted: MessageAccepted;
   message_list: MessageList;
@@ -2755,6 +2756,44 @@ export interface KnowledgeItem {
    * RFC 3339 か `YYYY-MM-DD`（front matter の `updated` → 最後のコミット）。
    */
   updated?: string | null;
+}
+/**
+ * Phase 65（ADR-0053 D4）: `GET /llm/sources`（API と型のみ。GUI 表示は Phase 66）。
+ */
+export interface LlmSourcesView {
+  sources: LlmSourceView[];
+}
+/**
+ * `GET /llm/sources` の 1 供給元。
+ */
+export interface LlmSourceView {
+  accounts: LlmSourceAccountView[];
+  enabled: boolean;
+  /**
+   * `claude-oauth` / `codex-oauth` / `openai-compatible:<id>`。
+   */
+  id: string;
+  kind: string;
+  last_hour_completion_tokens: number;
+  last_hour_prompt_tokens: number;
+  last_hour_requests: number;
+  /**
+   * `openai-compatible` だけ probe した結果。oauth のプールは `null`。
+   */
+  reachable?: boolean | null;
+}
+/**
+ * `GET /llm/sources` の 1 アカウント（`llm-proxy` の `claude-oauth`/`codex-oauth` のプール）。
+ */
+export interface LlmSourceAccountView {
+  cooldown_reason?: string | null;
+  cooldown_until?: number | null;
+  id: string;
+  logged_in: boolean;
+  /**
+   * 0.0〜1.0（測れないときは `null`。値を捏造しない。ADR-0024 D3 と同じ規律）。
+   */
+  remaining?: number | null;
 }
 /**
  * GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。

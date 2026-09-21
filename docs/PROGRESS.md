@@ -9670,3 +9670,120 @@ Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus
   - `node scripts/check-upgrade.mjs` を再実行: `{"ok":true,"results":[{"scenario":"success","requests":18},{"scenario":"failure","requests":18}]}`。証跡は `/tmp/celeris-upgrade-gui-Zy9P3L/`（success-01/02, failure-01/02 の各PNG）。成功シナリオで現行ハッシュが `aaaaaaaaaaaa` → `cccccccccccc` に更新され「upgrade が完了しました」が表示、失敗シナリオでハッシュ不変＋赤いバナー「upgrade に失敗しました」を目視確認。
   - 元のチェックアウト（`/home/rmaeda/workspace/agent-platform`）や本番サービスへの変更・デプロイは行っていない。`git status` はクリーン。
 - 未解決事項: 前節と同じ（Nothing 2a実機・本番promoteは人が行う）。
+
+## Phase 65 — LLM source のローカル OpenAI 互換プロキシ（ADR-0053 D1/D2。2026-09-21）
+
+人の依頼（ADR-0053）: ログイン済みの Claude Code / Codex の資格情報をバックエンドとして使う
+ローカル OpenAI 互換プロキシを作り、adapter を選ばないハーネス（opencode・PaperQA・Local Deep
+Research・LangMem）が供給元（Claude / GPT / Qwen）を意識せずに使えるようにする。プロバイダ =
+LLM source の抽象層で、ハーネスと密結合にしない。
+
+### 実装
+
+- 新クレート **`crates/llm-proxy`**（`task-core`/`task-dispatch` に依存。`task-worker`/`task-api` からは
+  依存されない側）。主なモジュール:
+  - `naming.rs` — モデル名の抽象（`celeris/<tier>` / `claude/<tier>` / `gpt/<tier>` / `qwen/<tier>` /
+    `<source>:<具体モデル>`）。
+  - `credentials.rs` — `.credentials.json` / `auth.json` の読み・atomic な書き戻し（`.tmp` + rename、
+    mode 0600）。値は隠す `Debug`。
+  - `sources/claude.rs` — Anthropic Messages API 双方向写し（system・tool_use/tool_result・stream の
+    SSE・トークン更新）。
+  - `sources/codex.rs` — ChatGPT Codex backend（Responses API）双方向写し。`auth.json` に有効期限相当が
+    無いため、更新は 401 を受けての事後のみ（claude-oauth は事前更新もする）。
+  - `sources/relay.rs` — `openai-compatible`（Qwen 等）へのそのまま中継 + 到達性 probe。
+  - `selection.rs` — ADR-0024/0049 のアカウントプールの評価式を再利用した決定的な選択（free 優先 →
+    残量スコア → 設定順の順位付きフォールバック列）。
+  - `server.rs` — axum（`GET /v1/models`、`POST /v1/chat/completions`（非 stream / stream）、
+    `POST /v1/embeddings` → 501、`GET /healthz`）。429/401 は cooldown を付けて次の候補へ（bytes を
+    送る前だけ）。stream 開始後の失敗は切断のみ。
+  - `sources_view.rs` — `GET /llm/sources` の材料（到達性・アカウントの残量・cooldown・直近 1 時間の
+    要求/token 数）。
+  - `log.rs` — `llm_proxy_requests`（migration 0022）への記録。本文は書かない。
+- **task-dispatch**: `Dispatcher::account_book` を `pub` にして、既存の非公開メソッドをそのまま
+  `llm-proxy` からも呼べるようにした（CLI ワーカーの dispatch と**同じ帳簘**を共有。別の写しを作らない）。
+- **task-api**: `GET /api/v1/llm/sources`（`crate::llm_sources`）を追加。`task-api` は `llm-proxy` を
+  直接知らない（`LlmSourcesReader` トレイト + `async-trait`。ADR-0017 M2 と同じ「task-worker/
+  task-dispatch に依存しない」境界を守るため、celeris が `llm_proxy::ProxyState` を包んだ実装を渡す）。
+  `[llm_proxy]` が無効なら 409 `llm_proxy_unavailable`。新しい型 3 つ（`LlmSourcesView` /
+  `LlmSourceView` / `LlmSourceAccountView`）を `schema.rs` に登録し、`docs/api/v1/api-v1.schema.json` /
+  `gui/app/celeris/types.ts` を再生成。
+- **celeris**: `[llm_proxy]`（`config.rs`）。`accounts_dir` は省略時に `[accounts] claude_dir`/
+  `codex_dir` を写す（`Config::load`）。`claude_oauth`/`codex_oauth` を有効にしたのに `accounts_dir` が
+  埋まらないのは設定エラー（`Config::validate`）。`lib.rs` に `build_llm_proxy_state`/
+  `start_llm_proxy`/`LlmSourcesAdapter` を追加し、主 API と同じ `SO_REUSEPORT` のライフサイクル
+  （`standby`/`draining` で 503・listener を閉じる）で動かす。
+- **DB**: `crates/task-core/migrations/0022_llm_proxy_requests.sql`、`SCHEMA_VERSION = 22`。
+  Phase 64（ADR-0052。並行開発）の `0021_knowledge_run_retry.sql` がこの worktree に無いため、
+  連番を切らさないための **予約のみの no-op** `0021_reserved_for_knowledge_run_retry.sql` を置いた
+  （merge 時に Phase 64 の本物へ差し替える。ADR-0053 の Phase 65 追記に手順を書いた）。
+- **設定例**: `config/celeris.example.toml` に `[llm_proxy]` の worked example を追加。
+  `paperqa-qwen`（`celeris.research.example.toml`）・`ldr-qwen`（`celeris.web-research.example.toml`）・
+  `langmem-main`（`celeris.example.toml` の `[knowledge.langmem]` と `docs/knowledge.md`）はプロキシへ
+  向けた（PaperQA だけ `celeris/standard`、他は `celeris/cheap`）。**`opencode-qwen` は明示的に無効の
+  ままにした**（下の「未完了」参照）。
+- ドキュメント: 新規 `docs/llm-source.md`（モデル名・供給元・選択・記録・設定・本番手順・既知の制約）、
+  `docs/gui/api.md` §3.108（`GET /llm/sources`）、ADR-0053 の「Phase 65 追記」節。
+
+### 完了していないこと（明示。ADR-0053 D1/D2 の受け入れ条件どおり「too hard なら偽装しない」）
+
+- **opencode（4 プロバイダのうち 1 つ）をプロキシに向ける変更は入れていない**。opencode の
+  `"model": "<providerId>/<modelId>"` の区切りが `modelId` 内のスラッシュ（`celeris/cheap`）を
+  どう扱うか、実機（またはソース）で確認できなかったため。JSON テンプレートと注意点は
+  `docs/llm-source.md` §7 に書いた。`config/celeris.acp-opencode.example.toml` は既定のまま
+  （直接 Qwen）。
+- **claude-oauth のトークン更新エンドポイント / client_id は実機で確認していない**（公知の値を既定に
+  したが、本物の資格情報ファイルを読まない制約のため検証できず。設定で上書き可能）。
+- D3（切れにくい Qwen トンネル）・D4（`GET /llm/sources` の GUI 表示）は Phase 66。
+
+### 検証
+
+- `cargo test --workspace --no-fail-fast`: **exit 0。1588 passed / 0 failed**（doctest 含む全クレート）。
+  `llm-proxy` 単体は unit 30 + integration 19 = 49 passed（偽の Anthropic/Codex/relay 上流を
+  `127.0.0.1:0` に実際に bind して、実 HTTP で叩く。外部ネットワークには出ない）。
+  - 偽の Anthropic 上流: 非 stream、stream（SSE。text delta + usage）、tool call の往復（要求・応答
+    両方向を検査）、401 → refresh → retry（資格情報ファイルへの書き戻しを確認）、429 → 次のアカウント
+    （cooldown が付くことも確認）。
+  - 偽の Codex Responses 上流: 非 stream、stream、tool call の往復。
+  - 偽の relay: 非 stream / stream のそのまま中継、`model` フィールドの書き換え。
+  - 選択: `prefer_free` で到達可能な relay を最優先、relay が届かないときはアカウントプールへ
+    フォールバック。
+  - bearer 必須、`/healthz` は無条件、`/v1/embeddings` は 501、standby は 503。
+  - `llm_proxy_requests` に 1 行残ることと、token 数が入ることを確認。
+  - **captured tracing subscriber で、資格情報の値（元の値・更新後の値）が 1 つもログに出ないことを
+    確認**（`no_secret_value_appears_in_the_logs_even_across_a_token_refresh`）。
+  - `task-api` は `GET /llm/sources` の 3 テスト（409・200・bearer 必須）を追加。
+- `cargo clippy --workspace --all-targets -- -D warnings`: **exit 0。警告 0**。
+  - 途中で `task-api::handlers.rs` と `task-ops::comment.rs` の既存コード（このセッションでは未変更の
+    部分）が `items_after_test_module`（クリップィのバージョン差と思われる、テストモジュールの後に
+    普通の関数がある形）で新たに落ちるようになっていたのを発見。Phase 65 の変更とは無関係だが、
+    ゲートを通すために該当関数をテストモジュールの前へ機械的に移動した（挙動は変えていない。
+    `cargo test` は移動前後とも該当クレートで green）。
+- `UPDATE_SCHEMA=1 cargo test -p task-core -p task-api -p task-worker --lib`: 53 + 199 + 294 passed。
+  `docs/api/v1/api-v1.schema.json` を再生成。
+- GUI: `pnpm install --frozen-lockfile`（オフラインキャッシュから解決）、`pnpm gen:types`（差分は
+  `LlmSourcesView`/`LlmSourceView`/`LlmSourceAccountView` の追加のみ）、
+  `bash scripts/sync-gui-docs.sh` → `bash scripts/sync-gui-docs.sh --check` で up to date、
+  `pnpm typecheck` exit 0、`pnpm lint` exit 0、`pnpm test` **849 passed**、`pnpm build` 成功。
+
+### 実機確認（未実施。ADR-0009 P-34 のとおり、認証・ネットワークが使える環境の人／エージェントに依頼）
+
+このサンドボックスには本物の Claude/Codex 資格情報も外向きネットワークも無いため、以下は
+**未実施**。`docs/llm-source.md` §8 に手順を書いた。実行できる環境の人（またはエージェント）が
+行い、結果をここに追記すること。
+
+1. `[llm_proxy]` を有効化して celeris を再起動。
+2. `curl` で `GET /healthz` → `GET /v1/models` → `POST /v1/chat/completions`（`celeris/cheap`）を
+   1 回ずつ確認（`x-celeris-source` ヘッダで供給元を確認）。
+3. `paperqa-qwen` / `ldr-qwen` / `langmem-main` を 1 つずつプロキシへ向け、そのつどタスクを 1 件流す
+   （`opencode-qwen` は上記の理由で対象外）。
+
+### 提案
+
+- opencode の `modelId` にスラッシュを含めてよいかを実機（`opencode acp` の initialize/session ログ、
+  または opencode 本体のソース）で確認し、確認できたら `celeris.acp-opencode.example.toml` を
+  プロキシへ向ける（Phase 66 か、そのための小さな別 Phase）。
+- アカウントの同時実行カウント（`IN_USE_PENALTY` の分母）を、CLI ワーカーの `in_use` と
+  `llm-proxy` の同時要求で本当に 1 つの帳簘にするなら、`Dispatcher` 側にも `llm-proxy` の在庫を
+  問い合わせる経路が要る（今回は別枠のまま。公平性は多少甘くなるが cooldown・観測値は共有できている）。
+- claude-oauth の `token_url`/`client_id` の既定値は、実際の Claude Code アカウントで 1 回 `curl`
+  して確認するまで「未確認」の注記を外さないこと。

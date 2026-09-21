@@ -102,6 +102,7 @@ adapter = "fake"
             "dev".to_string(),
             DaemonMode::Normal,
             SharedRole::new(InstanceRole::Active),
+            None,
         );
         let (daemon_tx, daemon_rx) = tokio::sync::watch::channel(None);
         let state =
