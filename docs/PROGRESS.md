@@ -12251,3 +12251,14 @@ dispatcher.rs` に `Dispatcher::skills_context`（担当ノードの実効 profi
 - 本番 = ADR-0053 / 0054 / 0055（ラウンド 1〜9）/ 0056（Phase 78・79・80）すべて。
 - 実機確認（ADR-0056 §3 Phase 79）: MCP 経由で `skills_put celeris-commit-style` → `org_mount_skill engineering` → coding タスク 1 件を起こして
   `request.json` の `context.skills` と作業場所の `.claude/skills/` を見る（結果は次節）。
+
+### Phase 79 の実機確認（2026-09-21 18:46 UTC）— skills が MCP → mount → run まで通った
+
+- 18201（chatgpt）から `skills_put celeris-commit-style` → `skills/celeris-commit-style/SKILL.md`。`org_mount_skill { engineering }` → engineering の
+  profile に `skills_mounts` が入った。
+- coding タスク `01M32MN6BMX0K2Z7JC8SH0FNQZ`（software-engineering、tier cheap、「notes/skills-check.md を 1 行書く」）を作成 → run
+  `01M32MN79W8MW77TK41HZ35HBZ` の `request.json` に **`context.skills = [{name: celeris-commit-style, path: …/knowledge/skills/celeris-commit-style,
+  description: …}]`**、作業場所に **`.claude/skills/celeris-commit-style/SKILL.md`** が出現。タスクは **done**（18:46:55。usage in 10 / out 739）。
+- = ADR-0056 §3 Phase 79 の実機項目（`skills_put` → `org_mount_skill` → coding タスクの `request.json` と作業場所）を確認。ADR-0056 の受け入れは
+  Phase 78 / 79 とも実機でそろった。人側に残るのは ChatGPT / Claude Code の接続設定だけ。
+- 起動中: Phase 81（unmount 後の skills 掃除、publickey 自動接続の退避）。
