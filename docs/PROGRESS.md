@@ -11249,3 +11249,13 @@ main` で自分のブランチを進めてから着手した（このブラン�
 未確認、(2) ACP の読み取り許可は fail-closed（保証は「書き込みを誤って許さない」側だけ）、
 (3) claude-code の `--allowedTools` の書式（`Bash(cmd:*)`）が実際の claude-code CLI と一致するかは
 実機未確認、(4) Phase 67 の未解決事項（要約と直近のやり取りの重複）は今回も見送り。
+
+### Phase 68 の本番反映（2026-09-21 15:03 UTC。`b24bae9a796a`、ライブ切替）
+
+- main `b24bae9` = Phase 68 merge。ゲート: cargo test **1696 passed / 0 failed**、clippy exit 0、`pnpm gen:types` 差分なし、typecheck / lint exit 0、
+  `pnpm test` 881 passed、`pnpm mobile-audit` 違反 0（21 route）。`release.sh` → `b24bae9a796a`（schema 23 のまま）。
+- `verify.sh` check 1–6 true、`live_ok=true` → `promote.sh b24bae9a796a` **mode=live**（15:03:53→56、API 停止なし）。
+- これで ADR-0053（Phase 65/65b/66/66b/66c）、ADR-0054（Phase 67/67b/68）、ADR-0055（Phase 69–72）が本番に入った。
+  残り: Phase 67c（継続セッションを同じアカウントに固定・Codex の thread id）と Phase 73（チャットの磨き）が実装中。
+- 実機確認（ADR-0054 Phase 68「1 往復して考え → tool call → タスクのカードが順に出る」）: `/console/stream` を購読しながら CoS に 1 回指示して
+  `reply` ブロックの `state: streaming → done`・`steps`・`thinking` を観測中（結果は次節）。
