@@ -11518,3 +11518,14 @@ main への `git merge` コマンドそのものは実行していない。パ�
 - 起動後: `llm-proxy listening`、tunnel `login_needed`（変わらず）。conversation ハーネスの `adapter = "claude-code"` 固定がこの起動から有効。
   CoS の現役セッション（codex）は `POST /console/new-conversation` で retire 済み。sticky の実機確認（2 往復が同じ Claude セッションで、
   2 回目が `resume:true`・差分前置き）は次節。
+
+### Phase 67c の実機確認（2026-09-21 15:29–15:30 UTC）— ADR-0054 D1 が本番で成立
+
+- CoS に 2 回指示（conversation ハーネスは claude-code 固定、直前に `new-conversation` で codex セッションを retire）。
+  - 1 回目 run: `session = {claude-code, 01a0c496-1adc-41cc-bcd4-1dc07275718b, resume:false}`、前置き全量（memory 15.5 KB / organization 5.5 KB /
+    conversation 11.3 KB）→ **done**「月曜日」（usage in 4 / out 179）。
+  - 2 回目 run: **同じセッション id で `resume:true`、前置きは `session_diff` 297 バイトだけ** → **done**「今日の曜日を一言で答える動作確認」
+    （usage in 4 / out 191）。
+  - `node_sessions`: 新しい claude-code 行が **turns=2**、approx_tokens 378、retired なし。旧 3 行（ULID・アカウント変更で retire した Claude・codex）は retired。
+- = ADR-0054 D1（初回全量・継続は差分・同じアカウントで `--resume`）と Phase 67b（UUID）・67c（sticky）の受け入れ条件が実機で全部そろった。
+- 残り: Phase 68b（`codex exec resume` の argv）が入ったら conversation ハーネスの `adapter = "claude-code"` 固定を外して、Codex でも同じ 2 往復を確認する。
