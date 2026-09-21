@@ -131,6 +131,11 @@ pub struct Profile {
     /// ADR-0047 の知識のマウント。親と和。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub knowledge: Vec<KnowledgeMount>,
+    /// ADR-0056 D3（Phase 78）: KB の `skills/<name>/SKILL.md` をこのノードに mount する（skill 名の
+    /// 一覧）。継承は `knowledge` と同じ規則（親と和。届け方は Phase 79）。`skills`（マッチングの能力
+    /// タグ）とは別物。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills_mounts: Vec<String>,
     #[serde(default, skip_serializing_if = "HarnessPrefs::is_empty")]
     pub harnesses: HarnessPrefs,
     /// ADR-0046 D8 の語彙。親と和。
@@ -157,6 +162,7 @@ impl Profile {
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
             && self.knowledge.is_empty()
+            && self.skills_mounts.is_empty()
             && self.harnesses.is_empty()
             && self.tools.is_empty()
             && self.deny_tools.is_empty()
@@ -180,6 +186,9 @@ pub struct EffectiveProfile {
     pub skills: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub knowledge: Vec<KnowledgeMount>,
+    /// ADR-0056 D3（Phase 78）: 継いだ後の skills mount（skill 名。`knowledge` と同じ和の規則）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills_mounts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harnesses_allowed: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,6 +220,7 @@ impl EffectiveProfile {
     pub fn is_trivial(&self) -> bool {
         self.skills.is_empty()
             && self.knowledge.is_empty()
+            && self.skills_mounts.is_empty()
             && self.harnesses_allowed.is_empty()
             && self.harness_default.is_none()
             && self.tools.is_empty()
@@ -309,6 +319,7 @@ pub fn resolve(nodes: &[OrgNode], node_id: &str) -> EffectiveProfile {
                 out.knowledge.push(k.clone());
             }
         }
+        push_unique(&mut out.skills_mounts, p.skills_mounts.iter().cloned());
         push_unique(
             &mut out.harnesses_allowed,
             p.harnesses.allowed.iter().cloned(),
@@ -372,6 +383,9 @@ pub enum ProfileError {
     },
     #[error("skill {skill:?} must match [a-z0-9._-] (lowercase, 1..=64 characters)")]
     InvalidSkill { skill: String },
+    /// ADR-0056 D3（Phase 78）: `skills_mounts` の名前は KB の `skills/<name>/` と同じ綴り。
+    #[error("skill mount {name:?} must match [a-z0-9-] (lowercase, 1..=64 characters)")]
+    InvalidSkillMount { name: String },
 }
 
 /// ADR-0046 D2: skill タグの綴り（小文字・`[a-z0-9._-]`・1..=64 文字）。
@@ -400,6 +414,11 @@ pub fn validate_profile(profile: &Profile, known_harnesses: &[String]) -> Result
             return Err(ProfileError::InvalidSkill {
                 skill: skill.clone(),
             });
+        }
+    }
+    for name in &profile.skills_mounts {
+        if !crate::knowledge::is_valid_skill_name(name) {
+            return Err(ProfileError::InvalidSkillMount { name: name.clone() });
         }
     }
     for tool in profile.tools.iter().chain(profile.deny_tools.iter()) {
@@ -564,6 +583,34 @@ mod tests {
         assert_eq!(eff.allowed_tiers, vec![Tier::Standard, Tier::Cheap]);
         // 連結（根→葉。重複も残す）。
         assert_eq!(eff.policy, vec!["根の方針", "部の方針", "課の方針"]);
+    }
+
+    /// ADR-0056 D3（Phase 78）: `skills_mounts` は `knowledge` と同じ和の規則（親と子の重複は落ちる）。
+    #[test]
+    fn skills_mounts_are_unioned_like_knowledge_mounts() {
+        let org = vec![
+            node(
+                "cos",
+                None,
+                Profile {
+                    skills_mounts: vec!["writing".to_string()],
+                    ..Profile::default()
+                },
+            ),
+            node(
+                "engineering",
+                Some("cos"),
+                Profile {
+                    skills_mounts: vec!["rust-review".to_string(), "writing".to_string()],
+                    ..Profile::default()
+                },
+            ),
+        ];
+        assert_eq!(resolve(&org, "cos").skills_mounts, vec!["writing".to_string()]);
+        assert_eq!(
+            resolve(&org, "engineering").skills_mounts,
+            vec!["writing".to_string(), "rust-review".to_string()]
+        );
     }
 
     /// 親が空の `allowed_tiers`（制限なし）でも、子の制限はそのまま効く。
@@ -769,6 +816,21 @@ mod tests {
         ));
         // `known_harnesses` が空なら harness は検査しない（最小構成）。
         validate_profile(&bad_harness, &[]).expect("no registry: skip");
+
+        // ADR-0056 D3: `skills_mounts` は `[a-z0-9-]{1,64}`。
+        let bad_skill_mount = Profile {
+            skills_mounts: vec!["Rust Review".into()],
+            ..Profile::default()
+        };
+        assert!(matches!(
+            validate_profile(&bad_skill_mount, &known),
+            Err(ProfileError::InvalidSkillMount { .. })
+        ));
+        let ok_skill_mount = Profile {
+            skills_mounts: vec!["rust-review".into()],
+            ..Profile::default()
+        };
+        validate_profile(&ok_skill_mount, &known).expect("ok skill mount");
     }
 
     /// 空の profile は JSON に何も出さない（導入前のノードと 1 バイトも変わらない）。

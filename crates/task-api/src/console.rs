@@ -715,6 +715,8 @@ fn message_block(message: &Message) -> ConsoleBlock {
             project_id: message.project_id,
             task_id: message.task_id,
             text: message.text.clone(),
+            // ADR-0056 D2（Phase 78）: MCP 経由の発言は `mcp:<client_id>` を持つ。
+            author: message.metadata.as_ref().and_then(|m| m.author.clone()),
         },
         MessageRole::Node => ConsoleBlock::Reply {
             at,

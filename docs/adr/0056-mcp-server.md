@@ -145,3 +145,89 @@ Celeris の入口は今まで GUI（Console）と `celerisctl` だけだった�
   fake アダプタのテスト（作業場所に `.claude/skills/<name>/SKILL.md` が現れる、AGENTS.md に節が足される、前置きに載る）。
   実機: `skills_put` で 1 つ置き、`org_mount_skill` で engineering に mount、coding のタスク 1 件の `request.json` と作業場所で確認。
 - どの Phase も `cargo test --workspace --no-fail-fast` / clippy / GUI 一式、PROGRESS の実機の証跡。**トークンの値はログ・応答・PROGRESS に出さない。**
+
+## Phase 78 追記（2026-09-21。D1・D2・D4・D5 と D3 のデータモデルを実装したときの逸脱と細部）
+
+実装は ADR の決定どおり。**決定を変えた点は無い**（口の複数化・`auth = "none"` の `client` 固定は
+実装前にコーディネーターから ADR 本文そのものへの追記として指示され、この節はその後の実装）。
+書いていなかった細部と、あえて別のやり方にした点だけを残す。
+
+### 決めた細部（ADR が書いていなかったこと）
+
+- **P-78-a: `Message.metadata.author` は新しい列を増やさず、既存の `metadata_json`（migration 0017）に
+  足した。** ADR-0048 D3 が「CoS の返事の actions 結果」専用に用意した列だが、`role = user` の行にも
+  同じ列があるので流用した（migration 0024 は `mcp_clients` / `mcp_calls` の 2 表だけで、`messages` には
+  触れない）。`MessageMetadata::is_empty()` に `author.is_none()` を足し、`ConsoleBlock::Human.author`
+  へそのまま写す（`crates/task-api/src/console.rs::message_block`）。
+- **P-78-b: `console_instruct` は CoS（`COS_ID`）以外に話しかけられない。** ADR-0048 D3 の
+  `POST /console/instruct` は `scope=node:<id>` や `@<node-id>` でノードを指名できるが、ADR-0056 D2 の
+  `console_instruct { text, project_id? }` にはその余地が無い（そもそも仕様が node を受けない）。
+  `task_ops::conversation::start_as`（新設。`start`/`start_with_milestone` と同じ芯 `start_full` を
+  共有し、`author: Option<&str>` だけ追加）は任意の `node_id` を受けられるが、celeris-mcp 側は常に
+  `COS_ID` を渡す。`console_reply` も同じ前提（`message_page(Some(COS_ID), …)`）で返事を探す。
+- **P-78-c: skills（D3 の置き場）は KB の `skills/` を `_inbox`/`_retired` と同じ「索引・検索から除く
+  専用ディレクトリ」にした。** `task_core::knowledge::{SKILLS_DIR, is_skills}` を追加し、
+  `task_ops::knowledge::{walk, grep}` から除いた。SKILL.md 自身の frontmatter は KB の front matter
+  （`title`/`tags`/`scope`/…）と語彙が違う（`name`/`description`。Claude Code の skills 形式）ので、
+  `task_core::knowledge::front_matter` は使わず、`task_ops::knowledge::skill_frontmatter`
+  （`---\nkey: value\n---`だけを読む最小パーサ）を別に書いた。
+- **P-78-d: `skills_put` の冪等な書き直しが `git commit` を失敗させていたのを直した。** 同じ内容を
+  2 回書く（`source:` が既に入っている skill_md をそのまま渡す等）と `git add` が何もステージしない。
+  既存の `commit_paths`（`record`/`inbox_accept`/`apply_candidates` と共有）に `git diff --cached
+  --quiet` を挟み、変更が無ければ新しいコミットを作らず今の `HEAD` を返すようにした（他の呼び出し側は
+  常に新しいファイル名を使うので影響なし）。
+- **P-78-e: `org_create_node` の `tools`/`permissions`/`review` は「受け取っても無視」。** MCP の
+  `ProfileInput`（`celeris-mcp::tools::org`）は JSON としては `tools`/`permissions`/`review` を
+  受け付けるが（`deny_unknown_fields` で丸ごと拒否すると「なぜ無視されるのか」が見えにくいと判断）、
+  `Profile` に組み立てる段で必ず空 / 既定値に落とす（`ProfileInput::into_profile`）。
+- **P-78-f: `McpScope` の JSON 表現は `as_str()` と同じ `"knowledge:read"` 形（`:` 入り）。**
+  `#[serde(rename_all = "snake_case")]` だと `"knowledge_read"` になり、スコープ文字列
+  （`celerisctl mcp client add --scope`・DB の `scopes` 列・MCP ツールのスコープ判定）と食い違うため、
+  `Serialize`/`Deserialize`/`JsonSchema` を手で実装した（`task_core::mcp::McpScope`）。
+- **P-78-g: `resources/list` は知識の索引・組織・skills だけを列挙する。** タスク・案件は件数が
+  非有界（KB や組織と違って `MAX_INDEX_ITEMS` のような上限がそもそも無い）なので、`tasks_list` /
+  `projects_list` で id を知ってから `resources/read` で読む前提にした（`docs/mcp.md` §5 に明記）。
+- **P-78-h: JSON-RPC はバッチ（配列）を受けない。** MCP 2025-06-18 の仕様は 1 要求 1 応答が基本で、
+  celeris の他クレートも 1 要求単位の決定的処理を好む流儀なので、`POST /mcp` の本文は単一の JSON-RPC
+  オブジェクトだけを受ける（配列を送ると `-32600`）。
+- **P-78-i: `GET /mcp` は 405。** ADR-0056 D5 が明示的に許した簡略化（サーバー起点の SSE 購読は
+  実装しない）。`POST /mcp` の応答も常に JSON（`Accept: text/event-stream` を見ても JSON を返す）。
+- **P-78-j: セッション（`Mcp-Session-Id`）とレート制限のカウンタはプロセスのメモリだけに持つ。**
+  celeris の再起動（`--reload` の対象外なのでプロセス自体は再起動が要る）でセッションは失効し、
+  クライアントは `initialize` からやり直す（DB には残さない。`mcp_clients`/`mcp_calls` だけが永続）。
+- **P-78-k: `console_reply` の `Failed`/`Cancelled` の形は ADR に明記が無かったので決めた。**
+  `Done { reply, actions[] }` は ADR どおり。`Failed { reply: Option<String> }`（対話 run が失敗しても
+  `failure_reply` が書いた返事があれば返す）、`Cancelled`（本文なし）を追加した。
+- **P-78-l: トークンの生成は新しい crate を足さず `ulid`（既存依存）を 3 本つないで作った。**
+  `rand` は workspace の `Cargo.lock` に間接依存として複数バージョンが既にあるが、`celeris-mcp` が
+  直接使う体では無かったため、ADR-0056 D5「外部クレートは足さない」の精神に沿って避けた
+  （`celeris_mcp::auth::generate_token`）。
+- **P-78-m: `celeris-mcp` は `task-api` と同じ「専用の `SqliteStore` 接続を自分で開く」流儀。**
+  `McpState::open` が `[mcp]` の口とは別に DB を開く（`ApiState::new` と同じ多重接続。WAL なので
+  問題ない）。`celerisctl mcp client …` も同様に DB を直接開く（`knowledge rerun` と同じ管理系）。
+- **P-78-n: `mcp_clients.id` は `celerisctl mcp client add <name>` の `<name>` をそのまま使う
+  （ULID を新しく振らない）。** D1 の `[[mcp.listeners]] client = "chatgpt"` の例が
+  `mcp client add chatgpt` の名前をそのまま指しており、`add` の引数が名前 1 つしか無い
+  （別に id を選ばせる引数が無い）ことから、`id = name` と読むのがいちばん驚きが少ない。
+  同じ名前で 2 回 `add` すると（`id` が主キーなので）友好的なエラーになる。`org_nodes.id`
+  （人が選ぶ小文字ケバブの id）と同じ発想で、`tasks`/`projects` の ULID とは違う流儀。
+
+### GUI（D2 の `author`。Phase 78 の範囲内で最小限）
+
+- `Message.metadata.author` → `ConsoleBlock::Human.author` → GUI の `human` ブロックに
+  「外部（<mcp: を外した client_id>）」の `Badge` を 1 つ出すだけ（`gui/app/components/
+  ConsoleBlockItem.tsx`）。MCP クライアントの表示名解決（`GET /mcp/clients` の `name` を引く）は
+  していない（生の `client_id` を見せる最小実装。詳細は `gui/docs/PROGRESS.md` の該当節）。
+- 「アカウント」画面の「MCP クライアント」節（`GET /mcp/clients`/`GET /mcp/calls` を実際に呼ぶ画面）は
+  ADR-0056 D4 が「後続の GUI Phase」と明記したとおり、今回はやっていない。
+
+### やっていないこと（ADR のとおり Phase 79）
+
+- `RunContext.skills` / claude-code・codex・acp への実際の届け方 / `request.json` への記録。
+- 「アカウント」画面の MCP クライアント節（管理 API はあるが GUI からはまだ呼ばない）。
+
+### 実機（このセッションでは未実施。ADR-0009 P-34）
+
+`docs/mcp.md` §8 に手順を書いた（`celerisctl mcp client add`、`curl` での `initialize` /
+`tools/list` / `knowledge_propose` / `console_instruct` + `console_reply`）。認証・ネットワークが
+使える環境の人（またはエージェント）が実行し、結果を `docs/PROGRESS.md` の Phase 78 節に追記すること。

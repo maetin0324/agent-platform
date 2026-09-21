@@ -1,6 +1,15 @@
 # celeris HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-21 Phase 78（ADR-0056 D1/D2/D4/D5、外部エージェントが Celeris を操作する MCP サーバー）
+  — **追加のみ。v1 のまま**。エンドポイント 99〜100: `GET /mcp/clients` / `GET /mcp/calls?client=`
+  （§3.110〜3.111。MCP クライアント表と呼び出しログの観測。トークンの値は出ない）。MCP サーバー本体
+  （`POST /mcp`。JSON-RPC 2.0 + MCP Streamable HTTP）は `[mcp] listen` の既定 `127.0.0.1:18200` の
+  別ポートで、この `/api/v1` 契約には含まれない（`docs/mcp.md` 参照）。DB のスキーマ版数は **24**
+  （migration 0024: `mcp_clients` / `mcp_calls`）。`Message.metadata` に `author`（`mcp:<client_id>`。
+  MCP の `console_instruct` が付ける）、`Profile`/`EffectiveProfile` に `skills_mounts`（ADR-0056 D3
+  のデータモデルのみ。届け方は Phase 79）が増えた。`GET /console` の `human` ブロックに `author` が
+  増えた（§3.98）。
 - 改訂: 2026-09-21 Phase 67（ADR-0054 D1、ノードごとの継続セッションと resume）— **追加のみ。v1 のまま**。
   エンドポイント 98: `POST /console/new-conversation`（§3.109。CoS の継続セッションを捨てる。**管理系**、
   204、本文なし）。DB のスキーマ版数は **23**（migration 0023: `node_sessions`。ノードごとの継続セッション
@@ -2245,7 +2254,7 @@ CoS の `actions` は ADR-0048 D3（Phase 60b。§3.107）。
 
 | `kind` | 中身 | 由来 |
 |---|---|---|
-| `human` | 人の発言（`text` / `node_id` / `project_id` / `task_id`） | `messages`（`role = user`） |
+| `human` | 人の発言（`text` / `node_id` / `project_id` / `task_id`）。ADR-0056 D2（Phase 78）: `author`（`mcp:<client_id>`。MCP の `console_instruct` が付けた発言だけ。人の発言は省略）で GUI は「外部（<client name>）」の帯を出せる | `messages`（`role = user`） |
 | `reply` | CoS・部署ノードの返事（Markdown。`run_id` 付き）。CoS が `actions`（§3.107）を宣言していれば `actions_result`（`MessageMetadata`: `actions_executed[]` / `actions_failed[]`）。ADR-0054 D2（Phase 68）: `state`（`streaming` \| `done`。省略時 `done`）・`thinking`（run 中の最新の思考 1 行。置き換え式）・`steps[]`（`{kind: tool_use\|tool_result, tool?, text, error?}`。run 中の道具の呼び出しを順番どおり） | `messages`（`role = node`）。`state = streaming` のときは対話 run の `Event::WorkerProgress` から合成（まだ `messages` に確定していない） |
 | `task` | 開始・終了・失敗・中止・割り込みの 1 行（`task`: `from` / `to` / `reason` / `assignee` / `harness` / `tier` / `mode` / `elapsed_secs`） | `Event::Transitioned` |
 | `progress` | run ごとに束ねたワーカーの進行。`progress`: `run_id` / `count` / `tool_count` / `last_status` / `started_at` / `updated_at` / `first[]` / `last[]` / `truncated`。見出し用に `title` / `assignee` / `harness` / `tier` | `Event::WorkerProgress`（ADR-0048 D2 の正規化） |
@@ -2511,6 +2520,22 @@ GUI の「新しい会話」ボタンの入口。**薄い**: ディスパッチ�
 - Phase 68（ADR-0054 D3）: GUI の「新しい会話」ボタンが実際にこの API を呼ぶようになった（確認ダイアログ
   付き）。組織画面の部門長ノードには `GET /org`（§3.42）の `lead_sessions[]`（`NodeSessionSummary`）から
   「継続中のセッション: turns / tokens / 最終使用」を出す（§6.2 参照。無いノードには出さない）。
+
+### 3.110〜3.111 MCP サーバーの観測（ADR-0056 D4、Phase 78。**99〜100。読み取り**）
+
+外部エージェントが Celeris を操作する MCP サーバー（`crates/celeris-mcp`。`[mcp] listen` の既定
+`127.0.0.1:18200`、`/api/v1` の外・別ポート）が持つクライアント表（`mcp_clients`）と呼び出しログ
+（`mcp_calls`）の観測。判断（認証・スコープ・流量制限）は MCP サーバーの中で決定的に行われる。ここは
+**見えるようにするだけ**（GUI の表示は「アカウント」画面の「MCP クライアント」節、後続の GUI Phase）。
+
+- `GET /mcp/clients` → 200 `{"items": [McpClient]}`。`McpClient` は `id` / `name` / `scopes[]`
+  （`"knowledge:read"` 等の文字列） / `created_at` / `last_used_at`（無ければ省略） /
+  `revoked_at`（無ければ省略）。**トークンの値は出ない**（DB にも平文では無い。ハッシュも出さない）。
+- `GET /mcp/calls?client=<id>` → 200 `{"items": [McpCall]}`。`client` は省略可（省略時は全クライアント）。
+  新しい順、直近 100 件。`McpCall` は `id` / `client_id` / `tool` / `ok` / `error_kind`（成功なら省略） /
+  `latency_ms` / `at`。**引数と結果の本文は残さない**（ADR-0056 D4）。`console_instruct` の呼び出しは
+  Console（§3.98）にも出るので二重には書かない。
+- どちらも読み取り専用（トークンは必要。`GET /llm/sources` §3.108 と同じ規律）。
 
 ---
 

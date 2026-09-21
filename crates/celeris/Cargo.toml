@@ -17,6 +17,7 @@ task-dispatch = { path = "../task-dispatch" }
 task-ops = { path = "../task-ops" }
 task-api = { path = "../task-api" }
 llm-proxy = { path = "../llm-proxy" }
+celeris-mcp = { path = "../celeris-mcp" }
 async-trait = "0.1"
 time = { version = "0.3", features = ["formatting"] }
 ulid = "1"

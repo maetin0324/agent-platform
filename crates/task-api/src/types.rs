@@ -1334,6 +1334,10 @@ pub enum ConsoleBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task_id: Option<TaskId>,
         text: String,
+        /// ADR-0056 D2（Phase 78）: 発した外部 MCP クライアント（`mcp:<client_id>`）。人の発言なら
+        /// `None`（GUI はこれがあれば「外部（<name>）」の帯を出す。名前の解決は GUI 側）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
     },
     /// CoS または部署ノードの返事（`messages` の `role = node`。本文は Markdown）。
     Reply {

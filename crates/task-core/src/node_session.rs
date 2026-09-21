@@ -100,7 +100,9 @@ impl NodeSession {
     }
 }
 
-mod opt_rfc3339 {
+/// ADR-0056（Phase 78）: `crate::mcp` も同じ `Option<OffsetDateTime>` の RFC 3339 往復を要るため、
+/// crate 内に公開した（意味は「RFC 3339 の `Option`」というだけで `node_session` 固有ではない）。
+pub(crate) mod opt_rfc3339 {
     use serde::{Deserialize, Deserializer, Serializer};
     use time::OffsetDateTime;
     use time::format_description::well_known::Rfc3339;

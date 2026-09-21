@@ -5082,3 +5082,18 @@ LCP は最大 220ms 前後で、どちらも予算の 1500 / 2500ms に遠く届
 - **P-G33-2**: `components`（77KB）・`Icon`（47KB）はどちらも「ほぼ全画面が使う土台」なので、これ以上
   削るなら個々の関数・アイコン単位の分割ではなく、使用頻度の低い画面（`/clusters`・`/accounts` 等）
   だけが使う UI 部品を洗い出して分離する方が筋が良さそう（次のラウンドで検討）。
+## celeris 側 Phase 78（ADR-0056、MCP サーバー）に伴う最小追従（2026-09-21）
+
+新しい GUI フェーズではなく、celeris 側 Phase 78 の受け入れ条件（型再生成・最小ラベル）に合わせただけの
+差分。詳細な決定は celeris 側 `docs/PROGRESS.md` の Phase 78 節を参照。
+
+- `pnpm gen:types`: `ConsoleBlock`（`human`）に `author?: string | null`、`Profile` /
+  `EffectiveProfile` に `skills_mounts?: string[]`、`McpScope` / `McpClient` / `McpClientsView` /
+  `McpCall` / `McpCallsView` が増えた（`GET /mcp/clients` / `GET /mcp/calls`。GUI からはまだ呼んでいない）。
+- `app/components/ConsoleBlockItem.tsx`: `human` ブロックに `block.author` があれば
+  `外部（<mcp: を外した client_id>）` の `Badge` を 1 つ出すだけ（`data-testid="console-human-author"`）。
+  MCP クライアントの表示名解決（`GET /mcp/clients` を引いて `name` を出す）はしていない
+  （`author` の生の値をそのまま見せる最小実装。次のラウンドでやるなら「アカウント」画面の
+  「MCP クライアント」節と合わせて設計するとよい）。
+- ゲート: `pnpm typecheck` / `pnpm lint` 差分無し、`pnpm test`（**925 passed**、Phase G32 と同数。
+  今回のラベルにテストは追加していない）、`pnpm build` 成功。
