@@ -10933,3 +10933,15 @@ D1 の核心）、テストの追加、ドキュメントの追記を行った�
 - `resume_failed` の検出をイベントソース経由（run 途中）ではなく `resolve_node_session` 呼び出し時点の
   引数として渡す設計に統一するかどうかは、実機で resume 拒否がどのくらいの頻度・タイミングで起きるか
   観測してから判断するのが良い（今回は「要約が抜けても実害は小さい」という判断で見送った）。
+
+### Phase 67 の本番反映（2026-09-21 13:51–13:53 UTC。`6de40cb829e3`、schema 23、停止→起動）
+
+- main `6de40cb` = Phase 67 merge。ゲート: cargo test **1672 passed / 0 failed**、clippy exit 0、`pnpm gen:types` 差分なし、typecheck exit 0、
+  `pnpm test` 878 passed。`release.sh` → `6de40cb829e3`（schema 23）。`verify.sh` check 1–4・6 true、check 5 は想定どおり false
+  （N-1 = 5d3414a は schema 23 を `SchemaTooNew`）→ `ok=true live_ok=false`。
+- 停止→起動の条件: in-flight 0、pending の知識整理 run 0、blocked 0 / wa 0、1 分 load 1.86（規則の「< 1」より高いが、I/O 待ちが無いことを確認して実施。
+  直前の cargo build の CPU 残りで、D 状態の危険は無かった）。`promote.sh 6de40cb829e3` **mode=stop-start**: 旧の停止 1 秒 →
+  バックアップ 14 MB → 新 healthy（schema 23）。API の停止は約 3 秒。
+- 起動後: `llm-proxy listening 127.0.0.1:18100`、tunnel `login_needed`（pegasus の TOTP 待ち。変わらず）、`node_sessions` は 0 行（まだ対話 run が無い）。
+- 実機確認（ADR-0054 D1「CoS に往復して 2 回目以降が `--resume`、前置きが差分だけ」）: CoS に 2 回指示を送って `node_sessions` と
+  `runs/<id>/request.json` を確認中（結果は次節）。Phase 68（Console に run の進行を流す・チャット UI）を Sonnet で起動。
