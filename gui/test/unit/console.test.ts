@@ -18,7 +18,9 @@ import {
   scopeForNode,
   scopeForProject,
   shouldStickToBottom,
+  TOOL_SUMMARY_MAX_LENGTH,
   taskLineSummary,
+  toolSummaryTruncated,
 } from "~/lib/console";
 import { consoleGrowingReplySteps } from "../mock-celeris/fixtures";
 
@@ -501,5 +503,20 @@ describe("shouldStickToBottom（console-stream の自動追従の判定）", () 
 
   it("すべて表示できている（スクロール不要）なら常に張り付いている扱い", () => {
     expect(shouldStickToBottom(200, 0, 200)).toBe(true);
+  });
+});
+
+describe("toolSummaryTruncated（ADR-0055 D2 ラウンド 6、U-G29-2 / P-G29-2 の解消）", () => {
+  it("既定の 90 字ちょうどなら省略しない", () => {
+    expect(toolSummaryTruncated("a".repeat(TOOL_SUMMARY_MAX_LENGTH))).toBe(false);
+  });
+
+  it("既定の 90 字を超えると省略する（= タップで展開できる）", () => {
+    expect(toolSummaryTruncated("a".repeat(TOOL_SUMMARY_MAX_LENGTH + 1))).toBe(true);
+  });
+
+  it("maxLength を明示できる", () => {
+    expect(toolSummaryTruncated("12345", 4)).toBe(true);
+    expect(toolSummaryTruncated("1234", 4)).toBe(false);
   });
 });

@@ -12,11 +12,14 @@ import {
   formatRunEventRow,
   hasMoreThanFirstLine,
   progressSummaryLine,
+  TOOL_SUMMARY_MAX_LENGTH,
   taskLineSummary,
+  toolSummaryTruncated,
 } from "~/lib/console";
 import { shortId, truncateLabel } from "~/lib/format";
 import { isKnowledgeFallback } from "~/lib/knowledge";
 import { milestoneDecisionValid } from "~/lib/milestone-review";
+import { relativeTimeLabel } from "~/lib/reports";
 import { cn } from "~/lib/utils";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { Badge, StatusBadge } from "./ui/badge";
@@ -46,32 +49,35 @@ export function ConsoleBlockItem({
   block,
   org,
   projects,
+  fetchedAt,
   onReplyToConversation,
 }: {
   block: ConsoleBlock;
   org: readonly OrgNode[];
   projects: readonly Project[];
+  /** ADR-0055 D2 ラウンド 6: 相対時刻表示（`relativeTimeLabel`）の基準時刻。`~/lib/console.ts::ConsoleData.fetchedAt`。 */
+  fetchedAt: string;
   onReplyToConversation: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
 }) {
   switch (block.kind) {
     case "human":
-      return <HumanBlockView block={block} org={org} onReply={onReplyToConversation} />;
+      return <HumanBlockView block={block} org={org} fetchedAt={fetchedAt} onReply={onReplyToConversation} />;
     case "reply":
-      return <ReplyBlockView block={block} org={org} onReply={onReplyToConversation} />;
+      return <ReplyBlockView block={block} org={org} fetchedAt={fetchedAt} onReply={onReplyToConversation} />;
     case "task":
-      return <TaskBlockView block={block} org={org} projects={projects} />;
+      return <TaskBlockView block={block} org={org} projects={projects} fetchedAt={fetchedAt} />;
     case "progress":
       return <ProgressBlockView block={block} />;
     case "question":
-      return <QuestionBlockView block={block} org={org} />;
+      return <QuestionBlockView block={block} org={org} fetchedAt={fetchedAt} />;
     case "approval":
-      return <ApprovalBlockView block={block} org={org} projects={projects} />;
+      return <ApprovalBlockView block={block} org={org} projects={projects} fetchedAt={fetchedAt} />;
     case "milestone":
-      return <MilestoneBlockView block={block} projects={projects} />;
+      return <MilestoneBlockView block={block} projects={projects} fetchedAt={fetchedAt} />;
     case "report":
-      return <ReportBlockView block={block} org={org} projects={projects} />;
+      return <ReportBlockView block={block} org={org} projects={projects} fetchedAt={fetchedAt} />;
     case "knowledge":
-      return <KnowledgeBlockView block={block} />;
+      return <KnowledgeBlockView block={block} fetchedAt={fetchedAt} />;
     default:
       return null;
   }
@@ -125,16 +131,21 @@ function ReplyButton({ onClick }: { onClick: () => void }) {
  * ブロック先頭の帯（フェーズ 71、ADR-0055 D2「状態はバッジ 1 語 + 色。理由・詳細は行の下か開閉に」の
  * 精神を Console にも: 誰 / いつ を吹き出しの先頭にまとめ、本文中に「at」を重複させない）。
  * `align="end"`（人の発言）は右寄せ、それ以外（CoS 側）は左寄せの帯にする。
+ * フェーズ 74（ADR-0055 D2 ラウンド 6）: `at` は celeris が返す生の ISO をそのまま出していたが
+ * （393px には長すぎ、`/approvals`・`/artifacts` の相対表示と揃っていなかった）、`relativeTimeLabel`
+ * （`~/lib/reports.ts`。他画面と同じ 1 つの純粋関数）に揃え、絶対時刻は `title` に残す。
  */
 function BlockHeader({
   icon,
   who,
-  at,
+  atIso,
+  fetchedAt,
   align = "start",
 }: {
   icon: IconName;
   who: ReactNode;
-  at: string;
+  atIso: string;
+  fetchedAt: string;
   align?: "start" | "end";
 }) {
   return (
@@ -149,7 +160,9 @@ function BlockHeader({
         <Icon name={icon} className="size-3.5 shrink-0" />
         <span className="min-w-0 truncate">{who}</span>
       </span>
-      <span className="shrink-0">{at}</span>
+      <span className="shrink-0" title={atIso}>
+        {relativeTimeLabel(atIso, fetchedAt)}
+      </span>
     </div>
   );
 }
@@ -157,15 +170,23 @@ function BlockHeader({
 function HumanBlockView({
   block,
   org,
+  fetchedAt,
   onReply,
 }: {
   block: Extract<ConsoleBlock, { kind: "human" }>;
   org: readonly OrgNode[];
+  fetchedAt: string;
   onReply: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
 }) {
   return (
     <BlockShell testId="console-block-human" align="end">
-      <BlockHeader icon="send" who={`${orgNodeName(block.node_id, org)} へ`} at={block.at} align="end" />
+      <BlockHeader
+        icon="send"
+        who={`${orgNodeName(block.node_id, org)} へ`}
+        atIso={block.at}
+        fetchedAt={fetchedAt}
+        align="end"
+      />
       <p className="whitespace-pre-wrap">{block.text}</p>
       <div className="mt-1 flex justify-end">
         <ReplyButton onClick={() => onReply(block)} />
@@ -178,13 +199,21 @@ function HumanBlockView({
  * ADR-0054 D2（Phase 68）: 育つ返事の中の 1 手（`tool_use`/`tool_result`）を 1 行に。
  * フェーズ 73（ADR-0055 D2 ラウンド 5、Claude Code / Codex ライクな磨き）:
  * - `tool_use` は道具名を太字にし、要約は長ければ省略して `title` に全文を残す（`truncateLabel`）。
- * - `tool_result` は既定で畳み、1 行目だけを `<summary>` に見せる（`firstLine`）。中身が 1 行しか
- *   無ければ `<details>` にせず素の行のまま（開いても閉じても同じものが見えるだけの空の三角を出さない）。
+ * - `tool_result` は既定で畳み、1 行目だけを見せる（`firstLine`）。中身が 1 行しか無ければ展開できる
+ *   行にせず素の行のまま（開いても閉じても同じものが見えるだけの空の三角を出さない）。
  * - 長い id・パス・URL（空白の無いトークン）が 393px を飛び出さないよう、`.markdown` と同じ
  *   `overflow-wrap: anywhere`（`break-words`＝`overflow-wrap: break-word` より min-content の計算にも
  *   効くので、詰まったフレックス行でも確実に折り返す）にする。
+ * フェーズ 74（ADR-0055 D2 ラウンド 6、U-G29-2 / P-G29-2 の解消）: `tool_use` も `tool_result` も
+ * 省略・折り畳みがあるときは同じ「行全体をタップで開閉」の作りにした（`<details>` はネイティブに開閉
+ * できるが `aria-expanded` を持たない。スマホには hover が無く「長押しで `title` を見る」しか手段が
+ * 無かったので、`button` + `aria-expanded` の開閉に揃え、キーボード（Enter/Space）でも操作できる
+ * ようにした）。ボタンは `min-h-11 w-full` で 44px のタップ領域を確保する。
+ * `~/routes/tasks.$id.tsx` のタイムライン（ADR-0048 D2、フェーズ 74）もこのコンポーネントをそのまま
+ * 再利用する（「同じ step 行を使う」= 見た目を合わせる、が目的なので export する）。
  */
-function ReplyStepRow({ step }: { step: ConsoleReplyStep }) {
+export function ReplyStepRow({ step }: { step: ConsoleReplyStep }) {
+  const [expanded, setExpanded] = useState(false);
   const toneClass = step.error ? "bg-danger-soft text-danger-soft-fg" : "bg-surface-2/60";
   const errorBadge = step.error && (
     <Badge tone="danger" className="ml-2 shrink-0">
@@ -194,8 +223,8 @@ function ReplyStepRow({ step }: { step: ConsoleReplyStep }) {
 
   if (step.kind === "tool_result") {
     const first = firstLine(step.text);
-    const more = hasMoreThanFirstLine(step.text);
-    if (!more) {
+    const expandable = hasMoreThanFirstLine(step.text);
+    if (!expandable) {
       return (
         <div
           data-testid="console-reply-step"
@@ -208,26 +237,64 @@ function ReplyStepRow({ step }: { step: ConsoleReplyStep }) {
       );
     }
     return (
-      <details data-testid="console-reply-step" className={cn("rounded-md px-2 py-1 font-mono text-xs", toneClass)}>
-        <summary className="cursor-pointer leading-snug [overflow-wrap:anywhere] marker:text-fg-subtle">
-          <span className="text-fg-subtle">→ </span>
-          {first}
-          <span className="ml-1 text-fg-subtle">…</span>
+      <div data-testid="console-reply-step" className={cn("rounded-md font-mono text-xs", toneClass)}>
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          data-testid="console-reply-step-toggle"
+          className="flex min-h-11 w-full items-start gap-1 px-2 py-1 text-left leading-snug [overflow-wrap:anywhere]"
+        >
+          <Icon name={expanded ? "chevronDown" : "chevronRight"} className="mt-0.5 size-3 shrink-0 text-fg-subtle" />
+          <span className="min-w-0 flex-1">
+            <span className="text-fg-subtle">→ </span>
+            {first}
+            {!expanded && <span className="ml-1 text-fg-subtle">…</span>}
+          </span>
           {errorBadge}
-        </summary>
-        <pre className="mt-1 whitespace-pre-wrap [overflow-wrap:anywhere] text-fg-muted">{step.text}</pre>
-      </details>
+        </button>
+        {expanded && (
+          <pre
+            className="mx-2 mb-1.5 whitespace-pre-wrap [overflow-wrap:anywhere] text-fg-muted"
+            data-testid="console-reply-step-body"
+          >
+            {step.text}
+          </pre>
+        )}
+      </div>
+    );
+  }
+
+  if (!toolSummaryTruncated(step.text)) {
+    return (
+      <div
+        data-testid="console-reply-step"
+        className={cn("rounded-md px-2 py-1 font-mono text-xs leading-snug [overflow-wrap:anywhere]", toneClass)}
+      >
+        {step.tool && <span className="font-semibold">[{step.tool}] </span>}
+        {step.text}
+        {errorBadge}
+      </div>
     );
   }
 
   return (
-    <div
-      data-testid="console-reply-step"
-      className={cn("rounded-md px-2 py-1 font-mono text-xs leading-snug [overflow-wrap:anywhere]", toneClass)}
-    >
-      {step.tool && <span className="font-semibold">[{step.tool}] </span>}
-      <span title={step.text}>{truncateLabel(step.text, 90)}</span>
-      {errorBadge}
+    <div data-testid="console-reply-step" className={cn("rounded-md font-mono text-xs", toneClass)}>
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+        title={expanded ? undefined : step.text}
+        data-testid="console-reply-step-toggle"
+        className="flex min-h-11 w-full items-start gap-1 px-2 py-1 text-left leading-snug [overflow-wrap:anywhere]"
+      >
+        <Icon name={expanded ? "chevronDown" : "chevronRight"} className="mt-0.5 size-3 shrink-0 text-fg-subtle" />
+        <span className="min-w-0 flex-1">
+          {step.tool && <span className="font-semibold">[{step.tool}] </span>}
+          {expanded ? step.text : truncateLabel(step.text, TOOL_SUMMARY_MAX_LENGTH)}
+        </span>
+        {errorBadge}
+      </button>
     </div>
   );
 }
@@ -235,10 +302,12 @@ function ReplyStepRow({ step }: { step: ConsoleReplyStep }) {
 function ReplyBlockView({
   block,
   org,
+  fetchedAt,
   onReply,
 }: {
   block: Extract<ConsoleBlock, { kind: "reply" }>;
   org: readonly OrgNode[];
+  fetchedAt: string;
   onReply: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
 }) {
   const result = block.actions_result;
@@ -266,7 +335,8 @@ function ReplyBlockView({
             orgNodeName(block.node_id, org)
           )
         }
-        at={block.at}
+        atIso={block.at}
+        fetchedAt={fetchedAt}
       />
       {streaming && (
         <p className="mb-1.5 text-sm text-fg-subtle italic lg:text-xs" data-testid="console-reply-thinking">
@@ -318,10 +388,12 @@ function TaskBlockView({
   block,
   org,
   projects,
+  fetchedAt,
 }: {
   block: Extract<ConsoleBlock, { kind: "task" }>;
   org: readonly OrgNode[];
   projects: readonly Project[];
+  fetchedAt: string;
 }) {
   const [commenting, setCommenting] = useState(false);
   const [body, setBody] = useState("");
@@ -356,7 +428,7 @@ function TaskBlockView({
         <span className="flex items-center gap-2">
           {/* ADR-0055 D2: 長い id は末尾だけ、全文は title 属性。 */}
           <Mono title={t.task_id}>{shortId(t.task_id)}</Mono>
-          <span>{block.at}</span>
+          <span title={block.at}>{relativeTimeLabel(block.at, fetchedAt)}</span>
         </span>
         <ReplyButton onClick={() => setCommenting((v) => !v)} />
       </div>
@@ -519,9 +591,11 @@ function ProgressLineRow({
 function QuestionBlockView({
   block,
   org,
+  fetchedAt,
 }: {
   block: Extract<ConsoleBlock, { kind: "question" }>;
   org: readonly OrgNode[];
+  fetchedAt: string;
 }) {
   const fetcher = useFetcher<TransitionOutcome>({ key: `console-question-${block.task_id}` });
   const submitting = fetcher.state !== "idle";
@@ -530,7 +604,8 @@ function QuestionBlockView({
       <BlockHeader
         icon="alert"
         who={`${block.node_id ? orgNodeName(block.node_id, org) : "-"} からの質問`}
-        at={block.at}
+        atIso={block.at}
+        fetchedAt={fetchedAt}
       />
       <p data-testid="console-question-text">{block.text}</p>
       {block.answered ? (
@@ -568,10 +643,12 @@ function ApprovalBlockView({
   block,
   org,
   projects,
+  fetchedAt,
 }: {
   block: Extract<ConsoleBlock, { kind: "approval" }>;
   org: readonly OrgNode[];
   projects: readonly Project[];
+  fetchedAt: string;
 }) {
   const fetcher = useFetcher<ApprovalOpOutcome>({ key: `console-approval-${block.approval.id}` });
   const submitting = fetcher.state !== "idle";
@@ -579,7 +656,7 @@ function ApprovalBlockView({
   const decided = a.decision != null;
   return (
     <BlockShell testId="console-block-approval" className="w-full max-w-none border-warning-border bg-warning-soft/40">
-      <BlockHeader icon="shield" who={orgNodeName(a.node_id, org)} at={block.at} />
+      <BlockHeader icon="shield" who={orgNodeName(a.node_id, org)} atIso={block.at} fetchedAt={fetchedAt} />
       <div className="flex flex-wrap items-center gap-2">
         {projectName(a.project_id, projects) && <Badge tone="neutral">{projectName(a.project_id, projects)}</Badge>}
         {a.task_id && (
@@ -650,9 +727,11 @@ function ApprovalBlockView({
 function MilestoneBlockView({
   block,
   projects,
+  fetchedAt,
 }: {
   block: Extract<ConsoleBlock, { kind: "milestone" }>;
   projects: readonly Project[];
+  fetchedAt: string;
 }) {
   const fetcher = useFetcher<ProjectOpOutcome>({ key: `console-milestone-${block.milestone.id}` });
   const submitting = fetcher.state !== "idle";
@@ -673,7 +752,7 @@ function MilestoneBlockView({
 
   return (
     <BlockShell testId="console-block-milestone" className="w-full max-w-none border-primary-border bg-primary-soft/30">
-      <BlockHeader icon="target" who="途中目標の提案" at={block.at} />
+      <BlockHeader icon="target" who="途中目標の提案" atIso={block.at} fetchedAt={fetchedAt} />
       {projectName(m.project_id, projects) && <Badge tone="neutral">{projectName(m.project_id, projects)}</Badge>}
       <p className="mt-1 font-medium" data-testid="console-milestone-title">
         {m.title}
@@ -753,16 +832,18 @@ function ReportBlockView({
   block,
   org,
   projects,
+  fetchedAt,
 }: {
   block: Extract<ConsoleBlock, { kind: "report" }>;
   org: readonly OrgNode[];
   projects: readonly Project[];
+  fetchedAt: string;
 }) {
   const [open, setOpen] = useState(false);
   const r = block.report;
   return (
     <BlockShell testId="console-block-report" className="w-full max-w-none">
-      <BlockHeader icon="send" who={orgNodeName(r.node_id, org)} at={block.at} />
+      <BlockHeader icon="send" who={orgNodeName(r.node_id, org)} atIso={block.at} fetchedAt={fetchedAt} />
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -791,11 +872,17 @@ function ReportBlockView({
   );
 }
 
-function KnowledgeBlockView({ block }: { block: Extract<ConsoleBlock, { kind: "knowledge" }> }) {
+function KnowledgeBlockView({
+  block,
+  fetchedAt,
+}: {
+  block: Extract<ConsoleBlock, { kind: "knowledge" }>;
+  fetchedAt: string;
+}) {
   const total = (block.ingested ?? 0) + (block.inbox ?? 0) + (block.discarded ?? 0);
   return (
     <BlockShell testId="console-block-knowledge" className="w-full max-w-none">
-      <BlockHeader icon="send" who={block.task_title} at={block.at} />
+      <BlockHeader icon="send" who={block.task_title} atIso={block.at} fetchedAt={fetchedAt} />
       <div className="flex flex-wrap items-center gap-2">
         <Link to={`/tasks/${block.task_id}`} className={cn(touchLinkClass, "text-sm underline underline-offset-2")}>
           このタスクを見る

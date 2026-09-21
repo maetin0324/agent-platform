@@ -243,6 +243,56 @@ export function timeline(items: TimelineItem[] = [], taskId = "01BOARDTASK000000
 }
 
 /**
+ * 連続する `worker_progress` イベント（ADR-0048 D2、フェーズ 74）。`/tasks/:id?tab=timeline` の機械検査
+ * （`gui/scripts/mobile-audit.mjs`）が「折り畳み → 展開すると Console と同じ step 行」を実際のデータで
+ * 通ることを確認するための fixture。長い `summary`（90 字超）を混ぜて `~/components/ConsoleBlockItem.tsx::
+ * ReplyStepRow` のタップ展開（U-G29-2 / P-G29-2 の解消）も一緒に検査できるようにする。
+ */
+export function timelineWorkerProgressItems(startSeq = 1): TimelineItem[] {
+  return [
+    {
+      kind: "event",
+      at: "2026-09-19T00:00:10Z",
+      seq: startSeq,
+      event: {
+        type: "worker_progress",
+        run_id: "r1",
+        kind: "tool_use",
+        tool: "Bash",
+        summary: "cargo test --workspace",
+        msg: "",
+      },
+    },
+    {
+      kind: "event",
+      at: "2026-09-19T00:00:11Z",
+      seq: startSeq + 1,
+      event: {
+        type: "worker_progress",
+        run_id: "r1",
+        kind: "tool_use",
+        tool: "Bash",
+        summary:
+          "cargo test --workspace --all-features -- --nocapture 2>&1 | tee /tmp/very/long/path/to/the/output/of/this/particular/test/run.log",
+        msg: "",
+      },
+    },
+    {
+      kind: "event",
+      at: "2026-09-19T00:00:12Z",
+      seq: startSeq + 2,
+      event: {
+        type: "worker_progress",
+        run_id: "r1",
+        kind: "tool_result",
+        summary: "test result: ok. 42 passed; 0 failed\n(詳細はここをタップ)",
+        msg: "",
+      },
+    },
+  ];
+}
+
+/**
  * タイムラインの `knowledge` 項目（ADR-0047 D4/D5、Phase 62）。既定は `applied`
  * （取り込み 1 / 候補 2 / 破棄 0）。`state: "scheduled"` のときは `ingested`/`inbox`/`discarded` は
  * 付かない（celeris が適用前は出さない）。
@@ -942,7 +992,14 @@ export function consoleGrowingReplySnapshot(
     state: "streaming",
     thinking: "考え中…",
     steps: [
-      { kind: "tool_use", tool: "celerisctl", text: "knowledge search 降水予測の長期トレンドについて" },
+      {
+        // フェーズ 74（ADR-0055 D2 ラウンド 6、U-G29-2 / P-G29-2 の解消）: 90 字を超える要約にして、
+        // `~/components/ConsoleBlockItem.tsx::ReplyStepRow` のタップ展開（`toolSummaryTruncated`）が
+        // 機械検査（`gui/scripts/mobile-audit.mjs`）を実データで通ることを確認する。
+        kind: "tool_use",
+        tool: "celerisctl",
+        text: "knowledge search 降水予測の長期トレンドと気候変動の関係について、2010 年から 2024 年までの主要な論文と観測データを対象に検索し、関連する引用文献も合わせて収集する",
+      },
       {
         kind: "tool_result",
         text: "3 件\n- 降水予測の手法比較（2024）\n- 長期トレンド分析（2023）\n- 気候変動と降水（2022）",

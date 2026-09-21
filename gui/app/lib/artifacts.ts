@@ -1,9 +1,11 @@
 import type { ArtifactView, OrgNode, ProjectTaskView, Status, TaskId, WorkspaceSpec } from "~/celeris/types";
-import { formatDuration, secondsBetween } from "~/lib/time-delta";
 
 /**
  * 「成果物」（SPEC §2.1・§2.2・§3.7・§4 の 6）の純粋関数。DOM を描画する unit テストが無い件（G10-U1）を
  * 踏まえ、判断・計算はここに集約する（`~/lib/reports.ts` / `~/lib/work-tree.ts` と同じ作り）。
+ * フェーズ 74（ADR-0055 D2 ラウンド 6）: 「作られた時刻」の相対表示は `artifactRelativeTime` として
+ * ここに複製していたが（`~/lib/reports.ts::relativeTimeLabel` と実装が一字一句同じだった）、
+ * `relativeTimeLabel` に一本化した（1 つの pure helper。`~/components/ArtifactsList.tsx` が直接それを使う）。
  */
 
 /** 案件を横断した成果物一覧の 1 行（`/artifacts` の一覧、`/projects/:id` の「成果物」節で共有）。 */
@@ -129,9 +131,4 @@ export function parseSourcesJson(text: string): SourceLink[] | null {
     });
   }
   return links;
-}
-
-/** 「作られた時刻」の相対表示（`~/lib/reports.ts::relativeTimeLabel` と同じ作り）。 */
-export function artifactRelativeTime(ts: string, fetchedAtIso: string): string {
-  return `${formatDuration(secondsBetween(ts, fetchedAtIso))} 前`;
 }

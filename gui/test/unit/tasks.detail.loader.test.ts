@@ -130,6 +130,8 @@ describe("loadTaskDetail", () => {
       artifacts: artifactList,
       timeline,
       comments,
+      // フェーズ 74（ADR-0055 D2 ラウンド 6）: タイムラインの相対時刻表示の基準時刻（loader が読み込んだ時刻）。
+      fetchedAt: expect.any(String),
       org: [],
       milestones: [],
       // ADR-0046 D3（Phase 59）: `GET /config` を登録していないので落ちて `[]`（自由記述の欄になる）。

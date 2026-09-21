@@ -138,7 +138,12 @@ async function setupMockCeleris() {
       next_cursor: null,
     }),
   );
-  mock.on("GET", `/api/v1/tasks/${TASK_ID}/timeline`, (_req, res) => sendJson(res, 200, fx.timeline([], TASK_ID)));
+  // フェーズ 74（ADR-0055 D2 ラウンド 6）: worker_progress の折り畳み（ADR-0048 D2）が実際のデータで
+  // 機械検査を通ることを確認するため、既定の 4 件に連続する worker_progress を混ぜる（`timeline([])` の
+  // 既定 4 件のあとに繋げる。時刻はそれより後）。
+  mock.on("GET", `/api/v1/tasks/${TASK_ID}/timeline`, (_req, res) =>
+    sendJson(res, 200, fx.timeline([...fx.timeline([], TASK_ID).items, ...fx.timelineWorkerProgressItems()], TASK_ID)),
+  );
   mock.on("GET", `/api/v1/tasks/${TASK_ID}/comments`, (_req, res) =>
     sendJson(res, 200, { items: [fx.taskComment({ task_id: TASK_ID })] }),
   );

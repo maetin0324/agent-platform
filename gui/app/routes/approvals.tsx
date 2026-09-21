@@ -208,7 +208,7 @@ export default function ApprovalsPage({ loaderData }: Route.ComponentProps) {
         ) : (
           <ul className="space-y-2">
             {standingRules.map((r) => (
-              <StandingRuleRow key={r.id} rule={r} org={org} />
+              <StandingRuleRow key={r.id} rule={r} org={org} fetchedAt={fetchedAt} />
             ))}
           </ul>
         )}
@@ -319,7 +319,7 @@ function PendingApprovalCard({
               裏方のタスク
             </Link>
           )}
-          <span>{relativeTimeLabel(head.created_at, fetchedAt)}</span>
+          <span title={head.created_at}>{relativeTimeLabel(head.created_at, fetchedAt)}</span>
         </span>
       </div>
 
@@ -459,7 +459,7 @@ function DecidedApprovalRow({
               裏方のタスク
             </Link>
           )}
-          <span>{relativeTimeLabel(approval.created_at, fetchedAt)}</span>
+          <span title={approval.created_at}>{relativeTimeLabel(approval.created_at, fetchedAt)}</span>
         </span>
       </div>
       <div data-testid="approval-question" className="mt-1.5 text-sm">
@@ -474,7 +474,7 @@ function DecidedApprovalRow({
   );
 }
 
-function StandingRuleRow({ rule, org }: { rule: StandingRule; org: OrgNode[] }) {
+function StandingRuleRow({ rule, org, fetchedAt }: { rule: StandingRule; org: OrgNode[]; fetchedAt: string }) {
   const fetcher = useFetcher<StandingRuleOpOutcome>({ key: `standing-rule-${rule.id}` });
   const submitting = fetcher.state !== "idle";
 
@@ -487,7 +487,10 @@ function StandingRuleRow({ rule, org }: { rule: StandingRule; org: OrgNode[] }) 
       <div className="min-w-0 flex-1">
         <Badge tone={rule.node_id ? "neutral" : "teal"}>{standingRuleTargetName(rule, org)}</Badge>
         <p className="mt-1.5 text-sm text-fg">{rule.rule}</p>
-        <p className="mt-1 text-sm text-fg-subtle lg:text-xs">{rule.created_at}</p>
+        {/* フェーズ 74（ADR-0055 D2 ラウンド 6）: 生の ISO のままだったので、他の一覧と同じ相対表示に揃える。 */}
+        <p className="mt-1 text-sm text-fg-subtle lg:text-xs" title={rule.created_at}>
+          {relativeTimeLabel(rule.created_at, fetchedAt)}
+        </p>
       </div>
       <details className="group shrink-0">
         <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-danger-border bg-danger-soft px-3 text-sm text-danger-soft-fg shadow-xs hover:bg-danger hover:text-white">

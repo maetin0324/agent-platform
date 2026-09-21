@@ -22,7 +22,7 @@ export async function loadConsole(client: CelerisClient, scope: string, request:
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
     client.get<ProjectList>("/projects", { signal: request.signal }).catch(() => ({ items: [] }) as ProjectList),
   ]);
-  return { scope, page, org: org.items, projects: projects.items };
+  return { scope, page, org: org.items, projects: projects.items, fetchedAt: new Date().toISOString() };
 }
 
 /** `POST /console/instruct`（**管理系**、202 `ConsoleInstructAccepted`）。応答はそのまま画面へ渡す。 */

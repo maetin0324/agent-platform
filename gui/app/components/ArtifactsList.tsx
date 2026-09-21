@@ -8,8 +8,9 @@ import { Badge, statusTone } from "~/components/ui/badge";
 import { buttonClass } from "~/components/ui/button";
 import { Icon } from "~/components/ui/Icon";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
-import { artifactRelativeTime, isSourcesArtifact, type ProjectArtifactRow, parseSourcesJson } from "~/lib/artifacts";
+import { isSourcesArtifact, type ProjectArtifactRow, parseSourcesJson } from "~/lib/artifacts";
 import { taskStatusLabel } from "~/lib/labels";
+import { relativeTimeLabel } from "~/lib/reports";
 
 /**
  * 案件を横断した成果物一覧の部品（SPEC §2.2「調査結果の文書と見るべき関連研究へのリンクがまとまって読める」）。
@@ -102,7 +103,9 @@ function ArtifactRow({ row, fetchedAt }: { row: ProjectArtifactRow; fetchedAt: s
               </span>
             )}
           </p>
-          <p className="text-xs tabular-nums text-fg-subtle">{artifactRelativeTime(artifact.ts, fetchedAt)}</p>
+          <p className="text-xs tabular-nums text-fg-subtle" title={artifact.ts}>
+            {relativeTimeLabel(artifact.ts, fetchedAt)}
+          </p>
         </div>
         {canOpen && (
           <div className="flex shrink-0 gap-2">
