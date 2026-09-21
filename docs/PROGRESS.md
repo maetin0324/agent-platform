@@ -10216,3 +10216,150 @@ curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" \
   食っているため（人が許容済み）。供給元が無い間はタスクが ready↔running を繰り返すので、動作確認タスクは `cancel`
   （`{"expected_status":"ready"}`）した。PaperQA のプロキシ経由の完走は **次の昇格（gpt の写像が有効になる）後に再確認**。
 - 提案: claude-oauth も codex と同じく上流エラーの要約（`error.message` / `error.type`）を WARN と応答に出す（Phase 65b は codex のみ）。
+
+## Phase 66 — Qwen トンネルを celeris が張る・LLM source の可視化（ADR-0053 D3/D4。2026-09-21）
+
+Phase 65（D1/D2）に続き、D3（切れにくい Qwen トンネルを celeris 自身が張る）と D4（`GET
+/llm/sources` の可視化を GUI に出す）を実装した。詳しい設計判断・逸脱は `docs/adr/0053-llm-source-proxy.md`
+の「Phase 66 追記」に書いた。
+
+### 受け入れ条件ごと
+
+**1. master 経由の forward、生存監視、鍵→TOTP の順（ADR-0053 D3）**
+
+- `[[clusters.forwards]]`（`listen` / `target`）を設定に追加（`crates/celeris/src/config.rs`
+  `ClusterForwardConfig`、`crates/task-dispatch/src/dispatcher.rs` `ClusterForwardSpec`）。
+- `Dispatcher::refresh_cluster_tunnels`（`refresh_cluster_liveness` と同じ 5 秒間隔）:
+  master が死んでいれば既存の `ClusterConnector`（ADR-0032 D3 の鍵認証フック）を **`auth` の値に
+  関わらず**再利用して繋ぎ直しを試す（「TOTP を要求する前に鍵認証を試す」）。生きていれば forward
+  ごとに `TunnelProbe` で probe → 届かなければ `TunnelForwardEnsurer` で(再)確立 → 再 probe。
+  状態遷移（Up/Down/Restored/LoginNeeded）は `tunnel_events`（`take_tunnel_events` で取り出す）に
+  積む。
+- テスト（`crates/task-dispatch/src/dispatcher.rs`、偽の ssh を一切使わず、`ClusterConnector`/
+  `TunnelForwardEnsurer`/`TunnelProbe` を全部フェイクの closure で差し替えた決定的な状態機械テスト）:
+  - `cargo test -p task-dispatch --lib tunnel_` → **4 passed**:
+    `tunnel_down_then_key_auth_ok_brings_the_forward_up`（down→鍵認証 ok→forward up、`Up` イベント）、
+    `tunnel_down_and_key_auth_fails_marks_login_needed_once`（down→鍵認証も失敗→login_needed が
+    立ち、2 回目の tick では再度立たないこと）、
+    `tunnel_forward_missing_while_master_alive_is_re_added`（forward が消えても master が生きていれば
+    再確立を試すこと）、
+    `tunnel_probe_failure_while_master_alive_tries_to_reforward_then_reports_down`（再確立に失敗すれば
+    `Down` イベントになること）。
+
+**2. Discord の種（`cluster_login_needed`）（ADR-0053 D3）**
+
+- `task_core::notify::NotificationKind::ClusterLoginNeeded`（`"cluster_login_needed"`）を追加
+  （既存 6 種 → 7 種）。`ReportKind` は増やさず、`task_core::report::report_for_cluster_login_needed`
+  が `bad_news` の見出しに決まった接尾辞（`"は TOTP ログインが必要"`）を付け、
+  `celeris::notify::scan_cluster_login_needed` がそれだけを拾う（`scan_bad_news` は同じ接尾辞を除外
+  して二重に鳴らさない）。`key` = 報告 id、報告自体は `Dispatcher::mark_login_needed` が**同じ
+  outage の間は 1 回だけ**書く（in-memory dedup。復旧して再び落ちれば新しい報告 → 新しい key →
+  次の outage でまた 1 回鳴る）。
+- `cargo test -p task-core --lib notify::tests`、`cargo test -p celeris --lib notify::` は下記の
+  `cargo test --workspace` に含む（個別の新規テストは追加していない箇所もあるが、
+  `NotificationKind::ALL` を回すテストが 7 種に自動で追従することを既存テストで確認）。
+
+**3. systemd の tunnel unit の撤去（ADR-0053 D3）**
+
+- `scripts/selfdeploy/install-units.sh` に `--remove-qwen-tunnel` を追加。既存の `--remove-old`
+  （改名前のテンプレート unit 専用、`SD_OLD_UNITS` 駆動）とは別枠にした
+  （`celeris-qwen-tunnel.service`/`.timer` はこのリポジトリの `deploy/systemd/` に元から無い、
+  手で `~/.config/systemd/user/` に置かれた単発 unit のため）。`systemctl --user disable --now` の
+  あと unit ファイルを削除する。**このセッションでは `systemctl` を一切実行していない**（`bash -n`
+  で構文確認のみ）。本番での実行手順は下の「本番運用手順」に書いた。
+
+**4. `GET /llm/sources` の拡張（ADR-0053 D4）**
+
+- `LlmSourceAccountView` に `remaining_short`（5 時間 / Codex 週内相当）・`remaining_long`（7 日）を
+  追加（`remaining` は従来どおり両者のうち厳しい方。`crates/llm-proxy/src/sources_view.rs`
+  `window_remaining`）。
+- `LlmSourcesView` に `celeris_tiers: [{tier, resolves_to}]` を追加（`crates/llm-proxy/src/server.rs`
+  `ProxyState::resolves_tier` が実際の選択 `attempts_for` と同じ決定的な計算を副作用なしでなぞる）。
+- `docs/gui/api.md` §3.108 / §3.23（`GET /clusters` のトンネルフィールド）/ §3.64〜3.65（通知の種の
+  一覧）を更新し、`scripts/sync-gui-docs.sh` で `gui/docs/celeris-api-v1.md` に反映。
+
+**5. GUI（`/accounts` の LLM source 節、`/clusters` のトンネル/ログイン必要の表示）**
+
+- GUI 側の実装・検証は `gui/docs/PROGRESS.md` の **Phase G27** に書いた（要約: 純関数
+  `app/lib/llm-sources.ts` の vitest 17 件、`/accounts` に「LLM source」節、`/clusters` に
+  トンネル一覧と「ログインが必要（TOTP）」の Alert、`pnpm mobile-audit` は追加前後とも
+  `{"ok": true, "total": 0}`）。
+
+### ゲート
+
+- `cargo test --workspace --no-fail-fast`: **exit 0。1627 passed / 0 failed**（doctest 含む全クレート。
+  1 件 `sse_delivers_created_quickly_and_resumes_from_last_event_id` が並列実行時のみ 1 回だけ
+  flaky に落ちたが、単体では安定して通ることを確認済み（既存の e2e テストで、今回の変更とは無関係な
+  タイミング依存）。再実行で 1627 passed / 0 failed）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: **exit 0。警告 0**。
+- `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::tests::committed_schema_matches_generated`:
+  ok。`docs/api/v1/api-v1.schema.json` を再生成し、差分を確認した上でコミット対象に含めた。
+- GUI: `pnpm lint` / `pnpm typecheck` exit 0、`pnpm test` **877 passed**、`pnpm build` exit 0、
+  `pnpm gen:types` を 2 回連続実行して差分ゼロ（安定）、`bash scripts/sync-gui-docs.sh --check` up to
+  date、`pnpm mobile-audit` `{"ok": true, "total": 0}`。
+- 非テストコードに `unwrap()` を増やしていない（`grep -rn "\.unwrap()" crates/*/src` の新規差分を目視
+  確認。テスト内の `unwrap()` のみ）。
+- ディスパッチャ・ストアに LLM 呼び出しは無い（`refresh_cluster_tunnels` は ssh と HTTP GET
+  （`/v1/models` の probe）だけで、LLM の推論は一切呼ばない）。
+
+### 本番運用手順（実機はこのセッションでは未実施。ADR-0009 P-34）
+
+このサンドボックスには本物の pegasus / bnode150 も TOTP も無いため、以下は**未実施**。認証・
+ネットワークが使える環境の人（またはエージェント）が実行し、結果をここに追記すること。
+
+1. **設定に追加するキー**（`~/.config/celeris/config.toml`、または `config.toml.next` 経由の
+   段階反映。`docs/selfdeploy.md` の手順に従う）:
+
+   ```toml
+   [[clusters]]
+   id = "pegasus"
+   host = "pegasus"
+   auth = "totp"          # 既存の設定のまま（ADR-0032）
+
+   [[clusters.forwards]]
+   listen = "127.0.0.1:18000"   # 既存の Qwen 中継（[[llm_proxy.sources.openai_compatible]] の base_url）と同じ値にする
+   target = "bnode150:18000"    # pegasus から見た Qwen の待受
+   ```
+
+   `[llm_proxy.sources.openai_compatible]` 側の `base_url = "http://127.0.0.1:18000/v1"` は変更不要
+   （celeris がこのポートを維持するようになるだけで、Qwen 中継の設定自体は Phase 65 のまま）。
+
+2. **人が一度だけ行うこと**: celeris を新しい版に反映した後、pegasus の ssh master が生きていなければ
+   GUI の「クラスタ」画面で（`tunnel_login_needed: true` になっているはず）「接続」→ TOTP を 1 回
+   入力する。繋がれば celeris が forward を自動で張る（人の操作はこれだけ）。
+3. **`celeris-qwen-tunnel.service`/`.timer` の撤去**: celeris の新しい版が実際に forward を張れて
+   いる（`GET /clusters` の `tunnel_forwards[].up == true`）ことを確認してから、
+   `scripts/selfdeploy/install-units.sh --remove-qwen-tunnel` を実行する（人が実行。`systemctl` を
+   使うので、このセッションでは実行していない）。
+4. **`celeris/cheap` が Qwen に戻ることの確認**:
+   - `GET /api/v1/clusters` → 対象クラスタの `tunnel_forwards[0].up == true`、`tunnel_login_needed
+     == false`。
+   - `GET /api/v1/llm/sources` → `openai-compatible:qwen` の `reachable == true`、
+     `celeris_tiers` の `cheap`（既定で `prefer_free = true` なら他の tier も）の `resolves_to` が
+     `"openai-compatible:qwen"` になっていること。
+   - `curl -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" -H 'content-type: application/json' \
+     -d '{"model":"celeris/cheap","messages":[{"role":"user","content":"hi"}]}' \
+     http://127.0.0.1:18100/v1/chat/completions` → 応答ヘッダ `x-celeris-source: openai-compatible:qwen`。
+5. **トンネルが切れた状態から TOTP 1 回で復帰することの確認**: pegasus の ssh master を人が
+   `ssh -O exit pegasus` 等で意図的に落とし、`GET /clusters` の `tunnel_login_needed` が `true` に
+   変わり Discord に `cluster_login_needed` が 1 通だけ届くことを確認 → GUI で TOTP を入力 →
+   `tunnel_login_needed` が `false` に戻り `tunnel_forwards[].up` が `true` に戻ることを確認（上の
+   手順 4 も併せて再確認）。
+
+### 未解決事項
+
+- 上記「本番運用手順」の 1〜5 は実機未実施（認証・ネットワークが使える環境の人／エージェントに依頼。
+  ADR-0009 P-34）。
+- `tunnel_events`（Up/Down/Restored/LoginNeeded の履歴）は `tracing::info!` には出るが、GUI 専用の
+  タイムラインへはまだ配線していない（`GET /clusters` の現在値 `tunnel_forwards[].up` /
+  `tunnel_login_needed` は見える。ADR-0053 の Phase 66 追記に書いたとおり、`take_tunnel_events` を
+  将来の Console 統合のための取り出し口として残した）。
+- `tunnel_forward_ensurer` のフォールバック（`ssh -N -L` を別プロセスで張る）は celeris の終了時に
+  `TunnelForwardRegistry::drop` が全部 kill するが、celeris が異常終了（SIGKILL 等）した場合は
+  孤児プロセスとして残りうる（`ClusterMaster`/`ClusterConnectSession` と同じ制約。ADR-0032 から
+  変わっていない）。
+
+### 提案
+
+- `[[clusters.forwards]]` は Qwen 専用ではなく汎用の port forward として作った。将来、他のクラスタ側
+  サービス（例えば別の内部 API）をトンネルする必要が出たら同じ仕組みを再利用できる。
