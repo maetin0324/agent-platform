@@ -128,6 +128,33 @@ fn has_status_context(text: &str, start: usize, end: usize) -> bool {
     matches!(chars.next(), Some(c) if c.is_ascii_uppercase())
 }
 
+/// ADR-0054 D1（Phase 67）: `context.session` で resume を頼んだ run が、そのセッションを
+/// アダプタに拒否された（見つからない・失効した）ように見えるか。`claude-code` の crash 分類
+/// （`stderr` 末尾）や `codex` の crash 分類に使う決定的な部分一致（大文字小文字を無視）。
+///
+/// **この文言の一覧は実機で確認していない**（ADR-0009 P-34: 本物の CLI に「無い session id」で
+/// `--resume`/`resume` を渡して観測できる環境がこのサンドボックスに無い）。誤って一致しなくても
+/// run 自体は通常どおり失敗として扱われるだけで安全（次の run が新規セッションになる機会を逃すだけ）。
+/// 実機で確認できたら、ここに実際の文言を追加すること。
+const RESUME_REJECTION_PATTERNS: &[&str] = &[
+    "no conversation found",
+    "session not found",
+    "no session found",
+    "unknown session",
+    "invalid session",
+    "session does not exist",
+    "session has expired",
+    "could not find session",
+    "resume: not found",
+];
+
+/// `resume` を頼んだ run のエラー文面（`stderr` 末尾・結果メッセージ）が
+/// [`RESUME_REJECTION_PATTERNS`] のどれかを含むか。呼び出し側（`resume` を頼んでいたときだけ）で使う。
+pub fn looks_like_resume_rejection(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    RESUME_REJECTION_PATTERNS.iter().any(|p| lower.contains(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,5 +330,20 @@ ImportError: cannot import name 'Image' from 'PIL' (unknown location)
             classify_provider_failure("NOT LOGGED IN"),
             Some(ProviderFailure::AuthFailed)
         );
+    }
+
+    #[test]
+    fn resume_rejection_matches_known_phrases_case_insensitively() {
+        for text in [
+            "Error: No conversation found for session 01ARZ3",
+            "session not found",
+            "SESSION NOT FOUND",
+            "invalid session id",
+            "could not find session 01ARZ3",
+        ] {
+            assert!(looks_like_resume_rejection(text), "{text}");
+        }
+        assert!(!looks_like_resume_rejection("wall clock exceeded"));
+        assert!(!looks_like_resume_rejection(""));
     }
 }

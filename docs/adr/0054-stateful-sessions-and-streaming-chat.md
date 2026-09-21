@@ -54,3 +54,82 @@
   `--resume` で走り、前置きが差分だけになっていること（`runs/<id>/request.json`）。
 - **Phase 68（D2・D3）**: run 中の progress を Console へ（`text` の追記、`tool_use` の行、actions で止まる）、読み取り道具の許可、入力のキュー、
   GUI のチャット吹き出し、「新しい会話」。実機: スマホ幅で 1 往復して考え → tool call → タスクのカードが順に出る。
+
+## Phase 67 追記（実装時の逸脱・明確化。2026-09-21）
+
+- **`node_sessions`**（migration 0023、schema_version 23）: `id, node_id, kind('conversation'|'lead'),
+  project_id, adapter, account_id, session_id, turns, approx_tokens, created_at, last_used_at, retired_at`。
+  `crates/task-core/src/node_session.rs`。「有効なセッション」は `retired_at IS NULL` の行が高々 1 件、という
+  不変条件はストア自身では強制せず（部分 UNIQUE インデックスは使わない）、`task-dispatch` 側が
+  `node_session_retire` → `node_session_create` の順で呼ぶことで保つ（DESIGN 原則 1: ストアに判断を入れない）。
+- **判断の純粋関数**は `crates/task-dispatch/src/sessions.rs`（`decide` / `diff_lines` / `summary_lines`）に
+  切り出した。`decide(active, adapter_id, account, rollover_tokens, resume_failed) -> Resume | Fresh(reason)`
+  で、`resume_failed` → `account_id` 不一致 → `adapter_id` 不一致 → `approx_tokens >= rollover_tokens` の順に見る。
+  I/O は `Dispatcher::resolve_node_session`（`dispatcher.rs`）が行う。
+- **アダプタごとの継続**（`RunContext.session: Option<SessionHandle{adapter, session_id, resume}>`）:
+  - `claude-code`: `resume = false` なら celeris が前もって決めた ULID を `--session-id`、`resume = true`
+    なら `--resume <id>`（`claude_code.rs`）。
+  - `codex`: `[adapters.codex] resume_mode`（既定 `"exec_resume"`）で `codex exec resume <id>` か
+    `-c experimental_resume=<path>` かを選ぶ。**受け入れ条件の「バージョンプローブ」ではなく設定フラグ**を
+    選んだ（起動のたびに `codex --version` を呼ぶ副作用・キャッシュ管理を避けるため。値は
+    `celeris/src/config.rs::resolved_resume_mode` が決定的に解決し、未知の値は既定にフォールバック）。
+    `codex` は run の途中で `thread.started` イベントから実際のセッション id を確定させるので、
+    `EventSink::session_established` で `node_sessions.session_id` を上書きする（`codex.rs`）。
+  - `acp`: `resume = false` なら `session/new`、`resume = true` なら `session/load`。拒否されたら
+    `EventSink::session_resume_failed` を呼ぶ（`acp.rs`）。
+  - **resume 拒否の検出**は `crates/task-worker/src/provider.rs::looks_like_resume_rejection`
+    （エラーメッセージの既知の言い回しを見る決定的な文字列判定。LLM は使わない）。検出したら
+    `EventSink::session_resume_failed` を通じて**その場で** `node_sessions` を retire する（次の
+    `resolve_node_session` を待たない）。`Dispatcher::resolve_node_session` に渡す `resume_failed` 引数は
+    現状常に `false`（このイベントソースの経路で先に retire 済みのため、次回は自然に `NoActive` になる。
+    下の「既知の逸脱」参照）。
+- **rollover**: `[sessions] rollover_tokens`（既定 400,000。`crates/celeris/src/config.rs::SessionsConfig`）。
+  `Dispatcher::on_worker_finished`（CoS の対話 run）と `Dispatcher::on_review_finished`（部門長のレビュー
+  run）が、run の usage（`input_tokens + output_tokens`）が分かった時点で `node_session_touch` を呼び、
+  `approx_tokens` に積む。次の `resolve_node_session` 呼び出しが `approx_tokens >= rollover_tokens` を見て
+  作り直す。
+- **アカウント変更**: `decide` が `active.account_id != account`（今回選ばれたアカウント）を見て
+  `Fresh(AccountChanged)` にする。プールが枯渇して別アカウントに倒れたときも同じ経路。
+- **前置きの差分化**（D1「前置きは継続中は差分だけ」）: `Dispatcher::run_extras` で、CoS の対話 run が
+  **継続中**（`session.resume == true`）のときだけ `node`（brief）・`memory`（記憶）・`organization`
+  （組織の一覧）・`conversation`（直近のやり取り）・`active_projects`（進行中の案件）を**空にする**
+  （前置きに出さない）。新規セッション（`resume == false`。初回・rollover・アカウント変更・resume 失敗の
+  後のすべて）ではこれまでどおり全量を渡す。差分そのもの（`session_diff`）は
+  `Dispatcher::session_diff_since`（新しい人の発言・dispatch したタスクの終端と要約・認可の結果・新しい
+  案件）が組み、`crate::sessions::diff_lines`（純粋関数、`since` より後だけを残す）でフィルタする。
+  部門長（`kind = lead`）のレビュー run はもともと brief・記憶・組織図を渡さない設計（ADR-0033 D4: 判定は
+  成果物と条件だけで決める）なので、この差分化の対象外（`session`/`session_diff` は渡すが、他は元から空）。
+- **`POST /console/new-conversation`**（`crates/task-api/src/console.rs`）: CoS の継続セッションを
+  `node_session_retire` で捨てるだけの薄い管理系エンドポイント。ディスパッチャに触らない。204、本文なし。
+  `docs/gui/api.md` §3.109。
+- **部門長のセッション（ADR-0051 のレビュー run）**: `Dispatcher::pick_reviewer` が、対象タスクの部署
+  （`task_core::department_of`）が分かれば `resolve_node_session(<department>, SessionKind::Lead, None, …)`
+  を呼び、`ReviewerRun.session`/`session_diff` として `review::review_task` の `RunContext` に渡す
+  （`review.rs`）。部署が無い仕事（従来の独立レビュアー）はこれまでどおりセッションを持たない。
+
+### 既知の逸脱・未解決事項
+
+1. **「前のセッションの要約」と「直近のやり取り」の重複**: 新規セッションになった理由が `NoActive`
+   以外（rollover・アカウント変更・resume 失敗）のとき、`session_diff` に「前のセッションの要約」
+   （対話履歴の末尾 20 件）が乗るが、この場合 `continuing == false` なので `context.conversation`
+   （同じく末尾 20 件、別の見出し）も**そのまま渡る**。同じ内容が 2 つの節に出る（誤りではないが
+   冗長。数百トークン程度）。直すなら「summary が乗る run では `conversation` を空にする」という
+   条件を `run_extras` に足す（今回は時間の都合で見送った。次の Phase での改善候補）。
+2. **`resolve_node_session` の `resume_failed` 引数は常に `false`**: 実際の resume 拒否の検出と retire は
+   `EventSink::session_resume_failed`（run の途中、アダプタが拒否を検出した時点）で先に行われるため、
+   次に `resolve_node_session` を呼ぶ時点では既に `active = None`（`FreshReason::NoActive`）になっている。
+   結果として resume 失敗後の最初の run は「要約なし」の全量前置きになる（`conversation` フィールドに
+   直近のやり取りはそのまま乗るので、実害は小さい）。`resume_failed` 引数自体は、将来
+   `resolve_node_session` を呼ぶ側が retire 前の状態を渡せるようにする拡張の余地として残した。
+3. **`codex` の `resume_mode` は設定フラグ**（バージョンプローブではない）。既定 `exec_resume`。
+   実機で使っている codex CLI が `codex exec resume` に対応しないバージョンなら
+   `resume_mode = "experimental_resume"` に手動で切り替える必要がある（`config/celeris.codex.example.toml`
+   に注記）。
+4. **実機確認は未実施**（ADR-0009 P-34。本物の claude-code/codex/acp CLI も外向きネットワークも無い
+   サンドボックスのため）。「CoS に 3 往復して 2 回目以降が `--resume` で走り、前置きが差分だけになって
+   いること（`runs/<id>/request.json`）」は、`crates/task-worker/src/claude_code.rs` の
+   `request_json_records_the_session_handle` テストと、`crates/task-dispatch/src/dispatcher.rs` の
+   `a_continuing_cos_session_drops_the_full_preamble_and_a_fresh_one_keeps_it` テスト（偽アダプタ経由、
+   `run_extras` の出力を直接検査）で代替した。本番での確認手順は `docs/PROGRESS.md` の Phase 67 節に書いた。
+5. **GUI の「継続中のセッション」表示（D3 の一部）は今回に含めない**（Phase 67 は D1 のみが対象。D3 の
+   node-page indicator は Phase 68 の GUI 作業とまとめて行う）。

@@ -56,6 +56,13 @@ pub struct ReviewerRun {
     /// `[[roles]]` から決定的に組む）。ハーネスで動く分野なら、レビュアーのプロンプトに「成果物の名前は
     /// 固定」の規約が出る（`claude_code::harness_artifacts_section_for_review`）。
     pub subject_genre: Option<task_worker::GenreContext>,
+    /// ADR-0054 D1（Phase 67）: 部署の根ノード（engineering/research/operations）の**継続セッション**
+    /// （`kind = lead`）。対象タスクに部署が無い、またはアダプタが継続に対応しないときは `None`
+    /// （前置きは Phase 66 までとバイト単位で同じ）。ディスパッチャが `resolve_node_session` で決める。
+    pub session: Option<task_worker::protocol::SessionHandle>,
+    /// ADR-0054 D1: `session` が継続中（`resume = true`）なら前回以降の差分、新規（`resume = false`）で
+    /// 要約が要るときは前セッションの要約。どちらでもなければ空。
+    pub session_diff: Vec<String>,
 }
 
 /// `Plan` kind の検証パラメータ（ADR-0007 D2/D4, ADR-0028 D3）。
@@ -643,6 +650,10 @@ async fn run_reviewer_inner(
             // Phase 38（ADR-0028 追記）: 対象タスクの分野の manifest だけは渡す（ハーネスで動く分野の
             // 成果物の名前は固定で、`papers.json` は検索コーパスであって答えではない、を伝えるため）。
             subject_genre: subject_genre.clone(),
+            // ADR-0054 D1（Phase 67）: 部署の根ノードの継続セッション（`kind = lead`）。部署が無い・
+            // アダプタが対応しない run では `None` / 空（Phase 66 までとバイト単位で同じ）。
+            session: run.session.clone(),
+            session_diff: run.session_diff.clone(),
             // ADR-0033 D4 / D6: Reviewer run は「人」ではなく独立した判定なので、役職・記憶・やり取り・
             // 組織図は渡さない（判定は成果物と条件だけで決める）。
             ..RunContext::default()
@@ -993,6 +1004,8 @@ mod tests {
             sink: Box::new(RecordingSink::default()),
             hint: reviewer_hint(),
             subject_genre: None,
+            session: None,
+            session_diff: Vec::new(),
         }
     }
 
@@ -1100,6 +1113,8 @@ mod tests {
             sink: Box::new(RecordingSink::default()),
             hint: reviewer_hint(),
             subject_genre: None,
+            session: None,
+            session_diff: Vec::new(),
         };
         let out = review_task(
             &task,

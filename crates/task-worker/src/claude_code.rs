@@ -727,8 +727,29 @@ async fn run_claude_code(
         .arg("--permission-mode")
         .arg(&config.permission_mode)
         .arg("--max-turns")
-        .arg(req.task.budget.max_turns.to_string())
-        .arg("--no-session-persistence");
+        .arg(req.task.budget.max_turns.to_string());
+    // ADR-0054 D1（Phase 67）: `context.session`（この run が継続セッションの一部）が無ければ、
+    // Phase 66 までと同じ `--no-session-persistence`（session を残さない）。ある場合は、そのアダプタが
+    // `claude-code` のときだけ、初回は `--session-id <id>`（これから使う id を固定）、2 回目以降は
+    // `--resume <id>`（続ける）に切り替える。他アダプタ向けの `session` は無視する（渡り歩きは無い）。
+    // ADR-0054 D1（Phase 67）: `resume` を頼んだ run かどうかは、後段の crash 分類（resume 失敗の
+    // 検出）でも使う。
+    let is_resuming = req
+        .context
+        .session
+        .as_ref()
+        .is_some_and(|s| s.adapter == ClaudeCodeAdapter::ID && s.resume);
+    match req.context.session.as_ref() {
+        Some(session) if session.adapter == ClaudeCodeAdapter::ID && session.resume => {
+            command.arg("--resume").arg(&session.session_id);
+        }
+        Some(session) if session.adapter == ClaudeCodeAdapter::ID => {
+            command.arg("--session-id").arg(&session.session_id);
+        }
+        _ => {
+            command.arg("--no-session-persistence");
+        }
+    }
     if let Some(model) = &config.model {
         command.arg("--model").arg(model);
     }
@@ -749,6 +770,16 @@ async fn run_claude_code(
     let mut child = command.spawn().map_err(AdapterError::Spawn)?;
     // ADR-0044 §5 Phase 53 追記（Phase 55）: この run のプロセスグループを覚える（`kill_tree` の入口）。
     let _process_group = crate::process_group::ProcessGroup::register(run_id, child.id());
+    // ADR-0054 D1（Phase 67）: 起動できたら、このアダプタ宛ての継続セッションの id をそのまま報告する
+    // （claude-code は id を`自分で`固定するので、成功した spawn の直後に確定する）。
+    if let Some(session) = req
+        .context
+        .session
+        .as_ref()
+        .filter(|s| s.adapter == ClaudeCodeAdapter::ID)
+    {
+        sink.session_established(&session.session_id);
+    }
 
     let stdout = child
         .stdout
@@ -859,6 +890,13 @@ async fn run_claude_code(
                 };
                 let tail = read_tail(&stderr_log_path, 4096).await;
                 let pf = classify_provider_failure(&tail);
+                // ADR-0054 D1（Phase 67）: resume を頼んだ run が、セッションを拒否されたように見える
+                // crash なら報告する（ディスパッチャが `node_sessions` を retire し、次の run は新規
+                // セッションになる）。文言は実機で確認していない（`provider::looks_like_resume_rejection`
+                // のコメント参照）。
+                if is_resuming && crate::provider::looks_like_resume_rejection(&tail) {
+                    sink.session_resume_failed(&tail);
+                }
                 (
                     Terminal::Error {
                         message: format!(
@@ -1137,6 +1175,10 @@ mod tests {
         structured: Mutex<Vec<(String, task_core::ProgressFields)>>,
         delegated: Mutex<Vec<Vec<DelegateTask>>>,
         rate_limits: Mutex<Vec<RateLimitObservation>>,
+        /// ADR-0054 D1（Phase 67）: `session_established` に報告された id。
+        session_established: Mutex<Vec<String>>,
+        /// ADR-0054 D1（Phase 67）: `session_resume_failed` に報告された理由。
+        session_resume_failed: Mutex<Vec<String>>,
     }
 
     impl EventSink for RecordingSink {
@@ -1165,6 +1207,18 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(obs);
+        }
+        fn session_established(&self, session_id: &str) {
+            self.session_established
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(session_id.to_string());
+        }
+        fn session_resume_failed(&self, reason: &str) {
+            self.session_resume_failed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(reason.to_string());
         }
     }
 
@@ -2569,5 +2623,214 @@ printf '%s\n' '{"type":"turn.completed"}'
                 "account-a"
             );
         }
+    }
+
+    fn args_log_script() -> &'static str {
+        r#"
+for a in "$@"; do printf '%s\0' "$a" >> args.log; done
+mkdir -p artifacts
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"type":"turn.completed"}'
+"#
+    }
+
+    fn captured_args(dir: &std::path::Path) -> Vec<String> {
+        let args = std::fs::read_to_string(dir.join("args.log")).unwrap();
+        args.split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// ADR-0054 D1（Phase 67）: `context.session` が無ければ Phase 66 までと同じ
+    /// `--no-session-persistence`。
+    #[tokio::test]
+    async fn without_a_session_the_cli_keeps_no_session_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let _ = adapter
+            .run(req, "run-1", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(args.contains(&"--no-session-persistence".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    /// ADR-0054 D1（Phase 67）: 継続セッションの**最初の run**（`resume: false`）は
+    /// `--session-id <id>`（これから使う id を固定）で、`--no-session-persistence` は付かない。
+    #[tokio::test]
+    async fn a_fresh_session_passes_session_id_not_no_session_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: ClaudeCodeAdapter::ID.to_string(),
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            resume: false,
+        });
+        let _ = adapter
+            .run(req, "run-1", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(!args.contains(&"--no-session-persistence".to_string()));
+        let idx = args
+            .iter()
+            .position(|a| a == "--session-id")
+            .expect("--session-id present");
+        assert_eq!(args[idx + 1], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+        assert!(!args.contains(&"--resume".to_string()));
+    }
+
+    /// ADR-0054 D1（Phase 67）: 継続セッションの**2 回目以降**（`resume: true`）は `--resume <id>`。
+    #[tokio::test]
+    async fn a_continuing_session_passes_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: ClaudeCodeAdapter::ID.to_string(),
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-2", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(!args.contains(&"--no-session-persistence".to_string()));
+        assert!(!args.contains(&"--session-id".to_string()));
+        let idx = args
+            .iter()
+            .position(|a| a == "--resume")
+            .expect("--resume present");
+        assert_eq!(args[idx + 1], "01ARZ3NDEKTSV4RRFFQ69G5FAV");
+    }
+
+    /// `context.session` が別アダプタ向けなら無視する（渡り歩きは無い）。
+    #[tokio::test]
+    async fn a_session_for_another_adapter_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: "codex".to_string(),
+            session_id: "codex-session".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-3", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(args.contains(&"--no-session-persistence".to_string()));
+    }
+
+    /// `runs/<run_id>/request.json` に `context.session` がそのまま残る（実装依頼の受け入れ条件:
+    /// resume の有無が `request.json` から読み取れること）。
+    #[tokio::test]
+    async fn request_json_records_the_session_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: ClaudeCodeAdapter::ID.to_string(),
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-4", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let request_json = std::fs::read_to_string(
+            dir.path().join("runs").join("run-4").join("request.json"),
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&request_json).unwrap();
+        assert_eq!(value["context"]["session"]["resume"], true);
+        assert_eq!(
+            value["context"]["session"]["session_id"],
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        );
+        assert_eq!(value["context"]["session"]["adapter"], "claude-code");
+    }
+
+    /// ADR-0054 D1（Phase 67）: `--session-id` で spawn できたら、resume していなくても
+    /// `session_established` を報告する（次の run から確実に resume できるよう、celeris 自身が
+    /// 選んだ id をそのまま確認させる）。
+    #[tokio::test]
+    async fn a_fresh_session_reports_session_established() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: ClaudeCodeAdapter::ID.to_string(),
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            resume: false,
+        });
+        let sink = RecordingSink::default();
+        let _ = adapter
+            .run(req, "run-5", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.session_established.lock().unwrap().as_slice(),
+            ["01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string()]
+        );
+        assert!(sink.session_resume_failed.lock().unwrap().is_empty());
+    }
+
+    /// ADR-0054 D1（Phase 67）: `--resume` を頼んだ run が、既知の「セッションが見つからない」文言を
+    /// 含む stderr で crash したら `session_resume_failed` を報告する（実機での文言は未確認。
+    /// `provider::looks_like_resume_rejection` のコメント参照）。
+    #[tokio::test]
+    async fn a_rejected_resume_reports_session_resume_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            "echo 'Error: No conversation found for session 01ARZ3' 1>&2; exit 1",
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: ClaudeCodeAdapter::ID.to_string(),
+            session_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_string(),
+            resume: true,
+        });
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-6", default_limits(), &sink).await;
+        // 供給側失敗としては分類されない文面なので run 自体は retryable な通常のエラーで返る。
+        match outcome {
+            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
+        }
+        let failed = sink.session_resume_failed.lock().unwrap();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("No conversation found"), "{failed:?}");
+    }
+
+    /// resume していない run が同じ文言で crash しても `session_resume_failed` は報告しない
+    /// （resume を頼んでいない run には関係が無い判断のため）。
+    #[tokio::test]
+    async fn a_crash_without_resuming_does_not_report_session_resume_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            "echo 'Error: No conversation found for session 01ARZ3' 1>&2; exit 1",
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let _ = adapter.run(req, "run-7", default_limits(), &sink).await;
+        assert!(sink.session_resume_failed.lock().unwrap().is_empty());
     }
 }

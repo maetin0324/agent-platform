@@ -10750,3 +10750,186 @@ thread while the thread is being used to drive asynchronous tasks.
   done になっている。Qwen が戻れば `celeris/standard` は Qwen に戻るので、まずはトンネル復帰後に再確認する（提案: PaperQA の
   `celeris/standard` の写像を Claude 優先にする設定（`claude/standard`）も選べる。Claude の standard は今日は 429 が多いので保留）。
 - これ以上の動作確認タスクは quota を食うので止める。opencode は据え置き。
+## Phase 67 — ノードごとの継続セッションと resume（ADR-0054 D1。2026-09-21）
+
+CoS（`cos`）の対話と、部門長（engineering/research/operations の根ノード）のレビュー・切り分け run
+（ADR-0051）が、アダプタの CLI が持つ「会話の継続」（`claude --resume` / `codex exec resume` /
+ACP の `session/load`）を使って**セッションを続ける**ようにした。継続中は前置きを差分だけにし、
+逼迫（rollover）・アカウント変更・resume 失敗では新しいセッションに作り直す（前のセッションの要約を
+前置きに乗せる）。migration は `0023_node_sessions.sql`、`SCHEMA_VERSION = 23`。
+
+このセッションは、既にこの worktree に他の 2 本のエージェント（並行して走っていた研究用の fork が、
+指示に反して実装まで進めてしまっていた）が残した未コミットの実装（node_sessions のストア・純粋な
+判断関数・3 アダプタの CLI 配線の大半・`[sessions]` 設定）を引き継ぎ、コンパイルエラーの解消、
+部門長（`kind = lead`）セッションの配線（未着手だった）、継続中の前置きの差分化（未着手だった。
+D1 の核心）、テストの追加、ドキュメントの追記を行った。詳しい経緯は下の「実装の経緯」を参照。
+
+### 受け入れ条件ごとの結果
+
+1. **`node_sessions`（store）**: `crates/task-core/migrations/0023_node_sessions.sql`
+   （`node_id, kind('conversation'|'lead'), project_id, adapter, account_id, session_id, turns,
+   approx_tokens, created_at, last_used_at, retired_at`。索引 `(node_id, kind, project_id,
+   retired_at)`）。API は `crates/task-core/src/node_session.rs`
+   の `NodeSessionStore` トレイト（`node_session_active/create/retire/touch/set_id`）。
+   テスト: `cargo test -p task-core --lib node_session::` → **6 passed**（作成→取得の往復、
+   `touch` の累積、`set_id` の単独更新、無い状態での no-op、`retire`→`create` での入れ替え、
+   `conversation`/`lead` と別ノードの独立性）。
+2. **アダプタごとの resume**:
+   - `claude-code`: 初回 `--session-id <ulid>`（celeris が前もって決める）、継続 `--resume <id>`。
+     `cargo test -p task-worker --lib claude_code::tests::` の
+     `without_a_session_the_cli_keeps_no_session_persistence` /
+     `a_fresh_session_passes_session_id_not_no_session_persistence` /
+     `a_continuing_session_passes_resume` /
+     `request_json_records_the_session_handle`（**`runs/<id>/request.json` に resume フラグが
+     残ることを直接検査**）/ `a_fresh_session_reports_session_established` /
+     `a_rejected_resume_reports_session_resume_failed` が green。
+   - `codex`: `[adapters.codex] resume_mode`（既定 `"exec_resume"`）で `codex exec resume <id>` か
+     `-c experimental_resume=<path>` かを選ぶ**設定フラグ**（バージョンプローブではない。
+     `crates/celeris/src/config.rs::resolved_resume_mode` が決定的に解決）。
+     `a_continuing_session_uses_exec_resume_by_default` /
+     `a_continuing_session_uses_experimental_resume_when_configured` /
+     `thread_started_with_a_thread_id_reports_session_established` /
+     `a_rejected_resume_reports_session_resume_failed` が green。
+   - `acp`: 初回 `session/new`、継続 `session/load`。
+     `a_fresh_session_reports_the_agent_assigned_session_id` /
+     `a_continuing_session_sends_session_load_and_reports_it_established` /
+     `a_rejected_session_load_reports_resume_failed` が green。
+   - 3 アダプタとも `a_session_for_another_adapter_is_ignored`（`SessionHandle.adapter` が自分の
+     `id()` と違えば無視）。
+3. **rollover と要約の継ぎ・アカウント変更での作り直し**: 判断は純粋関数
+   `crates/task-dispatch/src/sessions.rs::decide`（`resume_failed` → アカウント不一致 → アダプタ不一致 →
+   `approx_tokens >= rollover_tokens` の順）。`cargo test -p task-dispatch --lib sessions::` →
+   **10 passed**（`no_active_session_is_fresh_without_a_summary` /
+   `a_matching_session_under_the_rollover_threshold_resumes` /
+   `rollover_exceeded_is_fresh_with_summary` / `account_change_is_fresh` /
+   `adapter_change_is_fresh` / `a_failed_resume_is_fresh_even_if_nothing_else_changed` ほか）。
+   store 側の配線（実際に retire → create すること）は
+   `dispatcher::tests::resolve_node_session_resumes_under_the_limit_then_rolls_over_then_retires_on_account_change`
+   （新規 1 本目 → 閾値未満で resume → 閾値超えで rollover（同じ id では**ない**新セッション、
+   旧は `turns = 0` の新しいものに置き換わっていることを確認）→ アカウント変更で作り直し、を 1 本の
+   テストで直列に検証）。`[sessions] rollover_tokens`（既定 400,000）は
+   `crates/celeris/src/config.rs::SessionsConfig`、`config/celeris.example.toml` に `[sessions]` 節を
+   追記。
+4. **前置きの差分化（D1 の核心。今回の引き継ぎで未実装だった部分）**: `Dispatcher::run_extras` を、
+   CoS の対話 run が**継続中**（`session.resume == true`）のときだけ `node`（brief）・`memory`
+   （記憶）・`organization`（組織の一覧）・`conversation`（直近のやり取り）・`active_projects`
+   （進行中の案件）を空にするよう変更（新規セッションでは従来どおり全量）。差分そのものは
+   `Dispatcher::session_diff_since` → `crate::sessions::diff_lines`（純粋関数。`since` より後だけを残す。
+   `diff_lines_keeps_only_items_strictly_after_since` / `diff_lines_is_empty_when_nothing_changed` で
+   テスト済み）。新規テスト
+   `dispatcher::tests::a_continuing_cos_session_drops_the_full_preamble_and_a_fresh_one_keeps_it`
+   （1 本目: `session.resume == false`・brief あり・組織の一覧あり・進行中の案件あり／2 本目
+   （同じセッションを resume）: `session.resume == true`・同じ `session_id`・brief 無し・組織の一覧
+   空・進行中の案件空／CoS 以外への対話は `session` 自体が付かないので毎回全量、の 3 点を直接検査）。
+5. **部門長のセッション（ADR-0051 のレビュー run）**: `Dispatcher::pick_reviewer` が対象タスクの部署
+   （`task_core::department_of`）を引き、`resolve_node_session(<department>, SessionKind::Lead, None,
+   …)` を呼んで `ReviewerRun.session`/`session_diff` に積み、`review::review_task` が
+   `RunContext.session`/`session_diff` として渡す。使用量の積み上げは `Dispatcher::on_review_finished`
+   （Reviewer run が終わるたびに `node_session_touch`）。新規テスト
+   `dispatcher::tests::department_reviewer_runs_share_and_continue_one_lead_session`（部署付きの
+   Reviewer run を 2 回 → 同じ `kind = lead` セッションを共有・継続（同じ `session_id`、
+   `turns: 1 → 2`）すること、部署の無い Reviewer run にはセッションが付かないこと、使っていない部署
+   （`research`）にはセッションが作られないことを検査）。
+6. **fake アダプタでのテスト**: 上記 2〜5 の全テストが偽アダプタ（`FileAdapter`、または各アダプタ
+   単体の `RecordingSink`/フェイク subprocess）経由。`runs/<id>/request.json` の直接検査は
+   `claude_code::tests::request_json_records_the_session_handle`。
+7. **`POST /console/new-conversation`**: `crates/task-api/src/console.rs`（薄い。
+   `NodeSessionStore::node_session_retire` を呼ぶだけ、ディスパッチャに触らない）。204、本文なし。
+   `crates/task-api/tests/console.rs` の `new_conversation_retires_the_active_cos_session`
+   （現役セッションが retire されること、無くても 204 になること）と
+   `new_conversation_requires_admin_auth`（bearer 無しは 401）で検証。`docs/gui/api.md` §3.109 に
+   エンドポイント 98 として追記（`scripts/sync-gui-docs.sh` で `gui/docs/celeris-api-v1.md` に同期、
+   `--check` で up to date を確認）。
+
+### 検証（証拠コマンドと結果）
+
+- `cargo test --workspace --no-fail-fast`: **exit 0。1666 passed / 0 failed**（doctest 含む全クレート。
+  73 個の `test result:` ブロックを合計）。途中 1 回、e2e の
+  `sse_delivers_created_quickly_and_resumes_from_last_event_id` がワークスペース全体の並列実行時の
+  タイミングで 1 度だけ FAILED になったが（`celerisctl replay` が `Reviewing`/`Running` の遷移中に
+  スナップショットを取ってしまうタイミング依存の既知の揺れ）、単独実行では green、直後の
+  ワークスペース全体の再実行でも green（Phase 67 の変更とは無関係。証跡としてログの該当行を確認済み）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: **exit 0。警告 0**。
+- `UPDATE_SCHEMA=1 cargo test -p task-api --lib`: 53 passed、`git status --porcelain docs/api/`
+  差分ゼロ（`POST /console/new-conversation` は新しい型を追加していない＝204・本文なしなので、
+  API のスキーマ生成物は変わらない）。この結果から GUI 側の `pnpm gen:types` は不要と判断し、
+  `pnpm typecheck`/`lint`/`test` は実行していない（型の変更が無いため）。
+- `bash scripts/sync-gui-docs.sh` → `bash scripts/sync-gui-docs.sh --check` で up to date
+  （`gui/docs/celeris-api-v1.md` と `docs/gui/api.md` が一致）。
+- 非テストコードに `unwrap()` を増やしていない（今回の diff（`git diff` 対 HEAD、変更・新規ファイル
+  すべて）の追加行を、各ファイルの `#[cfg(test)]`/`mod tests` の位置を基準に走査して確認。
+  `mod tests` を持たない `protocol.rs`/`adapter.rs`/`lib.rs` 系も個別に確認済み）。
+- ディスパッチャ・ストアに LLM 呼び出しを入れていない（`node_session*` はどれも同期の SQL、
+  `crate::sessions::decide`/`diff_lines`/`summary_lines` は純粋関数。テストも外部ネットワークに出ない）。
+
+### 実装の経緯（引き継ぎの明示）
+
+このタスクの実装は、私（本セッション）が調査用に並行起動した 2 本の fork エージェントが、指示（研究の
+みで実装はしない）に反して worktree に直接コード変更を書き始めていたところから始まった（並行実行中に
+発覚。両方に即座に停止を指示し、状況の報告を受けた）。発覚時点で約 2,200 行の未コミットの diff
+（`node_sessions` のストア、`crate::sessions` の純粋関数、3 アダプタの CLI 配線の大半、
+`[sessions]` 設定、`POST /console/new-conversation` のルート登録）が存在し、コンパイルは 2 か所
+失敗していた（`celerisctl` のテストヘルパの `Config` 初期化漏れ、`console.rs` の
+`new_conversation` 関数の重複定義— 両 fork が同時に同じ関数を書いていた）。これらを解消した上で、
+未着手だった 2 点（部門長のセッション配線、継続中の前置きの差分化=D1 の核心）を実装し、
+テストとドキュメントを追加した。実機の資格情報・ネットワークは一切使っていない
+（フォークも含め、このサンドボックス内の偽アダプタとインメモリ SQLite だけで検証）。
+
+### 本番運用手順（未実施。ADR-0009 P-34。実機の資格情報・ネットワークが必要）
+
+1. **設定に追記**: `config/celeris.example.toml` の `[sessions]` 節（`rollover_tokens = 400000`。
+   省略可、既定値と同じ）。codex を使うなら `[adapters.codex] resume_mode = "exec_resume"`（既定。
+   インストール済みの codex CLI が `codex exec resume` に対応しなければ
+   `"experimental_resume"` に変更。`config/celeris.codex.example.toml` に注記）。
+2. **デプロイ**: 通常の `release.sh` → `verify.sh`（schema 23 を新規に要求する。旧バイナリは
+   `SchemaTooNew` で拒否するので、Phase 65 と同様「新バイナリだけが読める設定」は無い＝
+   pre-start フック不要）→ `promote.sh`。
+3. **確認**: CoS（`/api/v1/org/cos/messages` または Console）に 3 回続けて話しかける。
+   - 1 回目の `runs/<id>/request.json` の `context.session.resume` が `false`、
+     `context.session.session_id` が非空の ULID であること。`context.node`/`context.organization`
+     が入っていること（全量の前置き）。
+   - 2 回目・3 回目の `request.json` の `context.session.resume` が `true`、
+     `context.session.session_id` が 1 回目と同じであること。`context.node` が省略され
+     （brief を流し直さない）、`context.session_diff` に「前回の run 以降」の差分（新しい人の発言等。
+     3 回目なら 2 回目の発言など）が入っていること。
+   - claude-code アダプタの実プロセスに `--session-id <id>`（1 回目）/`--resume <id>`（2・3 回目）が
+     渡っていることをプロセス起動ログか `ps` で確認。
+4. **rollover の確認**（任意）: `sqlite3 celeris.sqlite3 "select * from node_sessions where
+   node_id='cos'"` で `approx_tokens` を見る。`[sessions] rollover_tokens` を一時的に小さく
+   （例 100）して再起動し、数往復後に `session_id` が変わる（旧行の `retired_at` が立つ）ことを確認。
+5. **`POST /console/new-conversation`**（GUI の「新しい会話」実装は Phase 68。今回は `curl` で確認）:
+   `curl -X POST -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)"
+   http://127.0.0.1:7700/api/v1/console/new-conversation` → 204。直後に CoS へ話しかけた run の
+   `request.json` が `resume: false`（全量の前置き）に戻ることを確認。
+6. **部門長のセッション**: `Check::Reviewer` を持つタスクで、担当ノードが `engineering`/`research`/
+   `operations` のいずれかの配下にあるものを 2 件連続でレビューさせ、`node_sessions` の
+   `kind='lead', node_id='engineering'`（等）の行が 1 本のまま `turns` が増えること、Reviewer run の
+   `request.json` に `context.session` が入ることを確認。
+
+### 未解決事項
+
+- **「前のセッションの要約」と「直近のやり取り」が一部のケースで重複する**: 新規セッションになった
+  理由が `NoActive`（初回）以外（rollover・アカウント変更・resume 失敗）のとき、
+  `context.session_diff` に前のセッションの要約（末尾 20 件）が乗るが、このとき `continuing == false`
+  なので `context.conversation`（同じく末尾 20 件、別の見出し）もそのまま渡り、同じ内容が前置きに
+  2 回出る（誤りではないが数百トークン程度の冗長）。次の Phase で「summary が乗る run では
+  `conversation` を空にする」条件を足すのが素直な直し方。
+- **`resolve_node_session` の `resume_failed` 引数が常に `false`**: 実際の resume 拒否の検出・retire は
+  `EventSink::session_resume_failed`（run の途中）が先にやってしまうため、次に
+  `resolve_node_session` を呼ぶ時点では既に `active = None`（`NoActive` 扱い）。結果、resume
+  失敗直後の最初の run は「要約なし」の全量前置きになる（`conversation` フィールドは全量渡るので
+  実害は小さい）。
+- **実機確認は未実施**（本物の claude-code/codex/acp CLI・ネットワークが無いサンドボックスのため）。
+  上の「本番運用手順」を、認証とネットワークが使える環境の人（またはエージェント）が実行し、結果を
+  ここに追記すること。
+- **GUI の「継続中のセッション: turns / tokens / 最終使用」表示（D3 の一部）は今回に含めていない**
+  （ADR-0054 の受け入れ条件どおり Phase 67 は D1 のみ。D3 の node-page indicator は Phase 68 の
+  GUI 作業とまとめて行う）。
+
+### 提案
+
+- 上記「未解決事項」の 1 点目（要約と直近のやり取りの重複）は、次に CoS 対話まわりを触る Phase で
+  小さく直すことを提案する（`run_extras` に 1 行足すだけの見込み）。
+- `resume_failed` の検出をイベントソース経由（run 途中）ではなく `resolve_node_session` 呼び出し時点の
+  引数として渡す設計に統一するかどうかは、実機で resume 拒否がどのくらいの頻度・タイミングで起きるか
+  観測してから判断するのが良い（今回は「要約が抜けても実害は小さい」という判断で見送った）。

@@ -29,6 +29,20 @@ use crate::subprocess::{
     write_result_json,
 };
 
+/// `[adapters.codex] resume_mode`（ADR-0054 D1。Phase 67）: このインストールの `codex` が
+/// `exec resume <id>` サブコマンドを受け付けるかの**決定的な**判定。実機のバージョンを毎回 probe する
+/// のではなく、設定で固定する（instructions: 「a config flag or a version probe done once, cached」の
+/// うち前者。celeris はこのサンドボックスから実 CLI を起こせないため、実機で `codex exec resume --help`
+/// 等を確認した上で運用側が設定すること。既定は `ExecResume`（新しめの codex-cli を想定）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CodexResumeMode {
+    /// `codex exec resume <id> --json …`。
+    #[default]
+    ExecResume,
+    /// `codex exec --json -c experimental_resume=<id> …`（`resume` サブコマンドの無い古い版）。
+    ExperimentalResume,
+}
+
 /// `[adapters.codex]`（config.toml, ADR-0008 D4）。
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
@@ -43,6 +57,8 @@ pub struct CodexConfig {
     pub env: Vec<(String, String)>,
     /// ADR-0043 D3（Phase 56）: `Some` なら `codex` をコンテナの中で起こす（`container::wrap`）。
     pub container: Option<crate::container::SharedPlan>,
+    /// ADR-0054 D1（Phase 67）: `context.session` が resume を求めたときの継続手段。
+    pub resume_mode: CodexResumeMode,
 }
 
 impl Default for CodexConfig {
@@ -53,6 +69,7 @@ impl Default for CodexConfig {
             model: None,
             env: Vec::new(),
             container: None,
+            resume_mode: CodexResumeMode::default(),
         }
     }
 }
@@ -170,15 +187,32 @@ async fn run_codex(
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
 
+    // ADR-0054 D1（Phase 67）: `context.session` がこのアダプタ宛て（`adapter == "codex"`）で
+    // `resume: true` のときだけ継続する。手段は `config.resume_mode` で決定的に選ぶ（実機 probe はしない）。
+    let codex_session = req
+        .context
+        .session
+        .as_ref()
+        .filter(|s| s.adapter == CodexAdapter::ID);
+    let resume_id = codex_session
+        .filter(|s| s.resume)
+        .map(|s| s.session_id.clone());
+
     let mut command = Command::new(&config.command);
     // CoS and standalone task workspaces need not be Git repositories.
+    command.arg("exec");
+    if let (Some(id), CodexResumeMode::ExecResume) = (&resume_id, config.resume_mode) {
+        command.arg("resume").arg(id);
+    }
     command
-        .arg("exec")
         .arg("--json")
         .arg("--skip-git-repo-check")
         // The result.json contract needs writes; explicit extra_args override this default.
         .arg("-c")
         .arg("sandbox_mode=\"workspace-write\"");
+    if let (Some(id), CodexResumeMode::ExperimentalResume) = (&resume_id, config.resume_mode) {
+        command.arg("-c").arg(format!("experimental_resume={id}"));
+    }
     if let Some(model) = &config.model {
         command.arg("--model").arg(model);
     }
@@ -333,9 +367,17 @@ async fn run_codex(
             let mut pf = last_error_message
                 .as_deref()
                 .and_then(classify_provider_failure);
+            let tail = read_tail(&stderr_log_path, 4096).await;
             if pf.is_none() {
-                let tail = read_tail(&stderr_log_path, 4096).await;
                 pf = classify_provider_failure(&tail);
+            }
+            // ADR-0054 D1（Phase 67）: resume を頼んだ run が、セッションを拒否されたように見える crash
+            // なら報告する。文言は実機で確認していない（`provider::looks_like_resume_rejection` 参照）。
+            if resume_id.is_some() {
+                let combined = format!("{} {tail}", last_error_message.as_deref().unwrap_or(""));
+                if crate::provider::looks_like_resume_rejection(&combined) {
+                    sink.session_resume_failed(&combined);
+                }
             }
             (
                 Terminal::Error {
@@ -349,6 +391,9 @@ async fn run_codex(
         }
         (None, Some(TurnSignal::Failed { message })) => {
             let pf = classify_provider_failure(message);
+            if resume_id.is_some() && crate::provider::looks_like_resume_rejection(message) {
+                sink.session_resume_failed(message);
+            }
             (
                 Terminal::Error {
                     message: format!("codex turn failed: {message}"),
@@ -419,6 +464,19 @@ fn handle_line(
         return;
     }
     match ty {
+        // ADR-0054 D1（Phase 67）: 新規セッション（`context.session.resume == false`）で codex 自身が
+        // 割り当てた thread id を報告する。**フィールド名 `thread_id` は実機で確認していない**
+        // （`thread.started` イベント自体は ADR-0008 の実機確認で観測済みだが、その本文の形は
+        // 未確認。誤って読めなくても run 自体は失敗しない — 次の run が新規セッションとして走るだけ）。
+        "thread.started" => {
+            if let Some(id) = value
+                .get("thread_id")
+                .or_else(|| value.get("threadId"))
+                .and_then(|v| v.as_str())
+            {
+                sink.session_established(id);
+            }
+        }
         "turn.completed" => {
             let usage = value.get("usage").map(|u| Usage {
                 input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
@@ -601,6 +659,10 @@ mod tests {
         structured: Mutex<Vec<(String, task_core::ProgressFields)>>,
         delegated: Mutex<Vec<Vec<DelegateTask>>>,
         rate_limits: Mutex<Vec<task_core::RateLimitObservation>>,
+        /// ADR-0054 D1（Phase 67）: `session_established` の呼び出し。
+        sessions: Mutex<Vec<String>>,
+        /// ADR-0054 D1（Phase 67）: `session_resume_failed` の呼び出し。
+        resume_failed: Mutex<Vec<String>>,
     }
 
     impl EventSink for RecordingSink {
@@ -629,6 +691,18 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(obs);
+        }
+        fn session_established(&self, session_id: &str) {
+            self.sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(session_id.to_string());
+        }
+        fn session_resume_failed(&self, reason: &str) {
+            self.resume_failed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(reason.to_string());
         }
     }
 
@@ -1241,6 +1315,7 @@ echo '{"type":"turn.completed"}'
             model: Some("gpt-5-codex".into()),
             env: Vec::new(),
             container: None,
+            resume_mode: CodexResumeMode::default(),
         };
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -1418,5 +1493,199 @@ printf '%s\n' '{"type":"turn.completed"}'
                 "account-a"
             );
         }
+    }
+
+    fn args_log_script() -> &'static str {
+        r#"
+for a in "$@"; do printf '%s\0' "$a" >> args.log; done
+mkdir -p artifacts
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"type":"turn.completed"}'
+"#
+    }
+
+    fn captured_args(dir: &std::path::Path) -> Vec<String> {
+        let args = std::fs::read_to_string(dir.join("args.log")).unwrap();
+        args.split('\0')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// ADR-0054 D1（Phase 67）: `context.session` が無ければ Phase 66 までと同じ（resume の引数は付かない）。
+    #[tokio::test]
+    async fn without_a_session_no_resume_flags_are_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let _ = adapter
+            .run(req, "run-1", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(!args.contains(&"resume".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("experimental_resume=")));
+    }
+
+    /// ADR-0054 D1（Phase 67）: 継続セッション（`resume: true`）かつ `resume_mode = ExecResume`（既定）
+    /// なら `codex exec resume <id> …`。
+    #[tokio::test]
+    async fn a_continuing_session_uses_exec_resume_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "thread-123".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-2", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert_eq!(args[0], "exec");
+        assert_eq!(args[1], "resume");
+        assert_eq!(args[2], "thread-123");
+        assert!(!args.iter().any(|a| a.starts_with("experimental_resume=")));
+    }
+
+    /// ADR-0054 D1（Phase 67）: `resume_mode = ExperimentalResume`（`resume` サブコマンドの無い古い版）
+    /// なら `-c experimental_resume=<id>` に切り替える。
+    #[tokio::test]
+    async fn a_continuing_session_uses_experimental_resume_when_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_codex(dir.path(), args_log_script());
+        config.resume_mode = CodexResumeMode::ExperimentalResume;
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "thread-123".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-3", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(!args.contains(&"resume".to_string()));
+        assert!(
+            args.contains(&"experimental_resume=thread-123".to_string()),
+            "{args:?}"
+        );
+    }
+
+    /// ADR-0054 D1（Phase 67）: 新規セッション（`resume: false`）は resume の引数を付けない
+    /// （codex は `--session-id` 相当の「これから使う id を固定する」手段を持たないため）。
+    #[tokio::test]
+    async fn a_fresh_session_adds_no_resume_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "placeholder".to_string(),
+            resume: false,
+        });
+        let _ = adapter
+            .run(req, "run-4", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(!args.contains(&"resume".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("experimental_resume=")));
+    }
+
+    /// `context.session` が別アダプタ向けなら無視する。
+    #[tokio::test]
+    async fn a_session_for_another_adapter_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: "claude-code".to_string(),
+            session_id: "cc-session".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-5", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(!args.contains(&"resume".to_string()));
+    }
+
+    /// ADR-0054 D1（Phase 67）: `thread.started` に `thread_id` があれば `session_established` へ報告する。
+    /// フィールド名は未検証（コメント参照）だが、パーサの挙動そのものはこの偽の CLI で確認できる。
+    #[tokio::test]
+    async fn thread_started_with_a_thread_id_reports_session_established() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"
+mkdir -p artifacts
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-xyz"}'
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"type":"turn.completed"}'
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let _ = adapter
+            .run(req, "run-6", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            sink.sessions.lock().unwrap().as_slice(),
+            &["thread-xyz".to_string()]
+        );
+    }
+
+    /// ADR-0054 D1（Phase 67）: `resume` を頼んだ run が turn.failed の `message` に「セッションが
+    /// 見つからない」旨の文言を含んで終わったら `session_resume_failed` を報告する（文言は未検証）。
+    #[tokio::test]
+    async fn a_rejected_resume_reports_session_resume_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"printf '%s\n' '{"type":"turn.failed","error":{"message":"session not found: 01ARZ3"}}'"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "01ARZ3".to_string(),
+            resume: true,
+        });
+        let sink = RecordingSink::default();
+        let outcome = adapter.run(req, "run-7", default_limits(), &sink).await;
+        match outcome {
+            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
+        }
+        let failed = sink.resume_failed.lock().unwrap();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("session not found"), "{failed:?}");
+    }
+
+    /// resume していない run が同じ文言で失敗しても `session_resume_failed` は報告しない。
+    #[tokio::test]
+    async fn a_failure_without_resuming_does_not_report_session_resume_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"printf '%s\n' '{"type":"turn.failed","error":{"message":"session not found: 01ARZ3"}}'"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let _ = adapter.run(req, "run-8", default_limits(), &sink).await;
+        assert!(sink.resume_failed.lock().unwrap().is_empty());
     }
 }

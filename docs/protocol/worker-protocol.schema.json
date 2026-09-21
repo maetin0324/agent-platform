@@ -1411,6 +1411,24 @@
           ],
           "description": "タスクに役割があるときだけ `Some`（ADR-0016 D1）。"
         },
+        "session": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionHandle"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0054 D1: この run が**継続セッション**（CoS の対話、または部門長のレビュー・切り分け run）\nのときだけ `Some`。アダプタはこれを見て `--session-id`/`--resume`（claude-code）、\n`codex exec resume`/`experimental_resume`（codex）、`session/load`（acp）を選ぶ。継続しない run\n（通常の仕事の run）では常に `None` で、前置き・アダプタの起動は Phase 66 までと 1 バイトも変わらない。"
+        },
+        "session_diff": {
+          "description": "ADR-0054 D1: `session` が**継続中**（`resume = true`）の run にだけ渡す、前回の run 以降に\n起きたことの短い箇条書き（新しい人の発言・dispatch したタスクの終端と要約・認可の結果・新しい案件）。\n`session` が新規（`resume = false`。rollover・アカウント変更・resume 失敗の後を含む）のときは、\n代わりに「前のセッションの要約」（ADR-0033 D4 の対話履歴の末尾 20 件）をここに入れることがある。\nどちらでもない通常の run では常に空で省略される（Phase 66 までと 1 バイトも変わらない）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "standing_rules": {
           "description": "ADR-0033 D5: 「今後ずっと」の認可（永続の認可）。**Phase 26 が埋める。今は常に空**。",
           "items": {
@@ -1451,6 +1469,29 @@
       "required": [
         "prior_review",
         "inputs"
+      ],
+      "type": "object"
+    },
+    "SessionHandle": {
+      "description": "`context.session`（ADR-0054 D1。Phase 67）: 継続セッションの手がかり。\nディスパッチャが `node_sessions`（`task_core::NodeSession`）から決定的に組む。",
+      "properties": {
+        "adapter": {
+          "description": "このセッションを継続する手段（`claude-code` / `codex` / `acp`）。アダプタは自分の `id()` と\n一致しないときは無視する（別アダプタへ渡り歩くセッションは無い）。",
+          "type": "string"
+        },
+        "resume": {
+          "description": "`false` = 新規（このセッションの最初の run）。`true` = 続ける（2 回目以降）。",
+          "type": "boolean"
+        },
+        "session_id": {
+          "description": "アダプタに渡す実際の値。`resume = false`（新規）のときはアダプタが**これから使う**セッション id\n（claude-code の `--session-id`。固定した ULID）、`resume = true`のときは**続ける**セッション id\n（claude-code の `--resume`、codex の resume id、acp の `session/load` の id）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "adapter",
+        "session_id",
+        "resume"
       ],
       "type": "object"
     },

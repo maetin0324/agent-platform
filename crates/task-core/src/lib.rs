@@ -22,6 +22,8 @@ pub mod knowledge;
 pub mod knowledge_run;
 pub mod message;
 pub mod model;
+/// ADR-0054 D1（Phase 67）: ノードごとの継続セッション（`node_sessions`）。
+pub mod node_session;
 pub mod notify;
 pub mod org;
 pub mod plan;
@@ -90,6 +92,8 @@ pub use model::{
     priority_from_label, priority_label,
 };
 // ---- ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ ----
+// ---- ADR-0054 D1（Phase 67）: ノードごとの継続セッション ----
+pub use node_session::{NodeSession, NodeSessionStore, SessionKind};
 pub use notify::{
     DEFAULT_WEBHOOK_SECRET_ID, MAX_NOTIFY_ATTEMPTS, Notification, NotificationId, NotificationKind,
     NotificationStore,

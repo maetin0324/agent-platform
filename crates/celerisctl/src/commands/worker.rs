@@ -860,6 +860,7 @@ mod tests {
             containers: Default::default(),
             knowledge: Default::default(),
             llm_proxy: Default::default(),
+            sessions: Default::default(),
             source_path: None,
         }
     }

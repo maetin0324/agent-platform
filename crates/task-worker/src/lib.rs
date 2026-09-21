@@ -48,7 +48,7 @@ pub use cluster_login::{
     ClusterConnectError, ClusterConnectSession, ClusterConnectStart, ClusterMaster, disconnect,
     start_connect,
 };
-pub use codex::{CodexAdapter, CodexConfig};
+pub use codex::{CodexAdapter, CodexConfig, CodexResumeMode};
 pub use codex_account::{CodexLoginSession, check_account_codex, start_login_codex};
 pub use container::{
     ContainerChoice, ContainerPlan, ContainerStop, ContainerStopper, ImageSource, RepoRunInput,
@@ -74,7 +74,8 @@ pub use protocol::{
     ConversationAddressee, ConversationTurn, Evidence, GenreContext, GenreRoleContext,
     MemoryContext, MilestoneBrief, MilestoneReviewContext, MilestoneTaskResult, NodeContext,
     OrgNodeContext, PROTOCOL_VERSION, PriorReview, ProviderFailure, RecentWork, ReviewOutput,
-    ReviewRequest, ReviewVerdictOut, RoleContext, RunContext, RunRequest, WorkerMessage,
+    ReviewRequest, ReviewVerdictOut, RoleContext, RunContext, RunRequest, SessionHandle,
+    WorkerMessage,
 };
 pub use provider::classify_provider_failure;
 pub use result_report::{

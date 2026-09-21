@@ -15,9 +15,9 @@ use std::time::Duration;
 use common::*;
 use task_api::StreamTuning;
 use task_core::{
-    Approval, ApprovalStore, Event, Message, MessageId, MessageRole, MilestoneStatus,
-    ProgressFields, ProgressKind, Project, ProjectId, Report, ReportKind, ReportStore, Status,
-    Task, TaskKind, TaskStore,
+    Approval, ApprovalStore, COS_ID, Event, Message, MessageId, MessageRole, MilestoneStatus,
+    NodeSession, NodeSessionStore, ProgressFields, ProgressKind, Project, ProjectId, Report,
+    ReportKind, ReportStore, SessionKind, Status, Task, TaskKind, TaskStore,
 };
 use time::OffsetDateTime;
 
@@ -740,4 +740,65 @@ async fn run_events_returns_only_that_runs_rows() {
     .json();
     assert_eq!(page["items"].as_array().map(Vec::len), Some(2));
     assert_eq!(page["has_more"], true);
+}
+
+// ---- POST /console/new-conversation（ADR-0054 D1。Phase 67）----
+
+/// 現役の CoS 継続セッションがあれば捨てる（`retired_at` が立つ）。管理系（bearer 必須）。
+#[tokio::test]
+async fn new_conversation_retires_the_active_cos_session() {
+    let env = admin_env();
+    let app = env.router();
+    let now = OffsetDateTime::now_utc();
+    let session = NodeSession::new(
+        COS_ID,
+        SessionKind::Conversation,
+        None,
+        "claude-code",
+        Some("acct-a".to_string()),
+        "sess-1",
+        now,
+    );
+    env.store.node_session_create(&session).expect("create");
+    assert!(
+        env.store
+            .node_session_active(COS_ID, SessionKind::Conversation, None)
+            .expect("active")
+            .is_some()
+    );
+
+    let resp = send(
+        &app,
+        post_admin("/api/v1/console/new-conversation", &serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 204, "{}", resp.text());
+    assert_eq!(
+        env.store
+            .node_session_active(COS_ID, SessionKind::Conversation, None)
+            .expect("active"),
+        None,
+        "the session is retired, so the next CoS run starts fresh"
+    );
+
+    // 現役セッションが無くても 204（「無い」状態にするだけなので、無かったことをエラーにしない）。
+    let resp = send(
+        &app,
+        post_admin("/api/v1/console/new-conversation", &serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 204, "{}", resp.text());
+}
+
+/// bearer 無しは 401（他の管理系エンドポイントと同じ規律）。
+#[tokio::test]
+async fn new_conversation_requires_admin_auth() {
+    let env = admin_env();
+    let app = env.router();
+    let resp = send(
+        &app,
+        post_json("/api/v1/console/new-conversation", &serde_json::json!({})),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 401, "{}", resp.text());
 }

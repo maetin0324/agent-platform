@@ -43,6 +43,9 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
     // コメントが 1 件も無ければ何も出さないので、Phase 52 までの出力とバイト単位で同じ。
     let mut out = comments_section(context);
     out.push_str(&person_sections(context));
+    // ADR-0054 D1（Phase 67）: 継続セッションの差分、または新規セッションの前のセッションの要約。
+    // `context.session_diff` が空の run の前置きは Phase 66 までと 1 バイトも変わらない。
+    out.push_str(&session_diff_section(context));
     // ADR-0046 D1 / D4（Phase 59）: 実効 profile（能力・方針・道具・知識・ハーネス）と進め方。
     // どちらも `None` / 空なら節ごと出さないので、Phase 58 までの出力とバイト単位で同じ。
     // 61（ADR-0047 の知識の索引）は `knowledge_section` を別に足す。ここには入れない。
@@ -202,6 +205,23 @@ fn person_sections(context: &RunContext) -> String {
         }
         out.push('\n');
     }
+    out
+}
+
+/// ADR-0054 D1（Phase 67）: 「前回の run 以降」の節。継続中（`session.resume = true`）なら差分
+/// （新しい人の発言・dispatch したタスクの終端と要約・認可の結果・新しい案件）、新規セッション
+/// （rollover・アカウント変更・resume 失敗の後を含む）なら前のセッションの要約（ADR-0033 D4 の
+/// 対話履歴の末尾 20 件）。どちらの文面を渡すかはディスパッチャが決める（このモジュールは並べるだけ）。
+/// `context.session_diff` が空なら何も出さない（Phase 66 までと同じ出力）。
+fn session_diff_section(context: &RunContext) -> String {
+    if context.session_diff.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## 前回の run 以降 (since your last turn in this session)\n");
+    for line in &context.session_diff {
+        out.push_str(&format!("- {}\n", one_line(line)));
+    }
+    out.push('\n');
     out
 }
 
