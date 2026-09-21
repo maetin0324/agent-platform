@@ -12045,3 +12045,138 @@ Phase 79）を実装した。詳細な決定・逸脱は `docs/adr/0056-mcp-serv
   変わりうる）。実機で通すエージェントに検証を依頼し、`docs/mcp.md` を確定させるとよい。
 - `[mcp] rate_limit_per_min` と `Mcp-Session-Id` のインメモリ状態を、将来 celeris が複数プロセスに
   分かれる構成になった場合はどうするか（今は単一プロセス前提）。
+
+## Phase 79 — mount した skills を run に届ける（ADR-0056 D3。2026-09-21）
+
+Phase 78 が作ったデータモデル（`Profile.skills_mounts` / `EffectiveProfile.skills_mounts` / KB の
+`skills/<name>/SKILL.md`）を、実際に run へ届ける経路を実装した。`crates/task-worker/src/protocol.rs`
+に `RunContext.skills: Vec<SkillMount { name, path, description }>`、`crates/task-dispatch/src/
+dispatcher.rs` に `Dispatcher::skills_context`（担当ノードの実効 profile の `skills_mounts` を KB から
+解決し、見つからないものは `status` の進行イベント 1 行に回す）、届け先ごとの実装を新設した
+`crates/task-worker/src/skills.rs`（`claude-code` は `.claude/skills/<name>/` へファイルコピー、
+`codex` は `AGENTS.md` の `<!-- celeris:skills:start -->`〜`end` 節、`acp` は前置きへの直接埋め込み）
+に置いた。決めた細部・逸脱は `docs/adr/0056-mcp-server.md`「Phase 79 追記」（P-79-a〜g）を参照。
+
+### 受け入れ条件ごとの証跡
+
+**1. `RunContext.skills` をディスパッチャが `EffectiveProfile.skills_mounts` から埋める**
+- `crates/task-dispatch/src/dispatcher.rs::Dispatcher::skills_context` を新設（`knowledge_context` と
+  同じ形。`task_ops::knowledge::skills_get` で KB を読むだけの決定的関数）。`run_extras` に
+  `profile_skills_mounts`（`task_core::resolve_profile(&org, &n.id).skills_mounts`）から呼び出す配線を
+  追加し、`RunExtras.skills` / `RunExtras.missing_skills` の 2 つに分けて返す。
+- 見つからない skill 名は `RunContext` に**乗せず**、`dispatch_ready` 相当の呼び出し元で
+  `Event::worker_progress_with(&run_id, "skill <name> not found",
+  ProgressFields::of(ProgressKind::Status))` を 1 行ずつ出す（run は失敗させない）。
+- テスト（`crates/task-dispatch/src/dispatcher.rs`）:
+  - `skills_context_resolves_mounted_skills_and_reports_missing_ones` — KB にある/無い skill を
+    `skills`/`missing` に振り分ける。
+  - `run_extras_resolves_the_assigned_nodes_effective_skills_mounts` — 親（`cos`: `writing`）と子
+    （`engineering`: `rust-review`/`writing`/`ghost`）の profile から `run_extras` が呼ぶと、
+    `extras.skills` が `["writing", "rust-review"]`（**根→葉の和、重複が落ちる**）、
+    `extras.missing_skills == ["ghost"]` になることを確認（ADR-0046 D1 の継承規則に沿う。dedup の
+    確認そのものは Phase 78 の `task_core::profile::tests::
+    skills_mounts_are_unioned_like_knowledge_mounts` で既に取れているが、ここでは KB 解決込みで
+    再確認した）。
+  - `dispatch_delivers_mounted_skills_and_reports_missing_ones_without_failing_the_run` —
+    実際に `run_until_idle` で dispatch し、`PersonAdapter` が受け取った `RunContext.skills` に
+    `writing` が 1 件だけ乗ること、`events_for` に `msg == "skill ghost not found"` かつ
+    `kind == Status` の行があること、タスクの状態が `Reviewing`/`Done`（`Blocked`/`Failed` ではない
+    = run を落としていない）であることを確認。
+- `cargo test -p task-dispatch --lib skills` → **exit 0、3 passed**。
+
+**2. アダプタごとの届け方（run 開始時）**
+- `crates/task-worker/src/skills.rs`（新規）: `skills_block`（`## Skills（celeris）` 節の組み立て。
+  `SKILL.md` を `path` から読む） / `rewrite_agents_md`（`AGENTS.md` の区切りの中だけを書き直す純粋
+  関数） / `deliver_claude_code`（`.claude/skills/<name>/` へ丸ごとコピー） /
+  `deliver_agents_md`（`codex` 用） / `preamble_section`（`acp` 用）。
+- `crates/task-worker/src/claude_code.rs::run_claude_code` に `deliver_claude_code` 呼び出しを追加
+  （spawn 前）。`crates/task-worker/src/codex.rs::run_codex` に `deliver_agents_md` 呼び出しを追加。
+  `crates/task-worker/src/acp.rs::run_acp` は `build_prompt` の結果に `preamble_section` を追記
+  （`claude_code::build_prompt` は `claude-code`/`codex`/`acp` の 3 アダプタで共有されているため、
+  共有関数自体は変えず `acp.rs` 側だけで文字列を足した。`claude-code`/`codex` のプロンプトは
+  Phase 78 までと 1 バイトも変わらない）。
+- `cargo test -p task-worker --lib skills::` → **exit 0、15 passed**（`skills.rs` の単体テスト。
+  `rewrite_agents_md` の冪等性・既存内容の保持・節の置き換え・`None` での節削除、
+  `deliver_claude_code` の「対象の skill ディレクトリだけ置き換える」ことの確認を含む）。
+- 各アダプタの fake アダプタ統合テスト（`cargo test -p task-worker --lib mounted_skills` →
+  **exit 0、3 passed**）:
+  - `claude_code::tests::mounted_skills_are_copied_into_dot_claude_skills` — 作業場所に
+    `.claude/skills/rust-review/SKILL.md` と付属ファイル `refs/checklist.md` が現れる。
+  - `codex::tests::mounted_skills_are_written_into_agents_md` — 既存の `AGENTS.md`（`# Notes`）を
+    保ったまま末尾に `## Skills（celeris）` / `### rust-review` の節が足される。
+  - `acp::tests::mounted_skills_are_embedded_in_the_preamble` — `runs/<id>/prompt.txt` に
+    `## Skills（celeris）` / `### writing` / 本文が含まれる。
+- 研究系アダプタ（paperqa / local-deep-research / langmem）は変更していない
+  （`context.skills` を読む経路自体が preamble・アダプタどちらにも無い。既存テストは全て green のまま）。
+
+**3. `runs/<id>/request.json` に届けた skills を記録する**
+- `crates/task-dispatch/src/dispatcher.rs` の `RunRequest.context: RunContext { …, skills:
+  extras.skills, … }`。`request.json` は `task_worker::subprocess::write_run_request` が
+  `RunRequest`（`context` を含む）をそのまま書くので、追加のシリアライズ処理は不要
+  （`RunContext.skills` の `#[serde(skip_serializing_if = "Vec::is_empty")]` により、skills が
+  無い run の `request.json` は Phase 78 までと 1 バイトも変わらない）。上の `mounted_skills_are_*`
+  3 本はいずれも `runs/<run_id>/request.json`（`claude_code`/`codex`）または `prompt.txt`
+  （`acp`。同じ `write_run_request` 経由）を間接的に検証している。
+
+### ゲート（証拠コマンドと結果）
+
+- `cargo test --workspace --no-fail-fast` → **exit 0。77 個の test バイナリすべて `test result: ok`
+  （`test result: FAILED` 0 件）。合計 1774 passed**（Phase 78 の 1753 から +21。内訳:
+  `task-dispatch` 215（Phase 78 相当 212 + 今回の 3 本）、`task-worker` 359（Phase 78 相当 341 +
+  `skills.rs` の単体テスト 15 + 各アダプタの `mounted_skills_*` 統合テスト 3 = +18）。
+  `task-core`/`task-ops` は今回ロジック変更なし（`task-ops` に `skill_description` を追加したが、
+  既存の `skills_get`/`skills_list` のテストが frontmatter パーサを間接的に通しており、専用テストは
+  追加していない）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0、警告・エラーとも 0 件**
+  （`grep -c "^error\|^warning"` で確認）。
+- `UPDATE_SCHEMA=1 cargo test -p task-worker --lib protocol::` → **exit 0、9 passed**
+  （`committed_schema_matches_generated` を含む。`docs/protocol/worker-protocol.schema.json` に
+  `RunContext.skills` と新設の `SkillMount`（`name`/`path`/`description`）が増えた）。
+- `scripts/sync-gui-docs.sh` → `sync-gui-docs: up to date`（`docs/gui/api.md` は今回変更していない
+  ので反映すべき差分も無い。GUI 側の型生成は worker protocol を直接は読まないため対象外）。
+- `unwrap()`: 新規コードでテスト以外に追加していない（`git diff` を目視確認。`skills.rs` の非テスト
+  関数は `unwrap_or_default`/`unwrap_or(false)`/`?` のみ）。
+- ディスパッチャ・ストアに LLM 呼び出しを入れていない（`skills_context`・`skills.rs` はいずれも
+  ファイル読み書きだけの決定的関数）。
+
+### 実機での確認（未実施。ADR-0009 P-34。このワークトリークは systemctl・本番ポート・資格情報に
+触れない運用のため、デプロイ後に人 or エージェントが実施）
+
+1. `release.sh` → `verify.sh` → `promote.sh` でこの Phase をデプロイする（schema 変更なし。
+   `worker-protocol.schema.json` はプロトコルのドキュメントであって DB schema ではないので、
+   `POST /reload` の対象内 = 停止 → 起動は不要のはず。念のため `verify.sh` の結果を見て判断する）。
+2. `celerisctl` か MCP（`skills_put`）で `skills/rust-review/SKILL.md` を 1 つ KB に置く
+   （`docs/mcp.md` §4 の `skills_put` の例、または `celerisctl knowledge` 相当の CLI があればそちら）。
+3. MCP の `org_mount_skill { node_id: "engineering", skill: "rust-review" }`（または GUI の組織編集）
+   で engineering ノードに mount する。
+4. engineering ノードが担当する coding のタスクを 1 件流し、完了後に
+   `~/.local/celeris/workspaces/<task>/runs/<run_id>/request.json` の `context.skills` に
+   `{"name":"rust-review", "path":"<KB>/skills/rust-review", "description":"…"}` が入っていること、
+   `claude-code` なら作業場所の `.claude/skills/rust-review/SKILL.md`、`codex` なら `AGENTS.md` の
+   `## Skills（celeris）` 節を目視で確認する。
+
+### 未解決事項
+
+- 実機確認（上記 4 項目）は未実施（ADR-0009 P-34。認証・ネットワーク・本番ワークスペースへの書き込みが
+  要るため、このワークトリークからは実行できない）。
+- `AGENTS.md`／`.claude/skills/` の削除方向（mount していた skill を unmount した次の run で、
+  前回のファイル/節が消えること）は `rewrite_agents_md(existing, None)` と
+  `deliver_claude_code` の「対象ディレクトリだけ置き換える」設計で理論上カバーしているが、
+  `deliver_claude_code` は「今回 mount されている skill のディレクトリを上書きする」だけで、
+  **前回 mount されていて今回は外れた skill のディレクトリを消す処理は無い**（`.claude/skills/
+  <外れた name>/` が残り続ける）。`codex`（`AGENTS.md` の節）は skills が空になった run では
+  そもそも `deliver_agents_md` を呼んでいない（`skills.is_empty()` で早期リターン）ため、
+  こちらも stale な節が残る可能性がある。実機で unmount の運用が出てきたら、mount された skill 名の
+  集合を（AGENTS.md の節と同様に）毎回洗い替える形に直す必要がある。
+- `celeris-mcp` の `org_mount_skill`/`skills_put` が実際に `Profile.skills_mounts` /
+  KB の `skills/` を書き、それが今回のディスパッチャ側の解決経路と噛み合うこと自体は Phase 78/79 の
+  単体テストではそれぞれ別々に確認しているが、MCP 経由での end-to-end（`skills_put` → `org_mount_skill`
+  → dispatch → `request.json`）は実機・統合テストどちらでも未検証。
+
+### 提案
+
+- 上の未解決事項（unmount 時の stale なファイル/節）への対処は、`skills_mounts` の変更頻度が低ければ
+  優先度は低いと判断し、今回のスコープには含めなかった。運用で unmount が使われ始めたら
+  `deliver_claude_code`/`deliver_agents_md` に「前回 mount していた名前の集合」を渡して差分を取る形に
+  拡張するとよい（`RunContext` に前回の skills 一覧を足すか、`.claude/skills/.celeris-managed.json`
+  のような管理用メタファイルを作業場所に残す、の 2 案が考えられる）。

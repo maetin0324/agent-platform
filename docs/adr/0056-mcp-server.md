@@ -231,3 +231,63 @@ Celeris の入口は今まで GUI（Console）と `celerisctl` だけだった�
 `docs/mcp.md` §8 に手順を書いた（`celerisctl mcp client add`、`curl` での `initialize` /
 `tools/list` / `knowledge_propose` / `console_instruct` + `console_reply`）。認証・ネットワークが
 使える環境の人（またはエージェント）が実行し、結果を `docs/PROGRESS.md` の Phase 78 節に追記すること。
+
+## Phase 79 追記（2026-09-21。D3: mount した skills を run に届ける）
+
+実装は ADR の決定どおり（届け方: claude-code はファイルコピー、codex は `AGENTS.md` の節、acp は前置き）。
+**決定を変えた点は無い**。ADR がデータ形しか書いていなかった `RunContext.skills[]` の中身と、
+アダプタごとの実装細部だけを残す。
+
+### 決めた細部（ADR が「届ける」としか書いていなかったこと）
+
+- **P-79-a: `SkillMount` は `{name, path, description}` の 3 つだけで、`SKILL.md` の本文は運ばない。**
+  `path` は KB の `skills/<name>/`（ディレクトリ）の絶対パス。本文はアダプタが起動直前にそこから読む
+  （`crates/task-worker/src/skills.rs::read_skill_md`）。`RunContext`（`request.json` に残る）を
+  肥大させないのと、`knowledge` の「索引だけ渡す、本文は道具で読む」という既存の設計原則
+  （`docs/adr/0047-*` D2）に揃える判断。`description` は `SKILL.md` の frontmatter から
+  `task_ops::knowledge::skill_description`（新設。Phase 78 の `skill_frontmatter` を再利用）で抜く。
+- **P-79-b: 見つからない skill は「`status` の進行イベントを 1 行出して run は続ける」を、
+  ディスパッチャの `run_extras` ではなく呼び出し元（`dispatch_ready` 相当。run_id が確定した直後）で
+  行う。** `run_extras` 自身はストアに書き込まない純粋寄りの関数（既存の `knowledge_fallback` の
+  `status` 行も同じ場所で出している）ので、その並びに合わせた。`RunExtras.missing_skills:
+  Vec<String>` を新設し、`extras.skills`（KB に実在したものだけ）とは別に運ぶ。
+- **P-79-c: `claude-code` の削除は「対象の skill ディレクトリだけ」に絞った。**
+  `.claude/skills/<name>/` が既にあれば `remove_dir_all` してから丸ごと写す（run ごとに新しい内容へ
+  置き換える。stale なファイルが残らない）が、`.claude/skills/` 配下の**他の**skill ディレクトリや
+  `.claude/settings.json` 等には一切触れない（`crates/task-worker/src/skills.rs::deliver_claude_code`。
+  fake アダプタのテスト `deliver_claude_code_only_touches_its_own_skill_directories` で確認）。
+- **P-79-d: `codex` の `AGENTS.md` 節は `<!-- celeris:skills:start -->` 〜 `<!-- celeris:skills:end
+  -->` の HTML コメントで区切り、その中だけを run ごとに書き直す（`rewrite_agents_md`。純粋関数、
+  テスト容易）。** 区切りの外側（人や他の仕組みが書いた内容）は常に保つ。`skills` が空の run は
+  `AGENTS.md` に一切触れない（無ければ作らない。ADR-0056 D3 の「既存の AGENTS.md は壊さない」を、
+  「そもそも今回 skills が無ければ何もしない」まで広げた解釈）。
+- **P-79-e: `acp` は前置き（プロンプト文面そのもの）に直接埋め込む。** acp（opencode）はファイルを
+  自動で読む契約が無い（ADR-0054 Phase 68 の判断と同じ理由: ACP には claude-code の `.claude/`・
+  codex の `AGENTS.md` に相当する「エージェントが自動で読む規約」が無い）ので、`build_prompt` が
+  組んだ本文の末尾に `crate::skills::preamble_section` の出力をそのまま足す
+  （`crates/task-worker/src/acp.rs::run_acp`）。`claude_code::build_prompt` は `claude-code` と
+  `codex` にも共有されているため、共有関数自体は変えず、`acp.rs` 側だけで `prompt` 文字列に追記した
+  （claude-code / codex のプロンプトは Phase 78 までと 1 バイトも変わらない）。
+- **P-79-f: 前置き用の `## Skills（celeris）` 節の組み立て（本文の読み込みを含む）は
+  `preamble.rs` ではなく新設の `crates/task-worker/src/skills.rs` に置いた。** `preamble.rs` の
+  冒頭コメントが「ここは純粋関数だけで、I/O も LLM も無い」と明記しており、`knowledge_section` も
+  索引（メタデータ）だけを受けて本文は読まない設計なので、ファイル I/O を要する skills の本文読み込み
+  はその外に出した（`skills.rs` は `delegate_file.rs` と同じ「アダプタ共有の小道具」の位置づけ。
+  `lib.rs` に `pub mod skills;` を追加）。
+- **P-79-g: 研究系アダプタ（paperqa / local-deep-research / langmem）は変更していない。**
+  `RunContext.skills` は既定で空 Vec（`skip_serializing_if`）なので、これらのアダプタの prompt.txt /
+  request.json は Phase 78 までと 1 バイトも変わらない（触っていないことを確認するテストは追加して
+  いない。研究系はそもそも `preamble::render` を使わない設計 — `docs/adr/0033-*` 参照 — なので
+  `context.skills` を読む経路自体が無い）。
+
+### やっていないこと（Phase 79 のスコープ外）
+
+- GUI（「アカウント」画面の MCP クライアント節）は引き続き未着手（ADR-0056 D4 が明記した後続 Phase）。
+- `org_mount_skill` した skill を実際に外部（ChatGPT 等）から `skills_put` で書く実機確認（ADR-0009
+  P-34。認証・ネットワークが使える環境の人・エージェントに依頼）。
+
+### 実機（このセッションでは未実施。ADR-0009 P-34）
+
+`docs/PROGRESS.md` の「Phase 79」節に手順を書いた（`skills_put` で 1 つ置く、`org_mount_skill` で
+engineering に mount する、coding のタスクを 1 件流して `request.json` と作業場所を見る）。認証・
+ネットワークが使える環境の人（またはエージェント）が実行し、結果を同節に追記すること。

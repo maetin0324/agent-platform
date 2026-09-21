@@ -453,6 +453,31 @@ pub struct RunContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub session_diff: Vec<String>,
     // ---- ADR-0054 D1（Phase 67）: ここまで ----
+    // ---- ADR-0056 D3（Phase 79）: mount された skills。ここから ----
+    /// ADR-0056 D3: 担当ノードの実効 profile が継いだ `skills_mounts`（Phase 78）のうち、KB の
+    /// `skills/<name>/` に実在するものだけ（本文は含まない。`path` の `SKILL.md` をアダプタが読む）。
+    /// 見つからない名前は run を落とさず、ディスパッチャが `status` の進行イベントを 1 行出して省く
+    /// （このフィールドには乗らない）。届け方はアダプタごと（`claude-code` は `.claude/skills/<name>/`
+    /// へコピー、`codex` は `AGENTS.md` の節、`acp` は前置きに埋め込む）。研究系アダプタ
+    /// （paperqa / local-deep-research / langmem）は無視する。空なら省略され、前置き・作業場所は
+    /// Phase 78 までと 1 バイトも変わらない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillMount>,
+    // ---- ADR-0056 D3（Phase 79）: ここまで ----
+}
+
+/// `context.skills[]`（ADR-0056 D3。Phase 79）: mount された skill 1 件。ディスパッチャが KB から
+/// 決定的に解決する（存在確認と frontmatter の `description` を読むだけ。本文はアダプタが `path` から
+/// 読む）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SkillMount {
+    /// KB の `skills/<name>/` と同じ綴り。
+    pub name: String,
+    /// 絶対パス。KB の `skills/<name>/`（`SKILL.md` と付属ファイルを含むディレクトリ）。
+    pub path: String,
+    /// `SKILL.md` の frontmatter の `description`（決まらなければ空文字列）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 /// `context.session`（ADR-0054 D1。Phase 67）: 継続セッションの手がかり。

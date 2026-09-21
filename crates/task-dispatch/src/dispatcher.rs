@@ -622,6 +622,12 @@ struct RunExtras {
     session: Option<task_worker::protocol::SessionHandle>,
     /// ADR-0054 D1（Phase 67）: `session.resume = true` のときだけ、前回の run 以降の差分（箇条書き）。
     session_diff: Vec<String>,
+    /// ADR-0056 D3（Phase 79）: 担当ノードの実効 profile が継いだ skill mount のうち、KB に実在した
+    /// もの（`RunContext.skills` にそのまま乗る）。
+    skills: Vec<task_worker::protocol::SkillMount>,
+    /// ADR-0056 D3（Phase 79）: mount 名にあったが KB に無かった skill（`run_ready` 相当の呼び出し元が
+    /// `status` の進行イベントを 1 行出す。`RunContext` には乗らない）。
+    missing_skills: Vec<String>,
 }
 
 struct ReviewEntry {
@@ -3722,6 +3728,18 @@ impl Dispatcher {
             };
             let mut extras =
                 self.run_extras(&task, worktree.as_ref(), account.as_deref(), &adapter_id)?;
+            // ADR-0056 D3（Phase 79）: mount 名にあったが KB に見つからなかった skill を `status` の
+            // 進行イベントで 1 行ずつ報告する（run は落とさない）。
+            for name in &extras.missing_skills {
+                self.store.append_event(
+                    task.id,
+                    &Event::worker_progress_with(
+                        &run_id,
+                        format!("skill {name} not found"),
+                        task_core::ProgressFields::of(task_core::ProgressKind::Status),
+                    ),
+                )?;
+            }
             // ADR-0052 D2: フォールバックの前置き（LangMem に渡しているのと同じ抽出の指示 + 出力契約）を
             // 役割の指示文として載せる。依頼文（`maintenance_objective`）は `task.objective` のまま。
             if let Some(fallback) = &knowledge_fallback {
@@ -4066,6 +4084,13 @@ impl Dispatcher {
             .unwrap_or_default();
         let knowledge =
             self.knowledge_context(task, assigned.map(|n| n.id.as_str()), &profile_knowledge);
+        // ADR-0056 D3（Phase 79）: 担当ノードの実効 profile が継いだ skills mount を KB から解決する。
+        // 決定的（ファイルを読むだけ。LLM は関与しない）。見つからない名前は run を落とさず、呼び出し元
+        // （`dispatch_ready`）が `status` の進行イベントを 1 行出す。
+        let profile_skills_mounts: Vec<String> = assigned
+            .map(|n| task_core::resolve_profile(&org, &n.id).skills_mounts)
+            .unwrap_or_default();
+        let (skills, missing_skills) = self.skills_context(&profile_skills_mounts);
         // ADR-0048 D3（Phase 60b）: CoS の対話 run にだけ、進行中の案件とその途中目標を渡す
         // （`actions` の `create_task.project` / `add_milestone.project` を選ぶ材料。決定的にストアを
         // 読むだけ。CoS 以外の run・継続中の run（ADR-0054 D1: 差分に「新しい案件」が乗る）では常に空）。
@@ -4098,6 +4123,8 @@ impl Dispatcher {
             knowledge_fallback: None,
             session,
             session_diff,
+            skills,
+            missing_skills,
         })
     }
 
@@ -4419,6 +4446,38 @@ impl Dispatcher {
             mounts,
             index: items,
         })
+    }
+
+    /// ADR-0056 D3（Phase 79）: `skills_mounts`（skill 名の一覧）を KB の `skills/<name>/` から解決する
+    /// （`SKILL.md` があるかどうかを読むだけ。決定的、LLM は関与しない）。見つかったものは
+    /// `RunContext.skills` に乗せる `SkillMount`、見つからなかった名前は 2 つ目の戻り値（呼び出し元が
+    /// `status` の進行イベントを 1 行出し、run は落とさない）。
+    fn skills_context(
+        &self,
+        mounts: &[String],
+    ) -> (Vec<task_worker::protocol::SkillMount>, Vec<String>) {
+        let root = &self.config.knowledge.root;
+        let mut skills = Vec::new();
+        let mut missing = Vec::new();
+        for name in mounts {
+            match task_ops::knowledge::skills_get(root, name) {
+                Some(detail) => {
+                    let description = task_ops::knowledge::skill_description(&detail.skill_md);
+                    let path = root
+                        .join(task_core::knowledge::SKILLS_DIR)
+                        .join(name)
+                        .display()
+                        .to_string();
+                    skills.push(task_worker::protocol::SkillMount {
+                        name: name.clone(),
+                        path,
+                        description,
+                    });
+                }
+                None => missing.push(name.clone()),
+            }
+        }
+        (skills, missing)
     }
 
     /// `repo` マウント 1 件分（案件のその名前のリポジトリの文書の根のページ）。
@@ -6340,6 +6399,8 @@ async fn run_worker(
             // ADR-0054 D1（Phase 67）: 継続セッション（CoS の対話・部門長のレビュー run だけ）。
             session: extras.session,
             session_diff: extras.session_diff,
+            // ADR-0056 D3（Phase 79）: mount された skills（KB に実在したものだけ）。
+            skills: extras.skills,
         },
     };
     // ADR-0043 D3（Phase 56）: コンテナで走らせる run は、ここでアダプタを包んだ複製に差し替える
@@ -15158,6 +15219,181 @@ mod tests {
                 .any(|(_, e)| matches!(e, Event::WorkerStarted { .. }))
         );
         assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.contains("unverified executable ID"))));
+    }
+
+    // ---- ADR-0056 D3（Phase 79）: mount された skills を run に届ける ----
+
+    fn write_kb_skill(kb_root: &std::path::Path, name: &str, description: &str, body: &str) {
+        let dir = kb_root.join("skills").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n\n{body}\n"),
+        )
+        .unwrap();
+    }
+
+    /// `skills_context` は KB にある skill を `SkillMount` に解決し、無い名前は 2 つ目の戻り値
+    /// （`missing`）に回す（run は落とさない）。
+    #[test]
+    fn skills_context_resolves_mounted_skills_and_reports_missing_ones() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
+        let mut d = dispatcher(store, adapter, 1);
+        let kb = tempfile::tempdir().unwrap();
+        d.config.knowledge.root = kb.path().to_path_buf();
+        write_kb_skill(kb.path(), "writing", "文章の書き方", "本文");
+
+        let (skills, missing) =
+            d.skills_context(&["writing".to_string(), "ghost".to_string()]);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "writing");
+        assert_eq!(skills[0].description, "文章の書き方");
+        assert_eq!(
+            skills[0].path,
+            kb.path().join("skills").join("writing").display().to_string()
+        );
+        assert_eq!(missing, vec!["ghost".to_string()]);
+    }
+
+    /// ADR-0046 D1（継承）+ ADR-0056 D3: `run_extras` は担当ノードの実効 profile が継いだ
+    /// `skills_mounts`（親と子の和、重複は落ちる）を KB から解決して `RunExtras.skills` に積む。
+    #[test]
+    fn run_extras_resolves_the_assigned_nodes_effective_skills_mounts() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let now = OffsetDateTime::now_utc();
+        store
+            .org_upsert(&OrgNode {
+                id: "cos".into(),
+                parent_id: None,
+                name: "cos".into(),
+                kind: OrgKind::Secretary,
+                genre: None,
+                brief: String::new(),
+                profile: task_core::Profile {
+                    skills_mounts: vec!["writing".into()],
+                    ..task_core::Profile::default()
+                },
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+        store
+            .org_upsert(&OrgNode {
+                id: "engineering".into(),
+                parent_id: Some("cos".into()),
+                name: "engineering".into(),
+                kind: OrgKind::Department,
+                genre: None,
+                brief: String::new(),
+                // `writing` は親と重複（落ちる）、`ghost` は KB に無い（missing に回る）。
+                profile: task_core::Profile {
+                    skills_mounts: vec!["rust-review".into(), "writing".into(), "ghost".into()],
+                    ..task_core::Profile::default()
+                },
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut task = new_task(dir.path(), Check::Human, 0);
+        task.assignee = Some("engineering".into());
+        store.insert(&task).unwrap();
+
+        let adapter = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
+        let mut d = dispatcher(store, adapter, 1);
+        let kb = tempfile::tempdir().unwrap();
+        d.config.knowledge.root = kb.path().to_path_buf();
+        write_kb_skill(kb.path(), "writing", "d", "body");
+        write_kb_skill(kb.path(), "rust-review", "d", "body");
+
+        let extras = d.run_extras(&task, None, None, "claude-code").unwrap();
+        let names: Vec<&str> = extras.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["writing", "rust-review"],
+            "根→葉の和で重複が落ちる: {names:?}"
+        );
+        assert_eq!(extras.missing_skills, vec!["ghost".to_string()]);
+    }
+
+    /// 実際の dispatch（`run_until_idle`）で `RunContext.skills` がアダプタに届き、mount 名にあったが
+    /// KB に無かった skill は `status` の進行イベントを 1 行残すだけで run を失敗させない。
+    #[tokio::test]
+    async fn dispatch_delivers_mounted_skills_and_reports_missing_ones_without_failing_the_run() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let now = OffsetDateTime::now_utc();
+        store
+            .org_upsert(&OrgNode {
+                id: "engineering".into(),
+                parent_id: None,
+                name: "engineering".into(),
+                // 根は secretary だけ（ADR-0033 D1）。skills mount の解決そのものは対話・非対話を
+                // 区別しないので、根で 1 段だけの組織にする。
+                kind: OrgKind::Secretary,
+                genre: None,
+                brief: String::new(),
+                profile: task_core::Profile {
+                    skills_mounts: vec!["writing".into(), "ghost".into()],
+                    ..task_core::Profile::default()
+                },
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            })
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut task = new_task(dir.path(), Check::Human, 0);
+        task.assignee = Some("engineering".into());
+        store.insert(&task).unwrap();
+
+        let seen = Arc::new(StdMutex::new(None));
+        let adapter = Arc::new(PersonAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            seen: seen.clone(),
+            memory: None,
+            proposals: Vec::new(),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let kb = tempfile::tempdir().unwrap();
+        d.config.knowledge.root = kb.path().to_path_buf();
+        write_kb_skill(kb.path(), "writing", "d", "body");
+
+        assert!(run_until_idle(&mut d, 20).await.idle);
+        let context = seen.lock().unwrap().clone().expect("the adapter ran");
+        assert_eq!(context.skills.len(), 1);
+        assert_eq!(context.skills[0].name, "writing");
+
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::WorkerProgress { msg, kind, .. }
+                    if msg == "skill ghost not found" && *kind == Some(task_core::ProgressKind::Status)
+            )),
+            "{events:?}"
+        );
+        let status = store.get(task.id).unwrap().unwrap().status;
+        assert!(
+            matches!(status, Status::Reviewing | Status::Done),
+            "a missing skill mount must not fail the run: {status:?}"
+        );
     }
 }
 
