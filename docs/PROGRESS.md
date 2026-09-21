@@ -12235,3 +12235,10 @@ dispatcher.rs` に `Dispatcher::skills_context`（担当ノードの実効 profi
   `deliver_claude_code`/`deliver_agents_md` に「前回 mount していた名前の集合」を渡して差分を取る形に
   拡張するとよい（`RunContext` に前回の skills 一覧を足すか、`.claude/skills/.celeris-managed.json`
   のような管理用メタファイルを作業場所に残す、の 2 案が考えられる）。
+
+### Phase 80 の本番反映（2026-09-21 18:37–18:40 UTC。`751995ce4aec`、ライブ切替）
+
+- main `751995c` = Phase 80 merge（GUI のみ: `/accounts` の MCP クライアント節、Console の「外部（<name>）」帯、`/help` の MCP 節）。
+  GUI ゲート: typecheck / lint exit 0、`pnpm test` 940 passed、`pnpm mobile-audit` 違反 0。`release.sh` → `751995ce4aec`（schema 24）。
+  `verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（18:38:25→39:53。今回も `systemctl start` の返りが遅かった。API 停止なし）。
+- Phase 79（skills の届け方）は merge 済み・cargo test 1774 passed。release → verify → ライブ切替は次節。
