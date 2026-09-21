@@ -3154,6 +3154,13 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
     /// 差し替える。これは Phase 66b の修正前なら panic した形そのものなので、この形が panic しなくなった
     /// ことが「呼び出し元が async ワーカーから逃がしている」ことの直接の証拠になる（`tunnel_forward_ensurer`
     /// / `tunnel_probe` は ssh・HTTP を呼ぶだけで元々 panic しないので偽物で十分）。
+    ///
+    /// Phase 84b: 「master が死んでいる」ことをテストの前提にするため、`set_cluster_liveness_probe` で
+    /// `ssh -O check` を偽物（常に false）に差し替える。以前はここを本物の `control_master_alive_blocking`
+    /// に任せていたため、テストを動かすマシン自身が（人の別作業で）`pegasus` へ実際に ssh ControlMaster
+    /// を張っていると「master 生存」と誤判定され、`cluster_connector` が一度も呼ばれずに落ちた
+    /// （観測: 2026-09-21 21:07 UTC の release gate）。クラスタの id/host も、`~/.ssh/config` に実在
+    /// しうる名前（`pegasus`/`sirius`/`fern03`）を避け、テスト専用の `test-cluster` にした。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
@@ -3170,8 +3177,8 @@ id = "x"
 adapter = "fake"
 
 [[clusters]]
-id = "pegasus"
-host = "pegasus"
+id = "test-cluster"
+host = "test-cluster"
 auth = "totp"
 
 [[clusters.forwards]]
@@ -3184,6 +3191,9 @@ target = "bnode150:18000"
         let masters: ClusterMasters = Default::default();
         let mut dispatcher = build_dispatcher(&config, masters)
             .unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
+
+        // Phase 84b: 実機の ssh 状態に依存しないよう、master は常に死んでいる扱いにする。
+        dispatcher.set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| false));
 
         let connector_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let connector_calls_hook = connector_calls.clone();
@@ -3317,6 +3327,11 @@ auth = "publickey"
         let mut dispatcher = build_dispatcher(&config, masters)
             .unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
 
+        // Phase 84b: 実機の ssh 状態に依存しないよう、master は常に死んでいる扱いにする
+        // （`try_auto_connect_cluster` は `cluster_connected` を見ないが、`refresh_cluster_liveness`
+        // が同じ tick で先に呼ばれるので、ここも決定的な偽物に揃えておく）。
+        dispatcher.set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| false));
+
         let connector_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let connector_calls_hook = connector_calls.clone();
         dispatcher.set_cluster_connector(Arc::new(move |_cluster_id: &str, _host: &str| {
@@ -3354,6 +3369,77 @@ auth = "publickey"
         // 自動接続が失敗したので cooldown に落ち、この tick では dispatch されない（実
         // ssh/rsync には一切触れていない）。
         assert_eq!(report.unwrap().dispatched, 0);
+    }
+
+    /// ADR-0053 D3 Phase 84b 追記: `a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b`
+    /// と同じ配線（`build_dispatcher`、`[[clusters.forwards]]` を持つ `auth = "totp"` クラスタ）だが、
+    /// `set_cluster_liveness_probe` が「master 生存」を返す点だけが違う。D3 の設計どおり、master が
+    /// 生きていれば `cluster_connector`（鍵認証での再接続）は要らず、`tunnel_forward_ensurer`
+    /// （forward の(再)確立）だけが呼ばれることを確認する。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_totp_cluster_with_a_live_master_skips_the_connector_but_ensures_the_forward_phase_84b()
+     {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        std::fs::create_dir_all(dir.path().join("ws")).unwrap_or_else(|e| panic!("ws: {e}"));
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+db = "celeris.sqlite3"
+workspace_root = "ws"
+
+[[providers]]
+id = "x"
+adapter = "fake"
+
+[[clusters]]
+id = "test-cluster"
+host = "test-cluster"
+auth = "totp"
+
+[[clusters.forwards]]
+listen = "127.0.0.1:0"
+target = "bnode150:18000"
+"#,
+        )
+        .unwrap_or_else(|e| panic!("config: {e}"));
+        let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
+        let masters: ClusterMasters = Default::default();
+        let mut dispatcher = build_dispatcher(&config, masters)
+            .unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
+
+        // master は常に生存している扱い（実機の ssh 状態には依存しない偽物）。
+        dispatcher.set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| true));
+
+        let connector_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connector_calls_hook = connector_calls.clone();
+        dispatcher.set_cluster_connector(Arc::new(move |_cluster_id: &str, _host: &str| {
+            connector_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<(), String>("must not be called while the master is alive (Phase 84b)".to_string())
+        }));
+        let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ensure_calls_hook = ensure_calls.clone();
+        dispatcher.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
+            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+        dispatcher.set_tunnel_probe(Arc::new(|_listen: &str| false));
+        dispatcher.set_accepting_new_work(true);
+
+        let report = dispatcher.tick();
+        assert!(
+            report.is_ok(),
+            "the first tick must complete without panicking: {report:?}"
+        );
+        assert_eq!(
+            connector_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the cluster connector must not run while the ssh master is alive (ADR-0053 D3)"
+        );
+        assert!(
+            ensure_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the forward must still be (re-)established while the master is alive (ADR-0053 D3)"
+        );
     }
 
     #[test]

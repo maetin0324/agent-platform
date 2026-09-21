@@ -427,3 +427,61 @@ Phase 66b の修正 5. が「`try_auto_connect_cluster`（`auth = "publickey"` �
   避けられないため）。この経路は `task-dispatch` 側の
   `publickey_cluster_auto_connects_and_dispatch_continues_on_success`（`InstantAdapter` で
   workspace 準備自体をバイパスする既存のユニットテスト）でカバー済みという判断。
+
+## Phase 84b 追記（celeris のトンネルテストが実機の ssh master に依存していた。2026-09-21）
+
+**観測（2026-09-21 21:07 UTC、release gate、main `331aab724fa4`）**: `crates/celeris/src/lib.rs` の
+`a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b` が
+`the totp cluster with a forward must still reach the cluster connector (key auth before TOTP,
+ADR-0053 D3)`（`connector_calls == 0`）で落ちた。このテストは 1 日中 green だったが、~21:00 UTC に
+人がこのマシンから実際に `pegasus` への ssh ControlMaster を張った（`~/.ssh/mux-rmaeda@pegasus03…` が
+現れた）直後から落ちるようになった。
+
+- **原因**: `a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b`（Phase 66b/81 追記
+  を参照）は `build_dispatcher` + `dispatcher.tick()` という**本番と同じ配線**を検証の要（「実物の
+  `cluster_connector` を、実物と同じ経路〈`tick()` の中〉から呼ぶ」）にしていたため、`cluster_connector`
+  だけを偽物に差し替え、それ以外（`refresh_cluster_liveness` が呼ぶ `control_master_alive_blocking` =
+  本物の `ssh -O check`）は本物のままにしていた。テストの `[[clusters]] host = "pegasus"` は「実在
+  しないはず」という前提だったが、`ssh -O check pegasus` はホスト名の DNS 解決すら要らず、**手元の
+  `~/.ssh/mux-rmaeda@pegasus*` ソケットの有無だけ**を見るので、人が同じマシンで実際に `pegasus` へ
+  ログインしていると `alive = true` になる。`ensure_cluster_master_for_tunnel`
+  （`crates/task-dispatch/src/dispatcher.rs`）は `cluster_connected` が `true` ならそこで即座に
+  `return true` するため（ADR-0053 D3 の設計どおり: master が生きていれば鍵認証をやり直す必要が
+  無い）、`cluster_connector` に一度も届かなくなった。**テストが実機の ssh 状態（このマシンで
+  他の作業が張った ControlMaster）に依存していた**ことがバグの本体であり、`cluster_connector` 側にも
+  `refresh_cluster_liveness`/`refresh_cluster_tunnels` 側にも実装のバグは無い。
+- **決めたこと**: `refresh_cluster_liveness` が使う「master 生存」判定を、`cluster_connector` /
+  `tunnel_forward_ensurer` / `tunnel_probe` と同じ流儀でフック化した
+  （`task_dispatch::dispatcher::ClusterLivenessProbe = Arc<dyn Fn(&[String], &str) -> bool + Send +
+  Sync>`、`Dispatcher::set_cluster_liveness_probe`）。既定（`Dispatcher::new`）は従来どおり本物の
+  `control_master_alive_blocking`（`ssh -O check`）なので、本番の挙動（celeris は
+  `set_cluster_liveness_probe` を呼ばない）は変わらない。**テストは実機の ssh 状態に依存してはならない
+  ので、`ssh -O check` に触れうるテストは必ずこのフックを偽物に差し替える**（CLAUDE.md「テストで外部
+  ネットワークに出ない」と同じ精神。`ssh -O check` は外部ネットワークには出ないが、実行環境の状態
+  〈人が張った ControlMaster〉に依存する点で同種の脆さがある）。
+  - `a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b`:
+    `set_cluster_liveness_probe(|_, _| false)`（master 死亡、フォワード付き）に差し替え、
+    クラスタ id/host も `~/.ssh/config` に実在しうる名前（`pegasus`/`sirius`/`fern03`）を避けて
+    `test-cluster` に変えた。
+  - `a_publickey_cluster_with_a_ready_task_does_not_panic_the_first_tick_phase_81`: 元々 host は
+    `celeris-no-such-host-for-tests-auto-phase81`（安全な架空名）で実害は無かったが、一貫性のため
+    同じく `set_cluster_liveness_probe(|_, _| false)` を挿した。
+  - 新設: `a_totp_cluster_with_a_live_master_skips_the_connector_but_ensures_the_forward_phase_84b`
+    （`crates/celeris/src/lib.rs`）。`set_cluster_liveness_probe(|_, _| true)`（master 生存）にすると、
+    ADR-0053 D3 の設計どおり `cluster_connector` は呼ばれず（呼ばれたら偽物が `Err` を返して assert
+    される想定だが、そもそも呼ばれないことを回数 0 で確認）、`tunnel_forward_ensurer` だけが呼ばれる
+    （forward の(再)確立）ことを確認する回帰テスト。
+- **`crates/task-dispatch/src/dispatcher.rs` の既存テストの棚卸し**: ワークスペース全体を
+  `pegasus|sirius|fern03` で grep すると、`dispatcher.rs` の `tunnel_*` 系テスト（`tunnel_down_then_
+  key_auth_ok_brings_the_forward_up` 等）とスナップショットの `connect_pending` テスト
+  （`cluster_live_carries_auth_and_connect_pending` 系）に `"pegasus"` / `"fern03"` が残っている。
+  これらは (a) `refresh_cluster_tunnels()` を**直接**呼ぶだけで `refresh_cluster_liveness()`（＝
+  `ssh -O check` を打つ経路）を一切通らない、または (b) `host` 自体は安全な架空名
+  （`celeris-no-such-host-for-tests-live` 等）で `id` だけが `"fern03"` という**ラベル**である、の
+  いずれかであることをコードを読んで確認済みなので、実機の ssh 状態には依存しない。今回はこの Phase の
+  スコープ（celeris の 2 テスト）を超えるリネームはしていない（CLAUDE.md「今回のPhaseだけをやる」）。
+  将来 `dispatcher.rs` のテストが `tick()`/`refresh_cluster_liveness()` を経由するよう書き換わる場合は、
+  同じフックで差し替えるか、実在しうるクラスタ名を避けること。
+- **ゲート**: `cargo test -p celeris --lib phase_` 3 件 green、`cargo test --workspace --no-fail-fast`
+  全 green（FAILED 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0。詳細は
+  `docs/PROGRESS.md` の「Phase 84b」節。

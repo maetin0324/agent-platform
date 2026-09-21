@@ -12712,3 +12712,74 @@ board/task の状態バッジに `~/lib/live-status.ts::isLiveStatusScreen`（�
   `connector_calls == 0` で落ちた。原因は上の ssh master: テストが `host = "pegasus"` で**実機の `ssh -O check` を叩いており**、master が生きたことで
   「落ちている → connector を呼ぶ」経路を通らなくなった（環境依存のテスト）。→ **Phase 84b**（liveness probe を注入可能にしてテストは偽物を使う、
   テストのホスト名から実クラスタ名を排除）を Sonnet で起動。Phase 84（GUI）の配備はその後。
+## Phase 84b — celeris のトンネルテストが実機の ssh master に依存していた（2026-09-21）
+
+### 観測
+
+release gate（2026-09-21 21:07 UTC、main `331aab724fa4`）で
+`crates/celeris/src/lib.rs` の `a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b`
+が `the totp cluster with a forward must still reach the cluster connector (key auth before TOTP,
+ADR-0053 D3)`（`connector_calls == 0`）で失敗した。1 日中 green だったが、~21:00 UTC に人がこのマシンから
+実際に `pegasus` へ ssh ControlMaster を張った直後から落ちるようになった。
+
+### 原因
+
+テストの `[[clusters]] id = "pegasus" host = "pegasus"` は「実在しないはず」の前提だったが、
+`refresh_cluster_liveness`（`crates/task-dispatch/src/dispatcher.rs`）は `cluster_connector` とは別に、
+**本物の `control_master_alive_blocking`（`ssh -O check pegasus`）を差し替え不能のまま**呼んでいた。
+`ssh -O check` はホスト名の解決すら要らず手元の ControlMaster ソケットの有無だけを見るので、テストを
+動かすマシン自身が（人の別作業で）`pegasus` へログイン済みだと `alive = true` と判定される。
+`ensure_cluster_master_for_tunnel` は `cluster_connected == true` ならそこで即座に `return true` する
+（ADR-0053 D3 の設計どおり）ため、`cluster_connector` に一度も届かなくなった。**テストが実機の ssh 状態に
+依存していた**ことがバグの本体で、実装（`cluster_connector`/`refresh_cluster_liveness`/
+`refresh_cluster_tunnels`）自体にバグは無い。詳細は `docs/adr/0053-llm-source-proxy.md`「Phase 84b 追記」。
+
+### 修正
+
+1. `crates/task-dispatch/src/dispatcher.rs` に `ClusterLivenessProbe` 型
+   （`Arc<dyn Fn(&[String], &str) -> bool + Send + Sync>`）と `Dispatcher::set_cluster_liveness_probe`
+   を追加し、`refresh_cluster_liveness` の `control_master_alive_blocking` 直呼びをこのフック経由に
+   した。既定（`Dispatcher::new`）は従来どおり本物の `control_master_alive_blocking`（本番の挙動は不変。
+   `crates/celeris/src/lib.rs::build_dispatcher` はこのフックを差し替えていない）。
+2. `crates/celeris/src/lib.rs` の 2 テストに `set_cluster_liveness_probe(|_, _| false)`（master 死亡）を
+   足し、`a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b` のクラスタ id/host を
+   `~/.ssh/config` に実在しうる名前（`pegasus`/`sirius`/`fern03`）を避けて `test-cluster` に変えた。
+3. 新規テスト `a_totp_cluster_with_a_live_master_skips_the_connector_but_ensures_the_forward_phase_84b`
+   （`crates/celeris/src/lib.rs`）を追加: `set_cluster_liveness_probe(|_, _| true)`（master 生存）で
+   `dispatcher.tick()` を呼び、ADR-0053 D3 の設計どおり `cluster_connector` が呼ばれない（0 回）ことと
+   `tunnel_forward_ensurer` が呼ばれる（forward の(再)確立、1 回以上）ことを確認する。
+4. `crates/task-dispatch/src/dispatcher.rs` をワークスペース全体で `pegasus|sirius|fern03` を grep して
+   棚卸しした。残る出現（`tunnel_*` 系テスト、`cluster_live_carries_auth_and_connect_pending` 等）は
+   コードを読んで確認済みで、(a) `refresh_cluster_tunnels()` を直接呼ぶだけで `refresh_cluster_liveness()`
+   （= `ssh -O check`）を一切通らない、または (b) `host` 自体は安全な架空名（`celeris-no-such-host-for-
+   tests-live` 等）で `id` だけが `"fern03"` というラベル、のいずれかであり、実機の ssh 状態には
+   依存しない。この Phase のスコープ（celeris の 2 テスト）を超えるリネームはしていない。
+
+### 実行したコマンドと出力の要点
+
+- `cargo test -p celeris --lib phase_`:
+  ```
+  running 3 tests
+  test tests::a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b ... ok
+  test tests::a_totp_cluster_with_a_live_master_skips_the_connector_but_ensures_the_forward_phase_84b ... ok
+  test tests::a_publickey_cluster_with_a_ready_task_does_not_panic_the_first_tick_phase_81 ... ok
+  test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 155 filtered out
+  ```
+- `grep -rn "pegasus|sirius|fern03" crates/celeris/src/lib.rs crates/task-dispatch/src/dispatcher.rs`:
+  celeris 側は doc コメント（このバグの説明文）だけ、host として使われているものは無し。dispatcher.rs
+  側は上記 4. のとおり実機非依存であることを確認済みの箇所のみ残る。
+- `cargo test --workspace --no-fail-fast`: **exit 0**、全サブテスト `test result: ok`、**FAILED 0**、
+  合計 **1785 passed**（doctest 込み。Phase 83 の 1784 + このラウンドで足した新規テスト 1 件）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: **exit 0**、warning/error 0 件。
+- 変更ファイル: `crates/task-dispatch/src/dispatcher.rs`（`ClusterLivenessProbe` 型・フィールド・
+  setter・`refresh_cluster_liveness` の差し替え）、`crates/celeris/src/lib.rs`（既存 2 テストへの
+  フック挿入・クラスタ名変更、新規テスト 1 本）。`unwrap()` は新規のテスト関数内のみ（本文には追加なし）。
+
+### 未解決事項・提案
+
+- `crates/task-dispatch/src/dispatcher.rs` の `tunnel_*`/`cluster_live_carries_auth_and_connect_pending`
+  系テストは今回コードを読んで安全と確認したが、`"pegasus"`/`"fern03"` という文字列自体は残っている。
+  将来これらが `tick()`/`refresh_cluster_liveness()` を経由するよう書き換わるときは、同じ
+  `set_cluster_liveness_probe` で差し替えるか、クラスタ名も実在しうる名前を避けること。
+- worktree の `target/` はこの Phase の最後に削除済み（ディスク逼迫対策。`docs/PROGRESS.md` の
+  Phase 83 の教訓どおり）。
