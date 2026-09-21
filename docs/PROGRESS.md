@@ -12919,3 +12919,11 @@ ADR-0053 D3)`（`connector_calls == 0`）で失敗した。1 日中 green だっ
   この頻度自体が問題になる環境が出てきたら、こちらにも間引きを足す。
 - `docs/PROGRESS.md`「Phase 84 の release ゲート失敗」の直後に記録した旧 `celeris-qwen-tunnel.service`
   の撤去（`install-units.sh --remove-qwen-tunnel`）は本 Phase のスコープ外のまま（人の作業待ち）。
+
+### Phase 85 の本番反映（2026-09-21 22:03 UTC。`939914839dcc`、ライブ切替）
+
+- main `9399148…` = Phase 85 merge（forward の有無と target の健康を区別、`probe_interval_secs` 既定 30 秒、`GET /clusters` に
+  `listener` / `target_healthy` / `last_error`、GUI の「転送あり・先方応答なし」）。ゲート: cargo test **1787 passed / 0 failed**、clippy exit 0、
+  GUI typecheck / lint exit 0、`pnpm test` 983 passed、`pnpm mobile-audit` 違反 0。`release.sh` → `939914839dcc`（schema 24）。
+  `verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（22:03:47→50）。
+- 実機（配備 2 分後の観測は次行）。
