@@ -10714,3 +10714,18 @@ thread while the thread is being used to drive asynchronous tasks.
   （またはエージェント）が確認し、結果をここに追記すること。
 - Phase 66b の「未解決事項」（`try_auto_connect_cluster`〈`auth = "publickey"`〉側の同種の潜在
   バグは防御ガードで panic こそしないが機能としては退避させていない）はそのまま残っている。
+
+### Phase 66c の本番反映 — トンネルを celeris が管理する状態に（2026-09-21 13:32–13:35 UTC。`5d3414aa25fa`、ライブ切替）
+
+- main `5d3414a` = Phase 66c merge。ゲート: cargo test **1629 passed / 0 failed**、clippy exit 0。`release.sh` → `5d3414aa25fa`（schema 22）。
+- **forwards を設定したまま `verify.sh`**: check 1–6 **すべて true**（66b で check 1、66c で check 2 が直った。N-1 = 2b3aaf1 も forwards を読める）。
+  `live_ok=true` → `promote.sh 5d3414aa25fa` **mode=live**（13:33:08→13、API 停止なし）。
+- 新デーモンの起動直後: `tunnel: state transition pegasus kind=login_needed` → `listen=127.0.0.1:18000 kind=down`、30 秒後 `notify: new notifications count=1`
+  （`cluster_login_needed` の Discord 通知）。18000 は未 bind（master が無いので設計どおり）。**人が戻ったら GUI クラスタ画面の「接続」で
+  pegasus に TOTP を 1 回通せば、forward が上がり `celeris/cheap` が Qwen に戻る**（ADR-0053 D3 の目標）。その後 `install-units.sh --remove-qwen-tunnel`。
+- PaperQA 動作確認（2 回目 `01M31ZM75RSG0R0AF2QA9KRQZH`）: shebang 修正後 `pqa` は起動したが、litellm が `AuthenticationError: missing or
+  invalid bearer token` → Paper Count=0 → `insufficient literature evidence: cited=0` で failed。acquire（同じ env、`api_key` を env から読む）は
+  celeris/standard で 7 要求 ok だったので env には届いている。litellm の `"api_key": "os.environ/OPENAI_API_KEY"` が pqa の経路（`llm_config.model_list`
+  → Router）では解決されなかったと判断し、`celeris-proxy.json` から `api_key` を全部外した（litellm の openai provider は未指定なら
+  `OPENAI_API_KEY` を使う）。3 回目のタスクを作成（結果は次節）。この失敗タスクの知識整理 run が `scheduled` になったので、LangMem が
+  プロキシ経由（bearer 付き probe）で走るかもここで確認する。
