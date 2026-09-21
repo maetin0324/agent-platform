@@ -201,6 +201,16 @@ dir = "../memory"
 # standard = "qwen3.8-27b"
 # cheap = "qwen3.8-27b"
 
+# ---------------------------------------------------------------------------
+# ADR-0054 D1（Phase 67）: ノードごとの継続セッション（`node_sessions`）。CoS の対話は全体で 1 本、
+# 部門長（engineering/research/operations の根ノード）のレビュー・切り分け run（ADR-0051）は部署ごとに
+# 1 本、`--resume`（claude-code）/ `codex exec resume`（codex）/ `session/load`（acp）で続ける。
+# ---------------------------------------------------------------------------
+[sessions]
+# そのセッションの累計トークン（run の usage の合計）がこれを超えたら、次の run は新しいセッションから
+# 始める（前置きに「前セッションの要約」を乗せる）。既定 400_000。
+rollover_tokens = 400_000
+
 # Check::Reviewer の判定 run に使う adapter / tier（ADR-0010 D9）。adapter 省略時は tier だけで選ぶ。
 [reviewer]
 # adapter = "claude-code"

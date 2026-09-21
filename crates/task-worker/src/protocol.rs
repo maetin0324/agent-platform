@@ -25,6 +25,7 @@ use task_core::{
 /// （計画とレビュアーに「ハーネスで動く分野の成果物の名前は固定」を伝えるため）。
 /// Phase 59（ADR-0046 D1/D4/D6）: `context.profile`（実効 profile）、`context.mode`（進め方）、
 /// `context.organization[].skills` / `.harnesses` を追加（版数は据え置き。追加だけなので v4 のまま）。
+/// Phase 67（ADR-0054 D1）: `context.session`（継続セッションの手がかり）を追加（版数は据え置き）。
 /// 全て追加のみで v1〜v3 のワーカーはそのまま動く。
 pub const PROTOCOL_VERSION: u32 = 4;
 
@@ -423,6 +424,36 @@ pub struct RunContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub active_projects: Vec<ActiveProjectContext>,
     // ---- ADR-0048 D3（Phase 60b）: ここまで ----
+    // ---- ADR-0054 D1（Phase 67）: ノードごとの継続セッション。ここから ----
+    /// ADR-0054 D1: この run が**継続セッション**（CoS の対話、または部門長のレビュー・切り分け run）
+    /// のときだけ `Some`。アダプタはこれを見て `--session-id`/`--resume`（claude-code）、
+    /// `codex exec resume`/`experimental_resume`（codex）、`session/load`（acp）を選ぶ。継続しない run
+    /// （通常の仕事の run）では常に `None` で、前置き・アダプタの起動は Phase 66 までと 1 バイトも変わらない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<SessionHandle>,
+    /// ADR-0054 D1: `session` が**継続中**（`resume = true`）の run にだけ渡す、前回の run 以降に
+    /// 起きたことの短い箇条書き（新しい人の発言・dispatch したタスクの終端と要約・認可の結果・新しい案件）。
+    /// `session` が新規（`resume = false`。rollover・アカウント変更・resume 失敗の後を含む）のときは、
+    /// 代わりに「前のセッションの要約」（ADR-0033 D4 の対話履歴の末尾 20 件）をここに入れることがある。
+    /// どちらでもない通常の run では常に空で省略される（Phase 66 までと 1 バイトも変わらない）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_diff: Vec<String>,
+    // ---- ADR-0054 D1（Phase 67）: ここまで ----
+}
+
+/// `context.session`（ADR-0054 D1。Phase 67）: 継続セッションの手がかり。
+/// ディスパッチャが `node_sessions`（`task_core::NodeSession`）から決定的に組む。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionHandle {
+    /// このセッションを継続する手段（`claude-code` / `codex` / `acp`）。アダプタは自分の `id()` と
+    /// 一致しないときは無視する（別アダプタへ渡り歩くセッションは無い）。
+    pub adapter: String,
+    /// アダプタに渡す実際の値。`resume = false`（新規）のときはアダプタが**これから使う**セッション id
+    /// （claude-code の `--session-id`。固定した ULID）、`resume = true`のときは**続ける**セッション id
+    /// （claude-code の `--resume`、codex の resume id、acp の `session/load` の id）。
+    pub session_id: String,
+    /// `false` = 新規（このセッションの最初の run）。`true` = 続ける（2 回目以降）。
+    pub resume: bool,
 }
 
 /// `context.active_projects[]`（ADR-0048 D3。Phase 60b）。

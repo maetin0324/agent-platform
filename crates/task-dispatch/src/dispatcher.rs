@@ -23,9 +23,9 @@ use task_core::plan::{PlanLimits, PlanOutput, materialize};
 use task_core::report::{HEADLINE_MAX_CHARS, first_line, truncate_chars};
 use task_core::{
     AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec,
-    ListFilter, ListOrder, OnChildFailure, OrgKind, ProjectId, ProjectStatus, RateLimitObservation,
-    RoleSpec, RunRole, Status, StoreError, Task, TaskId, TaskKind, TaskStore, Tier, Trigger,
-    WorkspaceSpec, support_kind,
+    ListFilter, ListOrder, NodeSession, OnChildFailure, OrgKind, ProjectId, ProjectStatus,
+    RateLimitObservation, RoleSpec, RunRole, SessionKind, Status, StoreError, Task, TaskId,
+    TaskKind, TaskStore, Tier, Trigger, WorkspaceSpec, support_kind,
 };
 use task_ops::daemon::{
     AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot,
@@ -240,6 +240,10 @@ pub struct DispatchConfig {
     /// ADR-0047 D1 / D2: `[knowledge]`。正本の置き場と既定のマウント。
     pub knowledge: KnowledgeRuntimeConfig,
     // ---- ADR-0047（Phase 61）: ここまで ----
+    /// ADR-0054 D1（Phase 67）: `[sessions] rollover_tokens`。CoS の対話・部門長のレビュー run の
+    /// 継続セッションで、`approx_tokens`（run の usage の累計）がこれを超えたら次の run から
+    /// 新しいセッションにする（要約を前置きに）。既定 400,000（`celeris::config` 側の既定値と同じ）。
+    pub session_rollover_tokens: u64,
 }
 
 /// `[knowledge]`（ADR-0047 D1 / D2。Phase 61）。
@@ -519,6 +523,10 @@ struct RunExtras {
     /// ADR-0052 D2（Phase 64）: `langmem` の接続先に届かず、tier `cheap` の汎用ハーネスへ倒した run。
     /// 前置き（`role`）と予算をこの値で上書きする。通常の run では `None`。
     knowledge_fallback: Option<KnowledgeFallbackRun>,
+    /// ADR-0054 D1（Phase 67）: 継続セッションの手がかり（CoS の対話・部門長のレビュー run だけ `Some`）。
+    session: Option<task_worker::protocol::SessionHandle>,
+    /// ADR-0054 D1（Phase 67）: `session.resume = true` のときだけ、前回の run 以降の差分（箇条書き）。
+    session_diff: Vec<String>,
 }
 
 struct ReviewEntry {
@@ -578,6 +586,10 @@ struct StoreSink {
     /// （呼び出し側があらかじめアダプタで解決して渡す）。
     account: Option<String>,
     account_book: Option<Arc<StdMutex<AccountBook>>>,
+    /// ADR-0054 D1（Phase 67）: この run が継続セッションの対象なら `(node_id, kind, project_id)`。
+    /// `session_established` / `session_resume_failed` がこれを使って `node_sessions` を書く。
+    /// 継続セッションの対象でない run では `None`（両方 no-op）。
+    session_key: Option<(String, task_core::SessionKind, Option<ProjectId>)>,
 }
 
 impl StoreSink {
@@ -780,6 +792,41 @@ impl EventSink for StoreSink {
         book.record_observation(account, obs, ObservationSource::Run);
         if let Err(e) = book.save() {
             tracing::warn!(task_id = %self.task_id, %account, error = %e, "failed to save account book after rate_limit observation");
+        }
+    }
+
+    /// ADR-0054 D1（Phase 67）: アダプタが run の途中で確定させた id（codex / acp）を `node_sessions` へ
+    /// 書く。claude-code は celeris が前もって決めた id をそのまま報告するだけなので、通常は上書きでも
+    /// 値は変わらない。`session_key` が無い run（継続セッションの対象でない）では no-op。
+    fn session_established(&self, session_id: &str) {
+        let Some((node_id, kind, project_id)) = &self.session_key else {
+            return;
+        };
+        if let Err(e) = self
+            .store
+            .node_session_set_id(node_id, *kind, *project_id, session_id)
+        {
+            tracing::warn!(task_id = %self.task_id, error = %e, "failed to record the established session id");
+        }
+    }
+
+    /// ADR-0054 D1（Phase 67）: resume が拒否されたら、そのセッションを retire する（次の run は新規
+    /// セッションになる。ADR-0054 D1「失敗も同じ経路で作り直す」）。`session_key` が無ければ no-op。
+    fn session_resume_failed(&self, reason: &str) {
+        let Some((node_id, kind, project_id)) = &self.session_key else {
+            return;
+        };
+        match self
+            .store
+            .node_session_retire(node_id, *kind, *project_id, OffsetDateTime::now_utc())
+        {
+            Ok(true) => {
+                tracing::warn!(task_id = %self.task_id, node_id, %reason, "resume rejected; session retired");
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(task_id = %self.task_id, error = %e, "failed to retire the session after a rejected resume");
+            }
         }
     }
 }
@@ -1870,6 +1917,25 @@ impl Dispatcher {
                 ),
             },
         };
+        // ADR-0054 D1（Phase 67）: CoS の対話 run（継続セッション）は、この run の usage を
+        // `node_sessions.approx_tokens` に積む（rollover 判定の材料。turns も 1 進む）。継続セッションの
+        // 対象でない run（`node_sessions` の行が無い）では `node_session_touch` が no-op で返るだけ。
+        if task_core::is_conversation(&task) && task.assignee.as_deref() == Some(task_core::COS_ID)
+        {
+            let tokens = usage
+                .as_ref()
+                .map(|u| u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0))
+                .unwrap_or(0);
+            if let Err(e) = self.store.node_session_touch(
+                task_core::COS_ID,
+                task_core::SessionKind::Conversation,
+                None,
+                tokens as i64,
+                OffsetDateTime::now_utc(),
+            ) {
+                tracing::warn!(%task_id, error = %e, "failed to record session usage");
+            }
+        }
         // ADR-0033 D4: 部をまたぐ委譲の質問は、run の自己申告の終わり方より優先する（子は作られていない）。
         // Phase 27: 人に見せる質問は 1 件の部またぎにつき 1 つ（`approvals` の行の単位）。
         let mut questions: Vec<String> = Vec::new();
@@ -2179,6 +2245,35 @@ impl Dispatcher {
         let Some(task) = self.store.get(task_id)? else {
             return Ok(());
         };
+        // ADR-0054 D1（Phase 67）: この run が Reviewer run を伴っていれば、対象タスクの部署の根ノード
+        // （engineering/research/operations）の継続セッション（`kind = lead`）に usage を積む（rollover
+        // 判定の材料。turns も 1 進む）。部署が無い・対応しないアダプタでは `node_session_touch` が no-op。
+        if let Some(Event::WorkerFinished { usage, .. }) = &reviewer_finished
+            && let Some(node_id) = task.assignee.as_deref()
+        {
+            match self.store.org_list() {
+                Ok(org) => {
+                    if let Some(department) = task_core::department_of(&org, node_id) {
+                        let tokens = usage
+                            .as_ref()
+                            .map(|u| u.input_tokens.unwrap_or(0) + u.output_tokens.unwrap_or(0))
+                            .unwrap_or(0);
+                        if let Err(e) = self.store.node_session_touch(
+                            &department,
+                            task_core::SessionKind::Lead,
+                            None,
+                            tokens as i64,
+                            OffsetDateTime::now_utc(),
+                        ) {
+                            tracing::warn!(%task_id, error = %e, "failed to record department lead session usage");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(%task_id, error = %e, "failed to list org for department lead session touch");
+                }
+            }
+        }
         if task.status != Status::Reviewing {
             tracing::warn!(%task_id, status = ?task.status, "review result discarded (task no longer reviewing)");
             if let Some(ev) = &reviewer_finished {
@@ -3233,7 +3328,8 @@ impl Dispatcher {
                 }
                 ContainerDecision::Host | ContainerDecision::Unavailable { .. } => None,
             };
-            let mut extras = self.run_extras(&task, worktree.as_ref())?;
+            let mut extras =
+                self.run_extras(&task, worktree.as_ref(), account.as_deref(), &adapter_id)?;
             // ADR-0052 D2: フォールバックの前置き（LangMem に渡しているのと同じ抽出の指示 + 出力契約）を
             // 役割の指示文として載せる。依頼文（`maintenance_objective`）は `task.objective` のまま。
             if let Some(fallback) = &knowledge_fallback {
@@ -3289,6 +3385,10 @@ impl Dispatcher {
         &self,
         task: &Task,
         worktree: Option<&task_worker::TaskWorkspaces>,
+        // ADR-0054 D1（Phase 67）: 選んだアカウントとアダプタ id。CoS の対話・部門長のレビュー run の
+        // 継続セッション（`session` / `session_diff`）を決めるのに要る。他の全ての値の計算には使わない。
+        account: Option<&str>,
+        adapter_id: &str,
     ) -> Result<RunExtras, DispatchError> {
         let role = task.role.as_deref().map(|id| RoleContext {
             id: id.to_string(),
@@ -3389,7 +3489,35 @@ impl Dispatcher {
         // 分解・委譲できる run（`available_genres` を渡す run と同じ条件）にだけ組織図を渡す。
         // ADR-0046 D6: **CoS の対話 run** にも渡す（誰が何をできるかを見せる。人選はしない）。
         let is_cos_conversation = conversation_addressee == Some(ConversationAddressee::Secretary);
-        let organization = if available_genres.is_empty() && !is_cos_conversation {
+        // ADR-0054 D1（Phase 67）: CoS の対話は継続セッション（全体で 1 本。`project_id` は常に
+        // `None`。案件を開いているときも前置きに案件の文脈を足すだけでセッションは同じ）。対応しない
+        // アダプタ（claude-code/codex/acp 以外）では継続しない（`None` のまま。前置きは Phase 66 までと
+        // バイト単位で同じ）。organization / node / memory / conversation はこの直後で、継続中
+        // （`resume = true`）なら差分だけにする（毎回流し直さない。D1「前置きは継続中は差分だけ」）。
+        let (session, session_diff) = if is_cos_conversation {
+            self.resolve_node_session(
+                task_core::COS_ID,
+                task_core::SessionKind::Conversation,
+                None,
+                adapter_id,
+                account,
+                OffsetDateTime::now_utc(),
+            )?
+        } else {
+            (None, Vec::new())
+        };
+        // ADR-0054 D1: 継続中（`resume = true`）の CoS 対話 run だけ、この後の brief・記憶・組織の一覧・
+        // 直近のやり取り・進行中の案件を差分に置き換える（省く）。新規セッション（`resume = false`。
+        // rollover・アカウント変更・resume 失敗の後を含む）では、これまでどおり全量を渡す。
+        let continuing = is_cos_conversation && session.as_ref().is_some_and(|s| s.resume);
+        let node = if continuing { None } else { node };
+        let memory = if continuing { None } else { memory };
+        let conversation = if continuing {
+            Vec::new()
+        } else {
+            conversation
+        };
+        let organization = if (available_genres.is_empty() && !is_cos_conversation) || continuing {
             Vec::new()
         } else {
             org.iter()
@@ -3548,8 +3676,8 @@ impl Dispatcher {
             self.knowledge_context(task, assigned.map(|n| n.id.as_str()), &profile_knowledge);
         // ADR-0048 D3（Phase 60b）: CoS の対話 run にだけ、進行中の案件とその途中目標を渡す
         // （`actions` の `create_task.project` / `add_milestone.project` を選ぶ材料。決定的にストアを
-        // 読むだけ。CoS 以外の run では常に空で、前置きは Phase 60a までとバイト単位で同じ）。
-        let active_projects = if is_cos_conversation {
+        // 読むだけ。CoS 以外の run・継続中の run（ADR-0054 D1: 差分に「新しい案件」が乗る）では常に空）。
+        let active_projects = if is_cos_conversation && !continuing {
             self.active_projects_context()?
         } else {
             Vec::new()
@@ -3576,7 +3704,164 @@ impl Dispatcher {
             active_projects,
             // ADR-0052 D2: フォールバックの判断は `dispatch_ready` がする（ここは run ごとの文脈だけ）。
             knowledge_fallback: None,
+            session,
+            session_diff,
         })
+    }
+
+    /// ADR-0054 D1（Phase 67）: `(node_id, kind, project_id)` の継続セッションを決める・作る・引退させる
+    /// （store の読み書き。判断そのものは `crate::sessions::decide`、純粋・テスト容易）。対応しない
+    /// アダプタでは `(None, vec![])` を返す（このノード・kind は継続セッションを持たない）。
+    fn resolve_node_session(
+        &self,
+        node_id: &str,
+        kind: SessionKind,
+        project_id: Option<ProjectId>,
+        adapter_id: &str,
+        account: Option<&str>,
+        now: OffsetDateTime,
+    ) -> Result<(Option<task_worker::protocol::SessionHandle>, Vec<String>), DispatchError> {
+        if !crate::sessions::adapter_supports_sessions(adapter_id) {
+            return Ok((None, Vec::new()));
+        }
+        let active = self.store.node_session_active(node_id, kind, project_id)?;
+        let action = crate::sessions::decide(
+            active.as_ref(),
+            adapter_id,
+            account,
+            self.config.session_rollover_tokens,
+            // ADR-0054 D1: resume の失敗（アダプタがセッション不明/拒否を報告した）の明示検出は
+            // 今回のスコープには含めない（PROGRESS の未解決事項）。供給側失敗として requeue されるだけ。
+            false,
+        );
+        match action {
+            crate::sessions::SessionAction::Resume => {
+                let active = active.expect("SessionAction::Resume implies an active session");
+                let diff = self.session_diff_since(node_id, active.last_used_at)?;
+                Ok((
+                    Some(task_worker::protocol::SessionHandle {
+                        adapter: adapter_id.to_string(),
+                        session_id: active.session_id.clone(),
+                        resume: true,
+                    }),
+                    diff,
+                ))
+            }
+            crate::sessions::SessionAction::Fresh(reason) => {
+                if active.is_some() {
+                    self.store.node_session_retire(node_id, kind, project_id, now)?;
+                }
+                // claude-code は celeris が id を前もって決める（`--session-id`）。codex / acp は
+                // アダプタが run の途中で初めて確定させるので、確定するまでは空文字（ADR-0054 D1）。
+                let session_id = if adapter_id == "claude-code" {
+                    ulid::Ulid::new().to_string()
+                } else {
+                    String::new()
+                };
+                let new_session = NodeSession::new(
+                    node_id,
+                    kind,
+                    project_id,
+                    adapter_id,
+                    account.map(str::to_string),
+                    session_id.clone(),
+                    now,
+                );
+                self.store.node_session_create(&new_session)?;
+                let summary = if reason.needs_summary() {
+                    self.session_summary(node_id)?
+                } else {
+                    Vec::new()
+                };
+                Ok((
+                    Some(task_worker::protocol::SessionHandle {
+                        adapter: adapter_id.to_string(),
+                        session_id,
+                        resume: false,
+                    }),
+                    summary,
+                ))
+            }
+        }
+    }
+
+    /// ADR-0054 D1: 継続中セッションの前置きに出す差分（`since` より後に起きたこと。新しい人の発言・
+    /// 終端タスクの要約・新しい案件。認可の結果は今回のスコープには含めない — PROGRESS の未解決事項）。
+    fn session_diff_since(
+        &self,
+        node_id: &str,
+        since: OffsetDateTime,
+    ) -> Result<Vec<String>, DispatchError> {
+        // `project_id: None` = 絞らない（`message_page` の規約。ADR-0048 D1）。CoS のセッションは
+        // どの案件についての発言も同じ 1 本のセッションに乗るため、案件を問わず読む。
+        let messages = self.store.message_page(Some(node_id), None, None, 50)?;
+        let new_messages: Vec<(OffsetDateTime, task_core::MessageRole, String)> = messages
+            .into_iter()
+            .map(|m| (m.created_at, m.role, m.text))
+            .collect();
+        let finished_tasks = self.finished_tasks_since(since)?;
+        let new_projects = self.new_projects_since(since)?;
+        Ok(crate::sessions::diff_lines(
+            &new_messages,
+            &finished_tasks,
+            &[],
+            &new_projects,
+            since,
+        ))
+    }
+
+    /// ADR-0054 D1: 新しいセッションを継ぐときの「これまでの要約」（ADR-0033 D4 の対話履歴の末尾
+    /// `CONVERSATION_HISTORY` 件）。
+    fn session_summary(&self, node_id: &str) -> Result<Vec<String>, DispatchError> {
+        let messages = self.store.message_page(
+            Some(node_id),
+            None,
+            None,
+            task_ops::conversation::CONVERSATION_HISTORY,
+        )?;
+        let history: Vec<(task_core::MessageRole, String)> =
+            messages.into_iter().map(|m| (m.role, m.text)).collect();
+        Ok(crate::sessions::summary_lines(
+            &history,
+            task_ops::conversation::CONVERSATION_HISTORY,
+        ))
+    }
+
+    /// ADR-0054 D1: 前回の run 以降に終端になったタスク（支援タスクは除く）の 1 行要約。
+    fn finished_tasks_since(
+        &self,
+        since: OffsetDateTime,
+    ) -> Result<Vec<(OffsetDateTime, String)>, DispatchError> {
+        let filter = ListFilter {
+            statuses: vec![Status::Done, Status::Failed, Status::Blocked],
+            ..ListFilter::default()
+        };
+        let page = self
+            .store
+            .list_page(&filter, ListOrder::UpdatedDesc, None, RECENT_WORK_SCAN)?;
+        let mut out = Vec::new();
+        for task in page.items {
+            if support_kind(&task).is_some() || task.updated_at <= since {
+                continue;
+            }
+            let events = self.store.events_for(task.id)?;
+            let outcome = recent_work_outcome(&task, &events).unwrap_or_default();
+            out.push((task.updated_at, format!("{} — {outcome}", task.title)));
+        }
+        Ok(out)
+    }
+
+    /// ADR-0054 D1: `since` より後に作られた案件（`proposed`/`active`。人が新しく開いたもの）。
+    fn new_projects_since(
+        &self,
+        since: OffsetDateTime,
+    ) -> Result<Vec<(OffsetDateTime, String)>, DispatchError> {
+        let projects = self.store.project_list()?;
+        Ok(projects
+            .into_iter()
+            .filter(|p| p.created_at > since)
+            .map(|p| (p.created_at, p.title))
+            .collect())
     }
 
     /// ADR-0048 D3（Phase 60b）: CoS の対話 run に渡す「進行中の案件とその途中目標」（`proposed` /
@@ -4358,6 +4643,27 @@ impl Dispatcher {
             account: account.clone(),
             account_book: account_adapter.and_then(|a| self.account_book(a)),
         };
+        // ADR-0054 D1（Phase 67）: 部署の根ノード（engineering/research/operations）は
+        // レビュー・切り分け run を継続セッション（`kind = lead`）で走らせる（ADR-0051）。部署が無い
+        // 仕事（従来の独立レビュアー）では継続しない。store のエラーはレビューそのものを止めない
+        // （継続無し＝Phase 66 までと同じ挙動にフォールバックする）。
+        let (session, session_diff) = match &department {
+            Some(dept_id) => match self.resolve_node_session(
+                dept_id,
+                task_core::SessionKind::Lead,
+                None,
+                &adapter_id,
+                account.as_deref(),
+                OffsetDateTime::now_utc(),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(task_id = %task.id, department = %dept_id, error = %e, "failed to resolve the department lead session; reviewing without one");
+                    (None, Vec::new())
+                }
+            },
+            None => (None, Vec::new()),
+        };
         tracing::info!(task_id = %task.id, %review_run_id, adapter = %adapter_id, provider = %provider_id, account = account.as_deref(), "starting reviewer run");
         Some((
             provider_id,
@@ -4380,6 +4686,8 @@ impl Dispatcher {
                     .as_deref()
                     .and_then(|id| GenreSpec::find(&self.config.genres, id))
                     .map(|g| GenreContext::from_spec(g, &self.config.roles)),
+                session,
+                session_diff,
             },
         ))
     }
@@ -5456,6 +5764,9 @@ async fn run_worker(
             subject_genre: None,
             // ADR-0048 D3（Phase 60b）: CoS の対話 run だけに入る。
             active_projects: extras.active_projects,
+            // ADR-0054 D1（Phase 67）: 継続セッション（CoS の対話・部門長のレビュー run だけ）。
+            session: extras.session,
+            session_diff: extras.session_diff,
         },
     };
     // ADR-0043 D3（Phase 56）: コンテナで走らせる run は、ここでアダプタを包んだ複製に差し替える
@@ -5471,6 +5782,14 @@ async fn run_worker(
         },
         None => adapter,
     };
+    // ADR-0054 D1（Phase 67）: `run_worker` を通る run で継続セッションを持てるのは CoS の対話 run
+    // だけ（部門長のレビュー run は `review.rs` の別経路。`run_extras` の `is_cos_conversation` と同じ
+    // 判定で `extras.session` が埋まるので、ここでは `req.context.session` の有無だけを見ればよい）。
+    let session_key = req
+        .context
+        .session
+        .is_some()
+        .then(|| (task_core::COS_ID.to_string(), task_core::SessionKind::Conversation, None));
     let sink = StoreSink {
         store,
         task_id,
@@ -5484,6 +5803,7 @@ async fn run_worker(
         delegated_this_run: std::sync::atomic::AtomicUsize::new(0),
         account,
         account_book,
+        session_key,
     };
     adapter.run(req, run_id, limits, &sink).await
 }
@@ -5743,6 +6063,7 @@ mod tests {
                 releases_dir: None,
                 containers: ContainersRuntimeConfig::default(),
                 knowledge: KnowledgeRuntimeConfig::default(),
+                session_rollover_tokens: 400_000,
             },
         )
     }
@@ -6640,6 +6961,224 @@ mod tests {
         assert!(report.idle);
         assert_eq!(store.get(r.id).unwrap().unwrap().status, Status::Done);
         assert_eq!(store.get(other.id).unwrap().unwrap().status, Status::Done);
+    }
+
+    /// ADR-0054 D1（Phase 67）: 部署の根ノード（`department_of` が返す id）は、Reviewer run のたびに
+    /// **同じ継続セッション**（`kind = lead`）を使う。1 本目の run で新規セッション（`turns = 1`）ができ、
+    /// 2 本目の run では **同じ `session_id` のまま** `turns = 2` に進む（`--resume` 相当の継続）。
+    /// アダプタが継続に対応する id（`claude-code`）のときだけの経路（`crate::sessions::adapter_supports_sessions`）。
+    #[tokio::test]
+    async fn department_reviewer_runs_share_and_continue_one_lead_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let policy = StaticPolicy::new(
+            vec![ProviderSpec {
+                id: "p1".into(),
+                // ADR-0054 D1: セッション継続に対応するアダプタ id（`crate::sessions::SUPPORTED_ADAPTERS`）。
+                adapter: "claude-code".into(),
+                tiers: vec![Tier::Frontier, Tier::Standard, Tier::Cheap],
+                concurrency: 2,
+                model: "m".into(),
+            }],
+            Duration::from_secs(1),
+        );
+        let file_adapter = Arc::new(FileAdapter {
+            plan_json: String::new(),
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"ok"}]}"#.into(),
+            delay: Duration::from_millis(5),
+        });
+        let mut adapters: HashMap<ProviderId, Arc<dyn WorkerAdapter>> = HashMap::new();
+        adapters.insert("p1".into(), file_adapter);
+        let mut d = Dispatcher::new(
+            store.clone(),
+            Box::new(policy),
+            HashMap::from([("p1".to_string(), "m".to_string())]),
+            adapters,
+            std::collections::HashSet::new(),
+            DispatchConfig {
+                delivery: Default::default(),
+                max_concurrency: 2,
+                lease_grace: Duration::from_secs(60),
+                idle_timeout: Duration::from_secs(5),
+                kill_grace: Duration::from_millis(100),
+                review_timeout: Duration::from_secs(5),
+                workspace_root: PathBuf::from("/nonexistent"),
+                plan_auto_accept: false,
+                retry_backoff_base: Duration::ZERO,
+                retry_backoff_max: Duration::ZERO,
+                reviewer_hint: crate::review::reviewer_hint(),
+                clusters: HashMap::new(),
+                cluster_cooldown: Duration::from_secs(1),
+                max_requeues: 5,
+                roles: Vec::new(),
+                genres: Vec::new(),
+                delegation: DelegationLimits::default(),
+                accounts: None,
+                memory_dir: None,
+                worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
+                releases_dir: None,
+                containers: ContainersRuntimeConfig::default(),
+                knowledge: KnowledgeRuntimeConfig::default(),
+                session_rollover_tokens: 400_000,
+            },
+        );
+
+        // 1 本目: `coding-poc`（セクション）の Reviewer run。部署は `department_of` で `coding` に解決する。
+        let mut first = new_task(dir.path(), Check::Reviewer, 0);
+        first.assignee = Some("coding-poc".into());
+        store.insert(&first).unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(first.id).unwrap().unwrap().status, Status::Done);
+
+        let after_first = store
+            .node_session_active("coding", SessionKind::Lead, None)
+            .unwrap()
+            .expect("a lead session exists for the department after the first review");
+        assert_eq!(after_first.adapter, "claude-code");
+        assert!(
+            !after_first.session_id.is_empty(),
+            "claude-code sessions get a celeris-assigned id up front"
+        );
+        assert_eq!(after_first.turns, 1);
+
+        // 2 本目: 別のタスクだが同じ部署。セッションは**続く**（同じ id、turns が進む）。
+        let mut second = new_task(dir.path(), Check::Reviewer, 0);
+        second.assignee = Some("coding-poc".into());
+        store.insert(&second).unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(second.id).unwrap().unwrap().status, Status::Done);
+
+        let after_second = store
+            .node_session_active("coding", SessionKind::Lead, None)
+            .unwrap()
+            .expect("the lead session is still active");
+        assert_eq!(
+            after_second.session_id, after_first.session_id,
+            "the second review resumes the same lead session"
+        );
+        assert_eq!(after_second.turns, 2);
+        assert!(after_second.retired_at.is_none());
+
+        // 部署の無い（担当なし）Reviewer run はセッションを持たない。
+        let plain = new_task(dir.path(), Check::Reviewer, 0);
+        store.insert(&plain).unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(plain.id).unwrap().unwrap().status, Status::Done);
+        // `research` 部署は今回のタスクで一度も使っていないので、セッションは無い。
+        assert_eq!(
+            store
+                .node_session_active("research", SessionKind::Lead, None)
+                .unwrap(),
+            None
+        );
+    }
+
+    /// ADR-0054 D1（Phase 67）: `resolve_node_session` の店じまい（store の読み書き側）。純粋な判断は
+    /// `crate::sessions::decide` で別途テスト済みなので、ここでは実際に `node_sessions` を作る・続ける・
+    /// rollover で作り直す・アカウント変更で作り直す、の 4 つが store に正しく反映されることを見る。
+    #[tokio::test]
+    async fn resolve_node_session_resumes_under_the_limit_then_rolls_over_then_retires_on_account_change()
+     {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut d = dispatcher(
+            store.clone(),
+            Arc::new(FileAdapter {
+                plan_json: String::new(),
+                review_json: String::new(),
+                delay: Duration::ZERO,
+            }),
+            1,
+        );
+        d.config.session_rollover_tokens = 100;
+        let now = OffsetDateTime::now_utc();
+
+        // 1 本目: 現役セッションが無いので新規（要約は乗らない）。
+        let (first, diff0) = d
+            .resolve_node_session(
+                "cos",
+                SessionKind::Conversation,
+                None,
+                "claude-code",
+                Some("acct-a"),
+                now,
+            )
+            .unwrap();
+        let first = first.unwrap();
+        assert!(!first.resume, "the first run of a session is never a resume");
+        assert!(diff0.is_empty(), "a brand-new session has no summary yet");
+        assert!(!first.session_id.is_empty());
+        let first_id = first.session_id.clone();
+
+        // 累計トークンが閾値未満なら続く（`--resume` 相当）。
+        store
+            .node_session_touch("cos", SessionKind::Conversation, None, 50, now)
+            .unwrap();
+        let (second, _) = d
+            .resolve_node_session(
+                "cos",
+                SessionKind::Conversation,
+                None,
+                "claude-code",
+                Some("acct-a"),
+                now,
+            )
+            .unwrap();
+        let second = second.unwrap();
+        assert!(second.resume);
+        assert_eq!(second.session_id, first_id);
+
+        // 閾値を超えたら次の run から新規セッション（前のセッションは引退、前置きには要約が乗る）。
+        store
+            .node_session_touch("cos", SessionKind::Conversation, None, 100, now)
+            .unwrap();
+        let (third, summary) = d
+            .resolve_node_session(
+                "cos",
+                SessionKind::Conversation,
+                None,
+                "claude-code",
+                Some("acct-a"),
+                now,
+            )
+            .unwrap();
+        let third = third.unwrap();
+        assert!(!third.resume, "rollover starts a fresh session");
+        assert_ne!(third.session_id, first_id);
+        // 要約自体は空（対話履歴が無いテストなので）でも、`needs_summary` 経路（`session_summary` 呼び出し）
+        // を通ったことは rollover で `resume = false` になったことから確認できる。
+        let _ = summary;
+        let after_rollover = store
+            .node_session_active("cos", SessionKind::Conversation, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_rollover.session_id, third.session_id);
+        assert_eq!(after_rollover.turns, 0, "a fresh session starts at 0 turns");
+
+        // アカウントが変わると（プールが枯渇して別アカウントに倒れた等）、同じトークン量でも作り直す。
+        let (fourth, _) = d
+            .resolve_node_session(
+                "cos",
+                SessionKind::Conversation,
+                None,
+                "claude-code",
+                Some("acct-b"),
+                now,
+            )
+            .unwrap();
+        let fourth = fourth.unwrap();
+        assert!(!fourth.resume, "an account change starts a fresh session");
+        assert_ne!(fourth.session_id, third.session_id);
+        let after_account_change = store
+            .node_session_active("cos", SessionKind::Conversation, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after_account_change.session_id, fourth.session_id);
+        assert_eq!(after_account_change.account_id.as_deref(), Some("acct-b"));
     }
 
     /// ADR-0008 D2: `Check::Human` はディスパッチャが `Approval` 子タスクを生成して待つ。承認前は
@@ -8783,7 +9322,7 @@ mod tests {
             description: "write and fix code".into(),
             ..task_core::GenreSpec::default()
         }];
-        let extras = d.run_extras(&plan, None).unwrap();
+        let extras = d.run_extras(&plan, None, None, "claude-code").unwrap();
         let ids: Vec<&str> = extras
             .available_genres
             .iter()
@@ -8793,7 +9332,7 @@ mod tests {
 
         // 分野が無い設定では空のまま。
         d.config.genres = Vec::new();
-        let extras = d.run_extras(&plan, None).unwrap();
+        let extras = d.run_extras(&plan, None, None, "claude-code").unwrap();
         assert!(extras.available_genres.is_empty());
     }
 
@@ -8827,7 +9366,7 @@ mod tests {
             ..task_core::GenreSpec::default()
         }];
 
-        let extras = d.run_extras(&plan_parent, None).unwrap();
+        let extras = d.run_extras(&plan_parent, None, None, "claude-code").unwrap();
         assert_eq!(
             extras.available_genres[0].harness.as_deref(),
             Some("paperqa")
@@ -9255,6 +9794,7 @@ mod tests {
                 releases_dir: None,
                 containers: ContainersRuntimeConfig::default(),
                 knowledge: KnowledgeRuntimeConfig::default(),
+                session_rollover_tokens: 400_000,
             },
         )
     }
@@ -10217,7 +10757,7 @@ mod tests {
             usage: None,
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root, None);
-        let extras = d.run_extras(&second.task, None).unwrap();
+        let extras = d.run_extras(&second.task, None, None, "claude-code").unwrap();
         let texts: Vec<&str> = extras
             .conversation
             .iter()
@@ -10679,7 +11219,7 @@ mod tests {
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
 
-        let extras = d.run_extras(&to_secretary, None).unwrap();
+        let extras = d.run_extras(&to_secretary, None, None, "claude-code").unwrap();
         assert!(
             extras.available_genres.is_empty(),
             "対話 run は委譲できない: {extras:?}"
@@ -10700,7 +11240,7 @@ mod tests {
             Some(ConversationAddressee::Secretary)
         );
 
-        let extras = d.run_extras(&to_survey, None).unwrap();
+        let extras = d.run_extras(&to_survey, None, None, "claude-code").unwrap();
         assert_eq!(
             extras.conversation_addressee,
             Some(ConversationAddressee::Other)
@@ -10713,7 +11253,7 @@ mod tests {
 
         // 通常タスク（対話由来でない）には付かない。
         let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
-        let extras = d.run_extras(&ordinary, None).unwrap();
+        let extras = d.run_extras(&ordinary, None, None, "claude-code").unwrap();
         assert_eq!(extras.conversation_addressee, None);
     }
 
@@ -10779,7 +11319,7 @@ mod tests {
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
 
-        let extras = d.run_extras(&to_secretary, None).unwrap();
+        let extras = d.run_extras(&to_secretary, None, None, "claude-code").unwrap();
         assert_eq!(
             extras.active_projects.len(),
             1,
@@ -10797,13 +11337,110 @@ mod tests {
         assert_eq!(project.milestones[0].status, "in_progress");
 
         // CoS 以外の対話には渡さない。
-        let extras = d.run_extras(&to_survey, None).unwrap();
+        let extras = d.run_extras(&to_survey, None, None, "claude-code").unwrap();
         assert!(extras.active_projects.is_empty());
 
         // 通常タスクにも渡さない。
         let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
-        let extras = d.run_extras(&ordinary, None).unwrap();
+        let extras = d.run_extras(&ordinary, None, None, "claude-code").unwrap();
         assert!(extras.active_projects.is_empty());
+    }
+
+    /// ADR-0054 D1（Phase 67）: 継続中（`resume = true`）の CoS 対話 run は、brief・記憶・組織の一覧・
+    /// 進行中の案件を**流し直さない**（前置きは差分だけ）。1 本目（新規セッション）はこれまでどおり全量を
+    /// 渡す。CoS 以外への対話にはそもそもセッションが付かないので、毎回全量のまま（対象外）。
+    #[test]
+    fn a_continuing_cos_session_drops_the_full_preamble_and_a_fresh_one_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let mut active = titled_project("進行中の案件");
+        active.status = ProjectStatus::Active;
+        store.project_create(&active).unwrap();
+
+        let to_secretary = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "hi",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
+
+        let adapter = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
+        let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
+
+        // 1 本目: 現役セッションが無いので新規（全量。Phase 66 までと同じ振る舞い）。
+        let first = d
+            .run_extras(&to_secretary, None, None, "claude-code")
+            .unwrap();
+        let session = first
+            .session
+            .as_ref()
+            .expect("claude-code supports continuous sessions");
+        assert!(!session.resume, "the first run of a session is never a resume");
+        assert!(first.node.is_some(), "fresh session: brief を渡す");
+        assert!(!first.organization.is_empty(), "fresh session: 組織の一覧を渡す");
+        assert_eq!(
+            first.active_projects.len(),
+            1,
+            "fresh session: 進行中の案件を渡す"
+        );
+
+        // 2 本目（同じノード）: 続く（resume）。前置きは差分だけになる。
+        let second = d
+            .run_extras(&to_secretary, None, None, "claude-code")
+            .unwrap();
+        let session2 = second.session.as_ref().expect("still claude-code");
+        assert!(session2.resume, "the second run resumes the same session");
+        assert_eq!(session2.session_id, session.session_id);
+        assert!(
+            second.node.is_none(),
+            "continuing session: brief を流し直さない: {:?}",
+            second.node
+        );
+        assert!(
+            second.organization.is_empty(),
+            "continuing session: 組織の一覧を流し直さない: {:?}",
+            second.organization
+        );
+        assert!(
+            second.active_projects.is_empty(),
+            "continuing session: 進行中の案件を流し直さない（差分に「新しい案件」が乗る）: {:?}",
+            second.active_projects
+        );
+
+        // CoS 以外への対話にはセッションが付かない（`is_cos_conversation` でなければ常に `None`）ので、
+        // 何度呼んでも全量のまま（対象外）。
+        let to_survey = task_ops::conversation::start(
+            store.as_ref(),
+            "research-survey",
+            None,
+            "hi",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
+        let other = d.run_extras(&to_survey, None, None, "claude-code").unwrap();
+        assert!(other.session.is_none());
+        assert!(
+            other.node.is_some(),
+            "CoS 以外は継続の対象外なので brief は毎回渡す"
+        );
     }
 
     /// Phase 43（ADR-0039 D3）: 案件が作業場所を決めていれば、その run の前置きに出す 1 行が `RunExtras` に
@@ -10835,7 +11472,7 @@ mod tests {
 
         let mut task = assigned_task(&workspace_root, "poc", "research-survey");
         task.project_id = Some(with_workspace.id);
-        let extras = d.run_extras(&task, None).unwrap();
+        let extras = d.run_extras(&task, None, None, "claude-code").unwrap();
         assert_eq!(
             extras.workspace_note.as_deref(),
             Some(
@@ -10845,9 +11482,9 @@ mod tests {
         );
 
         task.project_id = Some(plain.id);
-        assert_eq!(d.run_extras(&task, None).unwrap().workspace_note, None);
+        assert_eq!(d.run_extras(&task, None, None, "claude-code").unwrap().workspace_note, None);
         task.project_id = None;
-        assert_eq!(d.run_extras(&task, None).unwrap().workspace_note, None);
+        assert_eq!(d.run_extras(&task, None, None, "claude-code").unwrap().workspace_note, None);
 
         // 対話 run には出さない（会話は編集をしない。ADR-0039 D2）。
         let conversation = task_ops::conversation::start(
@@ -10863,7 +11500,7 @@ mod tests {
         .unwrap()
         .task;
         assert_eq!(
-            d.run_extras(&conversation, None).unwrap().workspace_note,
+            d.run_extras(&conversation, None, None, "claude-code").unwrap().workspace_note,
             None
         );
     }
@@ -10937,7 +11574,7 @@ mod tests {
             ..GenreSpec::default()
         });
 
-        let extras = d.run_extras(&to_survey, None).unwrap();
+        let extras = d.run_extras(&to_survey, None, None, "claude-code").unwrap();
         let work_genre = extras
             .work_genre
             .expect("research-survey has its own genre");
@@ -10949,13 +11586,13 @@ mod tests {
         );
 
         // 分野を持たないノードには `work_genre` が乗らない。
-        let extras = d.run_extras(&to_data, None).unwrap();
+        let extras = d.run_extras(&to_data, None, None, "claude-code").unwrap();
         assert!(extras.work_genre.is_none());
 
         // 通常タスク（対話由来でない）には、担当が genre を持っていても乗らない
         // （`work_genre` は対話専用。仕事の run は `task.genre` 自体がその分野になる）。
         let ordinary = assigned_task(&workspace_root, "ordinary", "research-survey");
-        let extras = d.run_extras(&ordinary, None).unwrap();
+        let extras = d.run_extras(&ordinary, None, None, "claude-code").unwrap();
         assert!(extras.work_genre.is_none());
     }
 
@@ -11226,7 +11863,7 @@ mod tests {
         conv.conversation = Some(task_core::MessageId::new());
         store.insert(&conv).unwrap();
 
-        let extras = d.run_extras(&conv, None).unwrap();
+        let extras = d.run_extras(&conv, None, None, "claude-code").unwrap();
         assert_eq!(
             extras.recent_work.len(),
             10,
@@ -11340,7 +11977,7 @@ mod tests {
         )
         .unwrap();
 
-        let extras = d.run_extras(&started.task, None).unwrap();
+        let extras = d.run_extras(&started.task, None, None, "claude-code").unwrap();
         let review = extras
             .milestone_review
             .expect("the review context is filled");
@@ -11391,7 +12028,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            d.run_extras(&plain.task, None)
+            d.run_extras(&plain.task, None, None, "claude-code")
                 .unwrap()
                 .milestone_review
                 .is_none()
@@ -11660,7 +12297,7 @@ mod tests {
             base + time::Duration::seconds(1),
         );
         store.insert(&ordinary).unwrap();
-        let extras = d.run_extras(&ordinary, None).unwrap();
+        let extras = d.run_extras(&ordinary, None, None, "claude-code").unwrap();
         assert!(extras.recent_work.is_empty(), "{:?}", extras.recent_work);
     }
 
@@ -11852,7 +12489,7 @@ mod tests {
         conv.conversation = Some(task_core::MessageId::new());
         store.insert(&conv).unwrap();
 
-        let extras = d.run_extras(&conv, None).unwrap();
+        let extras = d.run_extras(&conv, None, None, "claude-code").unwrap();
         assert_eq!(extras.recent_work.len(), 1);
         let w = &extras.recent_work[0];
         assert_eq!(w.task_id, done.id);
@@ -12317,7 +12954,7 @@ mod tests {
             None,
         );
         let worktree = d.task_workspaces_for(&task).expect("worktree plan");
-        let extras = d.run_extras(&task, Some(&worktree)).unwrap();
+        let extras = d.run_extras(&task, Some(&worktree), None, "claude-code").unwrap();
         let note = extras.workspace_note.expect("workspace_note");
         let tree = root.path().join(task.id.to_string()).join("tree");
         assert!(note.contains(&format!("→ `{}`", tree.display())), "{note}");
@@ -12657,7 +13294,7 @@ mod tests {
         let workspaces = d.task_workspaces_for(&task).expect("workspaces");
         assert_eq!(workspaces.repos.len(), 3);
         let note = d
-            .run_extras(&task, Some(&workspaces))
+            .run_extras(&task, Some(&workspaces), None, "claude-code")
             .unwrap()
             .workspace_note
             .expect("note");
@@ -13163,7 +13800,7 @@ mod tests {
             root.path(),
             None,
         );
-        let extras = d.run_extras(&parent, None).unwrap();
+        let extras = d.run_extras(&parent, None, None, "claude-code").unwrap();
         let mut branches: Vec<String> = extras
             .children
             .iter()
@@ -13480,6 +14117,7 @@ mod knowledge_fallback_tests {
                     fallback_tier,
                     ..KnowledgeRuntimeConfig::default()
                 },
+                session_rollover_tokens: 400_000,
             },
         )
     }

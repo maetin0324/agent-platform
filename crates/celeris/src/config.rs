@@ -149,9 +149,36 @@ pub struct Config {
     #[serde(default)]
     pub llm_proxy: llm_proxy::config::LlmProxyConfig,
     // ---- ADR-0053（Phase 65）: ここまで ----
+    // ---- ADR-0054 D1（Phase 67）: ノードごとの継続セッション。ここから ----
+    /// `[sessions]`。CoS の対話・部門長のレビュー run の継続セッション（`node_sessions`）の逼迫判定。
+    #[serde(default)]
+    pub sessions: SessionsConfig,
+    // ---- ADR-0054 D1（Phase 67）: ここまで ----
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
+}
+
+/// `[sessions]`（ADR-0054 D1。Phase 67）: CoS の対話・部門長のレビュー run の継続セッション
+/// （`node_sessions`）の逼迫判定。`approx_tokens`（run の usage の累計）がこれを超えたら、次の run は
+/// 新しいセッションから始める（要約を前置きに。`preamble::session_diff_section`）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionsConfig {
+    #[serde(default = "default_rollover_tokens")]
+    pub rollover_tokens: u64,
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            rollover_tokens: default_rollover_tokens(),
+        }
+    }
+}
+
+fn default_rollover_tokens() -> u64 {
+    400_000
 }
 
 /// `[handoff]`（ADR-0040 D4）: 昇格のライブ引き継ぎ。`active` が `draining` になったあと、手元の run が
@@ -1057,6 +1084,16 @@ pub struct CodexAdapterConfig {
     /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。`env` より優先。
     #[serde(default)]
     pub env_from_secrets: HashMap<String, String>,
+    /// ADR-0054 D1（Phase 67）: このインストールの `codex` が `exec resume <id>` サブコマンドを
+    /// 受け付けるかの**決定的な**判定（`"exec_resume"` | `"experimental_resume"`。実機のバージョンを
+    /// 毎回 probe するのではなく設定で固定する。既定 `"exec_resume"`。`codex exec resume --help` が
+    /// 無い古い版では `"experimental_resume"` に変えること。運用手順は `docs/PROGRESS.md` Phase 67）。
+    #[serde(default = "default_codex_resume_mode")]
+    pub resume_mode: String,
+}
+
+fn default_codex_resume_mode() -> String {
+    "exec_resume".to_string()
 }
 
 impl Default for CodexAdapterConfig {
@@ -1067,6 +1104,19 @@ impl Default for CodexAdapterConfig {
             model: None,
             env: HashMap::new(),
             env_from_secrets: HashMap::new(),
+            resume_mode: default_codex_resume_mode(),
+        }
+    }
+}
+
+impl CodexAdapterConfig {
+    /// ADR-0054 D1（Phase 67）: `resume_mode` を決定的に解決する。未知の値は `ExecResume`（既定）に
+    /// 倒し、起動時の warn は呼び出し側（`dispatch_config`）に任せる（このクレートは task-worker の
+    /// tracing 依存を増やしたくないため）。
+    pub fn resolved_resume_mode(&self) -> task_worker::CodexResumeMode {
+        match self.resume_mode.as_str() {
+            "experimental_resume" => task_worker::CodexResumeMode::ExperimentalResume,
+            _ => task_worker::CodexResumeMode::ExecResume,
         }
     }
 }
@@ -2288,6 +2338,8 @@ impl Config {
                 build_dir: self.containers.build_dir.clone(),
                 build_timeout: Duration::from_secs(self.containers.build_timeout_secs),
             },
+            // ADR-0054 D1（Phase 67）: 継続セッションの逼迫判定。
+            session_rollover_tokens: self.sessions.rollover_tokens,
         }
     }
 

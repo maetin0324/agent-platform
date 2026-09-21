@@ -23,9 +23,9 @@ use axum::http::{HeaderMap, StatusCode};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    ApprovalStore, Event, EventRow, KnowledgeRunState, KnowledgeRunStore, ListFilter, ListOrder,
-    Message, MessageRole, MilestoneStatus, OrgKind, ProjectId, ReportFilter, ReportStore,
-    SqliteStore, Status, Task, TaskId, TaskStore,
+    ApprovalStore, COS_ID, Event, EventRow, KnowledgeRunState, KnowledgeRunStore, ListFilter,
+    ListOrder, Message, MessageRole, MilestoneStatus, NodeSessionStore, OrgKind, ProjectId,
+    ReportFilter, ReportStore, SessionKind, SqliteStore, Status, Task, TaskId, TaskStore,
 };
 use task_ops::console::{ConsoleCursor, at_nanos, group_progress, task_line};
 use time::OffsetDateTime;
@@ -51,6 +51,11 @@ pub(crate) fn routes() -> axum::Router<ApiState> {
         .route("/api/v1/console", axum::routing::get(console))
         .route("/api/v1/console/stream", axum::routing::get(stream))
         .route("/api/v1/console/instruct", axum::routing::post(instruct))
+        // ADR-0054 D1（Phase 67）: CoS の継続セッションを捨てる（次の run から新規セッション）。
+        .route(
+            "/api/v1/console/new-conversation",
+            axum::routing::post(new_conversation),
+        )
         // ADR-0048 D2: 折り畳んだ `progress` を開いたときに取る、その run の全行。
         .route(
             "/api/v1/tasks/{id}/runs/{run_id}/events",
@@ -183,6 +188,39 @@ async fn instruct(
             task_id: started.task.id,
             node_id: started.message.node_id,
         },
+    ))
+}
+
+// ---- POST /console/new-conversation（ADR-0054 D1。Phase 67）----
+
+/// `POST /console/new-conversation`: CoS の継続セッション（`node_sessions`）を捨てる。次の対話 run は
+/// 新規セッションから始まる（前置きは全量に戻り、ADR-0033 D4 の対話履歴の末尾 20 件が「これまでの
+/// 要約」として乗る。`task_dispatch::sessions::FreshReason::NoActive` と同じ経路）。書くのは
+/// `node_sessions` の 1 行だけ（ディスパッチへの依存は無い、thin な管理操作）。現役セッションが
+/// 既に無くても 204（結果として「無い」状態にするだけなので、無かったことをエラーにしない）。
+async fn new_conversation(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    state
+        .blocking(move |store| {
+            let retired = store
+                .node_session_retire(COS_ID, SessionKind::Conversation, None, OffsetDateTime::now_utc())
+                .map_err(store_problem)?;
+            tracing::info!(
+                who = "admin",
+                op = "console_new_conversation",
+                retired,
+                "admin: retired the CoS continuation session"
+            );
+            Ok(())
+        })
+        .await?;
+    Ok(axum::response::IntoResponse::into_response(
+        StatusCode::NO_CONTENT,
     ))
 }
 

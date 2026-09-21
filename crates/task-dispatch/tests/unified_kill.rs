@@ -139,6 +139,7 @@ fn dispatcher(
             // ADR-0043 D3（Phase 56）: このテストはホスト実行だけを見る（コンテナは要求しない）。
             containers: task_dispatch::ContainersRuntimeConfig::default(),
             knowledge: task_dispatch::KnowledgeRuntimeConfig::default(),
+            session_rollover_tokens: 400_000,
         },
     )
 }

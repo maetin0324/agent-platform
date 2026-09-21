@@ -940,14 +940,38 @@ async fn run_acp(
     let start = Instant::now();
     let mut last_activity = Instant::now();
 
-    // --- Phase A 続き: session/new（ADR-0026 D3 手順 3） ---
-    let new_session_params = serde_json::json!({
-        "cwd": req.cwd().to_string_lossy(),
-        "mcpServers": [],
-    });
+    // --- Phase A 続き: session/new、または継続セッションなら session/load（ADR-0026 D3 手順 3、
+    // ADR-0054 D1 Phase 67）。`context.session` がこのアダプタ宛て（`adapter == "acp"`）で
+    // `resume: true` のときだけ `session/load` に切り替える（ACP のセッション継続手段）。 ---
+    let acp_session = req
+        .context
+        .session
+        .as_ref()
+        .filter(|s| s.adapter == AcpAdapter::ID);
+    let resuming = acp_session.is_some_and(|s| s.resume);
+    let (new_session_method, new_session_params) = if let Some(session) =
+        acp_session.filter(|_| resuming)
+    {
+        (
+            "session/load",
+            serde_json::json!({
+                "sessionId": session.session_id,
+                "cwd": req.cwd().to_string_lossy(),
+                "mcpServers": [],
+            }),
+        )
+    } else {
+        (
+            "session/new",
+            serde_json::json!({
+                "cwd": req.cwd().to_string_lossy(),
+                "mcpServers": [],
+            }),
+        )
+    };
     if write_line(
         &mut stdin,
-        &jsonrpc_request(2, "session/new", new_session_params),
+        &jsonrpc_request(2, new_session_method, new_session_params),
     )
     .await
     .is_err()
@@ -958,7 +982,7 @@ async fn run_acp(
             &stderr_log_path,
             limits.kill_grace,
             None,
-            "failed to write the session/new request to the acp agent's stdin".into(),
+            format!("failed to write the {new_session_method} request to the acp agent's stdin"),
         )
         .await);
     }
@@ -979,21 +1003,27 @@ async fn run_acp(
     {
         Ok(WaitOutcome::Response(v)) => v,
         Ok(WaitOutcome::Eof) => {
+            if resuming {
+                sink.session_resume_failed("acp agent exited before responding to session/load");
+            }
             return Err(kill_and_classify(
                 &mut child,
                 stderr_task,
                 &stderr_log_path,
                 limits.kill_grace,
                 None,
-                "acp agent exited before responding to session/new".into(),
+                format!("acp agent exited before responding to {new_session_method}"),
             )
             .await);
         }
         Ok(WaitOutcome::TimedOut(terminal)) => {
             let message = match &terminal {
                 Terminal::Error { message, .. } => message.clone(),
-                _ => "timeout waiting for session/new".to_string(),
+                _ => format!("timeout waiting for {new_session_method}"),
             };
+            if resuming {
+                sink.session_resume_failed(&message);
+            }
             return Err(kill_and_classify(
                 &mut child,
                 stderr_task,
@@ -1012,31 +1042,52 @@ async fn run_acp(
     };
     if let Some(error) = new_session_response.get("error") {
         let msg = jsonrpc_error_text(error);
+        // ADR-0054 D1（Phase 67）: `session/load` が拒否された（セッションが無い・失効した）ことを
+        // 報告する。ディスパッチャはこれを見て `node_sessions` の該当行を retire し、次の run は
+        // 新規セッションになる。`session/new`（継続でない run）の拒否はこれまでどおりただのエラー。
+        if resuming {
+            sink.session_resume_failed(&msg);
+        }
         return Err(kill_and_classify(
             &mut child,
             stderr_task,
             &stderr_log_path,
             limits.kill_grace,
             Some(msg.clone()),
-            format!("acp agent rejected session/new: {msg}"),
+            format!("acp agent rejected {new_session_method}: {msg}"),
         )
         .await);
     }
-    let Some(session_id) = new_session_response
+    // ADR-0054 D1（Phase 67）: `session/load` は ACP の仕様上 `sessionId` を返さないことがある
+    // （渡した id をそのまま使い続けるだけでよい）。`session/new` は必ず返す（これまでどおり必須）。
+    let response_session_id = new_session_response
         .pointer("/result/sessionId")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-    else {
+        .map(|s| s.to_string());
+    let Some(session_id) = response_session_id.or_else(|| {
+        resuming
+            .then(|| acp_session.map(|s| s.session_id.clone()))
+            .flatten()
+    }) else {
+        if resuming {
+            sink.session_resume_failed("acp agent session/load response had no sessionId");
+        }
         return Err(kill_and_classify(
             &mut child,
             stderr_task,
             &stderr_log_path,
             limits.kill_grace,
             None,
-            "acp agent session/new response had no sessionId".into(),
+            format!("acp agent {new_session_method} response had no sessionId"),
         )
         .await);
     };
+    // ADR-0054 D1（Phase 67）: 継続セッションの対象なら、実際に使った id を報告する
+    // （新規は agent が割り当てた id、継続は渡した id——`session/load` が確認以上の応答をしなくても、
+    // その id が引き続き現役であることに変わりはない）。
+    if acp_session.is_some() {
+        sink.session_established(&session_id);
+    }
 
     // --- Phase B: セッションが存在する。以降の失敗は artifacts/result.json 経由の終端として扱う。 ---
     let mut next_id = 3u64;
@@ -1248,6 +1299,10 @@ mod tests {
         structured: Mutex<Vec<(String, task_core::ProgressFields)>>,
         delegated: Mutex<Vec<Vec<DelegateTask>>>,
         rate_limits: Mutex<Vec<RateLimitObservation>>,
+        /// ADR-0054 D1（Phase 67）: `session_established` の呼び出し。
+        sessions: Mutex<Vec<String>>,
+        /// ADR-0054 D1（Phase 67）: `session_resume_failed` の呼び出し（理由）。
+        resume_failures: Mutex<Vec<String>>,
     }
 
     impl EventSink for RecordingSink {
@@ -1276,6 +1331,18 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(obs);
+        }
+        fn session_established(&self, session_id: &str) {
+            self.sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(session_id.to_string());
+        }
+        fn session_resume_failed(&self, reason: &str) {
+            self.resume_failures
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(reason.to_string());
         }
     }
 
@@ -1942,5 +2009,189 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let seen = std::fs::read_to_string(&out_file).unwrap();
         assert_eq!(seen, "new");
+    }
+
+    /// ADR-0054 D1（Phase 67）: `context.session` が無ければ Phase 66 までと同じ `session/new`。
+    #[tokio::test]
+    async fn without_a_session_the_agent_sees_session_new() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_acp(
+            dir.path(),
+            r#"
+mkdir -p artifacts
+read -r _init
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r new_req
+printf '%s\n' "$new_req" >> methods.log
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-new","configOptions":[]}}'
+read -r _prompt
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+"#,
+        );
+        let adapter = AcpAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-16", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let methods = std::fs::read_to_string(dir.path().join("methods.log")).unwrap();
+        assert!(methods.contains("\"method\":\"session/new\""), "{methods}");
+        assert!(!methods.contains("session/load"), "{methods}");
+        assert!(
+            sink.sessions.lock().unwrap().is_empty(),
+            "no session tracked for this run, so nothing to report"
+        );
+    }
+
+    /// ADR-0054 D1（Phase 67）: 継続セッションの**最初の run**（`resume: false`）は `session/new` の
+    /// ままだが、agent が割り当てた `sessionId` を `session_established` で報告する。
+    #[tokio::test]
+    async fn a_fresh_session_reports_the_agent_assigned_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_acp(
+            dir.path(),
+            r#"
+mkdir -p artifacts
+read -r _init
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r new_req
+printf '%s\n' "$new_req" >> methods.log
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-fresh","configOptions":[]}}'
+read -r _prompt
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+"#,
+        );
+        let adapter = AcpAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: AcpAdapter::ID.to_string(),
+            session_id: "placeholder".to_string(),
+            resume: false,
+        });
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-17", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let methods = std::fs::read_to_string(dir.path().join("methods.log")).unwrap();
+        assert!(methods.contains("\"method\":\"session/new\""), "{methods}");
+        assert_eq!(
+            sink.sessions.lock().unwrap().as_slice(),
+            &["sess-fresh".to_string()]
+        );
+    }
+
+    /// ADR-0054 D1（Phase 67）: 継続セッションの**2 回目以降**（`resume: true`）は `session/load`。
+    #[tokio::test]
+    async fn a_continuing_session_sends_session_load_and_reports_it_established() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_acp(
+            dir.path(),
+            r#"
+mkdir -p artifacts
+read -r _init
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r new_req
+printf '%s\n' "$new_req" >> methods.log
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{}}'
+read -r _prompt
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+"#,
+        );
+        let adapter = AcpAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: AcpAdapter::ID.to_string(),
+            session_id: "sess-continue".to_string(),
+            resume: true,
+        });
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-18", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let methods = std::fs::read_to_string(dir.path().join("methods.log")).unwrap();
+        assert!(methods.contains("\"method\":\"session/load\""), "{methods}");
+        assert!(methods.contains("sess-continue"), "{methods}");
+        // `session/load` の応答は `sessionId` を含まなくてよい（渡した id をそのまま使う）。
+        assert_eq!(
+            sink.sessions.lock().unwrap().as_slice(),
+            &["sess-continue".to_string()]
+        );
+        assert!(sink.resume_failures.lock().unwrap().is_empty());
+    }
+
+    /// ADR-0054 D1（Phase 67）: `session/load` が拒否されたら（セッションが無い・失効）、
+    /// `session_resume_failed` を報告した上で run 自体は失敗する（ディスパッチャが retire して作り直す）。
+    #[tokio::test]
+    async fn a_rejected_session_load_reports_resume_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_acp(
+            dir.path(),
+            r#"
+mkdir -p artifacts
+read -r _init
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r _new
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"unknown session"}}'
+"#,
+        );
+        let adapter = AcpAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: AcpAdapter::ID.to_string(),
+            session_id: "sess-gone".to_string(),
+            resume: true,
+        });
+        let sink = RecordingSink::default();
+        let result = adapter.run(req, "run-19", default_limits(), &sink).await;
+        assert!(result.is_err(), "session/load rejection fails this run");
+        let failures = sink.resume_failures.lock().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("unknown session"), "{failures:?}");
+        assert!(sink.sessions.lock().unwrap().is_empty());
+    }
+
+    /// `context.session` が別アダプタ向けなら無視する（`session/new` のまま）。
+    #[tokio::test]
+    async fn a_session_for_another_adapter_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_acp(
+            dir.path(),
+            r#"
+mkdir -p artifacts
+read -r _init
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+read -r new_req
+printf '%s\n' "$new_req" >> methods.log
+printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"sess-1","configOptions":[]}}'
+read -r _prompt
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+"#,
+        );
+        let adapter = AcpAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: "claude-code".to_string(),
+            session_id: "cc-session".to_string(),
+            resume: true,
+        });
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-20", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let methods = std::fs::read_to_string(dir.path().join("methods.log")).unwrap();
+        assert!(methods.contains("\"method\":\"session/new\""), "{methods}");
+        assert!(sink.sessions.lock().unwrap().is_empty());
     }
 }

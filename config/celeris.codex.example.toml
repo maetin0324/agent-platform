@@ -17,6 +17,11 @@ auto_accept = false
 # command = "codex"                   # PATH 上の codex を使うなら省略可
 # extra_args = []                     # サンドボックス／承認モードのフラグはここで指定する（ADR-0008 D3）
 # model = "gpt-5-codex"                # 省略時は codex の既定モデル
+# ADR-0054 D1（Phase 67）: 継続セッション（ノードごとの `node_sessions`。CoS の対話・部門長のレビュー run）
+# を続ける手段。既定 "exec_resume"（`codex exec resume <id>`）。インストール済みの codex CLI がそれに
+# 対応していなければ "experimental_resume"（`-c experimental_resume=<path>`）に上書きする。判定は
+# バージョンプローブではなくこの設定フラグで決定的に行う（celeris/src/config.rs の `resolved_resume_mode`）。
+# resume_mode = "exec_resume"
 
 [[providers]]
 id = "codex-local"

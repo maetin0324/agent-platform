@@ -1,6 +1,12 @@
 # celeris HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-21 Phase 67（ADR-0054 D1、ノードごとの継続セッションと resume）— **追加のみ。v1 のまま**。
+  エンドポイント 98: `POST /console/new-conversation`（§3.109。CoS の継続セッションを捨てる。**管理系**、
+  204、本文なし）。DB のスキーマ版数は **23**（migration 0023: `node_sessions`。ノードごとの継続セッション
+  の目印。本文・トークンの値は書かない）。CoS の対話・部門長のレビュー run 自体の挙動（`--resume` 等、
+  前置きの差分化）は `GET /console` / `POST /console/instruct`（§3.98 / §3.107）の応答の形を変えない
+  （継続かどうかはサーバ内部の判断で、API の応答契約には出ない）。
 - 改訂: 2026-09-21 Phase 65（ADR-0053 D1/D4、LLM source のローカル OpenAI 互換プロキシ）— **追加のみ。
   v1 のまま**。エンドポイント 97: `GET /llm/sources`（§3.108。供給元ごとの到達性・アカウントの残量・
   cooldown・直近 1 時間の要求/token 数。読み取りだが認証は必要。`[llm_proxy]` が無効なら 409
@@ -2421,6 +2427,23 @@ LLM source のローカル OpenAI 互換プロキシ（`crates/llm-proxy`。`127
   cooldown とも一致する）。
 - `last_hour_*`: `llm_proxy_requests`（migration 0022）の直近 1 時間の集計。本文は記録しないので
   ここにも出ない。
+
+### 3.109 `POST /console/new-conversation`（ADR-0054 D1、Phase 67。**98。管理系**）→ 204
+
+CoS の**継続セッション**（`node_sessions`。§3.107 の対話 run が `--resume` 等で続けているもの）を捨てる。
+GUI の「新しい会話」ボタンの入口。**薄い**: ディスパッチャには触らず、ストアの `node_sessions.retired_at`
+を立てるだけ（DESIGN 原則 1）。
+
+- 要求本文は無い（`{}` を送っても無視される）。
+- 現役セッションが有っても無くても **204**（結果として「捨てた」状態にするだけなので、既に無かったことを
+  エラーにしない）。
+- 効果: 次に人が CoS（`GET /console` の `scope=all` / `project:<id>`。§3.98）に話しかけたときの対話 run は
+  **新規セッション**（前置きは全量。§3.107 の「進行中の案件」等をもう一度渡す）から始まる。捨てなければ、
+  逼迫（`[sessions] rollover_tokens`）かアカウント変更が起きるまで、前置きは差分だけ（`session_diff`）が
+  続く。
+- 部門長（engineering/research/operations の根ノード）のレビュー・切り分け run（ADR-0051）の継続セッション
+  （`kind = lead`）はこの API の対象外（部署ごとに 1 本、GUI からの操作は今回のスコープに無い。組織画面の
+  「継続中のセッション」表示は Phase 68 の D3）。
 
 ---
 

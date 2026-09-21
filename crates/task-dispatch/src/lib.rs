@@ -10,6 +10,8 @@ pub mod policy;
 /// ADR-0033 D3（Phase 25）: run の終端から決定的に作る報告。
 pub(crate) mod reports;
 pub mod review;
+/// ADR-0054 D1（Phase 67）: ノードごとの継続セッションの決定的な判断（純粋関数）。
+pub mod sessions;
 
 pub use accounts::{
     AccountBook, AccountCandidate, AccountCheckRecord, AccountCooldown, AccountCooldownReason,
@@ -28,5 +30,9 @@ pub use policy::{
 pub use review::{
     PLAN_FILE_NAME, PlanCheck, REVIEW_FILE_NAME, ReviewExtras, ReviewOutcome, ReviewSubject,
     ReviewerProviderFailure, ReviewerRun, Verdict, needs_reviewer_run, review_task, reviewer_hint,
+};
+pub use sessions::{
+    FreshReason, SUPPORTED_ADAPTERS, SessionAction, adapter_supports_sessions, decide, diff_lines,
+    summary_lines,
 };
 pub use task_core::AccountAdapter;

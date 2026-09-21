@@ -106,6 +106,19 @@ pub trait EventSink: Send + Sync {
     /// ディスパッチャはプールのアカウントで走っている run のシンクから、この値を `AccountBook` に記録する。
     /// 既定は何もしない（`fake` アダプタや `celerisctl worker run` の観測用途など）。
     fn rate_limit(&self, _obs: RateLimitObservation) {}
+    /// ADR-0054 D1（Phase 67）: アダプタが**実際に使った／割り当てられた**セッション id を報告する
+    /// （高々 1 回。claude-code は `--session-id`/`--resume` に渡した値そのもの、codex は
+    /// `thread.started` で観測した thread id、acp は `session/new`/`session/load` の応答の
+    /// `sessionId`）。ディスパッチャはこれを `node_sessions` に記録する（新規なら作る、確認なら触らない）。
+    /// `context.session` が無い run では呼ばれない。既定は何もしない（`fake` アダプタ・
+    /// `celerisctl worker run` など DB を変えない文脈）。
+    fn session_established(&self, _session_id: &str) {}
+    /// ADR-0054 D1（Phase 67）: `context.session` で resume を頼んだのに、アダプタがそのセッションを
+    /// 拒否した（見つからない・失効した）ことを報告する（高々 1 回）。ディスパッチャはこれを見て
+    /// `node_sessions` の該当行を retire する（次の run からは新しいセッションになる。ADR-0054 D1
+    /// 「失敗も同じ経路で作り直す」）。この run 自身の成否には関わらない（`RunOutcome` は通常どおり返す）。
+    /// 既定は何もしない。
+    fn session_resume_failed(&self, _reason: &str) {}
 }
 
 /// 何もしないシンク（テスト・デバッグ用）。
