@@ -12,6 +12,7 @@ task-core = { path = "../task-core" }
 task-ops = { path = "../task-ops" }
 task-worker = { path = "../task-worker" }
 task-dispatch = { path = "../task-dispatch" }
+celeris-mcp = { path = "../celeris-mcp" }
 celeris = { path = "../celeris" }
 clap = { version = "4", features = ["derive", "env"] }
 time = { version = "0.3", features = ["formatting"] }

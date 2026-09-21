@@ -194,6 +194,13 @@ function HumanBlockView({
         fetchedAt={fetchedAt}
         align="end"
       />
+      {block.author && (
+        <div className="mb-1 flex justify-end">
+          <Badge tone="neutral" data-testid="console-human-author">
+            外部（{block.author.replace(/^mcp:/, "")}）
+          </Badge>
+        </div>
+      )}
       <p className="whitespace-pre-wrap">{block.text}</p>
       <div className="mt-1 flex justify-end">
         <ReplyButton onClick={() => onReply(block)} />

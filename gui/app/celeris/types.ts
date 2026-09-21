@@ -81,6 +81,11 @@ export type Tier = "frontier" | "standard" | "cheap";
 export type ConsoleBlock =
   | {
       at: string;
+      /**
+       * ADR-0056 D2（Phase 78）: 発した外部 MCP クライアント（`mcp:<client_id>`）。人の発言なら
+       * `None`（GUI はこれがあれば「外部（<name>）」の帯を出す。名前の解決は GUI 側）。
+       */
+      author?: string | null;
       cursor: string;
       kind: "human";
       message_id: string;
@@ -467,6 +472,15 @@ export type AttentionItem =
  * ADR-0047 D1 / D4。
  */
 export type Confidence = "high" | "medium" | "low";
+export type McpScope =
+  | "knowledge:read"
+  | "knowledge:propose"
+  | "tasks:read"
+  | "console:instruct"
+  | "org:read"
+  | "org:write"
+  | "skills:read"
+  | "skills:write";
 /**
  * 誰が言ったか（ADR-0033 D4）。`user` = 人、`node` = 組織のノード（その run の返事）。
  */
@@ -678,6 +692,8 @@ export interface ApiV1Schema {
   knowledge_reject_result: KnowledgeRejectResult;
   knowledge_tree: KnowledgeTree;
   llm_sources: LlmSourcesView;
+  mcp_calls: McpCallsView;
+  mcp_clients: McpClientsView;
   memory: MemoryView;
   message_accepted: MessageAccepted;
   message_list: MessageList;
@@ -1536,6 +1552,10 @@ export interface ConsolePage {
 /**
  * `Message.metadata`（ADR-0048 D3。Phase 60b）: CoS の対話 run が結果ファイルで宣言した `actions`
  * を taskd が決定的に実行した結果。Console の `reply` ブロックが `actions_result` として表示する。
+ *
+ * ADR-0056 D2（Phase 78）: **`author`** を足した。MCP 経由で発せられた `role = user` の発言は
+ * `mcp:<client_id>` を持つ（新しい列は増やさない。既存の `metadata_json` を再利用する。人の発言・
+ * 導入前の行は `None`）。GUI の Console はこれを見て「外部（<client name>）」の帯を出す。
  */
 export interface MessageMetadata {
   /**
@@ -1546,6 +1566,11 @@ export interface MessageMetadata {
    * 検証に落ちて実行しなかった action と理由。
    */
   actions_failed?: MessageActionFailure[];
+  /**
+   * ADR-0056 D2（Phase 78）: この発言（`role = user`）を発した外部 MCP クライアント
+   * （`mcp:<client_id>`）。人が Console から言った発言・導入前の行には無い。
+   */
+  author?: string | null;
 }
 /**
  * `Message.metadata.actions_executed[]`。
@@ -2906,6 +2931,44 @@ export interface LlmSourceAccountView {
    */
   remaining_short?: number | null;
 }
+export interface McpCallsView {
+  items: McpCall[];
+}
+/**
+ * `mcp_calls` の 1 行（ADR-0056 D4: 引数と結果の本文は持たない）。
+ */
+export interface McpCall {
+  at: string;
+  client_id: string;
+  error_kind?: string | null;
+  id: string;
+  latency_ms: number;
+  ok: boolean;
+  tool: string;
+}
+/**
+ * Phase 78（ADR-0056 D4）: `GET /mcp/clients` と `GET /mcp/calls?client=`。
+ */
+export interface McpClientsView {
+  items: McpClient[];
+}
+/**
+ * `mcp_clients` の 1 行。
+ */
+export interface McpClient {
+  created_at: string;
+  id: string;
+  last_used_at?: string | null;
+  name: string;
+  revoked_at?: string | null;
+  scopes?: McpScope[];
+  /**
+   * トークンの SHA-256（16 進）。**値そのものは持たない**。`None` は `--no-token` で作った客
+   * （ADR-0056 D1: `auth = "none"` の口に `client = "<id>"` で固定する専用。`token` の口では
+   * 絶対に一致しない）。
+   */
+  token_hash?: string | null;
+}
 /**
  * GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。
  */
@@ -3294,6 +3357,12 @@ export interface Profile {
    */
   skills?: string[];
   /**
+   * ADR-0056 D3（Phase 78）: KB の `skills/<name>/SKILL.md` をこのノードに mount する（skill 名の
+   * 一覧）。継承は `knowledge` と同じ規則（親と和。届け方は Phase 79）。`skills`（マッチングの能力
+   * タグ）とは別物。
+   */
+  skills_mounts?: string[];
+  /**
    * ADR-0046 D8 の語彙。親と和。
    */
   tools?: string[];
@@ -3396,6 +3465,10 @@ export interface EffectiveProfile {
   review_tier?: Tier | null;
   run?: ProfileRun | null;
   skills?: string[];
+  /**
+   * ADR-0056 D3（Phase 78）: 継いだ後の skills mount（skill 名。`knowledge` と同じ和の規則）。
+   */
+  skills_mounts?: string[];
   tier?: Tier | null;
   /**
    * `deny_tools` を引いた後の道具。
@@ -3458,6 +3531,12 @@ export interface Profile1 {
    * 能力タグ（ADR-0046 D2）。親と和。
    */
   skills?: string[];
+  /**
+   * ADR-0056 D3（Phase 78）: KB の `skills/<name>/SKILL.md` をこのノードに mount する（skill 名の
+   * 一覧）。継承は `knowledge` と同じ規則（親と和。届け方は Phase 79）。`skills`（マッチングの能力
+   * タグ）とは別物。
+   */
+  skills_mounts?: string[];
   /**
    * ADR-0046 D8 の語彙。親と和。
    */

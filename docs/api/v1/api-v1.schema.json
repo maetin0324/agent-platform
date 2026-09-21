@@ -1863,6 +1863,13 @@
             "at": {
               "type": "string"
             },
+            "author": {
+              "description": "ADR-0056 D2（Phase 78）: 発した外部 MCP クライアント（`mcp:<client_id>`）。人の発言なら\n`None`（GUI はこれがあれば「外部（<name>）」の帯を出す。名前の解決は GUI 側）。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "cursor": {
               "type": "string"
             },
@@ -3747,6 +3754,13 @@
           },
           "type": "array"
         },
+        "skills_mounts": {
+          "description": "ADR-0056 D3（Phase 78）: 継いだ後の skills mount（skill 名。`knowledge` と同じ和の規則）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "tier": {
           "anyOf": [
             {
@@ -5413,6 +5427,132 @@
       ],
       "type": "object"
     },
+    "McpCall": {
+      "description": "`mcp_calls` の 1 行（ADR-0056 D4: 引数と結果の本文は持たない）。",
+      "properties": {
+        "at": {
+          "type": "string"
+        },
+        "client_id": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "latency_ms": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "client_id",
+        "tool",
+        "ok",
+        "latency_ms",
+        "at"
+      ],
+      "type": "object"
+    },
+    "McpCallsView": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/McpCall"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "McpClient": {
+      "description": "`mcp_clients` の 1 行。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_used_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "revoked_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scopes": {
+          "items": {
+            "$ref": "#/$defs/McpScope"
+          },
+          "type": "array"
+        },
+        "token_hash": {
+          "description": "トークンの SHA-256（16 進）。**値そのものは持たない**。`None` は `--no-token` で作った客\n（ADR-0056 D1: `auth = \"none\"` の口に `client = \"<id>\"` で固定する専用。`token` の口では\n絶対に一致しない）。",
+          "type": [
+            "string",
+            "null"
+          ],
+          "writeOnly": true
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "McpClientsView": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/McpClient"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "McpScope": {
+      "enum": [
+        "knowledge:read",
+        "knowledge:propose",
+        "tasks:read",
+        "console:instruct",
+        "org:read",
+        "org:write",
+        "skills:read",
+        "skills:write"
+      ],
+      "type": "string"
+    },
     "MemoryView": {
       "description": "`GET /org/{id}/memory` の応答。",
       "properties": {
@@ -5616,7 +5756,7 @@
       "type": "object"
     },
     "MessageMetadata": {
-      "description": "`Message.metadata`（ADR-0048 D3。Phase 60b）: CoS の対話 run が結果ファイルで宣言した `actions`\nを taskd が決定的に実行した結果。Console の `reply` ブロックが `actions_result` として表示する。",
+      "description": "`Message.metadata`（ADR-0048 D3。Phase 60b）: CoS の対話 run が結果ファイルで宣言した `actions`\nを taskd が決定的に実行した結果。Console の `reply` ブロックが `actions_result` として表示する。\n\nADR-0056 D2（Phase 78）: **`author`** を足した。MCP 経由で発せられた `role = user` の発言は\n`mcp:<client_id>` を持つ（新しい列は増やさない。既存の `metadata_json` を再利用する。人の発言・\n導入前の行は `None`）。GUI の Console はこれを見て「外部（<client name>）」の帯を出す。",
       "properties": {
         "actions_executed": {
           "description": "実行できた action（「→ タスクを作りました: …」のような 1 行と、作った物の id）。",
@@ -5631,6 +5771,13 @@
             "$ref": "#/$defs/MessageActionFailure"
           },
           "type": "array"
+        },
+        "author": {
+          "description": "ADR-0056 D2（Phase 78）: この発言（`role = user`）を発した外部 MCP クライアント\n（`mcp:<client_id>`）。人が Console から言った発言・導入前の行には無い。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -6909,6 +7056,13 @@
         },
         "skills": {
           "description": "能力タグ（ADR-0046 D2）。親と和。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skills_mounts": {
+          "description": "ADR-0056 D3（Phase 78）: KB の `skills/<name>/SKILL.md` をこのノードに mount する（skill 名の\n一覧）。継承は `knowledge` と同じ規則（親と和。届け方は Phase 79）。`skills`（マッチングの能力\nタグ）とは別物。",
           "items": {
             "type": "string"
           },
@@ -11110,6 +11264,13 @@
       "$ref": "#/$defs/LlmSourcesView",
       "description": "Phase 65（ADR-0053 D4）: `GET /llm/sources`（API と型のみ。GUI 表示は Phase 66）。"
     },
+    "mcp_calls": {
+      "$ref": "#/$defs/McpCallsView"
+    },
+    "mcp_clients": {
+      "$ref": "#/$defs/McpClientsView",
+      "description": "Phase 78（ADR-0056 D4）: `GET /mcp/clients` と `GET /mcp/calls?client=`。"
+    },
     "memory": {
       "$ref": "#/$defs/MemoryView",
       "description": "GUI 監査対応 Phase 29 / H3（ADR-0033 D6）: 記憶を読む（`GET /org/{id}/memory`）。"
@@ -11423,7 +11584,9 @@
     "stream_daemon",
     "stream_heartbeat",
     "stream_reset",
-    "llm_sources"
+    "llm_sources",
+    "mcp_clients",
+    "mcp_calls"
   ],
   "title": "ApiV1Schema",
   "type": "object"

@@ -154,6 +154,12 @@ pub struct Config {
     #[serde(default)]
     pub sessions: SessionsConfig,
     // ---- ADR-0054 D1（Phase 67）: ここまで ----
+    // ---- ADR-0056 D1/D5（Phase 78）: MCP サーバー。ここから ----
+    /// `[mcp]`（＋ `[[mcp.listeners]]`）。`[llm_proxy]` と同じ形で `celeris` が読んで起動する
+    /// （reload 対象外）。
+    #[serde(default)]
+    pub mcp: celeris_mcp::config::McpConfig,
+    // ---- ADR-0056（Phase 78）: ここまで ----
     /// `Config::load` で読んだファイルの絶対パス（`GET /api/v1/config` の `config_path`。TOML には書かない）。
     #[serde(skip)]
     pub source_path: Option<PathBuf>,
@@ -2190,6 +2196,10 @@ impl Config {
                 }
             }
         }
+        // ADR-0056 D1（Phase 78）: `auth = "none"` は loopback だけ、`client` は `none` のときだけ。
+        self.mcp
+            .resolve_listeners()
+            .map_err(|e| ConfigError::Invalid(e.to_string()))?;
         Ok(())
     }
 
@@ -3205,6 +3215,42 @@ adapter = "fake"
         assert!(cfg.plan.auto_accept);
         assert!(cfg.dispatch_config().plan_auto_accept);
         assert!(toml::from_str::<Config>("[plan]\nbogus = 1\n").is_err());
+    }
+
+    /// ADR-0056 D1（Phase 78）: `[[mcp.listeners]]` は `Config::validate` が検査する（`auth = "none"`
+    /// は loopback だけ）。
+    #[test]
+    fn mcp_listeners_parse_and_validate_are_wired_into_config() {
+        let cfg: Config = toml::from_str(
+            r#"[[providers]]
+id = "x"
+adapter = "fake"
+[[mcp.listeners]]
+listen = "127.0.0.1:18200"
+auth = "token"
+[[mcp.listeners]]
+listen = "127.0.0.1:18201"
+auth = "none"
+client = "chatgpt"
+"#,
+        )
+        .unwrap();
+        cfg.validate().unwrap();
+        assert!(cfg.mcp.effective_enabled());
+        assert_eq!(cfg.mcp.resolve_listeners().unwrap().len(), 2);
+
+        let bad: Config = toml::from_str(
+            r#"[[providers]]
+id = "x"
+adapter = "fake"
+[[mcp.listeners]]
+listen = "0.0.0.0:18201"
+auth = "none"
+client = "chatgpt"
+"#,
+        )
+        .unwrap();
+        assert!(matches!(bad.validate(), Err(ConfigError::Invalid(_))));
     }
 
     #[test]

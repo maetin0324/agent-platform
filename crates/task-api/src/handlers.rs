@@ -178,6 +178,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::console::routes())
         // ADR-0053 D4（Phase 65）: LLM source の観測。実装は `crate::llm_sources`。
         .merge(crate::llm_sources::routes())
+        // ADR-0056 D4（Phase 78）: MCP クライアント / 呼び出しログの観測。実装は `crate::mcp_admin`。
+        .merge(crate::mcp_admin::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))

@@ -514,6 +514,13 @@
           },
           "type": "array"
         },
+        "skills_mounts": {
+          "description": "ADR-0056 D3（Phase 78）: 継いだ後の skills mount（skill 名。`knowledge` と同じ和の規則）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "tier": {
           "anyOf": [
             {

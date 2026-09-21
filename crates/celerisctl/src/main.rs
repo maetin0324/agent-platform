@@ -16,6 +16,7 @@ use commands::cancel::{self, CancelArgs};
 use commands::config::{self as config_cmd, ConfigCommand};
 use commands::gate::{self, AnswerArgs, ApproveArgs, RejectArgs};
 use commands::knowledge::{self, KnowledgeCommand};
+use commands::mcp::{self, McpCommand};
 use commands::org::{self as org_cmd, OrgCommand};
 use commands::plan::{self, PlanArgs};
 use commands::projects::{self, ProjectsCommand};
@@ -56,6 +57,12 @@ enum Command {
     Knowledge {
         #[command(subcommand)]
         command: KnowledgeCommand,
+    },
+    /// ADR-0056 D1（Phase 78）: MCP クライアントの発行・一覧・失効（`client`）、stdio 橋（`stdio`）。
+    /// `stdio` 以外は DB を直接開く。
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
     },
     /// `celerisctl worker run` 等（デバッグ用。ADR-0012 D4）。
     Worker {
@@ -101,8 +108,9 @@ fn dispatch(store: &SqliteStore, db_path: &Path, command: Command) -> Result<Exi
         Command::Log(args) => query::run_log(store, args),
         Command::Replay(args) => replay::run(store, args),
         Command::Projects { command } => projects::run(store, command),
-        // `main` が先に処理する（DB を開かない）。
+        // `main` が先に処理する（DB を開かない場合があるため）。
         Command::Knowledge { .. } => unreachable!("handled before the store is opened"),
+        Command::Mcp { .. } => unreachable!("handled before the store is opened"),
         Command::Worker { command } => match command {
             WorkerCommand::Run(args) => worker::run_run(store, args),
         },
@@ -146,6 +154,36 @@ fn main() -> ExitCode {
             Err(e) => {
                 eprintln!("error: {e}");
                 ExitCode::FAILURE
+            }
+        };
+    }
+    // ADR-0056 D1: `mcp stdio` は DB を開かない（手元の HTTP に橋を架けるだけ）。
+    // `mcp client …` は `knowledge rerun` と同じ管理系（DB を直接開く）。
+    if let Command::Mcp { command } = cli.command {
+        return match command {
+            McpCommand::Stdio(args) => match mcp::run_stdio(args) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            },
+            McpCommand::Client { command } => {
+                let db_path = resolve_db_path(cli.db);
+                let store = match SqliteStore::open(&db_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("error: failed to open db {}: {e}", db_path.display());
+                        return ExitCode::FAILURE;
+                    }
+                };
+                match mcp::run_client(&store, command) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        ExitCode::FAILURE
+                    }
+                }
             }
         };
     }

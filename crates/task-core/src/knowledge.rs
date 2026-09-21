@@ -33,6 +33,9 @@ pub fn default_root() -> std::path::PathBuf {
 pub const INBOX_DIR: &str = "_inbox";
 /// ADR-0047 D4（Phase 62）: `op = retire` を accept したときの行き先（索引にも検索にも入らない）。
 pub const RETIRED_DIR: &str = "_retired";
+/// ADR-0056 D3（Phase 78）: skills（`SKILL.md` + 付属ファイル）の置き場。ADR-0047 のスコープの外側
+/// （`index.json` には載せない。`_inbox` / `_retired` と同じく検索・一覧・reindex から除く）。
+pub const SKILLS_DIR: &str = "skills";
 /// ADR-0047 D1: 派生物の索引。
 pub const INDEX_FILE: &str = "index.json";
 /// ADR-0047 D2: 前置きに出す索引の上限。
@@ -433,6 +436,20 @@ fn clean_relative(raw: &str) -> Result<String, PathError> {
 /// `_inbox/` の下か（候補は索引に入らない）。
 pub fn is_inbox(path: &str) -> bool {
     path == INBOX_DIR || path.starts_with(&format!("{INBOX_DIR}/"))
+}
+
+/// `skills/` の下か（ADR-0056 D3。索引にも通常の検索にも入らない）。
+pub fn is_skills(path: &str) -> bool {
+    path == SKILLS_DIR || path.starts_with(&format!("{SKILLS_DIR}/"))
+}
+
+/// ADR-0056 D3: skill 名の綴り（`[a-z0-9-]{1,64}`。`org_*` の id と同じ規則だが別の語彙）。
+pub fn is_valid_skill_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// 題名から `*.md` のファイル名のもとになる slug を作る（ASCII だけ。何も残らなければ `None`）。

@@ -319,6 +319,7 @@ async fn reply_blocks_carry_the_actions_result() {
                 kind: "add_milestone".into(),
                 reason: "project x does not exist".into(),
             }],
+            author: None,
         }),
         created_at: now,
     };

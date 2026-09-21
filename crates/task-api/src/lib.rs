@@ -31,6 +31,8 @@ mod files;
 mod handlers;
 /// ADR-0053 D4（Phase 65）: `GET /llm/sources`。celeris が `LlmSourcesReader` の実装を渡す。
 pub mod llm_sources;
+/// ADR-0056 D4（Phase 78）: MCP クライアント / 呼び出しログの観測（`GET /mcp/clients` / `GET /mcp/calls`）。
+pub mod mcp_admin;
 /// ADR-0047（Phase 61）: 知識ベース（`~/.local/share/celeris/knowledge` の Markdown が正本）。ツリー・ページ・`_inbox`。
 pub mod knowledge;
 /// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。

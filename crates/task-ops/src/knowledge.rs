@@ -90,6 +90,14 @@ fn commit_paths(
     if !git(root, &add, GIT_WRITE_TIMEOUT).is_some_and(|o| o.ok) {
         return Err("git add に失敗しました".to_string());
     }
+    // 書いた内容が既存のコミットと一字一句同じ（`skills_put` の冪等な書き直し等）なら、
+    // ステージに何も乗らない。その場合は「新しいコミットは作らず、今の HEAD を返す」
+    // （`git commit` は空のコミットを拒否するので、ここで先に見ておく）。
+    let mut diff_check: Vec<&str> = vec!["diff", "--cached", "--quiet", "--"];
+    diff_check.extend_from_slice(paths);
+    if git(root, &diff_check, GIT_TIMEOUT).is_some_and(|o| o.ok) {
+        return Ok(head(root).unwrap_or_default());
+    }
     let (name, email) = author_args(author.0, author.1);
     let mut args: Vec<&str> = vec![
         "-c", &name, "-c", &email, "commit", "-q", "-m", message, "--",
@@ -364,7 +372,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
             continue;
         };
         let rel = rel.to_string_lossy().replace('\\', "/");
-        if rel.starts_with('.') || kb::is_inbox(&rel) || is_retired(&rel) {
+        if rel.starts_with('.') || kb::is_inbox(&rel) || is_retired(&rel) || kb::is_skills(&rel) {
             continue;
         }
         if path.is_dir() {
@@ -670,7 +678,12 @@ pub fn grep(root: &Path, needle: &str) -> Vec<String> {
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .map(|l| l.trim_start_matches("./").to_string())
-        .filter(|p| p.to_ascii_lowercase().ends_with(".md") && !kb::is_inbox(p) && !is_retired(p))
+        .filter(|p| {
+            p.to_ascii_lowercase().ends_with(".md")
+                && !kb::is_inbox(p)
+                && !is_retired(p)
+                && !kb::is_skills(p)
+        })
         .collect();
     paths.sort();
     paths.dedup();
@@ -1328,6 +1341,238 @@ fn write_inbox_candidate(
     .map(|_| path)
 }
 
+// ---------------------------------------------------------------------------
+// skills（ADR-0056 D3。Phase 78）: `skills/<name>/SKILL.md` を KB の専用ディレクトリに置く。
+// `index.json` には載らない（`_inbox` / `_retired` と同じく `walk`/`grep` から除く）。
+// ---------------------------------------------------------------------------
+
+/// `skills_list` の 1 件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillSummary {
+    pub name: String,
+    pub description: String,
+}
+
+/// `skills_get` の結果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillDetail {
+    pub name: String,
+    /// `SKILL.md` の中身（frontmatter 込み）。
+    pub skill_md: String,
+    /// `SKILL.md` と同じディレクトリの付属ファイル（相対パス。`SKILL.md` 自身は含まない）。
+    pub files: Vec<String>,
+}
+
+/// `skills_put` の失敗。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SkillError {
+    #[error("skill name {name:?} must match [a-z0-9-] (lowercase, 1..=64 characters)")]
+    InvalidName { name: String },
+    #[error("skill_md must have a frontmatter block (--- … ---) with `name` and `description`")]
+    MissingFrontmatter,
+    #[error("frontmatter `name` ({found:?}) must equal the skill name ({name:?})")]
+    NameMismatch { name: String, found: String },
+    #[error("frontmatter `description` must not be blank")]
+    NoDescription,
+    #[error("attached file path {path:?} is not allowed (no `..`, no absolute paths)")]
+    BadFilePath { path: String },
+    #[error("{0}")]
+    Failed(String),
+}
+
+fn skill_dir(root: &Path, name: &str) -> Result<PathBuf, SkillError> {
+    if !kb::is_valid_skill_name(name) {
+        return Err(SkillError::InvalidName {
+            name: name.to_string(),
+        });
+    }
+    Ok(root.join(SKILLS_ROOT_DIR).join(name))
+}
+
+const SKILLS_ROOT_DIR: &str = "skills";
+const SKILL_FILE: &str = "SKILL.md";
+
+/// SKILL.md の frontmatter（`---\n...\n---\n`）から `key: value` の行を素直に読む（クォート無し、
+/// 1 行 1 鍵の最小 YAML もどき。KB の front matter とは別の形式なので `kb::front_matter` は使わない）。
+type SkillFrontmatter = (Vec<(String, String)>, usize, usize);
+
+fn skill_frontmatter(raw: &str) -> Option<SkillFrontmatter> {
+    let raw_trimmed_start = raw.trim_start_matches('\u{feff}');
+    if !raw_trimmed_start.starts_with("---") {
+        return None;
+    }
+    let after_open = &raw_trimmed_start[3..];
+    let after_open = after_open.strip_prefix('\n').unwrap_or(after_open);
+    let close_rel = after_open.find("\n---")?;
+    let body = &after_open[..close_rel];
+    let mut fields = Vec::new();
+    for line in body.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            fields.push((k.trim().to_string(), v.trim().to_string()));
+        }
+    }
+    let open_len = raw_trimmed_start.len() - after_open.len();
+    Some((fields, open_len, open_len + close_rel))
+}
+
+fn frontmatter_field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.as_str())
+}
+
+/// `name` / `description` を検証し、`source` 鍵が無ければ frontmatter に足す（ADR-0056 D3: 「出典
+/// `mcp:<client_id>` を frontmatter に残す」）。冪等（既に `source:` があれば触らない）。
+fn prepare_skill_md(name: &str, skill_md: &str, source: Option<&str>) -> Result<String, SkillError> {
+    let Some((fields, open, close)) = skill_frontmatter(skill_md) else {
+        return Err(SkillError::MissingFrontmatter);
+    };
+    let found_name = frontmatter_field(&fields, "name").unwrap_or_default();
+    if found_name.is_empty() || found_name != name {
+        return Err(SkillError::NameMismatch {
+            name: name.to_string(),
+            found: found_name.to_string(),
+        });
+    }
+    let description = frontmatter_field(&fields, "description").unwrap_or_default();
+    if description.trim().is_empty() {
+        return Err(SkillError::NoDescription);
+    }
+    if let Some(source) = source
+        && frontmatter_field(&fields, "source").is_none()
+    {
+        let mut out = String::with_capacity(skill_md.len() + source.len() + 16);
+        out.push_str(&skill_md[..close]);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&format!("source: {source}\n"));
+        out.push_str(&skill_md[close..]);
+        return Ok(out);
+    }
+    let _ = open;
+    Ok(skill_md.to_string())
+}
+
+/// 相対パスとして安全か（`..` を含まない、絶対パスでない、空でない）。
+fn safe_relative_path(path: &str) -> bool {
+    let path = path.trim();
+    !path.is_empty()
+        && !path.starts_with('/')
+        && !path.contains('\\')
+        && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
+/// ADR-0056 D3: `skills/<name>/SKILL.md`（＋付属ファイル）を書く（**直接コミット**。mount されるまで
+/// 何にも効かない）。`source`（`mcp:<client_id>`）は frontmatter に無ければ足す。
+pub fn skills_put(
+    root: &Path,
+    name: &str,
+    skill_md: &str,
+    files: &[(String, String)],
+    source: Option<&str>,
+) -> Result<String, SkillError> {
+    let dir = skill_dir(root, name)?;
+    for (path, _) in files {
+        if !safe_relative_path(path) || path == SKILL_FILE {
+            return Err(SkillError::BadFilePath { path: path.clone() });
+        }
+    }
+    let content = prepare_skill_md(name, skill_md, source)?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| SkillError::Failed(format!("{} を作れませんでした: {e}", dir.display())))?;
+    std::fs::write(dir.join(SKILL_FILE), content.as_bytes())
+        .map_err(|e| SkillError::Failed(format!("{SKILL_FILE} を書けませんでした: {e}")))?;
+    let mut rel_paths = vec![format!("{SKILLS_ROOT_DIR}/{name}/{SKILL_FILE}")];
+    for (path, body) in files {
+        let file_path = dir.join(path);
+        if let Some(parent) = file_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| SkillError::Failed(format!("{} を作れませんでした: {e}", parent.display())))?;
+        }
+        std::fs::write(&file_path, body.as_bytes())
+            .map_err(|e| SkillError::Failed(format!("{path} を書けませんでした: {e}")))?;
+        rel_paths.push(format!("{SKILLS_ROOT_DIR}/{name}/{path}"));
+    }
+    let refs: Vec<&str> = rel_paths.iter().map(String::as_str).collect();
+    commit_paths(
+        root,
+        &format!("knowledge: skills/{name} を更新"),
+        (kb::AGENT_AUTHOR_NAME, kb::AGENT_AUTHOR_EMAIL),
+        &refs,
+    )
+    .map_err(SkillError::Failed)?;
+    Ok(format!("{SKILLS_ROOT_DIR}/{name}/{SKILL_FILE}"))
+}
+
+/// ADR-0056 D2: `skills/` にある skill の一覧（`name` / frontmatter の `description`）。
+pub fn skills_list(root: &Path) -> Vec<SkillSummary> {
+    let dir = root.join(SKILLS_ROOT_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !kb::is_valid_skill_name(name) {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(path.join(SKILL_FILE)) else {
+            continue;
+        };
+        let description = skill_frontmatter(&raw)
+            .and_then(|(fields, ..)| frontmatter_field(&fields, "description").map(str::to_string))
+            .unwrap_or_default();
+        out.push(SkillSummary {
+            name: name.to_string(),
+            description,
+        });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// ADR-0056 D2: skill 1 件（`SKILL.md` 本文と付属ファイルの一覧）。無ければ `None`。
+pub fn skills_get(root: &Path, name: &str) -> Option<SkillDetail> {
+    if !kb::is_valid_skill_name(name) {
+        return None;
+    }
+    let dir = root.join(SKILLS_ROOT_DIR).join(name);
+    let skill_md = std::fs::read_to_string(dir.join(SKILL_FILE)).ok()?;
+    let mut files = Vec::new();
+    collect_skill_files(&dir, &dir, &mut files);
+    files.sort();
+    Some(SkillDetail {
+        name: name.to_string(),
+        skill_md,
+        files,
+    })
+}
+
+fn collect_skill_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_skill_files(root, &path, out);
+        } else if let Ok(rel) = path.strip_prefix(root) {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if rel != SKILL_FILE {
+                out.push(rel);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1938,5 +2183,90 @@ mod tests {
             !index.items.iter().any(|i| i.path.contains("pegasus")),
             "{index:?}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // skills（ADR-0056 D3。Phase 78）
+    // -----------------------------------------------------------------
+
+    const SAMPLE_SKILL_MD: &str = "---\nname: rust-review\ndescription: Rust のコードレビューの手順\n---\n\n# rust-review\n\n手順...\n";
+
+    #[test]
+    fn skills_put_writes_the_frontmatter_name_and_description_and_adds_the_source() {
+        let (_dir, root) = kb_dir();
+        let path = skills_put(&root, "rust-review", SAMPLE_SKILL_MD, &[], Some("mcp:chatgpt"))
+            .expect("put");
+        assert_eq!(path, "skills/rust-review/SKILL.md");
+        let raw = std::fs::read_to_string(root.join(&path)).expect("read");
+        assert!(raw.contains("name: rust-review"));
+        assert!(raw.contains("source: mcp:chatgpt"), "{raw}");
+
+        // 索引・検索・`list_pages` から見えない（ADR-0056 D3: 専用ディレクトリ）。
+        let index = reindex(&root).expect("reindex");
+        assert!(!index.items.iter().any(|i| i.path.starts_with("skills/")));
+        assert!(list_pages(&root).iter().all(|p| !p.starts_with("skills/")));
+
+        // 2 回目（source 込みで書いても）冪等: 既に `source:` があれば足さない。
+        let path2 = skills_put(&root, "rust-review", &raw, &[], Some("mcp:other")).expect("put 2");
+        let raw2 = std::fs::read_to_string(root.join(&path2)).expect("read 2");
+        assert_eq!(raw2.matches("source:").count(), 1);
+        assert!(raw2.contains("source: mcp:chatgpt"), "{raw2}");
+    }
+
+    #[test]
+    fn skills_put_writes_attached_files_and_skills_get_lists_them() {
+        let (_dir, root) = kb_dir();
+        skills_put(
+            &root,
+            "rust-review",
+            SAMPLE_SKILL_MD,
+            &[("checklist.md".to_string(), "- fmt\n- clippy\n".to_string())],
+            None,
+        )
+        .expect("put");
+        let detail = skills_get(&root, "rust-review").expect("get");
+        assert_eq!(detail.name, "rust-review");
+        assert!(detail.skill_md.contains("rust-review"));
+        assert_eq!(detail.files, vec!["checklist.md".to_string()]);
+
+        let list = skills_list(&root);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "rust-review");
+        assert_eq!(list[0].description, "Rust のコードレビューの手順");
+
+        assert!(skills_get(&root, "does-not-exist").is_none());
+    }
+
+    #[test]
+    fn skills_put_rejects_bad_names_missing_frontmatter_and_path_traversal() {
+        let (_dir, root) = kb_dir();
+        assert!(matches!(
+            skills_put(&root, "Bad Name", SAMPLE_SKILL_MD, &[], None),
+            Err(SkillError::InvalidName { .. })
+        ));
+        assert!(matches!(
+            skills_put(&root, "rust-review", "no frontmatter here", &[], None),
+            Err(SkillError::MissingFrontmatter)
+        ));
+        assert!(matches!(
+            skills_put(
+                &root,
+                "rust-review",
+                "---\nname: other\ndescription: x\n---\n",
+                &[],
+                None
+            ),
+            Err(SkillError::NameMismatch { .. })
+        ));
+        assert!(matches!(
+            skills_put(
+                &root,
+                "rust-review",
+                SAMPLE_SKILL_MD,
+                &[("../escape.md".to_string(), "x".to_string())],
+                None
+            ),
+            Err(SkillError::BadFilePath { .. })
+        ));
     }
 }

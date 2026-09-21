@@ -21,6 +21,8 @@ pub mod knowledge;
 /// ADR-0047 D4（Phase 62）: 知識整理 run の追跡（`knowledge_runs`）。
 pub mod knowledge_run;
 pub mod message;
+/// ADR-0056 D1 / D4（Phase 78）: MCP サーバーの認証（`mcp_clients`）とログ（`mcp_calls`）。
+pub mod mcp;
 pub mod model;
 /// ADR-0054 D1（Phase 67）: ノードごとの継続セッション（`node_sessions`）。
 pub mod node_session;
@@ -94,6 +96,11 @@ pub use model::{
 // ---- ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ ----
 // ---- ADR-0054 D1（Phase 67）: ノードごとの継続セッション ----
 pub use node_session::{NodeSession, NodeSessionStore, SessionKind};
+// ---- ADR-0056 D1 / D4（Phase 78）: MCP サーバーの認証とログ ----
+pub use mcp::{
+    McpCall, McpCallStore, McpClient, McpClientStore, McpScope, scopes_from_string,
+    scopes_to_string,
+};
 pub use notify::{
     DEFAULT_WEBHOOK_SECRET_ID, MAX_NOTIFY_ATTEMPTS, Notification, NotificationId, NotificationKind,
     NotificationStore,

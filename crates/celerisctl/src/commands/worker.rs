@@ -861,6 +861,7 @@ mod tests {
             knowledge: Default::default(),
             llm_proxy: Default::default(),
             sessions: Default::default(),
+            mcp: Default::default(),
             source_path: None,
         }
     }

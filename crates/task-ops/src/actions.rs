@@ -85,6 +85,7 @@ impl ActionsOutcome {
                     reason: f.reason.clone(),
                 })
                 .collect(),
+            author: None,
         })
     }
 }

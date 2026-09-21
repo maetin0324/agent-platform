@@ -11853,3 +11853,148 @@ Console の入力欄は元々 aria-label や DOM 順が適切だった）ため�
 - 人からの追加依頼（16:50 UTC、機内から）: **外部から Celeris を操作する MCP サーバー**（知識・タスク/案件・組織の一覧/閲覧/作成、skills の注入）。
   質問 4 件への回答を受けて ADR-0056 を起こした（接続は ChatGPT の Secure MCP tunnel で手元 HTTP、案件・タスクは CoS に渡す、知識は `_inbox`、
   skills は SKILL.md を KB に置きノードに mount）。Phase 78（サーバー）→ Phase 79（skills の届け方）。
+## Phase 78 — MCP サーバー（ADR-0056 D1/D2/D4/D5。2026-09-21）
+
+新クレート `crates/celeris-mcp`（JSON-RPC 2.0 + MCP 2025-06-18 Streamable HTTP。`POST /mcp`）、
+`[mcp]`/`[[mcp.listeners]]` 設定（`auth = "token"|"none"`、`none` は loopback + `client = "<id>"` 固定。
+コーディネーターから実装中に ADR-0056 D1 へ追記の指示があり、口を複数化して `auth = "none"` を
+名前付きクライアント固定にする形に変更してから実装した — ChatGPT の Secure MCP tunnel が Bearer
+ヘッダを足せないため）、migration `0024_mcp.sql`（`mcp_clients`/`mcp_calls`、`SCHEMA_VERSION = 24`）、
+`celerisctl mcp client add|ls|revoke` / `mcp stdio`、D2 の tools 18 個・resources 5 種、D4 のスコープ・
+監査・流量制限、D3 のデータモデルのみ（`Profile.skills_mounts` と KB の `skills/` 置き場。届け方は
+Phase 79）を実装した。詳細な決定・逸脱は `docs/adr/0056-mcp-server.md`「Phase 78 追記」を参照。
+
+### 受け入れ条件ごとの証跡
+
+**1. `crates/celeris-mcp`、`[mcp]` 設定、migration 0024**
+- `cargo test -p celeris-mcp` → **exit 0、29 passed**（lib 19 + `tests/mcp_integration.rs` 10）。
+- `crates/task-core/migrations/0024_mcp.sql` → `SCHEMA_VERSION = 24`。`cargo test -p task-core --lib`
+  → **217 passed**（`mcp::tests::*` 5 本、`SCHEMA_VERSION` の pin を 23→24 に更新した 5 箇所を含む）。
+
+**2. `celerisctl mcp client add|ls|revoke` / `mcp stdio`**
+- `cargo check -p celerisctl` → exit 0。`cargo test -p celerisctl` → **exit 0、52 passed**（既存分。
+  `mcp` サブコマンド自体の単体テストは `celeris-mcp` 側（`auth::tests`・`stdio::tests`）に寄せた —
+  `celerisctl` の `mcp.rs` は薄い CLI ラッパーのみで、独自ロジックを持たないため）。
+- stdio 橋の往復は `crates/celeris-mcp/src/stdio.rs::tests::
+  a_round_trip_through_a_real_server_returns_one_line_per_call_and_reuses_the_session`
+  （`127.0.0.1:0` に実サーバーを起こし、`celeris_mcp::stdio::run` で `initialize` → `ping` の 2 行を
+  流し、応答が 2 行返ること・`Mcp-Session-Id` が再利用されることを確認）。
+
+**3. tools / resources、スコープごとの `tools/list`、認証なし/失効の 401**
+- `crates/celeris-mcp/tests/mcp_integration.rs`（実際に `127.0.0.1:0` へ bind し `reqwest` で叩く。
+  外部ネットワークには出ない）:
+  - `initialize_then_tools_list_then_ping_round_trip` — `initialize` → `Mcp-Session-Id` 取得 →
+    `tools/list`（既定スコープでは `org_create_node` が出ない）→ `ping`。
+  - `tools_list_is_filtered_by_scope` — `knowledge:read` だけの客は `knowledge_get/list/search` の
+    3 つだけ、`org:write`+`skills:write` の客は `org_create_node`/`skills_put` を含む。
+  - `missing_or_revoked_token_is_401` — トークン無し・失効トークンともに 401。
+  - `a_fixed_none_listener_binds_every_request_to_its_named_client` —
+    `ListenerAuth::Fixed("chatgpt")` の口へ Bearer 無しで `tools/call(knowledge_propose)` が通り、
+    `mcp_calls` に `client_id = "chatgpt"` で 1 件残る。
+  - `session_is_required_after_initialize` — `Mcp-Session-Id` 無しの 2 通目は 400。
+
+**4. `knowledge_propose` → `_inbox` + `mcp:<client>` + 秘密の拒否**
+- `knowledge_propose_writes_to_inbox_with_the_mcp_source_and_rejects_secrets` — 返った `path` が
+  `_inbox/` 始まり、そのファイルの中身に `mcp:chatgpt` を含む。`sk-…` を含む本文は
+  JSON-RPC error code `-32002`（`ToolErrorCode::Rejected`）。
+- `task-ops` 側の単体テスト（`crates/task-ops/src/knowledge.rs`）: `skills_put_*` 3 本を追加
+  （`skills/` が索引・`list_pages`・検索から除かれること、frontmatter の `name`/`description` 必須、
+  出典 `source:` の冪等な追記、パストラバーサルの拒否）。`cargo test -p task-ops --lib` →
+  **exit 0、262 passed**。
+
+**5. `console_instruct` の `author = mcp:<client>`、`console_reply` の返事と actions**
+- `console_instruct_records_an_mcp_author_and_console_reply_returns_the_reply_and_actions` —
+  `console_instruct` が作った `role = user` の行の `metadata.author == "mcp:chatgpt"` を確認、
+  `console_reply` が未終了なら `{state:"pending"}`、`task-api` の対話テストと同じ流儀で
+  `task_ops::conversation::record_reply` + `apply_transition(Dispatch → WorkerDone → ReviewPass)`
+  を直接呼んで終端にしたあとは `{state:"done", reply:"3 件のタスクを作りました"}`。
+
+**6. `org_create_node` の `tools`/`permissions` 無視**
+- `org_create_node_ignores_tools_and_permissions` — `tools: ["gh"]`・
+  `permissions: {approvals: [...]}` を送っても、作られたノードの `profile.tools`/
+  `profile.permissions.approvals` は空。
+
+**7. 流量制限、`mcp_calls` の記録**
+- `rate_limit_returns_an_error_with_retry_after` — `rate_limit_per_min = 1` の客が 2 回目で
+  JSON-RPC error `-32000` + `data.retry_after`（数値）。
+- `tools_call_is_recorded_in_mcp_calls` — `tools/call` 1 回が `mcp_calls` に
+  `tool="knowledge_list", ok=true, error_kind=None` で残る。
+- `crates/celeris-mcp/src/ratelimit.rs`（メモリのスライディングウィンドウ）の単体テスト 4 本。
+
+**8. 管理 API（`GET /mcp/clients`/`GET /mcp/calls?client=`）**
+- `crates/task-api/tests/mcp_admin.rs`（新規）3 本: トークンの値が出ないこと、`client=` で絞れること、
+  トークン必須。`cargo test -p task-api` → **exit 0、53 passed（--lib）+ 3 passed（mcp_admin.rs）**。
+
+**9. ドキュメント**
+- `docs/mcp.md`（新規）: 転送・設定・`celerisctl mcp client`・スコープ一覧・tools/resources 一覧・
+  監査/流量制限・ChatGPT Secure MCP tunnel / Claude Code / Codex / stdio 橋の接続手順・実機確認の
+  curl 手順（§8）。
+- `docs/gui/api.md`: 改訂ログ + §3.110〜3.111（`GET /mcp/clients`/`GET /mcp/calls`）+ `human` ブロック
+  の `author` の説明。`scripts/sync-gui-docs.sh` で `gui/docs/celeris-api-v1.md` に反映済み。
+- `docs/adr/0056-mcp-server.md`「Phase 78 追記」に決めた細部・逸脱（P-78-a〜m）。
+
+### ゲート（証拠コマンドと結果）
+
+- `cargo test --workspace --no-fail-fast` → **exit 0。77 個の test バイナリすべて `test result: ok`
+  （`test result: FAILED` 0 件）。合計 1753 passed**（doctest 含む全クレート。`/tmp/full_test_run2.log`
+  相当。新規/変更クレートの内訳: `celeris-mcp` 19+10=29、`task-core` 217、`task-ops` 262、`task-api`
+  53（`--lib`）+ 3（`mcp_admin.rs`）、`celeris` 156、`celerisctl` 52）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0、警告 0**。
+- `UPDATE_SCHEMA=1 cargo test -p task-api --lib` → **exit 0**（`docs/api/v1/api-v1.schema.json` を
+  `ConsoleBlock.human.author` / `Profile.skills_mounts` / `EffectiveProfile.skills_mounts` /
+  `MessageMetadata.author` / `McpClient`/`McpCall`/`McpClientsView`/`McpCallsView`/`McpScope` で更新）。
+  `UPDATE_SCHEMA=1 cargo test -p task-worker --lib protocol::` → **exit 0**（`worker-protocol.schema.json`
+  に `EffectiveProfile.skills_mounts` が増えた。前置きに渡る実効 profile の型なので連動する）。
+  `scripts/sync-gui-docs.sh` → `gui/docs/celeris-api-v1.md` を更新。
+- GUI 一式（`PATH` に `/usr/lib/node_modules/corepack/shims` を追加）:
+  `pnpm gen:types` → `gui/app/celeris/types.ts` に `author`/`skills_mounts`/`McpScope`/`McpClient`/
+  `McpClientsView`/`McpCall`/`McpCallsView` が増えた（差分は意図どおり。新しいスキーマなので
+  「差分ゼロ」の確認対象ではない）。`pnpm typecheck` → exit 0。`pnpm lint`（biome）→ exit 0、
+  227 ファイル。`pnpm test`（vitest）→ **exit 0、925 passed**（Phase G32 と同数。今回のラベル表示に
+  新規テストは追加していない）。`pnpm build` → exit 0（client + server とも成功）。
+  変更は `gui/app/components/ConsoleBlockItem.tsx`（`human` ブロックに `block.author` があれば
+  「外部（<client_id>）」の `Badge` を出すだけ）と `gui/app/celeris/types.ts`（自動生成）のみ。
+  「アカウント」画面の MCP クライアント節は ADR-0056 D4 のとおり後続の GUI Phase。
+- `unwrap()`: 新規コードでテスト以外に追加していない（`git diff` を目視確認。`celeris-mcp` の
+  `state.rs::blocking` はパニックを `resume_unwind` で伝播させるだけで `unwrap()` は使っていない）。
+- ディスパッチャ・ストアに LLM 呼び出しを入れていない（`celeris-mcp` は `task-ops`/`task-core` の
+  既存の決定的関数だけを呼ぶ。`task-dispatch`/`task-worker` への依存は無し = `cargo tree -p
+  celeris-mcp` で確認可能）。
+- トークンの値: `celeris_mcp::auth::hash_token` の入力（生の値）はどのログ・応答・この PROGRESS にも
+  出していない（`McpClient.token_hash` は `#[serde(skip_serializing)]`）。
+
+### 実機での確認（未実施。ADR-0009 P-34。このワークトリークは systemctl・本番ポート・資格情報に
+触れない運用のため、デプロイ後に人 or エージェントが実施）
+
+1. `release.sh` → `verify.sh` → `promote.sh` でこの Phase をデプロイする（**schema 24。停止 → 起動
+   が要る**。`node_sessions` 等と違い `[mcp]` は `POST /reload` の対象外）。
+2. 本番の `config.toml` に `[mcp]` を足す（`docs/mcp.md` §2 の例。ChatGPT 用に `auth = "none"` の口を
+   使うなら loopback のアドレスにすること）。
+3. `celerisctl mcp client add chatgpt`（トークンを控える。`--no-token` で `auth = "none"` 用の客を
+   別途作ってもよい）。
+4. `docs/mcp.md` §8 の curl 手順で `initialize` → `tools/list` → `knowledge_propose` →
+   `console_instruct` + `console_reply` を実行し、`_inbox` に候補が入ること・CoS が返事することを
+   確認する。
+5. Claude Code / Codex から実際に接続できるかは §7.2/7.3 の設定例を使って確認する（この Phase では
+   celerisctl / celeris-mcp 側の実装のみ検証済みで、外部クライアントの実物との接続は未検証）。
+
+### 未解決事項
+
+- ChatGPT Secure MCP tunnel・Claude Code・Codex・opencode との実機接続は未検証（サンドボックスに
+  外向きネットワークも実物のクライアントも無いため）。
+- `resources/list` はタスク・案件を列挙しない（`docs/mcp.md` §5 に明記した意図的な簡略化）。
+- セッションと流量制限のカウンタはプロセスのメモリだけに持つ（celeris の再起動で失効する。
+  `[mcp]` は `POST /reload` の対象外なので実害は小さいと判断したが、複数インスタンス構成
+  （standby → active の引き継ぎ）では新しい active に対して MCP クライアントは `initialize` から
+  やり直しになる）。
+- 「アカウント」画面の MCP クライアント節（`GET /mcp/clients`/`GET /mcp/calls` を実際に呼ぶ GUI）は
+  ADR-0056 D4 のとおり未着手（後続の GUI Phase）。
+- Phase 79（D3 の残り: `RunContext.skills`、claude-code/codex/acp への届け方、`request.json` の記録）
+  は今回のスコープ外。
+
+### 提案
+
+- `docs/mcp.md` §7.2/7.3 の Claude Code / Codex の設定例は実機未検証（CLI のバージョンでフラグ名が
+  変わりうる）。実機で通すエージェントに検証を依頼し、`docs/mcp.md` を確定させるとよい。
+- `[mcp] rate_limit_per_min` と `Mcp-Session-Id` のインメモリ状態を、将来 celeris が複数プロセスに
+  分かれる構成になった場合はどうするか（今は単一プロセス前提）。

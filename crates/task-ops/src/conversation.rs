@@ -59,11 +59,40 @@ pub fn start(
     conversation_genre: &str,
     now: OffsetDateTime,
 ) -> Result<StartedConversation, OpsError> {
-    start_with_milestone(
+    start_full(
         store,
         node_id,
         project_id,
         None,
+        None,
+        text,
+        roles,
+        genres,
+        conversation_genre,
+        now,
+    )
+}
+
+/// ADR-0056 D2（Phase 78）: `start` と同じ対話を、**外部の発言者**（`mcp:<client_id>`）を印として
+/// 添えて起こす。人が Console から話しかける経路（`start`）は常に `author = None`。
+#[allow(clippy::too_many_arguments)]
+pub fn start_as(
+    store: &dyn TaskStore,
+    node_id: &str,
+    project_id: Option<ProjectId>,
+    author: &str,
+    text: &str,
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+    conversation_genre: &str,
+    now: OffsetDateTime,
+) -> Result<StartedConversation, OpsError> {
+    start_full(
+        store,
+        node_id,
+        project_id,
+        None,
+        Some(author),
         text,
         roles,
         genres,
@@ -81,6 +110,34 @@ pub fn start_with_milestone(
     node_id: &str,
     project_id: Option<ProjectId>,
     milestone_id: Option<task_core::MilestoneId>,
+    text: &str,
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+    conversation_genre: &str,
+    now: OffsetDateTime,
+) -> Result<StartedConversation, OpsError> {
+    start_full(
+        store,
+        node_id,
+        project_id,
+        milestone_id,
+        None,
+        text,
+        roles,
+        genres,
+        conversation_genre,
+        now,
+    )
+}
+
+/// `start` / `start_with_milestone` / `start_as` の共通の芯（ADR-0056 D2 で `author` を足した）。
+#[allow(clippy::too_many_arguments)]
+fn start_full(
+    store: &dyn TaskStore,
+    node_id: &str,
+    project_id: Option<ProjectId>,
+    milestone_id: Option<task_core::MilestoneId>,
+    author: Option<&str>,
     text: &str,
     roles: &[RoleSpec],
     genres: &[GenreSpec],
@@ -126,7 +183,11 @@ pub fn start_with_milestone(
         run_id: None,
         // R4（migration 0007）: 人の発言も返事も、同じ対話用タスクの id を持つ。
         task_id: Some(task.id),
-        metadata: None,
+        // ADR-0056 D2（Phase 78）: `author` があれば（MCP クライアント）その印を残す。
+        metadata: author.map(|a| task_core::MessageMetadata {
+            author: Some(a.to_string()),
+            ..Default::default()
+        }),
         created_at: now,
     };
     store.message_append(&message)?;

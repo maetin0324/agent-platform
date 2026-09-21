@@ -1036,6 +1036,69 @@ impl RunningLlmProxy {
     }
 }
 
+/// 動いている MCP サーバー（ADR-0056 D1/D5。Phase 78）。口ごとに別の listener を持つので、
+/// 止めるときは全部の handle をまとめて待つ。
+struct RunningMcp {
+    listeners: Vec<(tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<std::io::Result<()>>)>,
+}
+
+impl RunningMcp {
+    async fn stop(self) {
+        for (stop, handle) in self.listeners {
+            let _ = stop.send(());
+            match tokio::time::timeout(Duration::from_secs(5), handle).await {
+                Ok(Ok(Ok(()))) => tracing::info!("mcp listener stopped"),
+                Ok(Ok(Err(e))) => tracing::error!(error = %e, "mcp listener failed"),
+                Ok(Err(e)) => tracing::error!(error = %e, "mcp listener task panicked"),
+                Err(_) => tracing::warn!("mcp listener did not stop within 5s"),
+            }
+        }
+    }
+}
+
+/// ADR-0056 D1/D5（Phase 78）: `[mcp]` が有効なら `celeris_mcp::McpState` を組み立てる（bind はまだ
+/// しない）。`[mcp]` は独立の DB 接続を持つ（`task-api` の `ApiState` と同じ多重接続の流儀）。
+fn build_mcp_state(config: &Config) -> Result<Option<Arc<celeris_mcp::McpState>>, DaemonError> {
+    if !config.mcp.effective_enabled() {
+        return Ok(None);
+    }
+    let state = celeris_mcp::McpState::open(
+        &config.db,
+        StoreOptions::default().busy_timeout,
+        config.mcp.rate_limit_per_min,
+        config.role_specs(),
+        config.genre_specs(),
+        config.conversation_genre_id().to_string(),
+        Some(config.knowledge.root.clone()),
+    )
+    .map_err(|e| ApiError::Startup(format!("mcp: could not open the store: {e}")))?;
+    Ok(Some(state))
+}
+
+/// `state` を `[mcp]`/`[[mcp.listeners]]` の全ての口に bind して動かす（`config.mcp.resolve_listeners()`
+/// は `Config::validate` が既に検査済み。ここで失敗するのは bind そのものだけ）。
+async fn start_mcp(config: &Config, state: Arc<celeris_mcp::McpState>) -> Result<RunningMcp, DaemonError> {
+    let resolved = config
+        .mcp
+        .resolve_listeners()
+        .map_err(|e| ApiError::Startup(format!("mcp: {e}")))?;
+    let mut listeners = Vec::with_capacity(resolved.len());
+    for listener in resolved {
+        let bound = bind_reuseport(listener.listen).map_err(|source| ApiError::Bind {
+            addr: listener.listen,
+            source,
+        })?;
+        let addr = bound.local_addr().unwrap_or(listener.listen);
+        tracing::info!(%addr, auth = ?listener.auth, "mcp listening");
+        let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(celeris_mcp::serve(bound, Arc::clone(&state), listener.auth, async move {
+            let _ = stop_rx.await;
+        }));
+        listeners.push((stop, handle));
+    }
+    Ok(RunningMcp { listeners })
+}
+
 /// ADR-0053 D1（Phase 65）: `[llm_proxy]` が有効なら `llm_proxy::ProxyState` を組み立てる（bind はまだ
 /// しない。`GET /llm/sources`（主 API）とプロキシ自身の両方がこの同じ `Arc` を使うため、`run()` が
 /// 主 API の起動より前に 1 度だけ呼ぶ）。アカウントプール（cooldown・観測値）はディスパッチャの帳簿を
@@ -1178,6 +1241,8 @@ struct RoleState {
     api: Option<RunningApi>,
     /// ADR-0053 D1（Phase 65）: `[llm_proxy]` が有効なときだけ `Some`。
     llm_proxy: Option<RunningLlmProxy>,
+    /// ADR-0056 D1（Phase 78）: `[mcp]` が有効なときだけ `Some`。
+    mcp: Option<RunningMcp>,
 }
 
 /// デーモン本体。`[api]` があれば同じランタイムで HTTP API も動かし、tick ループの終了時に止める。
@@ -1278,11 +1343,18 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
         Some(state) => Some(start_llm_proxy(&config, state).await?),
         None => None,
     };
+    // ADR-0056 D1（Phase 78）: `[mcp]` も同じ理由で `standby`/`verify` から受ける。
+    let mcp_state = build_mcp_state(&config)?;
+    let mcp = match mcp_state {
+        Some(state) => Some(start_mcp(&config, state).await?),
+        None => None,
+    };
     let mut roles = RoleState {
         role,
         supervisor,
         api,
         llm_proxy,
+        mcp,
     };
     let result = tick_loop(
         &mut dispatcher,
@@ -1298,6 +1370,9 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
     }
     if let Some(llm_proxy) = roles.llm_proxy.take() {
         llm_proxy.stop().await;
+    }
+    if let Some(mcp) = roles.mcp.take() {
+        mcp.stop().await;
     }
     // ADR-0040 D4: 普通に止まったときは自分の行を消す。drain で終わったときは `drained_at` を残したまま
     // にし、新しい active が掃除する（`status.sh` が引き継ぎの結果を見られるように）。
@@ -1379,6 +1454,9 @@ async fn tick_loop(
                     }
                     if let Some(llm_proxy) = roles.llm_proxy.take() {
                         llm_proxy.stop().await;
+                    }
+                    if let Some(mcp) = roles.mcp.take() {
+                        mcp.stop().await;
                     }
                     tracing::info!(
                         ticks,

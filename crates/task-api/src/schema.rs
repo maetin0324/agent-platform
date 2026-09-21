@@ -179,6 +179,9 @@ pub struct ApiV1Schema {
     pub stream_reset: StreamReset,
     /// Phase 65（ADR-0053 D4）: `GET /llm/sources`（API と型のみ。GUI 表示は Phase 66）。
     pub llm_sources: crate::types::LlmSourcesView,
+    /// Phase 78（ADR-0056 D4）: `GET /mcp/clients` と `GET /mcp/calls?client=`。
+    pub mcp_clients: crate::mcp_admin::McpClientsView,
+    pub mcp_calls: crate::mcp_admin::McpCallsView,
 }
 
 /// 生成したスキーマ（`serde_json::Value`）。

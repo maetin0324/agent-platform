@@ -4897,3 +4897,19 @@ celeris 側は無変更（`crates/` 無変更）。Phase 76 の依頼（`gui/CLA
   今のまま全バッジに付けると再検証のたびに画面上の全バッジが一斉に「読み上げ候補」になり、かえって煩くなる
   おそれがあるため、次にやるなら先に celeris 側 API から「何が変わったか」が拾える形（SSE のペイロードに
   変更フィールドを載せる等）を検討したい。
+
+## celeris 側 Phase 78（ADR-0056、MCP サーバー）に伴う最小追従（2026-09-21）
+
+新しい GUI フェーズではなく、celeris 側 Phase 78 の受け入れ条件（型再生成・最小ラベル）に合わせただけの
+差分。詳細な決定は celeris 側 `docs/PROGRESS.md` の Phase 78 節を参照。
+
+- `pnpm gen:types`: `ConsoleBlock`（`human`）に `author?: string | null`、`Profile` /
+  `EffectiveProfile` に `skills_mounts?: string[]`、`McpScope` / `McpClient` / `McpClientsView` /
+  `McpCall` / `McpCallsView` が増えた（`GET /mcp/clients` / `GET /mcp/calls`。GUI からはまだ呼んでいない）。
+- `app/components/ConsoleBlockItem.tsx`: `human` ブロックに `block.author` があれば
+  `外部（<mcp: を外した client_id>）` の `Badge` を 1 つ出すだけ（`data-testid="console-human-author"`）。
+  MCP クライアントの表示名解決（`GET /mcp/clients` を引いて `name` を出す）はしていない
+  （`author` の生の値をそのまま見せる最小実装。次のラウンドでやるなら「アカウント」画面の
+  「MCP クライアント」節と合わせて設計するとよい）。
+- ゲート: `pnpm typecheck` / `pnpm lint` 差分無し、`pnpm test`（**925 passed**、Phase G32 と同数。
+  今回のラベルにテストは追加していない）、`pnpm build` 成功。
