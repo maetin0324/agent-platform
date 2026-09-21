@@ -201,13 +201,31 @@ async fn run_codex(
     let mut command = Command::new(&config.command);
     // CoS and standalone task workspaces need not be Git repositories.
     command.arg("exec");
+    // ADR-0054 Phase 68b: `codex exec resume` is a distinct clap subcommand from `codex exec`, and
+    // it does not accept every flag the parent does. Usage lines captured 2026-09-21 from
+    // `~/.local/bin/codex exec --help` / `~/.local/bin/codex exec resume --help` (codex-cli 0.155.1,
+    // the same binary/version that produced the production exit-2 below):
+    //   `codex exec --help`:
+    //     Usage: codex exec [OPTIONS] [PROMPT]
+    //            codex exec [OPTIONS] <COMMAND> [ARGS]
+    //     OPTIONS include: -c/--config <key=value>, -m/--model, --add-dir <DIR>, --json,
+    //     --skip-git-repo-check, ...
+    //   `codex exec resume --help`:
+    //     Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
+    //     OPTIONS include: -c/--config <key=value>, --last, --all, -m/--model, --json,
+    //     --skip-git-repo-check, ... — **no `--add-dir`, no `-s/--sandbox`** (both listed under
+    //     `exec` but absent from `exec resume`).
+    // `-c/--config` is accepted by both, so `-c sandbox_mode="..."` (below) still works unchanged on
+    // resume. Only `--add-dir` needs to be dropped for the `resume` subcommand form.
+    let mut is_exec_resume_subcommand = false;
     if let (Some(id), CodexResumeMode::ExecResume) = (&resume_id, config.resume_mode) {
         command.arg("resume").arg(id);
+        is_exec_resume_subcommand = true;
     }
     // ADR-0054 D2（Phase 68）: CoS の対話 run だけ read-only sandbox（読み取りの道具の代わり。codex には
     // claude-code の `--allowedTools` に相当する道具単位の許可リストが無いため、書き込みそのものを
-    // 塞ぐ）。`--add-dir` した `artifacts_dir`（下）は read-only でも書ける（celeris が渡す
-    // 「結果ファイルを書く場所」の明示的な例外。codex の writable_roots の扱いに依る）。
+    // 塞ぐ）。`--add-dir` した `artifacts_dir`（下。fresh run のみ。Phase 68b 参照）は read-only でも
+    // 書ける（celeris が渡す「結果ファイルを書く場所」の明示的な例外。codex の writable_roots の扱いに依る）。
     // それ以外の run は従来どおり `workspace-write`（result.json の契約に書き込みが要る）。
     let sandbox_mode = if req.context.conversation_addressee
         == Some(crate::protocol::ConversationAddressee::Secretary)
@@ -229,9 +247,16 @@ async fn run_codex(
         command.arg("--model").arg(model);
     }
     // Worktrees and shared workspaces keep results outside cwd. Grant only the
-    // dispatcher-selected artifact directory, not its parent or other tasks.
+    // dispatcher-selected artifact directory, not its parent or other tasks — but only on the forms
+    // of `codex exec` that accept `--add-dir` (see the usage-line comment above; `exec resume` does
+    // not). A resumed thread already carries the writable-roots grant it received on the *first*
+    // (non-resume) `exec` invocation that created it, since that one goes through plain `codex exec`
+    // and does pass `--add-dir`; `-c experimental_resume=<id>` runs also go through plain `codex exec`
+    // and keep getting `--add-dir` here.
     tokio::fs::create_dir_all(&req.artifacts_dir).await?;
-    command.arg("--add-dir").arg(&req.artifacts_dir);
+    if !is_exec_resume_subcommand {
+        command.arg("--add-dir").arg(&req.artifacts_dir);
+    }
     command.args(&config.extra_args);
     command.arg(&prompt);
     command
@@ -1585,6 +1610,136 @@ printf '%s\n' '{"type":"turn.completed"}'
             args.contains(&"sandbox_mode=\"workspace-write\"".to_string()),
             "{args:?}"
         );
+    }
+
+    // ADR-0054 Phase 68b（本番障害 2026-09-21 15:04 UTC、release b24bae9a796a: CoS の対話が codex に
+    // 割り当たり、`session.resume=true` の run が `error: unexpected argument '--add-dir' found` で
+    // exit 2 を 2 回連発した）。
+    //
+    // Usage 行は実機（`~/.local/bin/codex exec --help` / `~/.local/bin/codex exec resume --help`、
+    // codex-cli 0.155.1、2026-09-21）で確認したものをそのまま貼る:
+    //
+    //   $ codex exec --help
+    //   Usage: codex exec [OPTIONS] [PROMPT]
+    //          codex exec [OPTIONS] <COMMAND> [ARGS]
+    //   OPTIONS（抜粋）: -c/--config <key=value>, -m/--model <MODEL>, --add-dir <DIR>, --json,
+    //   --skip-git-repo-check, -s/--sandbox <SANDBOX_MODE> ...
+    //
+    //   $ codex exec resume --help
+    //   Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
+    //   OPTIONS（抜粋）: -c/--config <key=value>, --last, --all, -m/--model <MODEL>, --json,
+    //   --skip-git-repo-check ... — `--add-dir` も `-s/--sandbox` も無い。
+    //
+    // つまり `-c/--config`（sandbox_mode の指定に使う）は両方で通るが、`--add-dir` は `exec resume` では
+    // 拒否される。celeris 側の対応: `exec resume` のときだけ `--add-dir` を落とす（resume 先のスレッドは
+    // 最初の（非 resume の）`exec` 呼び出しで受け取った writable-roots をそのまま引き継ぐ前提。ADR-0054
+    // Phase 68b 追記参照）。
+
+    /// (a) CoS の新規（fresh）run: `codex exec --json --skip-git-repo-check -c sandbox_mode="read-only"
+    /// --add-dir <artifacts_dir> <prompt>`。read-only sandbox と `--add-dir` が両方乗ることを確認する
+    /// （`exec` の usage 行に `--add-dir` があることに対応。上のコメント参照）。
+    #[tokio::test]
+    async fn phase_68b_fresh_cos_run_argv_has_readonly_sandbox_and_add_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.conversation_addressee =
+            Some(crate::protocol::ConversationAddressee::Secretary);
+        let _ = adapter
+            .run(req, "run-68b-fresh", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        let artifacts_dir = dir.path().join("artifacts").to_str().unwrap().to_string();
+        assert_eq!(args.len(), 8, "{args:?}");
+        assert_eq!(
+            &args[..7],
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-c",
+                "sandbox_mode=\"read-only\"",
+                "--add-dir",
+                artifacts_dir.as_str(),
+            ],
+            "{args:?}"
+        );
+        assert!(args[7].contains("# Task:"), "prompt is last: {args:?}");
+    }
+
+    /// (b) CoS の継続（resume）run: production の再現。`--add-dir` を落とし、`-c sandbox_mode="read-only"`
+    /// は維持したまま `codex exec resume <id> --json --skip-git-repo-check -c sandbox_mode="read-only"
+    /// <prompt>` になることを確認する（`exec resume` の usage 行に `--add-dir` が無いことに対応）。
+    #[tokio::test]
+    async fn phase_68b_resume_cos_run_argv_drops_add_dir_keeps_readonly_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.conversation_addressee =
+            Some(crate::protocol::ConversationAddressee::Secretary);
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "thread-68b".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-68b-resume", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert_eq!(args.len(), 8, "{args:?}");
+        assert_eq!(
+            &args[..7],
+            [
+                "exec",
+                "resume",
+                "thread-68b",
+                "--json",
+                "--skip-git-repo-check",
+                "-c",
+                "sandbox_mode=\"read-only\"",
+            ],
+            "{args:?}"
+        );
+        assert!(args[7].contains("# Task:"), "prompt is last: {args:?}");
+        assert!(
+            !args.contains(&"--add-dir".to_string()),
+            "exec resume must not receive --add-dir (see usage-line comment above): {args:?}"
+        );
+    }
+
+    /// (c) 通常（非 CoS）の run: 従来どおり `workspace-write` + `--add-dir` を維持し、Phase 68b の変更が
+    /// 対話以外の run に影響しないことを確認する。
+    #[tokio::test]
+    async fn phase_68b_normal_run_argv_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let _ = adapter
+            .run(req, "run-68b-normal", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        let artifacts_dir = dir.path().join("artifacts").to_str().unwrap().to_string();
+        assert_eq!(args.len(), 8, "{args:?}");
+        assert_eq!(
+            &args[..7],
+            [
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "-c",
+                "sandbox_mode=\"workspace-write\"",
+                "--add-dir",
+                artifacts_dir.as_str(),
+            ],
+            "{args:?}"
+        );
+        assert!(args[7].contains("# Task:"), "prompt is last: {args:?}");
     }
 
     /// ADR-0054 D1（Phase 67）: 継続セッション（`resume: true`）かつ `resume_mode = ExecResume`（既定）

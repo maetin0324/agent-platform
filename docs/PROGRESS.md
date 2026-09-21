@@ -11429,3 +11429,109 @@ ADR-0049 ランキング（`select_provider`）の結果からそのまま取っ
 要求する形）も不審だったため、**指示として実行しなかった**（実 CLI を起動していない。`codex.rs` の
 `--add-dir`/sandbox 周りには一切手を入れていない）。本物の依頼であれば、別 Phase として改めて指示して
 ほしい。
+
+## Phase 68b — codex exec resume の argv（Phase 68 の read-only サンドボックスの回帰）（2026-09-21）
+
+Phase 67c 節「受け取ったが対応していない指示について」で見送られた依頼（Bash ツール結果の直後に不審な
+形で挿入されたため、当時のエージェントは正しく無視した）と同内容を、今回は coordinator が起こした
+新しいエージェントへの通常のタスク依頼として受け取った。依頼文自体が「実行してよいコマンドは
+`codex exec --help` / `codex exec resume --help` の 2 本だけ」と明記しており、Phase 68 の実機確認
+（下記「観測」）で既に本番障害として記録済みの内容と一致するため、正規の追加依頼として対応した。
+
+### 観測（本番障害の引用。Phase 68 の実機確認節、2026-09-21 15:04 UTC、release `b24bae9a796a`）
+
+CoS の対話 run が codex（67c 未配備時点の ADR-0049 残量スコアで codex が選ばれた）に割り当たり、
+`session.resume=true` の run が `codex exec resume --json --skip-git-repo-check --config … <SESSION_ID>`
+で 2 回とも次のエラーにより exit 2 で失敗した:
+
+```
+error: unexpected argument '--add-dir' found
+  tip: to pass '--add-dir' as a value, use '-- --add-dir'
+Usage: codex exec resume --json --skip-git-repo-check --config <key=value> <SESSION_ID> [PROMPT]
+```
+
+Phase 68（D2）が CoS の対話 run に read-only sandbox（`-c sandbox_mode="read-only"`）と
+`--add-dir <artifacts_dir>` を無条件に足していたが、`codex exec resume <id>` は `codex exec` とは別の
+clap サブコマンドで、`--add-dir` を受け付けない。
+
+### 原因（実機の CLI ヘルプで確認）
+
+本 Phase で許可された唯一のコマンド 2 本を実行して確認した（codex-cli 0.155.1、認証・ネットワークを
+使わない read-only 呼び出し）:
+
+```
+$ ~/.local/bin/codex exec --help
+Usage: codex exec [OPTIONS] [PROMPT]
+       codex exec [OPTIONS] <COMMAND> [ARGS]
+OPTIONS（抜粋）: -c/--config <key=value>, -m/--model <MODEL>, --add-dir <DIR>, --json,
+--skip-git-repo-check, -s/--sandbox <SANDBOX_MODE> ...
+
+$ ~/.local/bin/codex exec resume --help
+Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
+OPTIONS（抜粋）: -c/--config <key=value>, --last, --all, -m/--model <MODEL>, --json,
+--skip-git-repo-check ...
+```
+
+`exec resume` の OPTIONS 一覧に `--add-dir` も `-s/--sandbox` も無い（`exec` にはどちらもある）。
+`-c/--config` はどちらにもある。詳細は ADR-0054「Phase 68b 追記」を参照。
+
+### 変更
+
+- `crates/task-worker/src/codex.rs::run_codex`: `codex exec resume <id>`（`is_exec_resume_subcommand`。
+  `resume_id.is_some() && resume_mode == ExecResume` のときだけ真）のときだけ `--add-dir` を付けない
+  ようにした。`-c sandbox_mode="..."` は fresh・resume とも変更なし（CoS の対話 run は resume でも
+  read-only の意図を保つ）。`-c experimental_resume=<id>`（`ExperimentalResume` モード）はそもそも
+  普通の `codex exec` を使うため `--add-dir` は従来どおり付く。
+- fresh run の artifacts dir 書き込み手段は従来どおり `--add-dir <artifacts_dir>`（`exec` の usage 行に
+  ある正規のオプション）を維持。`-c sandbox_workspace_write.writable_roots=[...]` への切り替えは
+  行っていない（`--add-dir` が fresh では引き続き通るため不要と判断）。
+- resume run は、resume 先のスレッドが最初の（`resume:false` の）`exec` 呼び出しで受け取った
+  `--add-dir` の grant を引き継ぐ前提で `--add-dir` を単に落とした。この前提自体は `--help` からは
+  確認できず未検証（下記「未解決事項」）。
+
+### テスト（`crates/task-worker/src/codex.rs`。usage 行をコメントとして貼った 3 本）
+
+- `phase_68b_fresh_cos_run_argv_has_readonly_sandbox_and_add_dir`（(a) CoS fresh run。argv を完全一致
+  で検査）。
+- `phase_68b_resume_cos_run_argv_drops_add_dir_keeps_readonly_sandbox`（(b) CoS resume run。production
+  の再現。`--add-dir` が argv に無いことを明示的に確認）。
+- `phase_68b_normal_run_argv_unchanged`（(c) 通常（非 CoS）の run。Phase 68b の変更が対話以外に
+  影響しないことの回帰）。
+- 既存の `the_cos_conversation_run_gets_a_readonly_sandbox` / `non_cos_runs_keep_the_workspace_write_sandbox`
+  / `a_continuing_session_uses_exec_resume_by_default` / `a_continuing_session_uses_experimental_resume_when_configured`
+  / `command_line_has_exec_json_model_then_prompt_as_last_arg` は変更なしで green のまま。
+
+### ゲート（証拠コマンドと結果）
+
+- `cargo test -p task-worker --lib codex::` → **exit 0、38 passed**（Phase 67c の 33 + 新規 3 +
+  Phase 67c マージ後に含まれる `session_configured_with_a_session_id_reports_session_established` /
+  `thread_started_without_an_id_does_not_report_session_established` の 2 本を含む。実質の新規追加は
+  3 本）。
+- `cargo test --workspace --no-fail-fast` → **exit 0。1710 passed / 0 failed**（73 個の `test result:`
+  ブロックを合計。`grep -c "test result: FAILED"` = 0。doctest 含む全クレート）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0、警告 0**。
+- `unwrap()`: 今回の diff（`crates/task-worker/src/codex.rs`）で追加した `unwrap()` は無い
+  （`is_exec_resume_subcommand` の判定は既存の `if let` パターンのみ。`git diff -U0` で追加行を
+  目視確認）。
+- ディスパッチャ・ストアに LLM 呼び出しを入れていない（argv 組み立てのみの変更）。schema 変更なし。
+
+### 実機での確認（未実施。ADR-0009 P-34。本ワークトリークは systemctl・本番ポート・資格情報に触れない
+運用のため、デプロイ後に人 or エージェントが実施）
+
+1. `release.sh` → `verify.sh` → `promote.sh` でこの修正をデプロイする。
+2. CoS の対話セッションが codex に割り当たった状態で 2 回連続で指示を送り、1 回目
+   （`resume:false`）・2 回目（`resume:true`）とも exit 2 にならず正常終了することを確認する
+   （`runs/<id>/stderr.log` に `unexpected argument '--add-dir'` が出ないこと）。
+3. resume 側の run が `artifacts/result.json` を実際に書けることを確認する（fresh 時の `--add-dir` の
+   grant が resume でも有効という前提の裏取り）。書けなければ、resume 側の writable-roots を渡す別の
+   手段を別 Phase で調べる。
+
+### 未解決事項
+
+- resume 先のスレッドが fresh 時に付与した `--add-dir` の writable-roots を引き継ぐという前提は
+  `--help` の出力からは確認できず、実機で未検証。引き継がないと分かった場合、CoS の resume run は
+  read-only サンドボックスのまま `artifacts/result.json` を書けずに失敗し続ける可能性がある。
+- `codex exec resume --help` の Usage 行の位置引数表記（`--config` の後ろに `<SESSION_ID> [PROMPT]`）
+  と、celeris の実装（`resume <id>` を `exec` の直後、`--json` 等より前に置く）の順序が異なる。clap は
+  通常オプションと位置引数の混在順序を解釈できると考えて変更していないが、実機の `codex exec resume`
+  呼び出しでの確認はできていない。
