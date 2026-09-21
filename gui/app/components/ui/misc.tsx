@@ -204,8 +204,11 @@ export function DataItem({
 }) {
   return (
     <div className={cn("min-w-0", wide && "sm:col-span-2", className)}>
-      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは元の text-xs のまま。 */}
-      <dt className="text-sm font-medium text-fg-subtle lg:text-xs">{label}</dt>
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは元の text-xs のまま。フェーズ 71: ラベルに
+          API のフィールド名そのまま（`consecutive_reviewer_requeues` 等、区切りの無い長い 1 語）を渡す
+          画面があり、2 列の狭い列幅では折り返せずに横はみ出しを起こしていた。`break-words` で単語の
+          途中でも折り返せるようにする（id/sha は別途 `font-mono break-all` で扱うのでここでは変えない）。 */}
+      <dt className="break-words text-sm font-medium text-fg-subtle lg:text-xs">{label}</dt>
       <dd className="mt-1 break-words text-sm text-fg">{children}</dd>
     </div>
   );

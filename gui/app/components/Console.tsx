@@ -74,6 +74,10 @@ export function Console({ data }: { data: ConsoleData }) {
         <ScopePicker parsedScope={parsedScope} org={org} projects={projects} />
         <div className="min-w-0 space-y-3">
           <BlockStream blocks={blocks} org={org} projects={projects} onReply={handleReply} />
+          {/* フェーズ 71（ADR-0055 D2）: モバイルは入力欄を下部固定タブの上に `position: fixed` する
+              （`ConsoleInput` 自身が `lg:static` で戻る）。フローから抜けた分の高さを、この spacer で
+              本文側にあらかじめ確保しておく（無いと固定入力欄が直前のブロックに重なる）。 */}
+          <div aria-hidden="true" className="h-52 lg:hidden" />
           <ConsoleInput
             org={org}
             replyTarget={replyTarget}
@@ -353,7 +357,14 @@ function ConsoleInput({
   const error = fetcher.data && !fetcher.data.ok ? fetcher.data.error : undefined;
 
   return (
-    <div className="space-y-2" data-testid="console-input">
+    <div
+      data-testid="console-input"
+      // ADR-0055 D2「入力欄は画面下固定、キーボード表示時に隠れない」（フェーズ 71）。
+      // モバイルは下部固定タブ（`h-16` + `env(safe-area-inset-bottom)`。`~/root.tsx`）のすぐ上に
+      // `position: fixed` する（タブバー自身が safe-area を確保しているので、ここでは重ねない）。
+      // `lg:` でデスクトップは元の通常フロー（`static`）に戻す。
+      className="fixed inset-x-0 bottom-16 z-20 space-y-2 border-t border-border bg-surface/95 px-4 py-3 backdrop-blur-xl lg:static lg:inset-auto lg:border-0 lg:bg-transparent lg:px-0 lg:py-0 lg:backdrop-blur-none"
+    >
       <ErrorFlash error={error} />
       {replyTarget && (
         <p className="flex items-center gap-2 text-xs text-fg-subtle" data-testid="console-reply-target">

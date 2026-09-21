@@ -10087,3 +10087,43 @@ celeris 本体（Rust）には触っていない。作業は全て `gui/` 側（
   `pnpm build` exit 0（client・server とも）。
 - `pnpm mobile-audit` exit 0（**違反 0 件**。overflow / status-badge / fixed-overlay / tap-target /
   font-size のすべてが 0）。
+
+## Phase 71 — スマホ UX ラウンド 3（磨き。ADR-0055。2026-09-21）
+
+celeris 本体（Rust）には触っていない。作業は全て `gui/` 側（詳細は `gui/docs/PROGRESS.md` の
+`## Phase G25`）。機械検査（`pnpm mobile-audit`）はラウンド 2 で違反 0 のまま、今回は ADR-0055 D2
+の規律と `artifact-design` skill のガイド（余白・階層・トークン）に沿って、画面ごとに手で磨いた。
+
+### 画面ごとの変更と理由（1〜2 行）
+
+- **Console（`/`）**: 入力欄を画面下固定（下部タブの直上）にし、CoS 側の吹き出しに「誰・いつ」の帯を
+  先頭に揃えて重複表示を削り、task ブロックを 1 語の状態バッジ付きカードにした（ADR-0054 D2 の
+  「task ブロックは返事の直下」の見た目）。
+- **Board（`/board`）**: モバイルは 6 列を横スワイプではなく **segmented control で 1 列ずつ選ぶ**方式
+  にした（列の切れ目の誤操作を避け、既存の絞り込みフォームの「選ぶ」操作感に揃うため）。カードは
+  題名・状態（1 語）・優先度・担当だけを「折り目の上」に残し、種類・レベル・ラベル・行内編集は開閉に
+  畳んだ。
+- **Task（`/tasks/<id>`）**: タブを横スクロールのピル行に、メタデータを 2 列既定の `DataList` に、
+  操作（承認・回答・中止等）を画面下の全幅ボタンにした。2 列化で見つかった `DataItem` の横はみ出し
+  （区切りの無い長い 1 語のラベル）は `break-words` を足して直した（他画面にも効く一般的な直し）。
+- **Project（`/projects/<id>`）**: 一時停止・再開・中止を主役の操作として直接出し、使う頻度が低い
+  アーカイブ／アーカイブ解除は「その他の操作」の開閉に畳んだ（既存の `AddTaskForm` 等の規律に揃えた。
+  この 1 点はデスクトップの見た目も少し変わる）。
+- **Approvals（`/approvals`）**: 3 つの決定ボタンのうち「今後ずっと」を主役（先頭・全幅）にし、範囲の
+  選択と書き方の説明を 1 つの開閉にまとめた。
+
+### 証跡（GUI 側、コマンドと出力の要点）
+
+- `pnpm lint` exit 0 / `pnpm typecheck` exit 0 / `pnpm test` exit 0（**856 passed / 60 files**。今回は
+  レイアウト・CSS のみの変更で新しい純関数を作っていないため新規ユニットテストは無し）/ `pnpm build`
+  exit 0（client・server とも）/ `pnpm gen:types && git diff --exit-code app/celeris/types.ts` 差分ゼロ。
+- `pnpm mobile-audit` exit 0（**違反 0 件を維持**。Console の入力欄を新たに `position: fixed` にし、
+  タスク画面のメタデータを 2 列化したが、いずれも 0 のまま）。
+
+### 未解決事項・提案
+
+詳細は `gui/docs/PROGRESS.md` Phase G25 の「未解決事項」（U7〜U11）・「提案」（P-G25-1/2）を参照。
+要点: (1) Console 入力欄の spacer は見積もりで実測ではない、(2) 入力欄の固定化でソフトキーボード
+表示時の実機確認（ADR-0055 D2 の `100dvh`）が新たに必要になった（未実施、P-G23-1 と同じ経路で
+人またはネットワーク・実機が使える環境のエージェントに依頼）、(3) Project のアーカイブの開閉化は
+デスクトップの見た目も変える判断だったので、人が「常に見せたい」と言うなら次のラウンドで戻す。

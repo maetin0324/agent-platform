@@ -346,7 +346,10 @@ function PendingApprovalCard({
           rows={2}
           className={cn(textareaClass, "w-full")}
         />
-        <div className="flex flex-wrap items-center gap-2">
+        {/* フェーズ 71（ADR-0055 D2 ラウンド 3）: 3 つの決定は等価だが、最も選ばれやすい「今後ずっと」を
+            主役（全幅・先頭）にする。モバイルは縦積み（`order-*`）、`sm:` からは元どおりの横並び
+            （DOM の順序は変えないので、キーボード操作の順番は変わらない）。 */}
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
           <Button
             type="submit"
             name="decision"
@@ -355,6 +358,7 @@ function PendingApprovalCard({
             size="sm"
             disabled={submitting}
             data-testid="approval-once"
+            className="order-2 w-full sm:order-none sm:w-auto sm:flex-1"
           >
             今回だけ
           </Button>
@@ -366,6 +370,7 @@ function PendingApprovalCard({
             size="sm"
             disabled={submitting}
             data-testid="approval-standing"
+            className="order-1 w-full sm:order-none sm:w-auto"
           >
             今後ずっと
           </Button>
@@ -377,32 +382,42 @@ function PendingApprovalCard({
             size="sm"
             disabled={submitting}
             data-testid="approval-denied"
+            className="order-3 w-full sm:order-none sm:w-auto sm:flex-1"
           >
             認めない
           </Button>
-          {/* ADR-0055 D1-2/D1-4: タップ領域 44 以上、モバイルは text-sm、デスクトップは lg: で元の大きさのまま。 */}
-          <label htmlFor={`approval-scope-${head.id}`} className="ml-auto flex items-center gap-1.5 text-sm lg:text-xs">
-            <span className="text-fg-subtle">「今後ずっと」の範囲</span>
-            <select
-              id={`approval-scope-${head.id}`}
-              name="scope"
-              data-testid="approval-scope"
-              defaultValue="node"
-              className={cn(selectClass, "h-11 w-36 text-sm lg:h-8 lg:text-xs")}
-            >
-              <option value="node">この担当だけ</option>
-              <option value="all">全員</option>
-            </select>
-          </label>
         </div>
-        <details>
-          <summary className={cn(hintClass, "cursor-pointer list-none underline underline-offset-2")}>
-            「今後ずっと」の書き方
+        {/* フェーズ 71: 「範囲」の選択（既定 node のまま使うことが多い）と「書き方」の説明を 1 つの
+            details にまとめた（ADR-0055 D2「理由・詳細は行の下か開閉に」。secondary actions in a details
+            disclosure）。既定値は開かなくても効く。 */}
+        <details data-testid="approval-scope-details">
+          <summary
+            className={cn(
+              hintClass,
+              "flex min-h-11 cursor-pointer items-center list-none underline underline-offset-2",
+            )}
+          >
+            「今後ずっと」の範囲・書き方
           </summary>
-          <p className={hintClass}>
-            規則文として書いてください（例:
-            クラスタへの実験投入は毎回聞かずに進めてよい）。そのまま担当に前置きされます。
-          </p>
+          <div className="mt-2 space-y-2">
+            <label htmlFor={`approval-scope-${head.id}`} className="flex items-center gap-1.5 text-sm lg:text-xs">
+              <span className="text-fg-subtle">範囲</span>
+              <select
+                id={`approval-scope-${head.id}`}
+                name="scope"
+                data-testid="approval-scope"
+                defaultValue="node"
+                className={cn(selectClass, "h-11 w-36 text-sm lg:h-8 lg:text-xs")}
+              >
+                <option value="node">この担当だけ</option>
+                <option value="all">全員</option>
+              </select>
+            </label>
+            <p className={hintClass}>
+              規則文として書いてください（例:
+              クラスタへの実験投入は毎回聞かずに進めてよい）。そのまま担当に前置きされます。
+            </p>
+          </div>
         </details>
       </fetcher.Form>
       <ApprovalActionFlash outcome={fetcher.data} />

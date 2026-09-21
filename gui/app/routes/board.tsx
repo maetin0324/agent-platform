@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { data, Form, isRouteErrorResponse, Link, useFetcher, useSearchParams } from "react-router";
 import type { TaskEditOutcome } from "~/celeris/action-types";
 import type { CelerisClient } from "~/celeris/client.server";
@@ -131,6 +132,12 @@ export async function action({ request }: Route.ActionArgs) {
 
 export default function BoardPage({ loaderData }: Route.ComponentProps) {
   const { tasks, projects, milestones, org } = loaderData;
+  // フェーズ 71（ADR-0055 D2 ラウンド 3）: モバイルは 6 列を縦積みにすると 1 画面に収まらないので、
+  // 上部の segmented control で 1 列だけ選んで全幅で見せる（`lg:` はこれまでどおりの列グリッド）。
+  // ADR-0055 D3「D2 の直し方の規律」の「一度に 1 画面ずつ」に合わせ、選択肢はこの画面のカードと
+  // 同じ 6 列（横スワイプの行より、絞り込みフォームと同じ「選ぶ」操作に揃えた方が一貫すると判断した。
+  // 詳細は `docs/PROGRESS.md` Phase 71 を参照）。
+  const [activeColumn, setActiveColumn] = useState<BoardColumnId>(BOARD_COLUMNS[0].id);
   const [searchParams] = useSearchParams();
   const filter = parseBoardFilter(searchParams);
   // 裏方のタスク（`TaskSummary.support`: 対話・報告のまとめ・承認待ち・レビュー）は既定で隠す
@@ -371,6 +378,46 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
         </EmptyState>
       )}
 
+      {/* ADR-0055 D2 ラウンド 3: モバイルは 1 列だけ選ぶ segmented control（`md:` 以上は列グリッドが
+          そのまま出るので不要）。横スクロールするピル行は D1-1/D1-6 と同じ「overflow-x-auto の箱」。 */}
+      <div
+        role="tablist"
+        aria-label="ボードの列を選ぶ"
+        data-testid="board-column-picker"
+        className="sticky top-14 z-10 -mx-4 -mt-2 flex gap-2 overflow-x-auto bg-bg/95 px-4 py-2 backdrop-blur md:hidden"
+      >
+        {BOARD_COLUMNS.map((column) => {
+          const active = column.id === activeColumn;
+          const count = columns[column.id].length;
+          return (
+            <button
+              key={column.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              data-testid="board-column-picker-item"
+              onClick={() => setActiveColumn(column.id)}
+              className={cn(
+                "flex min-h-11 shrink-0 items-center gap-1.5 rounded-full border px-3.5 text-sm font-medium whitespace-nowrap",
+                active
+                  ? "border-primary-border bg-primary-soft text-primary-soft-fg"
+                  : "border-border bg-surface text-fg-muted",
+              )}
+            >
+              {boardColumnLabel(column.id)}
+              <span
+                className={cn(
+                  "rounded-full px-1.5 py-0.5 text-sm tabular-nums",
+                  active ? "bg-surface/70" : "bg-surface-2 text-fg-subtle",
+                )}
+              >
+                {count}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3" data-testid="board-columns">
         {BOARD_COLUMNS.map((column) => (
           <BoardColumn
@@ -380,6 +427,7 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
             orgNames={orgNames}
             milestoneNames={milestoneNames}
             org={org}
+            active={column.id === activeColumn}
           />
         ))}
       </div>
@@ -393,21 +441,26 @@ function BoardColumn({
   orgNames,
   milestoneNames,
   org,
+  active,
 }: {
   id: BoardColumnId;
   items: TaskSummary[];
   orgNames: Record<string, string>;
   milestoneNames: Record<string, string>;
   org: OrgNode[];
+  /** この列が今 segmented control で選ばれているか（`md:` 未満だけで効く。D2 の picker と対）。 */
+  active: boolean;
 }) {
   return (
     <section
       aria-label={boardColumnLabel(id)}
       data-testid="board-column"
       data-column={id}
-      className="rounded-xl border border-border bg-surface-2/40 p-3"
+      className={cn("rounded-xl border border-border bg-surface-2/40 p-3", active ? "block" : "hidden", "md:block")}
     >
-      <h2 className="flex items-center gap-2 text-sm font-semibold text-fg">
+      {/* モバイルは segmented control が列名を出すので、列の中の見出しは `md:` 以上だけに絞る
+          （二重に出さない）。`md:` からは元どおり sticky（縦スクロールしても見出しが見える）。 */}
+      <h2 className="hidden items-center gap-2 text-sm font-semibold text-fg md:sticky md:top-14 md:z-10 md:-mx-3 md:-mt-3 md:flex md:bg-surface-2/90 md:px-3 md:py-2 md:backdrop-blur">
         {boardColumnLabel(id)}
         {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
         <span className="rounded-full bg-surface px-2 py-0.5 text-sm font-semibold tabular-nums text-fg-subtle lg:text-xs">
@@ -430,6 +483,10 @@ function BoardColumn({
 /**
  * カード 1 枚（ADR-0044 D4）。題名・担当・レベル・優先度・ラベル・種類・途中目標を出し、
  * 優先度・レベル・担当は選んだ瞬間に `PATCH /tasks/{id}` を送る（`useFetcher`。画面遷移はしない）。
+ *
+ * フェーズ 71（ADR-0055 D2 ラウンド 3）: モバイルは「折り目の上」を題名・状態（1 語）・優先度・担当だけに
+ * 絞る。種類・レベル・途中目標・ラベル・行内編集は 2 番目の情報として折りたたみ（`~/components/Console.tsx`
+ * の `ScopePicker` と同じ「`lg:` は常に開き、それ未満は state で開閉する」作り。要素を複製しない）。
  */
 function BoardCard({
   item,
@@ -444,6 +501,7 @@ function BoardCard({
 }) {
   const fetcher = useFetcher<TaskEditOutcome>({ key: `board-edit-${item.id}` });
   const busy = fetcher.state !== "idle";
+  const [detailsOpen, setDetailsOpen] = useState(false);
   // 終端のタスクは celeris が 409 を返す（ADR-0044 D1）ので、行内編集そのものを出さない。
   const editable = item.actions.includes("edit");
   const priority = summaryPriorityLabel(item);
@@ -464,12 +522,6 @@ function BoardCard({
         <Badge tone="primary" data-testid="board-card-priority">
           {priority}
         </Badge>
-        <Badge tone="neutral" data-testid="board-card-category">
-          {taskCategoryLabel(item.category)}
-        </Badge>
-        <Badge tone="neutral" data-testid="board-card-tier">
-          {item.tier}
-        </Badge>
       </div>
       <Link
         to={`/tasks/${item.id}`}
@@ -483,68 +535,88 @@ function BoardCard({
         <span data-testid="board-card-assignee">
           担当: {item.assignee ? (orgNames[item.assignee] ?? item.assignee) : "（なし）"}
         </span>
-        {item.milestone_id && (
-          <span data-testid="board-card-milestone">
-            途中目標: {milestoneNames[item.milestone_id] ?? item.milestone_id}
-          </span>
+      </div>
+
+      <button
+        type="button"
+        onClick={() => setDetailsOpen((v) => !v)}
+        data-testid="board-card-more-toggle"
+        className="mt-2 flex min-h-11 items-center gap-1 text-sm text-fg-subtle underline underline-offset-2 lg:hidden"
+      >
+        {detailsOpen ? "閉じる" : "種類・レベル・ラベルを見る"}
+      </button>
+
+      <div className={cn("mt-2 space-y-2 lg:mt-1.5 lg:block", detailsOpen ? "block" : "hidden")}>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <Badge tone="neutral" data-testid="board-card-category">
+            {taskCategoryLabel(item.category)}
+          </Badge>
+          <Badge tone="neutral" data-testid="board-card-tier">
+            {item.tier}
+          </Badge>
+          {item.milestone_id && (
+            <span className="text-sm text-fg-subtle lg:text-xs" data-testid="board-card-milestone">
+              途中目標: {milestoneNames[item.milestone_id] ?? item.milestone_id}
+            </span>
+          )}
+        </div>
+        {item.labels.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {item.labels.map((label) => (
+              <Badge key={label} tone="teal" data-testid="board-card-label">
+                {label}
+              </Badge>
+            ))}
+          </div>
+        )}
+        {editable && (
+          <div className="flex flex-wrap gap-1.5" data-testid="board-card-edit">
+            <select
+              aria-label={`${item.title} の優先度`}
+              value={priority}
+              disabled={busy}
+              data-testid="board-card-priority-select"
+              onChange={(e) => submitField("priority", e.target.value)}
+              className={cn(selectClass, "h-11 w-24 text-sm lg:h-7 lg:text-xs")}
+            >
+              {PRIORITY_LABELS.map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label={`${item.title} のレベル`}
+              value={item.tier}
+              disabled={busy}
+              data-testid="board-card-tier-select"
+              onChange={(e) => submitField("tier", e.target.value)}
+              className={cn(selectClass, "h-11 w-28 text-sm lg:h-7 lg:text-xs")}
+            >
+              {TIERS.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label={`${item.title} の担当`}
+              value={item.assignee ?? ""}
+              disabled={busy}
+              data-testid="board-card-assignee-select"
+              onChange={(e) => submitField("assignee", e.target.value)}
+              className={cn(selectClass, "h-11 w-36 text-sm lg:h-7 lg:text-xs")}
+            >
+              <option value="">（決めない）</option>
+              {org.map((node) => (
+                <option key={node.id} value={node.id}>
+                  {node.name}
+                </option>
+              ))}
+            </select>
+          </div>
         )}
       </div>
-      {item.labels.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1">
-          {item.labels.map((label) => (
-            <Badge key={label} tone="teal" data-testid="board-card-label">
-              {label}
-            </Badge>
-          ))}
-        </div>
-      )}
-      {editable && (
-        <div className="mt-2 flex flex-wrap gap-1.5" data-testid="board-card-edit">
-          <select
-            aria-label={`${item.title} の優先度`}
-            value={priority}
-            disabled={busy}
-            data-testid="board-card-priority-select"
-            onChange={(e) => submitField("priority", e.target.value)}
-            className={cn(selectClass, "h-11 w-24 text-sm lg:h-7 lg:text-xs")}
-          >
-            {PRIORITY_LABELS.map((p) => (
-              <option key={p} value={p}>
-                {p}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label={`${item.title} のレベル`}
-            value={item.tier}
-            disabled={busy}
-            data-testid="board-card-tier-select"
-            onChange={(e) => submitField("tier", e.target.value)}
-            className={cn(selectClass, "h-11 w-28 text-sm lg:h-7 lg:text-xs")}
-          >
-            {TIERS.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label={`${item.title} の担当`}
-            value={item.assignee ?? ""}
-            disabled={busy}
-            data-testid="board-card-assignee-select"
-            onChange={(e) => submitField("assignee", e.target.value)}
-            className={cn(selectClass, "h-11 w-36 text-sm lg:h-7 lg:text-xs")}
-          >
-            <option value="">（決めない）</option>
-            {org.map((node) => (
-              <option key={node.id} value={node.id}>
-                {node.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
       {fetcher.data && !fetcher.data.ok && <ErrorFlash error={fetcher.data.error} />}
     </li>
   );

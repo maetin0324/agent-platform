@@ -866,13 +866,24 @@ function ProjectLifecycleActions({ project }: { project: ProjectDetail["project"
   const [confirming, setConfirming] = useState<"cancel" | "archive" | null>(null);
   const buttons = projectLifecycleButtons(project);
 
+  // フェーズ 71（ADR-0055 D2 ラウンド 3）: 一時停止／再開／中止はこのカードの主役の操作なので直接出す
+  // （モバイルは縦積み・全幅、`sm:` から元どおりの横並び）。アーカイブ／アーカイブ解除は使う頻度が低い
+  // 「その他の操作」として details に畳む（secondary actions in a details disclosure）。
+  const hasOther = buttons.archive || buttons.unarchive;
   return (
     <div className="space-y-2" data-testid="project-lifecycle">
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
         {buttons.pause && (
           <fetcher.Form method="post">
             <input type="hidden" name="intent" value="project_pause" />
-            <Button type="submit" variant="secondary" size="sm" disabled={busy} data-testid="project-pause">
+            <Button
+              type="submit"
+              variant="secondary"
+              size="sm"
+              disabled={busy}
+              data-testid="project-pause"
+              className="w-full sm:w-auto"
+            >
               <Icon name="clock" />
               {PAUSE_LABEL}
             </Button>
@@ -881,7 +892,14 @@ function ProjectLifecycleActions({ project }: { project: ProjectDetail["project"
         {buttons.resume && (
           <fetcher.Form method="post">
             <input type="hidden" name="intent" value="project_resume" />
-            <Button type="submit" variant="primary" size="sm" disabled={busy} data-testid="project-resume">
+            <Button
+              type="submit"
+              variant="primary"
+              size="sm"
+              disabled={busy}
+              data-testid="project-resume"
+              className="w-full sm:w-auto"
+            >
               <Icon name="play" />
               {RESUME_LABEL}
             </Button>
@@ -895,39 +913,62 @@ function ProjectLifecycleActions({ project }: { project: ProjectDetail["project"
             disabled={busy}
             onClick={() => setConfirming("cancel")}
             data-testid="project-cancel"
+            className="w-full sm:w-auto"
           >
             <Icon name="ban" />
             {CANCEL_LABEL}
           </Button>
         )}
-        {buttons.archive && (
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            disabled={busy || !buttons.archiveEnabled}
-            title={buttons.archiveEnabled ? undefined : ARCHIVE_ONLY_TERMINAL_HINT}
-            onClick={() => setConfirming("archive")}
-            data-testid="project-archive"
-          >
-            <Icon name="folder" />
-            {ARCHIVE_LABEL}
-          </Button>
-        )}
-        {buttons.unarchive && (
-          <fetcher.Form method="post">
-            <input type="hidden" name="intent" value="project_unarchive" />
-            <Button type="submit" variant="secondary" size="sm" disabled={busy} data-testid="project-unarchive">
-              <Icon name="rotate" />
-              {UNARCHIVE_LABEL}
-            </Button>
-          </fetcher.Form>
-        )}
       </div>
-      {buttons.archive && !buttons.archiveEnabled && (
-        <p className={hintClass} data-testid="project-archive-hint">
-          {ARCHIVE_ONLY_TERMINAL_HINT}
-        </p>
+      {hasOther && (
+        <details data-testid="project-lifecycle-other">
+          <summary
+            className={cn(
+              hintClass,
+              "flex min-h-11 cursor-pointer items-center list-none underline underline-offset-2",
+            )}
+          >
+            その他の操作（アーカイブ）
+          </summary>
+          <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            {buttons.archive && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busy || !buttons.archiveEnabled}
+                title={buttons.archiveEnabled ? undefined : ARCHIVE_ONLY_TERMINAL_HINT}
+                onClick={() => setConfirming("archive")}
+                data-testid="project-archive"
+                className="w-full sm:w-auto"
+              >
+                <Icon name="folder" />
+                {ARCHIVE_LABEL}
+              </Button>
+            )}
+            {buttons.unarchive && (
+              <fetcher.Form method="post">
+                <input type="hidden" name="intent" value="project_unarchive" />
+                <Button
+                  type="submit"
+                  variant="secondary"
+                  size="sm"
+                  disabled={busy}
+                  data-testid="project-unarchive"
+                  className="w-full sm:w-auto"
+                >
+                  <Icon name="rotate" />
+                  {UNARCHIVE_LABEL}
+                </Button>
+              </fetcher.Form>
+            )}
+          </div>
+          {buttons.archive && !buttons.archiveEnabled && (
+            <p className={cn(hintClass, "mt-1")} data-testid="project-archive-hint">
+              {ARCHIVE_ONLY_TERMINAL_HINT}
+            </p>
+          )}
+        </details>
       )}
       {confirming === "cancel" && (
         <Alert tone="danger" data-testid="project-cancel-confirm">
@@ -981,12 +1022,20 @@ function MilestoneLifecycleActions({ milestone }: { milestone: MilestoneView }) 
           {MILESTONE_PAUSED_BANNER}
         </Alert>
       )}
-      <div className="flex flex-wrap items-center gap-2">
+      {/* フェーズ 71: モバイルは縦積み・全幅、`sm:` から元どおりの横並び（xs サイズのまま）。 */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
         {buttons.pause && (
           <fetcher.Form method="post">
             <input type="hidden" name="intent" value="milestone_pause" />
             <input type="hidden" name="milestone_id" value={milestone.id} />
-            <Button type="submit" variant="ghost" size="xs" disabled={busy} data-testid="milestone-pause">
+            <Button
+              type="submit"
+              variant="ghost"
+              size="xs"
+              disabled={busy}
+              data-testid="milestone-pause"
+              className="w-full sm:w-auto"
+            >
               <Icon name="clock" />
               {PAUSE_LABEL}
             </Button>
@@ -996,7 +1045,14 @@ function MilestoneLifecycleActions({ milestone }: { milestone: MilestoneView }) 
           <fetcher.Form method="post">
             <input type="hidden" name="intent" value="milestone_resume" />
             <input type="hidden" name="milestone_id" value={milestone.id} />
-            <Button type="submit" variant="soft" size="xs" disabled={busy} data-testid="milestone-resume">
+            <Button
+              type="submit"
+              variant="soft"
+              size="xs"
+              disabled={busy}
+              data-testid="milestone-resume"
+              className="w-full sm:w-auto"
+            >
               <Icon name="play" />
               {RESUME_LABEL}
             </Button>
@@ -1010,6 +1066,7 @@ function MilestoneLifecycleActions({ milestone }: { milestone: MilestoneView }) 
             disabled={busy}
             onClick={() => setConfirming(true)}
             data-testid="milestone-cancel"
+            className="w-full sm:w-auto"
           >
             <Icon name="ban" />
             {CANCEL_LABEL}
