@@ -542,7 +542,10 @@ describe("画面の作り（ソースの確認。G10-U1 の制約）", () => {
     expect(taskDetail).toContain("?tab=changes`}");
     expect(taskDetail).toContain('data-testid="task-changes-link"');
     // タブの中身は同じ部品で、loader は `?tab=changes` のときだけ `GET /tasks/{id}/changes` を引く。
-    expect(taskDetail).toContain('import { TaskChanges } from "~/components/task-changes"');
+    // Phase 77（ADR-0055 性能予算）: 5 タブのうち一度に 1 つしか出ないので `React.lazy` にした
+    // （静的 `import { TaskChanges } from "..."` ではなく `lazy(() => import("~/components/task-changes")...)`）。
+    expect(taskDetail).toContain('lazy(() => import("~/components/task-changes")');
+    expect(taskDetail).toContain("default: m.TaskChanges");
     expect(taskDetail).toContain('parseTaskTab(url.searchParams.get("tab")) === "changes"');
     expect(taskDetail).toContain("loadTaskChanges(client, taskId, readTaskChangesQuery(request)");
     expect(taskDetail).toContain('data-testid="task-changes-unavailable"');

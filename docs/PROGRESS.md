@@ -11853,3 +11853,43 @@ Console の入力欄は元々 aria-label や DOM 順が適切だった）ため�
 - 人からの追加依頼（16:50 UTC、機内から）: **外部から Celeris を操作する MCP サーバー**（知識・タスク/案件・組織の一覧/閲覧/作成、skills の注入）。
   質問 4 件への回答を受けて ADR-0056 を起こした（接続は ChatGPT の Secure MCP tunnel で手元 HTTP、案件・タスクは CoS に渡す、知識は `_inbox`、
   skills は SKILL.md を KB に置きノードに mount）。Phase 78（サーバー）→ Phase 79（skills の届け方）。
+## Phase 77 — スマホ UX ラウンド 9（性能予算。ADR-0055。2026-09-21）
+
+GUI のみ（`crates/` 無変更）。`docs/adr/0055-mobile-ux.md` D2/D3 のループを続け、Phase G32（ラウンド 8）の
+続きとして、`gui/scripts/mobile-audit.mjs` に性能予算の機械検査（`perf` ルール。CPU x4 スロットリング下の
+初回 JS/CSS 転送量・DOM ノード数・LCP/FCP）を新設した。初回計測は 21 route 全てが JS 予算超過（最重量は
+`/tasks/:id` の各タブで 907.5KB）だったので、重い依存（`react-markdown`・CodeMirror・`@xyflow/react`+dagre）
+とタスク詳細の非表示タブの部品を `React.lazy` に切り出し、Console・ボード・タスク詳細に遷移中スケルトンを
+足した。最終計測は最重量ルートで 483.8KB（-47%）まで下がったが、React 19 + React Router のクライアント
+ランタイムだけで土台が約 360KB あるため、当初案の 350KB 予算は最適化後も届かず、実測値 + 10%（≈532KB）に
+調整した。詳細・証跡は `gui/docs/PROGRESS.md`「Phase G33」を参照（このリポジトリの慣例どおり、GUI の
+実装詳細は gui 側に書く）。
+
+### ゲート（詳細は gui/docs/PROGRESS.md Phase G33）
+
+`pnpm lint` / `pnpm typecheck` / `pnpm test`（925 passed、Phase G32 から件数変わらず。既存テスト 1 件を
+`React.lazy` 化に合わせて更新） / `pnpm build`（SSR ビルドにのみ実害の無い `INEFFECTIVE_DYNAMIC_IMPORT`
+警告 2 件） / `pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ）/ `pnpm mobile-audit`
+（**exit 0、違反 0 件。21 route × light/dark の 2 scheme = 42 通り全て 200**。新設した `perf`〈light のみ〉
+を含む全 12 ルールが 0 件）すべて exit 0。
+
+### 計測（要点。全 21 route の表は gui/docs/PROGRESS.md Phase G33 を参照）
+
+| route（代表） | js_kb（最適化前→後） | 備考 |
+| --- | --- | --- |
+| home / org-node | 590.7 → 441.6 | Console が使う `react-markdown` を遅延読み込みに |
+| project-detail | 1087.5 → 458.7 | `@xyflow/react`+dagre（「仕事の木」）を遅延読み込みに |
+| task-* 各タブ | 907.5 → 483.8 | CodeMirror・`react-markdown`・非表示タブの部品を遅延読み込みに |
+| board / releases / clusters 等 | ほぼ変化なし（-0.1〜-0.2KB） | 元々これらの重い依存を使っていない画面。アイコン棚卸し分のみ |
+
+CSS（最大 73.7KB→59.0KB）・DOM ノード数（最大 674。予算 1500）・LCP（最大 300ms。予算 2500ms）は
+最適化前から予算内で、変更は不要と判断した。
+
+### 未解決事項
+
+- 実機（Nothing 2a 等の中位機）での実際の JS 実行時間・LCP、遷移中スケルトンの見た目（`pnpm mobile-audit`
+  はフルナビゲーションしかしないため機械検査には現れない）の確認は今回も未実施（ADR-0009 P-34。認証・
+  ネットワークが使えるサンドボックスではないため）。
+- 詳細は gui/docs/PROGRESS.md「Phase G33」の未解決事項を参照（JS 予算 532KB が実測+10%である点、
+  `components`/`Icon` 共有チャンクをこれ以上削るなら使用頻度の低い画面の部品を分離する方が筋が良い、
+  という提案など）。

@@ -4897,3 +4897,188 @@ celeris 側は無変更（`crates/` 無変更）。Phase 76 の依頼（`gui/CLA
   今のまま全バッジに付けると再検証のたびに画面上の全バッジが一斉に「読み上げ候補」になり、かえって煩くなる
   おそれがあるため、次にやるなら先に celeris 側 API から「何が変わったか」が拾える形（SSE のペイロードに
   変更フィールドを載せる等）を検討したい。
+
+## Phase G33 — スマホ UX ラウンド 9: 性能予算（ADR-0055、Phase 77。2026-09-21）
+
+celeris 側は無変更（`crates/` 無変更）。Phase 77 の依頼（`gui/CLAUDE.md`・ADR-0055・Phase G32 の続き）に沿って、
+`gui/scripts/mobile-audit.mjs` に `perf` ルール（CPU x4 スロットリング下の初回 JS/CSS 転送量・DOM ノード数・
+LCP/FCP）を足し、そこが最初に落とした「初回 JS が予算を大きく超える」を、重い依存（`react-markdown`・
+CodeMirror・`@xyflow/react`+dagre）と、タスク詳細の非表示タブの部品を `React.lazy` に切り出すことで直した。
+あわせて体感速度（Console・ボード・タスク詳細の遷移中スケルトン）を足した。
+
+### 1. 計測（`perf` ルール。受け入れ条件 1）
+
+- `scripts/mobile-audit.mjs`: light scheme のときだけ（実行時間を抑えるため。D1 のこれまでのラウンドと同じ
+  判断）、`context.newCDPSession(page)` → `Emulation.setCPUThrottlingRate({ rate: 4 })`（ミッドレンジ機の
+  近似）を掛けてから `goto` する。`page.on("response", ...)` で `resourceType() === "script" | "stylesheet"`
+  の応答の `content-length` を合算し（ヘッダが無い応答＝SSE 等は数えない）、**`load` が発火した時点で
+  listener を外す**（`page.off`）。ここが肝: 外さずに `checkFocusOrder`/`PERF_SETTLE_MS` の待ちまで
+  聞き続けると、`React.lazy` の Suspense 境界がハイドレーション直後に発行する動的 `import()` の応答まで
+  「初回」に数えてしまい、遅延読み込みで減らしたはずの初回転送量が見かけ上減らない（実際に最初の実装では
+  そうなっていたので、`load` 時点で切る設計に直した）。
+- FCP/LCP は `addInitScript` で全ページに配線した `PerformanceObserver`（`{ type: "paint" | "largest-contentful-paint",
+  buffered: true }`）から読む。DOM ノード数は `document.querySelectorAll("*").length`。
+- 予算超過は `perf` ルールの違反（1 指標につき 1 件）。`report.json` の `perf`（route ごとの実測）・
+  `perf_budget`（使った予算値）に出し、標準エラーに固定幅の表を 1 回 `console.error`（`biome` が
+  `console.log` を禁止しているため。他のルールと同じ作り）で出す。
+
+### 2. 直した内容（受け入れ条件 2）
+
+計測（最適化前 → 最適化後。CPU x4、light）:
+
+| route | js_kb (before→after) | css_kb (before→after) | dom (after) | lcp_ms (after) |
+| --- | --- | --- | --- | --- |
+| home | 590.7 → 441.6 | 58.7 → 59.0 | 340 | 300 |
+| org | 581.1 → 431.5 | 58.7 → 59.0 | 391 | 148 |
+| org-node | 590.7 → 441.6 | 58.7 → 59.0 | 355 | 164 |
+| org-detail | 581.1 → 431.5 | 58.7 → 59.0 | 632 | 164 |
+| projects | 415.6 → 415.4 | 58.7 → 59.0 | 275 | 132 |
+| project-detail | 1087.5 → 458.7 | 73.7 → 59.0 | 674 | 192 |
+| project-docs | 564.0 → 414.4 | 58.7 → 59.0 | 276 | 144 |
+| board | 416.0 → 416.9 | 58.7 → 59.0 | 403 | 140 |
+| approvals | 562.5 → 412.9 | 58.7 → 59.0 | 308 | 136 |
+| reports | 566.0 → 416.4 | 58.7 → 59.0 | 295 | 144 |
+| releases | 415.9 → 415.8 | 58.7 → 59.0 | 346 | 128 |
+| knowledge | 571.0 → 421.4 | 58.7 → 59.0 | 281 | 128 |
+| knowledge-inbox | 563.5 → 413.9 | 58.7 → 59.0 | 305 | 136 |
+| clusters | 411.0 → 410.8 | 58.7 → 59.0 | 312 | 132 |
+| accounts | 426.9 → 426.7 | 58.7 → 59.0 | 322 | 132 |
+| help | 406.4 → 406.3 | 58.7 → 59.0 | 610 | 176 |
+| task-overview | 907.5 → 483.8 | 58.7 → 59.0 | 433 | 164 |
+| task-timeline | 907.5 → 483.8 | 58.7 → 59.0 | 336 | 160 |
+| task-changes | 907.5 → 483.8 | 58.7 → 59.0 | 321 | 136 |
+| task-files | 907.5 → 483.8 | 58.7 → 59.0 | 295 | 148 |
+| task-artifacts | 907.5 → 483.8 | 58.7 → 59.0 | 259 | 132 |
+
+（DOM ノード数・LCP/FCP は最適化前後でほぼ変わらない。もともと DOM 数は最大 674〈project-detail〉、
+LCP は最大 220ms 前後で、どちらも予算の 1500 / 2500ms に遠く届いていない。CSS がわずかに増えている
+のはスケルトンの Tailwind クラスぶん。`project-detail` の CSS だけ 73.7→59.0 と下がっているのは、
+`@xyflow/react/dist/style.css`〈15.4KB〉が `WorkTree` を `React.lazy` にしたことでチャンク読み込み後に
+届く扱いになり、`load` までの計測に乗らなくなったため）。
+
+- **`react-markdown`/`remark-gfm`（gzip 前 154KB。11 箇所が使う一番重い依存）**: `~/components/MarkdownViewer.tsx`
+  の中身を `~/components/MarkdownViewerBody.tsx` に移し、`MarkdownViewer.tsx` は `React.lazy` + `Suspense`
+  の薄い窓口にした（プロパティ・呼び出し側は 1 つも変えていない。11 箇所とも無修正）。SSR は
+  `renderToPipeableStream`（`app/entry.server.tsx`、既存のストリーミング SSR。ADR-0002 D2 のまま）が
+  サーバ側で `import()` を解決してから本文入りの HTML を返すので、最初の応答に中身がそのまま乗る
+  （フォールバック `MarkdownSkeleton` が実際に見えるのは、クライアント遷移直後にこのチャンクがまだ届いて
+  いない一瞬だけ）。
+- **CodeMirror 6（`@codemirror/*`。gzip 前 263KB。`/tasks/:id` の「ファイル」「成果物」タブ、
+  `~/components/ArtifactsList.tsx`、`/tasks/:id/runs/:runId` が使う）**: 同じ形で
+  `~/components/CodeViewerEditor.tsx`（本体）+ `~/components/CodeViewer.tsx`（`React.lazy` の窓口）に分けた。
+  `Suspense` のフォールバックは元々あった「マウント前は `<pre>` で生テキストを出す」を流用（見た目は
+  変わらない。中身のテキストは即読める）。
+- **`@xyflow/react` + `@dagrejs/dagre`（gzip 前 228KB。`/projects/:id` の「仕事の木」）**: 同じ形で
+  `~/components/WorkTreeGraph.tsx`（本体）+ `~/components/WorkTree.tsx`（`React.lazy` の窓口）に分けた。
+  外枠（高さ・角丸・`data-testid`）は窓口側に寄せ、本体側の「マウント後にだけ描く」ガード（ADR-0006 D5、
+  `ResizeObserver` 依存のため）はそのまま残した（`React.lazy` で遅延しても SSR はこのモジュールの
+  `import()` 自体は解決するので、このガードが無いと SSR で落ちる）。
+- **タスク詳細の非表示タブ（`~/components/task-changes.tsx`・`~/components/task-files.tsx`）**: `?tab=` で
+  5 つのうち 1 つしか同時に出ないのに、`~/routes/tasks.$id.tsx` はこれまで 5 タブぶんの部品を全部静的
+  import していた。「変更」「ファイル」タブの部品だけ `React.lazy`（`TaskTabSkeleton` フォールバック）に
+  した。兄弟ルート（`/tasks/:id/changes`・`/tasks/:id/files`）は従来どおり静的 import のままなので、
+  ビルド時に `[INEFFECTIVE_DYNAMIC_IMPORT]` という Rollup の警告が **SSR ビルドの方にだけ**出る
+  （Node はローカルの `require` なので分割の得が無いという指摘で、実害は無い。クライアント側は 2 つの
+  エントリ〈タブ入りの `/tasks/:id` と兄弟ルート〉から参照されるので自動的に共有チャンクへ切り出され、
+  実測どおり初回 JS が減っている）。「概要」「タイムライン」「成果物」タブは今回そのまま
+  （既定で表示される「概要」を遅延させると効果が薄いうえ複雑さが増すため、費用対効果で見送った）。
+- **アイコンの棚卸し**: `~/components/ui/Icon.tsx`（ほぼ全画面が読み込む共有チャンク。手書き SVG 46KB）を
+  `grep`/`tsc` で全画面から棚卸しし、どこからも使われていなかった `image` を削除した（`info` は
+  `~/components/ui/misc.tsx::ALERT_ICON` という `Record<Tone, IconName>` 経由の間接参照でだけ使われて
+  いたので、最初に消して `tsc` のエラーで気づいて戻した。直書きしている以上、他のアイコンは軒並みどこかの
+  画面で使われているので個別チャンク化ではなく「使っていない分だけ削る」方針にした）。効果は 21 route
+  合計で 0.1〜0.2KB/route と小さい（もともと無駄が少なかった）。
+- 「dead CSS の削除」「長い一覧の仮想化」は今回は見送った。CSS は最適化前から 58.7〜73.7KB で予算
+  120KB の半分以下、DOM ノード数も最大 674（`project-detail`）で予算 1500 に遠いため、実測が「問題ない」と
+  示している対象に手を入れる必要が無いと判断した（`@tanstack/react-virtual` は `~/routes/tasks.tsx`
+  〈一覧〉が既に使っているので、将来 DOM 数が予算に近づいたらそちらを流用すればよい）。
+
+### 3. 体感速度（受け入れ条件 3）
+
+- `~/components/ui/skeleton.tsx`: `Skeleton`（`animate-pulse rounded-md bg-surface-2`。装飾なので
+  `aria-hidden`）を新設。`app/app.css` の `@media (prefers-reduced-motion: reduce)` に `.animate-pulse` を
+  足し（既存の `.animate-pulse-dot`・`.animate-fade-in` と同じ扱い）、モーション低減の設定でアニメーション
+  だけ止まる（高さはそのまま予約されるのでガタつかない）。
+- **Console の吹き出し流**（`~/components/Console.tsx::BlockStream`）: `useNavigation()` で `/`・`/org/:id`
+  への遷移が pending か見て、pending の間は中身を `ConsoleStreamSkeleton`（吹き出し 3 つぶんの骨組み）に
+  差し替える。枠自体は `h-[clamp(10rem,calc(100dvh-30rem),36rem)]`（フェーズ 71 から固定）なのでレイアウトは
+  動かない。`aria-busy` も付けた。
+- **ボードの列**（`~/routes/board.tsx`）: 絞り込みフォーム（`method="get"`）を送ると `/board` への
+  再ナビゲーションになる。pending の間は各列を `BoardColumnSkeleton`（前回のカード枚数を 1〜4 に丸めて
+  同じ枚数ぶんのプレースホルダを積む。高さのガタつきを小さくするため）に差し替える。グリッドの列数・
+  `data-testid="board-columns"` は変えない。
+- **タスク詳細のタブ**（`~/routes/tasks.$id.tsx`）: `?tab=` の切り替えは `/tasks/:id` への再ナビゲーション
+  になり、`changes`/`files`/`timeline` の中身を loader が引き直す。pending の間はタブの中身全体を
+  `TaskTabSkeleton` に差し替える（`React.lazy` の `Suspense` フォールバックと同じ形を流用。チャンク待ち・
+  ナビゲーション待ちのどちらでも同じ見た目になる）。
+- どれも `pnpm test`（node 環境、DOM レンダリングのテストが無い既存方針。`vitest.config.ts` の
+  `environment: "node"`）には引っかからない範囲の変更で、`pnpm mobile-audit` は `page.goto` による
+  フルナビゲーションしかしない（`navigation.state` が `loading` になる瞬間を作らない）ため、これらの
+  スケルトン自体は機械検査には現れない（目視・実機の確認事項として次節に残す）。
+
+### 4. 予算の調整（受け入れ条件 5 の「達成不能なら 10% 増し」）
+
+- 当初案の JS 予算 350KB は、最適化を尽くしても届かない。`entry.client`（React 19 + React Router の
+  クライアントランタイム、182KB）・`components`（3 画面以上が共有する UI の自動チャンク、77KB）・`Icon`
+  （47KB）・`jsx-runtime`（34KB）・`root`（18KB）だけでどの画面でも約 360KB が土台としてかかり、これは
+  アプリ側のコード分割では削れない（フレームワークそのものの重さ）。
+- 実測した最重量ルート（`/tasks/:id` の各タブ、`React.lazy` 適用後で 483.8KB）の 10% 増し（≈532KB）を
+  `PERF_BUDGET.jsBytes` にした（`CLAUDE.md`／`gui/CLAUDE.md` の「達成不能なら実測値の 10% 増しにして
+  理由を書く」を適用）。CSS（120KB）・DOM ノード数（1500）・LCP（2500ms）は当初案のまま
+  （実測が余裕を持って収まっているため変更不要）。
+
+### 監査・ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint` | exit 0。`Checked 231 files in ...ms. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0。**Test Files 62 passed (62) / Tests 925 passed (925)**（Phase G32 から件数変わらず。今回追加した新規コードは React コンポーネント〈スケルトン・lazy の窓口〉と監査スクリプトの計測関数で、どちらもこのリポジトリの vitest 方針〈`environment: "node"`、DOM レンダリングのテスト無し〉の対象外。既存テストのうち `test/unit/task-changes.test.ts` 1 件を `TaskChanges` の静的 import 文字列チェックから `React.lazy` 呼び出しの文字列チェックに書き換えた） |
+| build | `pnpm build` | exit 0（client・server とも）。SSR ビルドにだけ `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件（上記「2. 直した内容」参照。実害なし） |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（API 変更なし） |
+| mobile-audit（`perf` 実装直後、最適化前） | `pnpm mobile-audit` | exit 1。全 21 route が `perf` で `initial JS ... > 350KB budget` 違反（`by_rule: {"perf": 21}`） |
+| mobile-audit（全対応後） | `pnpm mobile-audit` | **exit 0。violations 0 件**（`by_rule: {}`、`by_scheme: {"light": 0, "dark": 0}`）。21 route × 2 scheme = 42 通り全て 200 応答。`perf`（light のみ）を含む全 12 ルールが 0 件 |
+
+### 変更したファイル
+
+- `scripts/mobile-audit.mjs`（`perf` ルール新設: CDP CPU x4 スロットリング、`PerformanceObserver` 配線、
+  JS/CSS 転送量・DOM ノード数・LCP/FCP の計測、`checkPerfBudget`、`formatPerfTable`、`report.json` の
+  `perf`/`perf_budget`）
+- `app/components/MarkdownViewer.tsx`（`React.lazy` の窓口に）／`app/components/MarkdownViewerBody.tsx`（新規、本体）
+- `app/components/CodeViewer.tsx`（`React.lazy` の窓口に）／`app/components/CodeViewerEditor.tsx`（新規、本体）
+- `app/components/WorkTree.tsx`（`React.lazy` の窓口に）／`app/components/WorkTreeGraph.tsx`（新規、本体）
+- `app/routes/tasks.$id.tsx`（`TaskChanges`/`TaskFiles` を `React.lazy` に、`TaskTabSkeleton`、
+  `useNavigation` によるタブ遷移中スケルトン）
+- `app/components/Console.tsx`（`BlockStream` に `loading`、`ConsoleStreamSkeleton`、`useNavigation`）
+- `app/routes/board.tsx`（`BoardColumnSkeleton`、`useNavigation` による絞り込み遷移中スケルトン）
+- `app/components/ui/skeleton.tsx`（新規、`Skeleton` primitive）
+- `app/components/ui/Icon.tsx`（未使用の `image` を削除）
+- `app/app.css`（`prefers-reduced-motion: reduce` に `.animate-pulse` を追加）
+- `test/unit/task-changes.test.ts`（`TaskChanges` の import 文字列チェックを `React.lazy` 形に更新）
+
+### 未解決事項
+
+- **U-G33-1（実機未確認、ADR-0009 P-34 継続）**: CPU x4 スロットリングは CDP の近似で、実機（Nothing 2a
+  クラスの中位機）での実際の JS 実行時間・LCP は未確認。今回のヘッドレス計測では全 route が LCP 300ms
+  未満（予算 2500ms に大きく余裕）だったが、実 celeris・実データ（もっと長いタスク一覧・Console の
+  履歴等）ではもっと重くなりうる。
+- **U-G33-2**: `~/components/Console.tsx`・`~/routes/board.tsx`・`~/routes/tasks.$id.tsx` に足した
+  遷移中スケルトン（受け入れ条件 3）は `pnpm mobile-audit`（`page.goto` のフルナビゲーションしか行わない）
+  にも `pnpm test`（DOM レンダリングテスト無し）にも現れない。実際にクライアント側 SPA 遷移
+  （タブ切り替え・絞り込みフォーム送信・Console のノード間移動）で意図どおりスケルトンが出てレイアウトが
+  ガタつかないかは、実機か `pnpm e2e`（Playwright、今回のゲートには入っていない）での確認が要る。
+- **U-G33-3**: JS 予算 532KB は「今回の最適化後の実測 + 10%」であり、今後さらに画面や依存が増えれば
+  再び頭打ちになる。次に予算を超えたら、まず「タスク詳細の概要/タイムラインタブも `React.lazy` にする」
+  「`components` 共有チャンクの中身を洗う」を検討するとよい（今回は費用対効果で見送った）。
+- **U-G33-4**: `perf` は light scheme でしか計らない（D1 のこれまでのルールと同じ判断）。ダークモード
+  固有の重さ（無いはずだが）は今回の計測に乗らない。
+
+### 提案
+
+- **P-G33-1**: `React.lazy` にしたタブ・重い部品（`MarkdownViewer`・`CodeViewer`・`WorkTree`・
+  `TaskChanges`・`TaskFiles`）について、実機か `pnpm e2e` で「チャンク読み込み中のスケルトン→実体への
+  差し替えでガタつかない」「オフライン・低速回線での初回表示が壊れない」を一度確認しておくと安心
+  （ADR-0009 P-34、今回のサンドボックスでは未実施）。
+- **P-G33-2**: `components`（77KB）・`Icon`（47KB）はどちらも「ほぼ全画面が使う土台」なので、これ以上
+  削るなら個々の関数・アイコン単位の分割ではなく、使用頻度の低い画面（`/clusters`・`/accounts` 等）
+  だけが使う UI 部品を洗い出して分離する方が筋が良さそう（次のラウンドで検討）。

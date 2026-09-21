@@ -43,6 +43,25 @@ const REPORT_PATH = path.join(OUT_DIR, "report.json");
 const TASK_ID = "01BOARDTASK00000000000001";
 const PROJECT_ID = "p1";
 
+// Phase 77（ADR-0055 D1 拡張、`perf`）: 性能予算。CDP の CPU x4 スロットリング（ミッドレンジ機の近似）の下で、
+// 初回ナビゲーションの JS/CSS 転送量・DOM ノード数・LCP を計る。light scheme だけで計る（D1 の各ラウンドの
+// 慣例どおり、実行時間を抑えるため。ダークモードは色だけが変わるので転送量・DOM 数・LCP はほぼ同じと見なす）。
+const CPU_THROTTLING_RATE = 4;
+// 計測後、スロットリング下でのハイドレーション・LCP 確定を待つ猶予（x4 なので `load` 直後だとまだ描画中のことがある）。
+const PERF_SETTLE_MS = 1000;
+const PERF_BUDGET = {
+  // Phase 77 の当初案は 350KB だったが、実測すると `entry.client`（React 19 + React Router のクライアント
+  // ランタイム。182KB）・`components`（共有 UI チャンク。77KB）・`Icon`（ほぼ全画面が使う手書き SVG。47KB）・
+  // `jsx-runtime`（34KB）・`root`（18KB）だけで約 360KB あり、これはどの画面でも必ず要る土台なので
+  // 350KB は最適化後も届かない（`docs/PROGRESS.md` Phase 77 参照）。実測した最重量ルート
+  // （`/tasks/:id` の各タブ、React.lazy 適用後で 483.6KB）の 10% 増しに設定した
+  // （CLAUDE.md「予算が達成不能なら実測値の 10% 増しにして PROGRESS に理由を書く」）。
+  jsBytes: 532 * 1024,
+  cssBytes: 120 * 1024,
+  domNodes: 1500,
+  lcpMs: 2500,
+};
+
 fs.mkdirSync(OUT_DIR, { recursive: true });
 for (const name of fs.readdirSync(OUT_DIR)) fs.rmSync(path.join(OUT_DIR, name), { force: true });
 
@@ -985,6 +1004,98 @@ async function checkFocusOrder(page, route) {
   return violations;
 }
 
+// ---------------------------------------------------------------------------
+// D1 拡張その 4（Phase 77、`perf`）: 性能予算。
+// ---------------------------------------------------------------------------
+
+/**
+ * ページ内の `window.__perfEntries`（`PERF_OBSERVER_SOURCE`、`addInitScript` で全ページに配線）から
+ * FCP・LCP・DOM ノード数を読む。LCP は「バッファ済みの候補のうち最後（= 最大の startTime）」を最終値とみなす
+ * （spec の考え方どおり、ユーザー操作や visibility change が無いヘッドレス計測ではそのまま安定する）。
+ */
+async function readPerfMetrics(page) {
+  return page.evaluate(() => {
+    const entries = window.__perfEntries ?? { paint: [], lcp: [] };
+    const fcpEntry = entries.paint.find((e) => e.name === "first-contentful-paint");
+    const lcpTimes = entries.lcp.map((e) => e.startTime);
+    return {
+      fcpMs: fcpEntry ? fcpEntry.startTime : null,
+      lcpMs: lcpTimes.length > 0 ? Math.max(...lcpTimes) : null,
+      domNodes: document.querySelectorAll("*").length,
+    };
+  });
+}
+
+/** 予算超過を `perf` ルールの違反として返す。1 指標につき最大 1 件。 */
+function checkPerfBudget(record) {
+  const violations = [];
+  const over = (value, budget) => typeof value === "number" && Number.isFinite(value) && value > budget;
+  if (over(record.js_bytes, PERF_BUDGET.jsBytes)) {
+    violations.push({
+      rule: "perf",
+      selector: record.route,
+      box: {},
+      detail:
+        `initial JS ${(record.js_bytes / 1024).toFixed(1)}KB > ${(PERF_BUDGET.jsBytes / 1024).toFixed(0)}KB budget ` +
+        `(${record.js_chunks} chunks)`,
+    });
+  }
+  if (over(record.css_bytes, PERF_BUDGET.cssBytes)) {
+    violations.push({
+      rule: "perf",
+      selector: record.route,
+      box: {},
+      detail: `initial CSS ${(record.css_bytes / 1024).toFixed(1)}KB > ${(PERF_BUDGET.cssBytes / 1024).toFixed(0)}KB budget`,
+    });
+  }
+  if (over(record.dom_nodes, PERF_BUDGET.domNodes)) {
+    violations.push({
+      rule: "perf",
+      selector: record.route,
+      box: {},
+      detail: `DOM nodes ${record.dom_nodes} > ${PERF_BUDGET.domNodes} budget`,
+    });
+  }
+  if (over(record.lcp_ms, PERF_BUDGET.lcpMs)) {
+    violations.push({
+      rule: "perf",
+      selector: record.route,
+      box: {},
+      detail: `LCP ${record.lcp_ms.toFixed(0)}ms > ${PERF_BUDGET.lcpMs}ms budget (CPU x${CPU_THROTTLING_RATE})`,
+    });
+  }
+  return violations;
+}
+
+/** `perf` の結果を固定幅の表（`console.error` 1 回。`by_rule` の JSON の前に出す）にする。 */
+function formatPerfTable(records) {
+  const cols = [
+    ["route", 20],
+    ["js_kb", 8],
+    ["chunks", 7],
+    ["css_kb", 8],
+    ["dom", 6],
+    ["fcp_ms", 7],
+    ["lcp_ms", 7],
+  ];
+  const pad = (s, w) => String(s).slice(0, w).padEnd(w);
+  const lines = [cols.map(([name, w]) => pad(name, w)).join(" | ")];
+  lines.push(cols.map(([, w]) => "-".repeat(w)).join("-+-"));
+  for (const r of records) {
+    const row = [
+      r.route,
+      (r.js_bytes / 1024).toFixed(1),
+      String(r.js_chunks),
+      (r.css_bytes / 1024).toFixed(1),
+      String(r.dom_nodes),
+      r.fcp_ms == null ? "-" : r.fcp_ms.toFixed(0),
+      r.lcp_ms == null ? "-" : r.lcp_ms.toFixed(0),
+    ];
+    lines.push(row.map((v, i) => pad(v, cols[i][1])).join(" | "));
+  }
+  return lines.join("\n");
+}
+
 async function main() {
   const skipBuild = process.env.MOBILE_AUDIT_SKIP_BUILD === "1";
   if (!skipBuild) {
@@ -1007,6 +1118,7 @@ async function main() {
 
   const allViolations = [];
   const routeReports = [];
+  const perfRecords = [];
   let browser;
   try {
     await waitForHealth(`http://${guiBind}/healthz`);
@@ -1050,6 +1162,20 @@ async function main() {
       "window.__runMobileAudit = runChecks;",
       // Phase 76: `checkFocusOrder`（Node 側、実際に Tab キーを送る）が要素を突き合わせるのに使う。
       "window.__cssPathRef = cssPathRef;",
+      // Phase 77（`perf`）: FCP/LCP を `PerformanceObserver`（`buffered: true`）で拾う。`addInitScript` は
+      // 文書の最初のスクリプトより前に評価されるので、最初のペイントから取りこぼさない。どちらの
+      // entry type も未対応のブラウザでは黙って諦める（try/catch。Chromium では両方とも実装済み）。
+      `window.__perfEntries = { paint: [], lcp: [] };
+      try {
+        new PerformanceObserver((list) => {
+          for (const e of list.getEntries()) window.__perfEntries.paint.push({ name: e.name, startTime: e.startTime });
+        }).observe({ type: "paint", buffered: true });
+      } catch {}
+      try {
+        new PerformanceObserver((list) => {
+          for (const e of list.getEntries()) window.__perfEntries.lcp.push({ startTime: e.startTime, size: e.size });
+        }).observe({ type: "largest-contentful-paint", buffered: true });
+      } catch {}`,
     ].join("\n");
     await context.addInitScript(auditSource);
 
@@ -1062,7 +1188,34 @@ async function main() {
         await page.emulateMedia({ colorScheme: scheme });
         const pageErrors = [];
         page.on("pageerror", (err) => pageErrors.push(err.message));
+
+        // Phase 77（`perf`）: light だけ CPU x4 スロットリング（ミッドレンジ機の近似）を掛け、この
+        // ページが読み込む JS/CSS の転送量を数える。dark はここを飛ばす（色だけが変わるので、転送量・
+        // DOM 数・LCP は light とほぼ同じと見なして、実行時間を抑える。D1 のこれまでのラウンドと同じ判断）。
+        const perfResponses = [];
+        let cdpSession;
+        /** @param {import("@playwright/test").Response} res */
+        function onPerfResponse(res) {
+          const resourceType = res.request().resourceType();
+          if (resourceType !== "script" && resourceType !== "stylesheet") return;
+          const lenHeader = res.headers()["content-length"];
+          const bytes = lenHeader ? Number.parseInt(lenHeader, 10) : Number.NaN;
+          if (!Number.isFinite(bytes)) return; // Content-Length が無い応答（SSE 等）は数えない
+          perfResponses.push({ resourceType, bytes });
+        }
+        if (scheme === "light") {
+          cdpSession = await context.newCDPSession(page);
+          await cdpSession.send("Emulation.setCPUThrottlingRate", { rate: CPU_THROTTLING_RATE });
+          page.on("response", onPerfResponse);
+        }
+
         const response = await page.goto(`http://${guiBind}${routePath}`, { waitUntil: "load" });
+        // `load` が発火した時点で数え終える（「初回ナビゲーションの転送量」の境界。`load` は寄稿元 HTML が
+        // 参照する静的なリソースの完了を待つが、ハイドレーション中に React.lazy が発行する動的 import() の
+        // 応答は待たない。ここで listener を外さないと、あとの `checkFocusOrder`/`PERF_SETTLE_MS` の待ちの
+        // 間に届くその種の遅延チャンクまで数えてしまい、遅延読み込みで減らしたはずの初回転送量が見かけ上
+        // 減らない）。
+        page.off("response", onPerfResponse);
         const status = response?.status() ?? 0;
         if (status !== 200) {
           allViolations.push({
@@ -1080,7 +1233,30 @@ async function main() {
           // `page.evaluate` 単体の `runChecks` には入れず、ここで別枠として呼ぶ。
           const focusViolations = await checkFocusOrder(page, route);
           for (const v of focusViolations) allViolations.push({ route, scheme, ...v });
+
+          if (scheme === "light") {
+            // スロットリング下のハイドレーション・LCP 確定を待つ（`load` の時点ではまだのことがある）。
+            await page.waitForTimeout(PERF_SETTLE_MS);
+            const metrics = await readPerfMetrics(page);
+            const jsBytes = perfResponses.filter((r) => r.resourceType === "script").reduce((a, r) => a + r.bytes, 0);
+            const cssBytes = perfResponses
+              .filter((r) => r.resourceType === "stylesheet")
+              .reduce((a, r) => a + r.bytes, 0);
+            const jsChunks = perfResponses.filter((r) => r.resourceType === "script").length;
+            const record = {
+              route,
+              js_bytes: jsBytes,
+              css_bytes: cssBytes,
+              js_chunks: jsChunks,
+              dom_nodes: metrics.domNodes,
+              fcp_ms: metrics.fcpMs,
+              lcp_ms: metrics.lcpMs,
+            };
+            perfRecords.push(record);
+            for (const v of checkPerfBudget(record)) allViolations.push({ route, scheme: "light", ...v });
+          }
         }
+        await cdpSession?.detach().catch(() => {});
         if (pageErrors.length > 0) {
           allViolations.push({
             route,
@@ -1108,7 +1284,13 @@ async function main() {
   fs.writeFileSync(
     REPORT_PATH,
     JSON.stringify(
-      { generated_at: new Date().toISOString(), routes: routeReports, violations: allViolations },
+      {
+        generated_at: new Date().toISOString(),
+        routes: routeReports,
+        violations: allViolations,
+        perf: perfRecords,
+        perf_budget: PERF_BUDGET,
+      },
       null,
       2,
     ),
@@ -1121,6 +1303,7 @@ async function main() {
     if (v.scheme) byScheme[v.scheme] = (byScheme[v.scheme] ?? 0) + 1;
   }
   // `gui/biome.json` は `console.log` を禁止している（`error`/`warn` だけ許可）ので `console.error` で出す。
+  console.error(formatPerfTable(perfRecords));
   console.error(
     JSON.stringify(
       {
