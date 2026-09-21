@@ -7,10 +7,12 @@ import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge } from "~/components/ui/badge";
 import { buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, Mono } from "~/components/ui/misc";
 import { fileSizeLabel, repoKindLabel, treeEntryKindLabel } from "~/lib/labels";
 import { fileBody, isJsonPath, parentPath, pickTreeFileViewer, taskFilesHref, treeBreadcrumbs } from "~/lib/task-files";
+import { cn } from "~/lib/utils";
 
 /**
  * タスクの作業ツリーの閲覧（ADR-0043 D6、docs/celeris-api-v1.md §3.72〜3.73。Phase 52 / G16）。
@@ -68,7 +70,7 @@ export function TaskFiles({ taskId, tree, file, fileError, filePath }: TaskFiles
             >
               <Link
                 to={taskFilesHref(taskId, { repo: tree.repo })}
-                className="font-medium text-primary hover:underline"
+                className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
                 data-testid="task-files-crumb"
               >
                 {tree.repo}
@@ -78,7 +80,7 @@ export function TaskFiles({ taskId, tree, file, fileError, filePath }: TaskFiles
                   <span className="text-fg-subtle">/</span>
                   <Link
                     to={taskFilesHref(taskId, { repo: tree.repo, path: crumb.path })}
-                    className="font-medium text-primary hover:underline"
+                    className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
                     data-testid="task-files-crumb"
                   >
                     {crumb.name}
@@ -97,7 +99,7 @@ export function TaskFiles({ taskId, tree, file, fileError, filePath }: TaskFiles
           {up !== null && (
             <Link
               to={taskFilesHref(taskId, { repo: tree.repo, path: up })}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-fg-muted hover:text-fg"
+              className="inline-flex min-h-11 items-center gap-1.5 text-sm font-medium text-fg-muted hover:text-fg"
               data-testid="task-files-up"
             >
               <Icon name="arrowLeft" />
@@ -118,7 +120,7 @@ export function TaskFiles({ taskId, tree, file, fileError, filePath }: TaskFiles
                   {entry.kind === "dir" ? (
                     <Link
                       to={taskFilesHref(taskId, { repo: tree.repo, path: entry.path })}
-                      className="flex min-w-0 items-center gap-2 font-medium text-primary hover:underline"
+                      className="flex min-h-11 min-w-0 items-center gap-2 font-medium text-primary hover:underline"
                       data-testid="task-files-entry-link"
                     >
                       <Icon name="folder" />
@@ -127,7 +129,7 @@ export function TaskFiles({ taskId, tree, file, fileError, filePath }: TaskFiles
                   ) : entry.kind === "file" ? (
                     <Link
                       to={taskFilesHref(taskId, { repo: tree.repo, path: tree.path, file: entry.path })}
-                      className="flex min-w-0 items-center gap-2 font-medium text-primary hover:underline"
+                      className="flex min-h-11 min-w-0 items-center gap-2 font-medium text-primary hover:underline"
                       data-testid="task-files-entry-link"
                     >
                       <Icon name="file" />
@@ -139,7 +141,8 @@ export function TaskFiles({ taskId, tree, file, fileError, filePath }: TaskFiles
                       <span className="truncate">{entry.name}</span>
                     </span>
                   )}
-                  <span className="shrink-0 text-xs text-fg-subtle tabular-nums">
+                  {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+                  <span className="shrink-0 text-sm text-fg-subtle tabular-nums lg:text-xs">
                     {entry.kind === "file" && entry.size != null
                       ? fileSizeLabel(entry.size)
                       : treeEntryKindLabel(entry.kind)}

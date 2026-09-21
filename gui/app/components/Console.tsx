@@ -92,7 +92,8 @@ function WaitingStrip({ counts }: { counts: { questions: number; approvals: numb
     <div
       data-testid="console-waiting-strip"
       className={cn(
-        "flex flex-wrap items-center gap-3 rounded-xl border px-3 py-2 text-xs shadow-xs backdrop-blur",
+        // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+        "flex flex-wrap items-center gap-3 rounded-xl border px-3 py-2 text-sm shadow-xs backdrop-blur lg:text-xs",
         total > 0 ? "border-warning-border bg-warning-soft/80" : "border-border bg-surface/80",
       )}
     >

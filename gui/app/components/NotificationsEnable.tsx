@@ -21,7 +21,8 @@ export function NotificationsEnableButton({ className }: { className?: string })
       onClick={handleClick}
       data-testid="notifications-enable"
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg",
+        // ADR-0055 D1-2/D1-4: タップ領域 44 以上、モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+        "inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-border px-2.5 py-1.5 text-sm font-medium text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg lg:text-xs",
         className,
       )}
       title="ブラウザ通知を有効にします（悪い知らせは即座に、それ以外は数時間単位）"

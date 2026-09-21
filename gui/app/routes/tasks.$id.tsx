@@ -68,6 +68,7 @@ import {
   textareaClass,
   thClass,
   theadClass,
+  touchLinkClass,
   trHoverClass,
 } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
@@ -427,7 +428,7 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                     <Link
                       to={`/projects/${place.projectId}`}
                       data-testid="task-project-link"
-                      className="font-medium text-primary hover:underline"
+                      className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
                     >
                       {place.projectTitle ?? place.projectId}
                     </Link>
@@ -443,7 +444,7 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                           : `/org/${encodeURIComponent(place.assigneeId)}`
                       }
                       data-testid="task-assignee-link"
-                      className="font-medium text-primary hover:underline"
+                      className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
                     >
                       {place.assigneeName ?? place.assigneeId}
                     </Link>
@@ -451,7 +452,7 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                         （`Event::Assigned`。明示の assignee で作られたタスクには無い）。 */}
                     {assignedEvent && assignedEvent.node === place.assigneeId && (
                       <span
-                        className="ml-1.5 text-xs text-fg-subtle"
+                        className="ml-1.5 text-sm text-fg-subtle lg:text-xs"
                         data-testid="task-assigned-why"
                         title={`${ASSIGNED_WHY_LABEL}: ${assignedEvent.reason}（${assignedScoreLabel(assignedEvent.score)}）`}
                       >
@@ -466,10 +467,11 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                 {detail.cluster && (
                   <p data-testid="task-cluster">
                     cluster:{" "}
-                    <Link to="/clusters" className="font-medium text-primary hover:underline">
+                    <Link to="/clusters" className={cn(touchLinkClass, "font-medium text-primary hover:underline")}>
                       {detail.cluster}
                     </Link>
-                    <span className="ml-2 text-xs text-fg-subtle" data-testid="task-workspace-note">
+                    {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+                    <span className="ml-2 text-sm text-fg-subtle lg:text-xs" data-testid="task-workspace-note">
                       {/* ADR-0039 D3（Phase G13k）: 編集は手元の作業ディレクトリで、検証はリモートで。 */}
                       {detail.workspace_dir
                         ? `手元の写し: ${detail.workspace_dir}（クラスタ側の元のパスは表示されません）`
@@ -480,7 +482,10 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                 {task.parent_id && (
                   <p data-testid="task-parent">
                     親:{" "}
-                    <Link to={`/tasks/${task.parent_id}`} className="font-medium text-primary hover:underline">
+                    <Link
+                      to={`/tasks/${task.parent_id}`}
+                      className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
+                    >
                       {task.parent_id}
                     </Link>
                   </p>
@@ -658,14 +663,18 @@ function TaskTabs({
                 data-active={active ? "true" : undefined}
                 aria-current={active ? "page" : undefined}
                 className={cn(
-                  "-mb-px inline-flex items-center gap-1.5 rounded-t-lg border-b-2 px-3.5 py-2 text-sm font-medium no-underline transition-colors",
+                  // ADR-0055 D1-2: タップ領域 44×44 以上。
+                  "-mb-px inline-flex min-h-11 items-center gap-1.5 rounded-t-lg border-b-2 px-3.5 py-2 text-sm font-medium no-underline transition-colors",
                   active
                     ? "border-primary text-primary"
                     : "border-transparent text-fg-muted hover:border-border-strong hover:text-fg",
                 )}
               >
                 {taskTabLabel(t)}
-                {count !== null && count > 0 && <span className="text-xs tabular-nums text-fg-subtle">{count}</span>}
+                {count !== null && count > 0 && (
+                  // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+                  <span className="text-sm tabular-nums text-fg-subtle lg:text-xs">{count}</span>
+                )}
               </Link>
             </li>
           );
@@ -832,7 +841,7 @@ function OverviewTab({
                         Approval:{" "}
                         <Link
                           to={`/tasks/${criterion.approval.approval.id}`}
-                          className="font-medium text-primary hover:underline"
+                          className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
                         >
                           {criterion.approval.approval.id}
                         </Link>
@@ -970,11 +979,12 @@ function OverviewTab({
                     data-run-id={group.run_id}
                     className="rounded-lg border border-border p-3 text-sm"
                   >
-                    <p className="text-xs text-fg-subtle">
+                    {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+                    <p className="text-sm text-fg-subtle lg:text-xs">
                       run{" "}
                       <Link
                         to={`/tasks/${task.id}/runs/${group.run_id}`}
-                        className="font-medium text-primary hover:underline"
+                        className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
                       >
                         {group.run_id}
                       </Link>{" "}
@@ -986,7 +996,7 @@ function OverviewTab({
                           <Link
                             to={`/tasks/${child.id}`}
                             data-testid="delegated-child-link"
-                            className="font-medium text-primary hover:underline"
+                            className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
                           >
                             {child.title}
                           </Link>
@@ -1550,7 +1560,7 @@ function TaskEditSection({
                 </Button>
               </div>
               {labelError && (
-                <p role="alert" className="mt-1 text-xs text-danger" data-testid="edit-label-error">
+                <p role="alert" className="mt-1 text-sm text-danger lg:text-xs" data-testid="edit-label-error">
                   {labelError}
                 </p>
               )}
@@ -1724,9 +1734,9 @@ function TimelineTab({
                     >
                       {row.event.type === "worker_progress" ? (
                         <details>
-                          <summary className="flex cursor-pointer flex-wrap items-center gap-2">
+                          <summary className="flex min-h-11 cursor-pointer flex-wrap items-center gap-2">
                             <Mono>#{row.seq}</Mono>
-                            <span className="text-xs text-fg-subtle">{row.ts}</span>
+                            <span className="text-sm text-fg-subtle lg:text-xs">{row.ts}</span>
                             <Badge tone="neutral">{row.event.type}</Badge>
                           </summary>
                           <p className="mt-1.5 text-fg-muted">{row.event.msg}</p>
@@ -1734,7 +1744,7 @@ function TimelineTab({
                       ) : (
                         <p className="flex flex-wrap items-center gap-2">
                           <Mono>#{row.seq}</Mono>
-                          <span className="text-xs text-fg-subtle">{row.ts}</span>
+                          <span className="text-sm text-fg-subtle lg:text-xs">{row.ts}</span>
                           <Badge tone="neutral">{row.event.type}</Badge>
                         </p>
                       )}
@@ -1742,7 +1752,7 @@ function TimelineTab({
                   ))}
                 </ul>
               )}
-              {events.has_more && <p className="text-xs text-fg-subtle">続きがあります（has_more）。</p>}
+              {events.has_more && <p className="text-sm text-fg-subtle lg:text-xs">続きがあります（has_more）。</p>}
             </div>
           </details>
         </CardBody>
@@ -1787,7 +1797,8 @@ function TimelineRow({ taskId, item }: { taskId: string; item: TimelineItem }) {
       className="rounded-lg border border-border px-3 py-2 text-sm"
     >
       <p className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-fg-subtle">{item.at}</span>
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <span className="text-sm text-fg-subtle lg:text-xs">{item.at}</span>
         <Badge tone={TIMELINE_TONE[item.kind] ?? "neutral"}>{timelineKindLabel(item.kind)}</Badge>
         {item.kind === "event" && <Mono>{item.event.type}</Mono>}
       </p>
@@ -1817,25 +1828,33 @@ function TimelineBody({ taskId, item }: { taskId: string; item: TimelineItem }) 
     case "report":
       return (
         <p className="mt-1.5 text-fg-muted">
-          <Link to="/reports" className="font-medium text-primary hover:underline">
+          <Link to="/reports" className={cn(touchLinkClass, "font-medium text-primary hover:underline")}>
             {item.report.headline}
           </Link>
-          <span className="ml-2 text-xs text-fg-subtle">{item.report.kind}</span>
+          {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+          <span className="ml-2 text-sm text-fg-subtle lg:text-xs">{item.report.kind}</span>
         </p>
       );
     case "delegation":
       return (
         <div className="mt-1.5 text-fg-muted">
-          <p className="text-xs text-fg-subtle">
+          {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+          <p className="text-sm text-fg-subtle lg:text-xs">
             run{" "}
-            <Link to={`/tasks/${taskId}/runs/${item.run_id}`} className="font-medium text-primary hover:underline">
+            <Link
+              to={`/tasks/${taskId}/runs/${item.run_id}`}
+              className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
+            >
               {item.run_id}
             </Link>
           </p>
           <ul className="mt-1 space-y-0.5">
             {item.tasks.map((child) => (
               <li key={child.id}>
-                <Link to={`/tasks/${child.id}`} className="font-medium text-primary hover:underline">
+                <Link
+                  to={`/tasks/${child.id}`}
+                  className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
+                >
                   {child.title}
                 </Link>
                 <span className="text-fg-subtle">（{child.status}）</span>
@@ -1848,7 +1867,7 @@ function TimelineBody({ taskId, item }: { taskId: string; item: TimelineItem }) 
       return (
         <p className="mt-1.5 text-fg-muted" data-testid="timeline-release">
           このタスクの変更はリリース{" "}
-          <Link to="/releases" className="font-mono font-medium text-primary hover:underline">
+          <Link to="/releases" className={cn(touchLinkClass, "font-mono font-medium text-primary hover:underline")}>
             {item.sha12}
           </Link>{" "}
           に入りました（コミット {item.commits.length} 件）。
@@ -1867,7 +1886,7 @@ function TimelineBody({ taskId, item }: { taskId: string; item: TimelineItem }) 
         <p className="mt-1.5 text-fg-muted" data-testid="timeline-doc">
           <Link
             to={docsHref(item.project_id, { path: item.path })}
-            className="font-medium text-primary hover:underline"
+            className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
           >
             {item.title}
           </Link>{" "}
@@ -1889,7 +1908,10 @@ function TimelineBody({ taskId, item }: { taskId: string; item: TimelineItem }) 
               {(item.inbox ?? 0) > 0 && (
                 <>
                   {" "}
-                  <Link to="/knowledge/inbox" className="font-medium text-primary hover:underline">
+                  <Link
+                    to="/knowledge/inbox"
+                    className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
+                  >
                     知識の候補を見る
                   </Link>
                 </>
@@ -1959,7 +1981,8 @@ function TimelineEventBody({ event }: { event: Event }) {
 function CommentBody({ comment }: { comment: TaskComment }) {
   return (
     <div className="mt-1.5" data-testid="comment-item" data-author-kind={comment.author_kind}>
-      <p className="text-xs font-medium text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <p className="text-sm font-medium text-fg-subtle lg:text-xs">
         {commentAuthorLabel(comment.author_kind)}
         {comment.author ? `（${comment.author}）` : ""}
       </p>
@@ -1971,14 +1994,15 @@ function CommentBody({ comment }: { comment: TaskComment }) {
 function TaskRefList({ label, testId, refs }: { label: string; testId: string; refs: TaskRef[] }) {
   return (
     <div data-testid={testId}>
-      <p className="text-xs font-semibold uppercase tracking-wide text-fg-subtle">{label}</p>
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <p className="text-sm font-semibold uppercase tracking-wide text-fg-subtle lg:text-xs">{label}</p>
       {refs.length === 0 ? (
         <p className="mt-1 text-sm text-fg-subtle">ありません。</p>
       ) : (
         <ul className="mt-1.5 divide-y divide-border overflow-hidden rounded-lg border border-border">
           {refs.map((ref) => (
             <li key={ref.id} className="px-3 py-2 text-sm">
-              <Link to={`/tasks/${ref.id}`} className="font-medium text-primary hover:underline">
+              <Link to={`/tasks/${ref.id}`} className={cn(touchLinkClass, "font-medium text-primary hover:underline")}>
                 {ref.title}
               </Link>
               <span className="text-fg-subtle">（{ref.status}）</span>
@@ -2044,7 +2068,7 @@ function ArtifactRow({
           <p className="truncate font-mono text-xs text-fg" data-testid="artifact-name" title={artifact.artifact.name}>
             {artifact.artifact.name}
           </p>
-          <p className="mt-0.5 text-xs text-fg-subtle">
+          <p className="mt-0.5 text-sm text-fg-subtle lg:text-xs">
             {artifact.artifact.kind} · run {artifact.run_id}
           </p>
         </div>
@@ -2182,14 +2206,14 @@ function PromoteToDoc({
       {error && (
         <div data-testid="artifact-promote-error">
           <ErrorFlash error={error} />
-          {docsErrorHint(error.code) && <p className="text-xs text-fg-muted">{docsErrorHint(error.code)}</p>}
+          {docsErrorHint(error.code) && <p className="text-sm text-fg-muted lg:text-xs">{docsErrorHint(error.code)}</p>}
         </div>
       )}
       {fetcher.data?.ok && fetcher.data.op === "docs_promote" && (
         <p className="mt-2 text-sm" data-testid="artifact-promote-done">
           <Link
             to={docsHref(projectId, { path: fetcher.data.result.path })}
-            className="font-medium text-primary hover:underline"
+            className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
           >
             {fetcher.data.result.path}
           </Link>{" "}

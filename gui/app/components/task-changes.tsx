@@ -6,7 +6,7 @@ import { ErrorFlash } from "~/components/Flash";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { hintClass, inputClass, labelClass } from "~/components/ui/form";
+import { hintClass, inputClass, labelClass, touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono } from "~/components/ui/misc";
 import {
@@ -33,6 +33,7 @@ import {
   statChip,
   taskChangesHref,
 } from "~/lib/task-changes";
+import { cn } from "~/lib/utils";
 
 /**
  * タスクの変更の取り込み（ADR-0043 D5、celeris Phase 54 / G18）。
@@ -127,9 +128,12 @@ export function TaskChanges({ taskId, changes, diff, diffError, diffRepo, diffPa
               {DELIVERY_STATE_DESCRIPTION[changes.delivery.state]}
             </p>
             <p className="text-sm break-words">{changes.delivery.detail}</p>
-            <p className="text-xs text-fg-muted">実装 → 部署内レビュー・マージ判定 → マージ → 検証 → 人がデプロイ</p>
+            {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+            <p className="text-sm text-fg-muted lg:text-xs">
+              実装 → 部署内レビュー・マージ判定 → マージ → 検証 → 人がデプロイ
+            </p>
             <p className="text-sm">レビュー担当: {changes.delivery.department}</p>
-            <Link className="text-sm underline" to={`/tasks/${taskId}?tab=runs`}>
+            <Link className={cn(touchLinkClass, "text-sm underline")} to={`/tasks/${taskId}?tab=runs`}>
               実装・レビューの実行記録を見る
             </Link>
             {changes.delivery.release && (
@@ -256,7 +260,7 @@ function RepoChangesCard({
                     >
                       <Link
                         to={taskChangesHref(taskId, { repo: repo.repo, file: file.path })}
-                        className="flex min-w-0 items-center gap-2 font-medium text-primary hover:underline"
+                        className="flex min-h-11 min-w-0 items-center gap-2 font-medium text-primary hover:underline"
                         data-testid="task-changes-file-link"
                       >
                         <Badge tone={changedFileStatusTone(file.status)}>
@@ -264,7 +268,11 @@ function RepoChangesCard({
                         </Badge>
                         <span className="truncate font-mono text-xs">{file.path}</span>
                       </Link>
-                      <span className="shrink-0 text-xs text-fg-subtle tabular-nums" data-testid="task-changes-delta">
+                      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+                      <span
+                        className="shrink-0 text-sm text-fg-subtle tabular-nums lg:text-xs"
+                        data-testid="task-changes-delta"
+                      >
                         {fileDeltaChip(file)}
                       </span>
                     </li>
@@ -433,13 +441,14 @@ function IntegrationCard({
             href={integration.pr_url}
             target="_blank"
             rel="noreferrer noopener"
-            className="font-medium text-primary underline underline-offset-2"
+            className={cn(touchLinkClass, "font-medium text-primary underline underline-offset-2")}
             data-testid="task-changes-pr-link"
           >
             #{integration.pr_number}
           </a>
         )}
-        <span className="text-xs text-fg-subtle tabular-nums">{integration.updated_at}</span>
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <span className="text-sm text-fg-subtle tabular-nums lg:text-xs">{integration.updated_at}</span>
       </div>
       {integration.detail && (
         <p className="break-words text-sm text-fg-muted" data-testid="task-changes-integration-detail">

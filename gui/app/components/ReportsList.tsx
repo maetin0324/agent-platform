@@ -6,6 +6,7 @@ import { ErrorFlash } from "~/components/Flash";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
+import { touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import type { Tone } from "~/components/ui/tone";
 import { relativeTimeLabel, reportNodeName, reportProjectName } from "~/lib/reports";
@@ -57,21 +58,30 @@ export function ReportsList({ items, projects, org, fetchedAt }: ReportsListProp
 function ReportLinks({ report, projects }: { report: Report; projects: Project[] }) {
   const projectId = report.project_id ?? null;
   return (
-    <p className="flex flex-wrap items-center gap-3 text-xs" data-testid="report-links">
+    // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+    <p className="flex flex-wrap items-center gap-3 text-sm lg:text-xs" data-testid="report-links">
       {projectId && (
-        <Link to={`/projects/${projectId}`} data-testid="report-project-link" className="underline underline-offset-2">
+        <Link
+          to={`/projects/${projectId}`}
+          data-testid="report-project-link"
+          className={cn(touchLinkClass, "underline underline-offset-2")}
+        >
           案件へ（{reportProjectName(report, projects)}）
         </Link>
       )}
       <Link
         to={`/org/${encodeURIComponent(report.node_id)}`}
         data-testid="report-talk-link"
-        className="underline underline-offset-2"
+        className={cn(touchLinkClass, "underline underline-offset-2")}
       >
         担当に話す
       </Link>
       {report.task_id && (
-        <Link to={`/tasks/${report.task_id}`} data-testid="report-task-link" className="underline underline-offset-2">
+        <Link
+          to={`/tasks/${report.task_id}`}
+          data-testid="report-task-link"
+          className={cn(touchLinkClass, "underline underline-offset-2")}
+        >
           裏方のタスク
         </Link>
       )}
@@ -79,7 +89,7 @@ function ReportLinks({ report, projects }: { report: Report; projects: Project[]
         <Link
           to={`/artifacts?project=${encodeURIComponent(projectId)}`}
           data-testid="report-artifacts-link"
-          className="underline underline-offset-2"
+          className={cn(touchLinkClass, "underline underline-offset-2")}
         >
           その案件の成果物
         </Link>
@@ -140,16 +150,21 @@ function ReportRow({
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-surface-2"
+        className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-surface-2"
       >
         <Icon name={open ? "chevronDown" : "chevronRight"} className="size-3.5 shrink-0 text-fg-subtle" />
         <Badge tone={KIND_TONE[report.kind]}>{KIND_LABEL[report.kind] ?? report.kind}</Badge>
         <span data-testid="report-headline" className="min-w-0 flex-1 truncate font-medium text-fg">
           {report.headline}
         </span>
-        <span className="hidden shrink-0 text-xs text-fg-subtle sm:inline">{reportProjectName(report, projects)}</span>
-        <span className="hidden shrink-0 text-xs text-fg-subtle md:inline">{reportNodeName(report, org)}</span>
-        <span className="shrink-0 text-xs tabular-nums text-fg-subtle">
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <span className="hidden shrink-0 text-sm text-fg-subtle sm:inline lg:text-xs">
+          {reportProjectName(report, projects)}
+        </span>
+        <span className="hidden shrink-0 text-sm text-fg-subtle md:inline lg:text-xs">
+          {reportNodeName(report, org)}
+        </span>
+        <span className="shrink-0 text-sm tabular-nums text-fg-subtle lg:text-xs">
           {relativeTimeLabel(report.created_at, fetchedAt)}
         </span>
         {!isRead && (
@@ -162,7 +177,7 @@ function ReportRow({
       {open && (
         <div className="ml-6 mt-1.5 space-y-2 rounded-lg border border-border bg-surface-2/40 p-3">
           {detailFetcher.state !== "idle" && !detail ? (
-            <p className="text-xs text-fg-subtle">読み込み中…</p>
+            <p className="text-sm text-fg-subtle lg:text-xs">読み込み中…</p>
           ) : detail ? (
             <>
               {/* 本文は Markdown で描く（対話・認可と同じ。監査 6）。 */}
@@ -183,7 +198,7 @@ function ReportRow({
               {readFetcher.data && !readFetcher.data.ok && <ErrorFlash error={readFetcher.data.error} />}
               {detail.sources_expanded.length > 0 && (
                 <div data-testid="report-sources" className="space-y-1.5 pt-1">
-                  <p className="text-xs font-medium text-fg-subtle">元になった報告（圧縮元）</p>
+                  <p className="text-sm font-medium text-fg-subtle lg:text-xs">元になった報告（圧縮元）</p>
                   <ul className="space-y-1.5">
                     {detail.sources_expanded.map((src) => (
                       <ReportRow

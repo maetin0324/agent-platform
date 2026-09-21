@@ -410,33 +410,37 @@ function OrgTreeItem({
         data-testid="org-node"
         data-org-id={node.id}
         className={cn(
-          "flex items-start gap-2 rounded-lg px-2 py-1.5 text-sm no-underline transition-colors",
+          // ADR-0055 D1-2: タップ領域 44×44 以上。
+          "flex min-h-11 items-center gap-2 rounded-lg px-2 py-1.5 text-sm no-underline transition-colors",
           active ? "bg-primary-soft text-primary-soft-fg" : "text-fg hover:bg-surface-2",
         )}
         style={{ marginLeft: depth * 14 }}
       >
         {/* 「人」に見せる（監査 4）: 名前を先頭に太く、その下に一言、右端に小さく分野。
-            部・課の英語のバッジは出さない（木の形で分かる。必要な 1 文字だけ添える）。 */}
+            部・課の英語のバッジは出さない（木の形で分かる。必要な 1 文字だけ添える）。
+            ADR-0055 D1-4: 小さい注記はモバイル text-sm、デスクトップは lg: で元の大きさのまま。 */}
         <span className="min-w-0 flex-1">
           <span className="flex flex-wrap items-baseline gap-1.5">
             <span className="font-semibold" data-testid="org-node-name">
               {node.name}
             </span>
-            {orgKindMark(node.kind) && <span className="text-[0.7rem] text-fg-subtle">{orgKindMark(node.kind)}</span>}
+            {orgKindMark(node.kind) && (
+              <span className="text-sm text-fg-subtle lg:text-[0.7rem]">{orgKindMark(node.kind)}</span>
+            )}
           </span>
           {node.brief && (
-            <span className="mt-0.5 line-clamp-1 text-xs text-fg-muted" data-testid="org-node-brief">
+            <span className="mt-0.5 line-clamp-1 text-sm text-fg-muted lg:text-xs" data-testid="org-node-brief">
               {node.brief}
             </span>
           )}
         </span>
         {node.genre && (
-          <span className="mt-0.5 shrink-0 text-[0.7rem] text-fg-subtle" data-testid="org-node-genre">
+          <span className="mt-0.5 shrink-0 text-sm text-fg-subtle lg:text-[0.7rem]" data-testid="org-node-genre">
             {node.genre}
           </span>
         )}
         <span
-          className="mt-0.5 shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-[0.7rem] tabular-nums text-fg-subtle"
+          className="mt-0.5 shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-sm tabular-nums text-fg-subtle lg:text-[0.7rem]"
           title="抱えている仕事の数"
         >
           {open}

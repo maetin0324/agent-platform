@@ -33,6 +33,7 @@ import {
   DOCS_TRUNCATED_LABEL,
   docsErrorHint,
 } from "~/lib/labels";
+import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/projects.$id.docs";
 
@@ -104,7 +105,7 @@ export default function ProjectDocsPage({ loaderData }: Route.ComponentProps) {
     <div className="space-y-6" data-testid="project-docs">
       <Link
         to={`/projects/${projectId}`}
-        className="inline-flex items-center gap-1.5 text-sm font-medium text-fg-muted hover:text-fg"
+        className="inline-flex min-h-11 items-center gap-1.5 text-sm font-medium text-fg-muted hover:text-fg"
       >
         <Icon name="arrowLeft" />← 案件詳細
       </Link>
@@ -115,7 +116,8 @@ export default function ProjectDocsPage({ loaderData }: Route.ComponentProps) {
         description={DOCS_SECTION_DESCRIPTION}
         actions={
           tree ? (
-            <span className="flex items-center gap-2 text-xs text-fg-subtle">
+            // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+            <span className="flex items-center gap-2 text-sm text-fg-subtle lg:text-xs">
               <Badge tone="neutral">{tree.repo}</Badge>
               <Mono>
                 {tree.root}/ @ {tree.default_branch}
@@ -304,7 +306,7 @@ function DocsSidebar({
                       }
                       data-testid="docs-folder"
                       data-open={open ? "true" : "false"}
-                      className="inline-flex items-center gap-1 rounded px-1.5 py-1 font-medium text-fg-muted hover:text-fg"
+                      className="inline-flex min-h-11 items-center gap-1 rounded px-1.5 py-1 font-medium text-fg-muted hover:text-fg"
                     >
                       <Icon name={open ? "chevronDown" : "chevronRight"} />
                       <Icon name="folder" />
@@ -320,11 +322,10 @@ function DocsSidebar({
                     to={docsHref(projectId, { path: node.path, q })}
                     data-testid="docs-page-link"
                     data-current={current ? "true" : "false"}
-                    className={
-                      current
-                        ? "block rounded bg-surface-strong px-1.5 py-1 font-medium text-primary no-underline"
-                        : "block rounded px-1.5 py-1 text-fg no-underline hover:bg-surface-strong"
-                    }
+                    className={cn(
+                      "flex min-h-11 items-center rounded px-1.5 py-1 no-underline",
+                      current ? "bg-surface-strong font-medium text-primary" : "text-fg hover:bg-surface-strong",
+                    )}
                   >
                     {node.label}
                   </Link>
@@ -414,7 +415,8 @@ function PageView({
         }
       />
       <CardBody className="space-y-4">
-        <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle">
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <div className="flex flex-wrap items-center gap-2 text-sm text-fg-subtle lg:text-xs">
           <Mono data-testid="docs-page-path">{page.path}</Mono>
           {page.tags?.map((tag) => (
             <Badge key={tag} tone="neutral">
@@ -529,7 +531,8 @@ function DocHistory({ history }: { history: DocCommit[] }) {
       <h3 id="docs-history-heading" className="text-sm font-semibold text-fg">
         {DOCS_HISTORY_LABEL}
       </h3>
-      <ul className="space-y-1 text-xs text-fg-muted" data-testid="docs-history">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <ul className="space-y-1 text-sm text-fg-muted lg:text-xs" data-testid="docs-history">
         {history.map((commit) => (
           <li key={commit.sha} className="flex flex-wrap items-center gap-2">
             <Mono>{shortDocSha(commit.sha)}</Mono>

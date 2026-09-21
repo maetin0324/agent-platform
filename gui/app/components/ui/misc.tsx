@@ -36,7 +36,10 @@ export function PageHeader({
         )}
         <div className="min-w-0">
           {eyebrow && (
-            <div className="mb-0.5 text-xs font-semibold uppercase tracking-wider text-primary">{eyebrow}</div>
+            // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+            <div className="mb-0.5 text-sm font-semibold uppercase tracking-wider text-primary lg:text-xs">
+              {eyebrow}
+            </div>
           )}
           <Heading
             {...titleProps}
@@ -76,7 +79,8 @@ export function SectionTitle({
         <span
           aria-hidden="true"
           className={cn(
-            "rounded-full px-2 py-0.5 text-xs font-semibold tabular-nums",
+            // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+            "rounded-full px-2 py-0.5 text-sm font-semibold tabular-nums lg:text-xs",
             count > 0 ? TONE_SOFT[tone] : "bg-surface-2 text-fg-subtle",
           )}
         >

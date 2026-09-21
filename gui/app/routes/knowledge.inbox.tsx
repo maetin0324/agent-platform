@@ -94,7 +94,7 @@ export default function KnowledgeInboxRoute({ loaderData }: Route.ComponentProps
     <div className="space-y-6" data-testid="knowledge-inbox">
       <Link
         to={knowledgeHref()}
-        className="inline-flex items-center gap-1.5 text-sm font-medium text-fg-muted hover:text-fg"
+        className="inline-flex min-h-11 items-center gap-1.5 text-sm font-medium text-fg-muted hover:text-fg"
       >
         <Icon name="arrowLeft" />← 知識
       </Link>
@@ -105,7 +105,8 @@ export default function KnowledgeInboxRoute({ loaderData }: Route.ComponentProps
         description={KNOWLEDGE_INBOX_DESCRIPTION}
         actions={
           inbox ? (
-            <span className="flex items-center gap-2 text-xs text-fg-subtle">
+            // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+            <span className="flex items-center gap-2 text-sm text-fg-subtle lg:text-xs">
               <Mono data-testid="knowledge-inbox-root">{inbox.root}</Mono>
               <Badge tone="neutral" data-testid="knowledge-inbox-total">
                 {inbox.items.length}
@@ -180,7 +181,8 @@ function CandidateCard({ candidate }: { candidate: KnowledgeCandidate }) {
         description={
           <span className="flex flex-wrap items-center gap-2">
             <Mono data-testid="knowledge-candidate-path">{candidate.path}</Mono>
-            {candidate.created && <span className="text-xs text-fg-subtle">{candidate.created}</span>}
+            {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+            {candidate.created && <span className="text-sm text-fg-subtle lg:text-xs">{candidate.created}</span>}
           </span>
         }
       />
@@ -244,7 +246,7 @@ function CandidateCard({ candidate }: { candidate: KnowledgeCandidate }) {
               data-testid="knowledge-candidate-target"
             />
             {pathProblem ? (
-              <p className="text-xs text-danger" data-testid="knowledge-candidate-target-problem">
+              <p className="text-sm text-danger lg:text-xs" data-testid="knowledge-candidate-target-problem">
                 {pathProblem}
               </p>
             ) : (

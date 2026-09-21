@@ -26,7 +26,7 @@ import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { hintClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
+import { hintClass, labelClass, selectClass, textareaClass, touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import {
@@ -300,7 +300,8 @@ function PendingApprovalCard({
       data-approval-count={approvals.length}
       className="rounded-xl border border-border bg-surface px-3 py-2.5 shadow-xs"
     >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-fg-subtle lg:text-xs">
         <span className="font-medium text-fg">{nodeNames.join("・")}</span>
         <span>{approvalProjectName(head, projects)}</span>
         {approvals.length > 1 && (
@@ -312,7 +313,7 @@ function PendingApprovalCard({
           {head.task_id && (
             <Link
               to={`/tasks/${head.task_id}`}
-              className="underline underline-offset-2"
+              className={cn(touchLinkClass, "underline underline-offset-2")}
               data-testid="approval-task-link"
             >
               裏方のタスク
@@ -379,14 +380,15 @@ function PendingApprovalCard({
           >
             認めない
           </Button>
-          <label htmlFor={`approval-scope-${head.id}`} className="ml-auto flex items-center gap-1.5 text-xs">
+          {/* ADR-0055 D1-2/D1-4: タップ領域 44 以上、モバイルは text-sm、デスクトップは lg: で元の大きさのまま。 */}
+          <label htmlFor={`approval-scope-${head.id}`} className="ml-auto flex items-center gap-1.5 text-sm lg:text-xs">
             <span className="text-fg-subtle">「今後ずっと」の範囲</span>
             <select
               id={`approval-scope-${head.id}`}
               name="scope"
               data-testid="approval-scope"
               defaultValue="node"
-              className={cn(selectClass, "h-8 w-36 text-xs")}
+              className={cn(selectClass, "h-11 w-36 text-sm lg:h-8 lg:text-xs")}
             >
               <option value="node">この担当だけ</option>
               <option value="all">全員</option>
@@ -427,7 +429,8 @@ function DecidedApprovalRow({
       data-approval-id={approval.id}
       className="rounded-xl border border-border bg-surface px-3 py-2.5 shadow-xs"
     >
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-fg-subtle lg:text-xs">
         <span className="font-medium text-fg">{approvalNodeName(approval, org)}</span>
         <span>{approvalProjectName(approval, projects)}</span>
         {approval.decision && <Badge tone="neutral">{decisionLabel(approval.decision)}</Badge>}
@@ -435,7 +438,7 @@ function DecidedApprovalRow({
           {approval.task_id && (
             <Link
               to={`/tasks/${approval.task_id}`}
-              className="underline underline-offset-2"
+              className={cn(touchLinkClass, "underline underline-offset-2")}
               data-testid="approval-task-link"
             >
               裏方のタスク
@@ -469,7 +472,7 @@ function StandingRuleRow({ rule, org }: { rule: StandingRule; org: OrgNode[] }) 
       <div className="min-w-0 flex-1">
         <Badge tone={rule.node_id ? "neutral" : "teal"}>{standingRuleTargetName(rule, org)}</Badge>
         <p className="mt-1.5 text-sm text-fg">{rule.rule}</p>
-        <p className="mt-1 text-xs text-fg-subtle">{rule.created_at}</p>
+        <p className="mt-1 text-sm text-fg-subtle lg:text-xs">{rule.created_at}</p>
       </div>
       <details className="group shrink-0">
         <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-danger-border bg-danger-soft px-3 text-sm text-danger-soft-fg shadow-xs hover:bg-danger hover:text-white">

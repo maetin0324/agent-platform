@@ -146,6 +146,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
     );
   }
 
+  const connected = !disconnected && problem === null;
   return (
     <div className="min-h-screen lg:grid lg:grid-cols-[16rem_1fr]">
       <NotificationsWatcher reportsLive={reportsLive} />
@@ -153,11 +154,15 @@ export default function App({ loaderData }: Route.ComponentProps) {
         approvals={counts?.approvals ?? 0}
         reportsLive={reportsLive}
         approvalsPending={approvalsPending}
-        connected={!disconnected && problem === null}
+        connected={connected}
         celerisVersion={health?.celeris_version ?? null}
         logoutEnabled={session.enabled}
       />
-      <div className="flex min-w-0 flex-col">
+      {/* ADR-0055 D2（ラウンド 2）: モバイルはナビが下部固定タブなので、上には帯（ロゴ・接続状態）だけ置く。 */}
+      <MobileTopBar connected={connected} logoutEnabled={session.enabled} />
+      {/* 下部固定タブ（`h-16` + `env(safe-area-inset-bottom)`）に隠れないよう、本文側に余白を積む
+          （ADR-0055 D1-5。数値は `pb-28`（112px） > タブ高さ 64px + 実機の safe-area の余裕）。 */}
+      <div className="flex min-w-0 flex-col pb-28 lg:pb-0">
         <main className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
           {showBanner && <CelerisBanner celerisApiUrl={gui.celerisApiUrl} problem={problem} />}
           <div className="animate-fade-in">
@@ -217,6 +222,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
           )}
         </footer>
       </div>
+      <MobileTabBar approvalsPending={approvalsPending} reportsLive={reportsLive} />
     </div>
   );
 }
@@ -264,6 +270,29 @@ const NAV_GROUPS: { label: string; items: NavItem[] }[] = [
   { label: "ヘルプ", items: [{ href: "/help", label: "使い方", icon: "book" }] },
 ];
 
+/**
+ * 下部固定タブ（ADR-0055 D2）: Console / ボード / 案件 / 認可 / その他。人が最も見る画面を
+ * 4 本にしぼり、残りは「その他」のシートにまとめる（`MOBILE_OTHER`）。`NAV_GROUPS` とは別に持つ
+ * （デスクトップの並びと優先順位が違うため）。
+ */
+const MOBILE_TABS: NavItem[] = [
+  { href: "/", label: "Console", icon: "message" },
+  { href: "/board", label: "ボード", icon: "layers" },
+  { href: "/projects", label: "案件", icon: "folder" },
+  { href: "/approvals", label: "認可", icon: "shield", badge: "org_approvals" },
+];
+
+/** 「その他」シートの一覧（ADR-0055 D2 の指定どおり）。 */
+const MOBILE_OTHER: NavItem[] = [
+  { href: "/org", label: "組織", icon: "users" },
+  { href: "/reports", label: "報告", icon: "send", badge: "reports" },
+  { href: "/releases", label: "リリース", icon: "layers" },
+  { href: "/knowledge", label: "知識", icon: "database" },
+  { href: "/clusters", label: "クラスタ", icon: "server" },
+  { href: "/accounts", label: "アカウント", icon: "users" },
+  { href: "/help", label: "使い方", icon: "book" },
+];
+
 function isActive(pathname: string, href: string): boolean {
   if (href === "/") return pathname === "/";
   if (href === "/inbox") return pathname === "/inbox";
@@ -274,6 +303,10 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
+/**
+ * デスクトップ専用のサイドバー（ADR-0055 D2 ラウンド 2: モバイルのナビは下部固定タブ
+ * `MobileTabBar` に置き換えた。このコンポーネントは `lg:` 以上でしか出ない）。
+ */
 function Sidebar({
   approvals,
   reportsLive,
@@ -290,31 +323,11 @@ function Sidebar({
   logoutEnabled: boolean;
 }) {
   const { pathname } = useLocation();
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuButton = useRef<HTMLButtonElement>(null);
-  const menuNav = useRef<HTMLElement>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: close the mobile menu when navigation changes.
-  useEffect(() => setMenuOpen(false), [pathname]);
-  useEffect(() => {
-    if (menuOpen) menuNav.current?.querySelector<HTMLAnchorElement>("a")?.focus();
-  }, [menuOpen]);
-  const primary = NAV_GROUPS.flatMap((group) => group.items).filter((item) =>
-    ["/", "/projects", "/approvals"].includes(item.href),
-  );
   return (
-    <aside
-      onKeyDown={(event) => {
-        if (event.key === "Escape" && menuOpen) {
-          setMenuOpen(false);
-          menuButton.current?.focus();
-        }
-      }}
-      className="sticky top-0 z-30 border-b border-border bg-surface/95 backdrop-blur-xl lg:h-screen lg:border-r lg:border-b-0"
-    >
-      <div className="flex h-full flex-wrap items-center lg:flex-col lg:flex-nowrap lg:items-stretch lg:px-3 lg:py-5">
-        <div className="order-1 px-4 pt-3 lg:order-none lg:px-2 lg:pt-0">
-          {/* ADR-0055 D1-2: タップ領域 44×44 以上。 */}
-          <a href="/" className="group flex min-h-11 items-center gap-2.5 rounded-lg no-underline">
+    <aside className="hidden border-r border-border bg-surface/95 backdrop-blur-xl lg:sticky lg:top-0 lg:z-30 lg:block lg:h-screen">
+      <div className="flex h-full flex-col items-stretch px-3 py-5">
+        <div className="px-2">
+          <a href="/" className="group flex items-center gap-2.5 rounded-lg no-underline">
             <span className="grid size-8 place-items-center rounded-lg bg-linear-to-br from-primary via-primary to-teal text-white shadow-md ring-1 ring-white/20 transition-transform group-hover:scale-105 dark:text-bg">
               <Icon name="zap" className="size-4" strokeWidth={2.2} />
             </span>
@@ -322,60 +335,13 @@ function Sidebar({
           </a>
         </div>
 
-        <nav className="order-3 mt-2 grid w-full grid-cols-4 gap-1 px-2 pb-2 lg:hidden" aria-label="よく使う画面">
-          {primary.map((item) => (
-            <a
-              key={item.href}
-              href={item.href}
-              aria-current={isActive(pathname, item.href) ? "page" : undefined}
-              className={cn(
-                "flex min-h-11 items-center justify-center gap-1 rounded-lg px-1 text-sm font-medium no-underline",
-                isActive(pathname, item.href)
-                  ? "bg-primary-soft text-primary-soft-fg"
-                  : "text-fg-muted hover:bg-surface-2",
-              )}
-            >
-              {item.label}
-              {item.badge === "org_approvals" && approvalsPending > 0 && (
-                <span className="rounded-full bg-danger px-1 text-xs text-white">{approvalsPending}</span>
-              )}
-            </a>
-          ))}
-          <button
-            ref={menuButton}
-            type="button"
-            aria-expanded={menuOpen}
-            aria-controls="main-navigation"
-            data-testid="mobile-menu"
-            onClick={() => setMenuOpen((open) => !open)}
-            className="min-h-11 rounded-lg px-1 text-sm font-medium text-fg hover:bg-surface-2"
-          >
-            {menuOpen ? "閉じる" : "メニュー"}
-            {(reportsLive?.unread_secretary ?? 0) + approvals > 0 && (
-              <span role="img" aria-label="未読あり">
-                {" "}
-                •
-              </span>
-            )}
-          </button>
-        </nav>
-
-        <nav
-          id="main-navigation"
-          ref={menuNav}
-          aria-label="メイン"
-          className={cn(
-            "order-4 max-h-[60dvh] w-full flex-col gap-4 overflow-y-auto px-3 pb-3 lg:order-none lg:mt-7 lg:flex lg:max-h-none lg:flex-1 lg:items-stretch lg:gap-5 lg:overflow-y-auto lg:px-0 lg:pb-0",
-            menuOpen ? "flex" : "hidden",
-          )}
-        >
+        <nav aria-label="メイン" className="mt-7 flex flex-1 flex-col items-stretch gap-5 overflow-y-auto">
           {NAV_GROUPS.map((group) => (
             <div key={group.label} className="block">
-              {/* ADR-0055 D1-4: モバイルは text-sm（14px）、デスクトップは元の見出しの大きさのまま。 */}
-              <p className="px-3 pb-1.5 text-sm font-semibold uppercase tracking-wider text-fg-subtle lg:text-[0.7rem]">
+              <p className="px-3 pb-1.5 text-[0.7rem] font-semibold uppercase tracking-wider text-fg-subtle">
                 {group.label}
               </p>
-              <ul className="grid grid-cols-2 gap-1 lg:flex lg:flex-col lg:gap-0.5">
+              <ul className="flex flex-col gap-0.5">
                 {group.items.map((item) => {
                   const active = isActive(pathname, item.href);
                   const unreadSecretary = reportsLive?.unread_secretary ?? 0;
@@ -385,7 +351,7 @@ function Sidebar({
                         href={item.href}
                         aria-current={active ? "page" : undefined}
                         className={cn(
-                          "group relative flex min-h-11 items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm lg:min-h-0 font-medium no-underline transition-colors",
+                          "group relative flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm font-medium no-underline transition-colors",
                           active
                             ? "bg-primary-soft text-primary-soft-fg"
                             : "text-fg-muted hover:bg-surface-2 hover:text-fg",
@@ -394,7 +360,7 @@ function Sidebar({
                         {active && (
                           <span
                             aria-hidden="true"
-                            className="absolute inset-y-1.5 -left-3 hidden w-1 rounded-r-full bg-primary lg:block"
+                            className="absolute inset-y-1.5 -left-3 block w-1 rounded-r-full bg-primary"
                           />
                         )}
                         <Icon
@@ -440,8 +406,8 @@ function Sidebar({
           ))}
         </nav>
 
-        {/* 接続状態とログアウト。同じ要素を 2 つ描かない（data-testid の重複を避ける。docs/adr/0011 D3）ので、狭い画面では order で右上へ寄せる */}
-        <div className="order-2 ml-auto flex items-center gap-2 px-4 pt-3 lg:order-none lg:ml-0 lg:mt-4 lg:block lg:space-y-2 lg:border-t lg:border-border lg:px-1 lg:pt-4">
+        {/* 接続状態とログアウト（モバイルの帯は `MobileTopBar` が別に持つので、data-testid は重複しない）。 */}
+        <div className="mt-4 space-y-2 border-t border-border px-1 pt-4">
           <ConnectionPill connected={connected} celerisVersion={celerisVersion} />
           {logoutEnabled && (
             <Form method="post" action="/logout">
@@ -458,6 +424,190 @@ function Sidebar({
         </div>
       </div>
     </aside>
+  );
+}
+
+/**
+ * モバイルの上部の帯（ADR-0055 D2 ラウンド 2）。ナビは下部固定タブに移したので、ここはロゴと
+ * 接続状態・ログアウトだけ（`lg:hidden`。デスクトップは `Sidebar` がこれらを持つので二重に描かない）。
+ */
+function MobileTopBar({ connected, logoutEnabled }: { connected: boolean; logoutEnabled: boolean }) {
+  return (
+    <header className="sticky top-0 z-30 flex items-center justify-between gap-2 border-b border-border bg-surface/95 px-4 py-2.5 backdrop-blur-xl lg:hidden">
+      <a href="/" className="group flex min-h-11 items-center gap-2.5 rounded-lg no-underline">
+        <span className="grid size-8 place-items-center rounded-lg bg-linear-to-br from-primary via-primary to-teal text-white shadow-md ring-1 ring-white/20 dark:text-bg">
+          <Icon name="zap" className="size-4" strokeWidth={2.2} />
+        </span>
+        <span className="text-[0.95rem] font-bold tracking-tight text-fg">Celeris</span>
+      </a>
+      <div className="flex items-center gap-2">
+        <ConnectionPill connected={connected} celerisVersion={null} className="px-2.5 py-1.5" />
+        {logoutEnabled && (
+          <Form method="post" action="/logout">
+            <button
+              type="submit"
+              data-testid="logout-mobile"
+              aria-label="ログアウト"
+              className="grid min-h-11 min-w-11 place-items-center rounded-lg text-fg-muted hover:bg-surface-2 hover:text-fg"
+            >
+              <Icon name="logout" className="size-4.5" />
+            </button>
+          </Form>
+        )}
+      </div>
+    </header>
+  );
+}
+
+/**
+ * 下部固定タブ（ADR-0055 D2）。`env(safe-area-inset-bottom)` を padding で確保し、実機のホーム
+ * インジケータの上にタブが来るようにする（Playwright は safe-area を再現しない。P-G23-1 の続き）。
+ * 「その他」はシート（下からせり出す一覧）を開く。開いていない間は DOM に無いので、機械検査
+ * （D1-5 固定要素の検査等）には影響しない。
+ */
+function MobileTabBar({
+  approvalsPending,
+  reportsLive,
+}: {
+  approvalsPending: number;
+  reportsLive: ReportsLive | null;
+}) {
+  const { pathname } = useLocation();
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: 画面が変わったらシートは閉じる。
+  useEffect(() => setSheetOpen(false), [pathname]);
+  useEffect(() => {
+    if (sheetOpen) closeButton.current?.focus();
+  }, [sheetOpen]);
+  const unreadSecretary = reportsLive?.unread_secretary ?? 0;
+  const otherActive = MOBILE_OTHER.some((item) => isActive(pathname, item.href));
+
+  // Escape でシートを閉じる（背景はボタンにして a11y の静的要素の警告を避ける）。
+  useEffect(() => {
+    if (!sheetOpen) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setSheetOpen(false);
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [sheetOpen]);
+
+  return (
+    <>
+      {sheetOpen && (
+        <div className="fixed inset-0 z-40 lg:hidden">
+          <button
+            type="button"
+            aria-label="閉じる"
+            onClick={() => setSheetOpen(false)}
+            className="absolute inset-0 bg-black/40"
+          />
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="その他"
+            data-testid="mobile-more-sheet"
+            className="absolute inset-x-0 bottom-16 max-h-[70dvh] overflow-y-auto rounded-t-2xl border-t border-border bg-surface p-4 shadow-lg"
+            style={{ paddingBottom: "calc(1rem + env(safe-area-inset-bottom))" }}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-sm font-semibold text-fg">その他</p>
+              <button
+                ref={closeButton}
+                type="button"
+                onClick={() => setSheetOpen(false)}
+                data-testid="mobile-more-close"
+                aria-label="閉じる"
+                className="grid min-h-11 min-w-11 place-items-center rounded-lg text-fg-muted hover:bg-surface-2 hover:text-fg"
+              >
+                <Icon name="x" className="size-4.5" />
+              </button>
+            </div>
+            <ul className="grid grid-cols-2 gap-2">
+              {MOBILE_OTHER.map((item) => {
+                const active = isActive(pathname, item.href);
+                return (
+                  <li key={item.href}>
+                    <a
+                      href={item.href}
+                      aria-current={active ? "page" : undefined}
+                      className={cn(
+                        "flex min-h-11 items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium no-underline",
+                        active
+                          ? "border-primary-border bg-primary-soft text-primary-soft-fg"
+                          : "border-border text-fg-muted hover:bg-surface-2 hover:text-fg",
+                      )}
+                    >
+                      <Icon name={item.icon} className="size-4 shrink-0" />
+                      <span className="min-w-0 truncate">{item.label}</span>
+                      {item.badge === "reports" && unreadSecretary > 0 && (
+                        <span
+                          data-testid="mobile-reports-unread-badge"
+                          className="ml-auto min-w-5 rounded-full bg-danger px-1.5 py-0.5 text-center text-xs leading-none font-bold text-white tabular-nums shadow-sm dark:text-bg"
+                        >
+                          {unreadSecretary}
+                        </span>
+                      )}
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        </div>
+      )}
+      <nav
+        aria-label="メイン（モバイル）"
+        data-testid="mobile-tabbar"
+        className="fixed inset-x-0 bottom-0 z-30 grid h-16 grid-cols-5 border-t border-border bg-surface/95 backdrop-blur-xl lg:hidden"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      >
+        {MOBILE_TABS.map((item) => {
+          const active = isActive(pathname, item.href);
+          return (
+            <a
+              key={item.href}
+              href={item.href}
+              aria-current={active ? "page" : undefined}
+              className={cn(
+                "relative flex min-h-11 flex-col items-center justify-center gap-0.5 text-sm font-medium no-underline",
+                active ? "text-primary" : "text-fg-muted",
+              )}
+            >
+              <Icon name={item.icon} className="size-5" />
+              <span>{item.label}</span>
+              {item.badge === "org_approvals" && approvalsPending > 0 && (
+                <span
+                  data-testid="mobile-approvals-pending-badge"
+                  aria-hidden="true"
+                  className="absolute top-1.5 right-[calc(50%-1.4rem)] size-2 rounded-full bg-danger"
+                />
+              )}
+            </a>
+          );
+        })}
+        <button
+          type="button"
+          onClick={() => setSheetOpen((value) => !value)}
+          aria-expanded={sheetOpen}
+          data-testid="mobile-tabbar-more"
+          className={cn(
+            "relative flex min-h-11 flex-col items-center justify-center gap-0.5 text-sm font-medium",
+            sheetOpen || otherActive ? "text-primary" : "text-fg-muted",
+          )}
+        >
+          <Icon name="more" className="size-5" />
+          その他
+          {unreadSecretary > 0 && !otherActive && (
+            <span
+              aria-hidden="true"
+              className="absolute top-1.5 right-[calc(50%-1.4rem)] size-2 rounded-full bg-danger"
+            />
+          )}
+        </button>
+      </nav>
+    </>
   );
 }
 
