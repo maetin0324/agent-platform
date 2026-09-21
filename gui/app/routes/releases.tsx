@@ -24,6 +24,7 @@ import {
   promoteConfirmText,
   promotedAtText,
   promoteFailedText,
+  promoteFlashState,
   promoteNeedsTypedSha,
   releaseGateLabel,
   releasePositionLabel,
@@ -115,7 +116,7 @@ export default function ReleasesPage({ loaderData }: Route.ComponentProps) {
             <HelpLink anchor="screens" label="画面ごとの説明" />
           </>
         }
-        description="ビルド済みのリリースの検証状態を見て、検証済みのものへ昇格します（昇格は人が押します）。"
+        description="ビルド済みのリリースの検証状態を見て、検証済みのものへ upgrade します（upgrade は人が押します）。"
       />
 
       <section aria-labelledby="running-heading" data-testid="releases-running" className="space-y-4">
@@ -290,7 +291,7 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
               {item.verify?.at ?? "-"}
             </span>
           </DataItem>
-          <DataItem label="昇格">
+          <DataItem label="upgrade">
             <span data-testid="release-promoted-at" className="text-fg-subtle">
               {promotedAt ?? "まだ"}
             </span>
@@ -303,8 +304,8 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
               <Mono className="text-sm">{notOnMain}</Mono>
             </p>
             <p className={hintClass}>
-              昇格は本番を動かすだけで、あなたのチェックアウトには触れません（ADR-0041 D3）。 上のコマンドを人が流すと
-              `main` が本番に追いつきます。
+              upgrade は本番を動かすだけで、あなたのチェックアウトには触れません（ADR-0041 D3）。
+              上のコマンドを人が流すと `main` が本番に追いつきます。
             </p>
           </Alert>
         )}
@@ -313,7 +314,7 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
           <details className="rounded-lg border border-border bg-surface-2/40" data-testid="release-changes">
             <summary className="cursor-pointer list-none px-3 py-2 text-sm text-fg-muted hover:text-fg">
               <Icon name="layers" className="mr-1.5 inline size-4" />
-              昇格したら変わるもの
+              upgrade したら変わるもの
               <span className="ml-2 text-fg-subtle" data-testid="release-changes-summary">
                 {summary}
               </span>
@@ -348,7 +349,7 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
         {sensitive && item.changes && (
           <Alert tone="danger" title={sensitive} data-testid="release-sensitive">
             <p>
-              昇格の仕組み・本番の設定・エージェントへの指示文に当たるファイルが変わっています。
+              upgrade の仕組み・本番の設定・エージェントへの指示文に当たるファイルが変わっています。
               中身を読んでから押してください。
             </p>
             <ul className="mt-2 space-y-0.5" data-testid="release-sensitive-list">
@@ -368,30 +369,30 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
         )}
 
         {item.promoting && (
-          <Alert tone="warning" title="昇格が走っています" data-testid="release-promoting">
+          <Alert tone="warning" title="upgrade が走っています" data-testid="release-promoting">
             <p>このリリースへの切り替えが進行中です。完了まで数十秒かかります。</p>
           </Alert>
         )}
 
         {promoteFailed && (
-          <Alert tone="danger" title="昇格に失敗しました" data-testid="release-promote-failed">
+          <Alert tone="danger" title="upgrade に失敗しました" data-testid="release-promote-failed">
             <p className="break-all whitespace-pre-wrap font-mono text-xs">{promoteFailed}</p>
             {item.promote_failed?.failed_at && (
               <p className={hintClass}>失敗した日時: {item.promote_failed.failed_at}</p>
             )}
             <p className={hintClass}>
-              旧いバージョンのまま動き続けています（何も壊れていません）。原因を確認してから、もう一度「昇格」を押してください。
+              旧いバージョンのまま動き続けています（何も壊れていません）。原因を確認してから、もう一度「upgrade」を押してください。
             </p>
           </Alert>
         )}
 
-        <ReleasePromoteFlash outcome={fetcher.data} />
+        <ReleasePromoteFlash outcome={fetcher.data} state={promoteFlashState(item)} />
 
         {canPromote ? (
           <details className="group">
             <summary className="inline-flex h-8 cursor-pointer list-none items-center gap-1.5 rounded-lg border border-primary-border bg-primary-soft px-3 text-sm text-primary-soft-fg shadow-xs hover:bg-primary hover:text-white">
               <Icon name="rotate" className="size-4" />
-              昇格
+              upgrade
             </summary>
             <fetcher.Form method="post" className="mt-2 rounded-lg border border-primary-border bg-primary-soft/40 p-3">
               <input type="hidden" name="intent" value="release_promote" />
@@ -415,7 +416,7 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
                     data-testid="release-promote-sha-input"
                   />
                   <p className={hintClass}>
-                    安全に関わる変更を含むリリースは、ボタンを押すだけでは昇格できません（ADR-0041 D4）。
+                    安全に関わる変更を含むリリースは、ボタンを押すだけでは upgrade できません（ADR-0041 D4）。
                   </p>
                 </div>
               )}
@@ -439,13 +440,13 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
                 }}
               >
                 <Icon name="rotate" />
-                昇格する
+                upgrade
               </Button>
             </fetcher.Form>
           </details>
         ) : (
           <p className="text-sm text-fg-muted" data-testid="release-promote-disabled">
-            昇格できません: {reason}
+            upgrade できません: {reason}
           </p>
         )}
       </CardBody>

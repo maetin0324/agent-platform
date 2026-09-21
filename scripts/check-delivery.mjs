@@ -45,7 +45,7 @@ try {
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true,`${s} ${width}: overflow`);
       assert.equal(await page.getByTestId("delivery-status").getByText("レビュー担当: engineering").count(),1);
       measurements.push({width,state:s,text:await page.getByTestId("delivery-status").innerText()});
-      if(s==="ready") { await page.screenshot({path:path.join(out,`ready-${width}.png`),fullPage:true}); const link=page.getByRole("link",{name:/リリース .* を確認してデプロイ/}); assert.equal(await link.getAttribute("href"),`/releases#release-${sha}`); await link.click(); await page.locator(`#release-${sha}`).waitFor(); await page.locator(`#release-${sha} summary`).filter({hasText:/^昇格$/}).click(); assert.equal(await page.locator(`#release-${sha}`).getByRole("button").count()>0,true); }
+      if(s==="ready") { await page.screenshot({path:path.join(out,`ready-${width}.png`),fullPage:true}); const link=page.getByRole("link",{name:/リリース .* を確認してデプロイ/}); assert.equal(await link.getAttribute("href"),`/releases#release-${sha}`); await link.click(); await page.locator(`#release-${sha}`).waitFor(); await page.locator(`#release-${sha} summary`).filter({hasText:/^upgrade$/}).click(); assert.equal(await page.locator(`#release-${sha}`).getByRole("button").count()>0,true); }
     }
     assert.deepEqual(errors,[]); await page.close();
   }

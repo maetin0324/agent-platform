@@ -9641,3 +9641,20 @@ Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus
 - 工程中に検出した運用不備も修正: コンテナビルドログのflush、元repoの非衝突なユーザー変更を拒否しないレビュー条件、GUI切替時の新応答確認→旧停止→全応答確認、draining時の二重レビュー抑止、判定保存までのレビュー排他、異なるSHAのrelease直列化、workspaceの古いCargo出力の掃除。排他の回帰を含むdispatcher 93テストとClippy成功。
 - 最後のasyncロック解放とworkspace掃除は候補に含む。今回のrelease用共有キャッシュは、同じ自前8パッケージの掃除を共有ロック下で先行実施してから既存7ゲートを実行した。次回から候補に含まれるrelease.sh自身が掃除も記録する。
 - 登録元 `run-phases.sh` / `run-gphases.sh` の既存削除は保持。プロバイダ実装の旧HEADは `backup/provider-before-delivery` に保存。実サービス上の全モデルIDとNothing 2a実機/IMEは未検証。Pegasusは最終確認時に未接続で、再利用時は既存方針どおりGUIからTOTP再接続する。
+
+## 2026-09-21: リリース画面「昇格」→ upgrade 表記統一と、完了/失敗が見えない不具合の追加修正
+
+- 依頼の経緯: `190a4d0`（同日）で「押した後の成否が分からない」不具合のうち、**失敗**が見えない側（`promote.sh` が detached で失敗しても `promoting` が false に戻るだけだった）は `promote_failed.json` と赤いバナーで直した。今回の依頼は続報で、(1) **成功**しても現行のコミットハッシュ表示が変わったように見えない、(2) 「昇格」という語が謎、の2点。
+- 調査: バックエンド（`crates/celeris/src/releases.rs` の `release_item`）は `GET /releases` のたびに `current` symlink を読み直して `is_current` / `promoted_at` を再計算しており、値そのものは正しく更新されていた（データの不具合ではない）。またポーリング（`HANDOFF_POLL_MS=2000`、`handoffInFlight`）も `promoting` の間は正しく回っていた。**バグは表示側**: 202 を受けた直後の成功フラッシュが常に「昇格を始めました」のまま固定で、`is_current` が実際に true になっても「完了しました」に切り替わらず、ユーザーは現行バッジの位置が動いたことだけでは完了に気づけなかった。
+- 修正: `gui/app/lib/releases.ts` に `promoteFlashState(item)`（`started` / `in_progress` / `succeeded` / `hidden`）を追加。`is_current` になったら `succeeded`、`promote_failed` が付いたら `hidden`（赤いバナーと二重にしない）。`gui/app/components/Flash.tsx` の `ReleasePromoteFlash` はこの state を受け取り、`succeeded` のときだけ「upgrade が完了しました / {sha12} への切り替えが完了しました。現行のリリースになっています。」に差し替える。
+- 表記統一: `gui/app/routes/releases.tsx`・`gui/app/lib/releases.ts`・`gui/app/components/Flash.tsx`・`gui/app/routes/help.tsx` のリリース画面まわりのボタン・見出し・確認文・エラー文の「昇格」を全て `upgrade` に置換（ボタンラベル、`summary`、`promoteConfirmText`、`promoteAvailability` の理由文言、`promoteFailedText`、`handoffProgressText` を含む）。**別機能**の「成果物を案件の文書に昇格する」（`gui/app/lib/labels.ts` の `PROMOTE_TO_DOC_LABEL` 等、ADR-0044 D7）は名称も対象も別物なので変更していない。バックエンドの `scripts/selfdeploy/*.sh` のコメントや `promote.sh` の英語エラー文言（GUIにそのまま出る）は元々「昇格」を含まないので変更不要だった。
+- 検証:
+  - `cargo test --workspace`: 全 test result が `ok`、失敗0（doctest含む全クレート）。
+  - `cargo clippy --workspace -- -D warnings`: exit 0、警告0。
+  - GUI: `pnpm typecheck` exit 0、`pnpm lint`（biome）exit 0（rename で幅が変わった1箇所のみ自動整形）、`pnpm test` **849 passed**、`pnpm build` 成功。
+  - 実ブラウザでの動作確認: 新規 `scripts/check-upgrade.mjs`（`check-delivery.mjs` と同じ手法。合成APIをスタブし、POST 後のポーリングで `promoting → succeeded` / `promoting → promote_failed` を段階的に返す）で、ビルド済み GUI（393px、Chromium headless）を実際に操作。
+    - 成功シナリオ: `upgrade` の `summary` を開いて `release-promote` ボタンを押す → 202 直後は「upgrade を始めました」→ ポーリング後「upgrade が完了しました / cccccccccccc への切り替えが完了しました」に切り替わり、ヘッダの「現行（current）」が `cccccccccccc` に更新され、対象カードに「現行」バッジが付くことを確認。
+    - 失敗シナリオ: 同様に押した後、ポーリングで `promote_failed` が付くと赤いバナー「upgrade に失敗しました」＋エラー文＋失敗日時が出て、ヘッダの「現行（current）」は `aaaaaaaaaaaa` のまま（＝失敗時にハッシュが変わらないことも確認）。
+    - どちらのシナリオでも画面上に「昇格」の文字列が0件、「upgrade」が1件以上あることをアサートで確認。`pageerror` 0件。
+  - 証跡: `/tmp/celeris-upgrade-gui-23BMgE/`（`success-01-started.png`, `success-02-succeeded.png`, `failure-01-started.png`, `failure-02-failed.png`, 各シナリオの `gui-*.log`）。`node scripts/check-upgrade.mjs` の標準出力は `{"ok":true,"results":[{"scenario":"success","requests":18},{"scenario":"failure","requests":18}],...}`。
+- 未解決事項: Nothing 2a 実機（IME・実タップ）は未検証（既存の既知の未検証事項、今回は合成APIでのヘッドレス確認のみ）。本番反映は別途 release → verify → promote の手続きで人が行う（このタスクでは実装・検証のみ）。

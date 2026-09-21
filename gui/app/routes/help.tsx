@@ -253,7 +253,7 @@ const SCREENS: { href: string | null; icon: IconName; title: string; text: strin
     href: "/releases",
     icon: "layers",
     title: "リリース",
-    text: "agent-platform 自身の新しい版（リリース）を一覧し、検証済みのものへ昇格する画面（ADR-0040）。リリースは scripts/selfdeploy/release.sh が作り（cargo test / clippy / build と GUI の typecheck / test / build が全部通ったときだけ）、verify.sh が本番 DB のコピーで検証する。この画面に出るのはその結果で、「検証済み（ライブ引き継ぎ）」なら動いている仕事を止めずに切り替わり、「検証済み（停止 → 起動）」なら数十秒 API と画面が止まる。「昇格」は確認のうえ人が押す（管理系 API のトークンが要る）。切り替えの最中は上の「切り替えの進行」で旧が引き継ぎ中・新が稼働中になるのを見られる（2 秒ごとに自動更新）。",
+    text: "agent-platform 自身の新しい版（リリース）を一覧し、検証済みのものへ upgrade する画面（ADR-0040）。リリースは scripts/selfdeploy/release.sh が作り（cargo test / clippy / build と GUI の typecheck / test / build が全部通ったときだけ）、verify.sh が本番 DB のコピーで検証する。この画面に出るのはその結果で、「検証済み（ライブ引き継ぎ）」なら動いている仕事を止めずに切り替わり、「検証済み（停止 → 起動）」なら数十秒 API と画面が止まる。「upgrade」は確認のうえ人が押す（管理系 API のトークンが要る）。切り替えの最中は上の「切り替えの進行」で旧が引き継ぎ中・新が稼働中になるのを見られる（2 秒ごとに自動更新）。押した後の成否は各リリースのカードに出る（成功なら現行のコミットハッシュが更新され、失敗なら赤いバナーで理由が出る）。",
   },
   {
     href: "/daemon",

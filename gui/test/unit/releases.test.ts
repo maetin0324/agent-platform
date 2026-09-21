@@ -14,6 +14,7 @@ import {
   promoteConfirmText,
   promotedAtText,
   promoteFailedText,
+  promoteFlashState,
   promoteNeedsTypedSha,
   releaseGateLabel,
   releasePositionLabel,
@@ -94,10 +95,10 @@ describe("promoteAvailability（celeris の 409 と同じ理由で先回りし�
     expect(r.reason).toContain("いま動いている");
   });
 
-  it("昇格中は押せない", () => {
+  it("upgrade 中は押せない", () => {
     const r = promoteAvailability(item({ promoting: true }));
     expect(r.canPromote).toBe(false);
-    expect(r.reason).toContain("昇格が走っています");
+    expect(r.reason).toContain("upgrade が走っています");
   });
 
   it("未検証・検証落ちは押せない", () => {
@@ -212,7 +213,38 @@ describe("main への反映と昇格の記録（ADR-0041 D3）", () => {
 
   it("error が空文字でも、失敗したこと自体は伝える文言を出す", () => {
     const failed = item({ promote_failed: { failed_at: "2026-09-19T12:31:36Z", error: "" } });
-    expect(promoteFailedText(failed)).toBe("昇格に失敗しました（詳しい原因は promote.log を見てください）。");
+    expect(promoteFailedText(failed)).toBe("upgrade に失敗しました（詳しい原因は promote.log を見てください）。");
+  });
+});
+
+// バグ報告 2026-09-21 その 2: 押したあと、成功したのか失敗したのか、現行のコミットハッシュが変わったのか
+// 画面から分からなかった。`ReleasePromoteFlash` はこの状態で「始めました」→「完了しました」に文言を差し替え、
+// 失敗（`release-promote-failed` の赤いバナーが別に出る）のときは二重に出さない。
+describe("promoteFlashState（upgrade の 202 フラッシュをいつ「完了しました」に差し替えるか）", () => {
+  it("is_current になれば succeeded（現行のコミットハッシュ表示もこれで更新される）", () => {
+    expect(promoteFlashState(item({ is_current: true, promoting: false }))).toBe("succeeded");
+    // 走っている最中に current であることは無いはずだが、succeeded を優先する。
+    expect(promoteFlashState(item({ is_current: true, promoting: true }))).toBe("succeeded");
+  });
+
+  it("promoting の間は in_progress", () => {
+    expect(promoteFlashState(item({ is_current: false, promoting: true }))).toBe("in_progress");
+  });
+
+  it("promote_failed が付いたら hidden（赤いバナーに任せる）", () => {
+    expect(
+      promoteFlashState(
+        item({
+          is_current: false,
+          promoting: false,
+          promote_failed: { failed_at: "2026-09-19T12:31:36Z", error: "boom" },
+        }),
+      ),
+    ).toBe("hidden");
+  });
+
+  it("202 直後、まだどちらでもなければ started", () => {
+    expect(promoteFlashState(item({ is_current: false, promoting: false, promote_failed: null }))).toBe("started");
   });
 });
 
@@ -247,7 +279,7 @@ describe("引き継ぎの進行（ADR-0040 D4）", () => {
   it("promote.lock が生きている（promoting）だけでも進行中", () => {
     const promoting: Releases = { ...releasesView, items: [item({ promoting: true })], instances: [] };
     expect(handoffInFlight(promoting)).toBe(true);
-    expect(handoffProgressText(promoting)).toContain("昇格中");
+    expect(handoffProgressText(promoting)).toContain("upgrade 中");
   });
 
   it("running の一行は役割を日本語で出す", () => {

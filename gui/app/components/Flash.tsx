@@ -19,6 +19,7 @@ import type {
 } from "~/celeris/action-types";
 import { Alert } from "~/components/ui/misc";
 import { cancelledCountLabel, commentEffectMessage, taskFieldLabel } from "~/lib/labels";
+import type { PromoteFlashState } from "~/lib/releases";
 
 /**
  * action の結果表示（docs/DESIGN.md §6.3 の 2「`TransitionResult` を flash に載せる」、docs/adr/0005 D2）。
@@ -551,20 +552,48 @@ export function NotifyTestFlash({ outcome }: { outcome: NotifyTestOutcome | unde
 }
 
 /**
- * 「リリース」画面（`/releases`、Phase G14。ADR-0040 D6）の昇格の結果。202 は
+ * 「リリース」画面（`/releases`、Phase G14。ADR-0040 D6）の upgrade の結果。202 は
  * 「`promote.sh` を起こした」だけで、**切り替えが終わったわけではない**ことを必ず書く
  * （旧 celeris はこのあと `draining` になって手元の run を見終わってから終わる。ADR-0040 D4）。
+ *
+ * バグ報告 2026-09-21 その 2: 押したあと、成功したのか失敗したのか、現行のコミットハッシュが
+ * 変わったのか画面から分からなかった。`state`（`~/lib/releases.ts` の `promoteFlashState`）で
+ * 「始めました」→「完了しました」に文言を差し替える（失敗は `release-promote-failed` の
+ * 赤いバナーが別に出すので、ここでは隠す）。
  */
-export function ReleasePromoteFlash({ outcome }: { outcome: ReleasePromoteOutcome | undefined | null }) {
+export function ReleasePromoteFlash({
+  outcome,
+  state,
+}: {
+  outcome: ReleasePromoteOutcome | undefined | null;
+  state: PromoteFlashState;
+}) {
   if (!outcome) return null;
   if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  if (state === "hidden") return null;
+  if (state === "succeeded") {
+    return (
+      <Alert
+        role="status"
+        data-testid="flash"
+        data-flash-kind="ok"
+        tone="success"
+        title="upgrade が完了しました"
+        className="my-2"
+      >
+        <p data-testid="flash-release-promote">
+          {outcome.sha12} への切り替えが完了しました。現行のリリースになっています。
+        </p>
+      </Alert>
+    );
+  }
   return (
     <Alert
       role="status"
       data-testid="flash"
       data-flash-kind="ok"
       tone="success"
-      title="昇格を始めました"
+      title="upgrade を始めました"
       className="my-2"
     >
       <p data-testid="flash-release-promote">

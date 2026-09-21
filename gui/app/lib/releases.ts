@@ -63,7 +63,7 @@ export function releasePositionLabel(item: Pick<ReleaseItem, "is_current" | "is_
  */
 export function promoteAvailability(item: ReleaseItem): { canPromote: boolean; reason: string | null } {
   if (item.is_current) return { canPromote: false, reason: "いま動いているリリースです" };
-  if (item.promoting) return { canPromote: false, reason: "昇格が走っています" };
+  if (item.promoting) return { canPromote: false, reason: "upgrade が走っています" };
   if (item.problem) return { canPromote: false, reason: "リリースのファイルが読めません" };
   const state = releaseVerifyState(item);
   if (state === "unverified") {
@@ -79,7 +79,7 @@ export function promoteConfirmText(item: ReleaseItem): string {
     releaseVerifyState(item) === "ok_live"
       ? "動いている仕事を止めずに引き継ぎます（旧は手元の run を見終わってから終わります）"
       : "celeris と GUI をいったん停止してから起動し直します（数十秒、API と画面が止まります）";
-  return `${item.sha12} に昇格します。${how}。よろしいですか？`;
+  return `${item.sha12} に upgrade します。${how}。よろしいですか？`;
 }
 
 // ---- 昇格の前に何が変わるか（ADR-0041 D4。Phase G15）----------------------
@@ -171,7 +171,7 @@ export function handoffProgressText(view: Pick<Releases, "items" | "instances" |
   for (const i of draining) parts.push(`${i.release}: ${instanceRoleLabel(i.role)}`);
   if (parts.length === 0) {
     const promoting = view.items.filter((i) => i.promoting).map((i) => i.sha12);
-    return `昇格中: ${promoting.join(", ")}`;
+    return `upgrade 中: ${promoting.join(", ")}`;
   }
   return `切り替え中 — ${parts.join(" / ")}`;
 }
@@ -203,5 +203,27 @@ export function promotedAtText(item: Pick<ReleaseItem, "promoted_at">): string |
  */
 export function promoteFailedText(item: Pick<ReleaseItem, "promoting" | "promote_failed">): string | null {
   if (item.promoting || !item.promote_failed) return null;
-  return item.promote_failed.error || "昇格に失敗しました（詳しい原因は promote.log を見てください）。";
+  return item.promote_failed.error || "upgrade に失敗しました（詳しい原因は promote.log を見てください）。";
+}
+
+/**
+ * 「upgrade を始めました」フラッシュ（`ReleasePromoteFlash`）をどう出すか（バグ報告 2026-09-21 その 2:
+ * 押したあと成功したのか失敗したのか、現行のコミットハッシュが変わったのか画面から分からなかった）。
+ *
+ * - `succeeded`: `is_current` になった（＝`current` の symlink がこのリリースを指した。現行のコミット
+ *   ハッシュ表示もこれで更新される）。「完了しました」に文言を差し替える。
+ * - `in_progress`: まだ `promoting`（`promote.lock` の pid が生きている）。「始めました」のまま。
+ * - `hidden`: 失敗して `promote_failed` が付いた。`release-promote-failed` の赤いバナーが別に出るので、
+ *   ここで二重に出さない。
+ * - `started`: 202 を受けた直後、まだ最初の再読み込みが来ていない一瞬。
+ */
+export type PromoteFlashState = "started" | "in_progress" | "succeeded" | "hidden";
+
+export function promoteFlashState(
+  item: Pick<ReleaseItem, "is_current" | "promoting" | "promote_failed">,
+): PromoteFlashState {
+  if (item.is_current) return "succeeded";
+  if (item.promoting) return "in_progress";
+  if (item.promote_failed) return "hidden";
+  return "started";
 }
