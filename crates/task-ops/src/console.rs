@@ -196,6 +196,110 @@ pub fn progress_tie(task_id: TaskId, run_id: &str) -> String {
     format!("p{task_id}:{run_id}")
 }
 
+// ---- 対話 run の「育つ返事」（ADR-0054 D2。Phase 68）----
+
+/// `reply` ブロックの状態（Phase 68）。`streaming` は run 中（`text` はここまでの積み上げ）、`done` は
+/// `messages` に確定した返事（従来どおり）。`Default` は `Done`（過去の `messages` 由来の返事や
+/// このフィールドを知らないテスト・クライアントが黙って「確定済み」を読めるようにするため）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleReplyState {
+    Streaming,
+    #[default]
+    Done,
+}
+
+/// 育つ返事の中の 1 手（`tool_use` / `tool_result` だけ。ADR-0054 D2: 「tool_use は tool + summary を
+/// 1 行、tool_result は折り畳み」）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConsoleReplyStep {
+    pub kind: ProgressKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub error: bool,
+}
+
+/// 対話 run 1 本ぶんの「育つ返事」の積み上げ（`group_progress` の対話版）。`group_progress` と違い、
+/// 先頭・末尾で切らない（対話 run は `CONVERSATION_MAX_TURNS` で予算が小さく、際限なく伸びない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ConsoleReplyAccum {
+    pub task_id: TaskId,
+    pub run_id: String,
+    pub started_at: String,
+    pub updated_at: String,
+    /// 最新の `thinking`（ADR-0054 D2: 「thinking は要約 1 行」＝置き換え、積み上げない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<ConsoleReplyStep>,
+    /// `text` 種の行をそのままつなげたもの（ADR-0054 D2: 「text は本文をそのまま追記」）。
+    #[serde(default)]
+    pub text: String,
+}
+
+/// `Event::WorkerProgress` を**対話 run ごと**に「育つ返事」へ折りたたむ（`group_progress` の対話版）。
+/// `thinking` は最後の 1 行に置き換え、`text` は連結、`tool_use`/`tool_result` は `steps` に順番どおり積む。
+pub fn group_conversation_progress<'a>(
+    rows: impl IntoIterator<Item = &'a EventRow>,
+) -> Vec<ConsoleReplyAccum> {
+    let mut order: Vec<(TaskId, String)> = Vec::new();
+    let mut groups: std::collections::HashMap<(TaskId, String), ConsoleReplyAccum> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let Event::WorkerProgress { run_id, msg, .. } = &row.event else {
+            continue;
+        };
+        let fields = row.event.progress_fields().unwrap_or_default();
+        let text = fields.summary.clone().unwrap_or_else(|| msg.clone());
+        let key = (row.task_id, run_id.clone());
+        let accum = groups.entry(key.clone()).or_insert_with(|| {
+            order.push(key.clone());
+            ConsoleReplyAccum {
+                task_id: row.task_id,
+                run_id: run_id.clone(),
+                started_at: row.ts.clone(),
+                updated_at: row.ts.clone(),
+                thinking: None,
+                steps: Vec::new(),
+                text: String::new(),
+            }
+        });
+        accum.updated_at = row.ts.clone();
+        match fields.kind {
+            Some(ProgressKind::Thinking) => accum.thinking = Some(text),
+            Some(ProgressKind::Text) => accum.text.push_str(&text),
+            Some(kind @ (ProgressKind::ToolUse | ProgressKind::ToolResult)) => {
+                accum.steps.push(ConsoleReplyStep {
+                    kind,
+                    tool: fields.tool.clone(),
+                    text,
+                    error: fields.error,
+                });
+            }
+            // `status`（節目）は「育つ返事」には出さない（今は `thinking`/`text`/`tool_*` だけを見せる。
+            // ADR-0054 D2 の一覧どおり）。構造化されていない行（`kind` 無し）も同様に無視する。
+            _ => {}
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|key| groups.remove(&key))
+        .collect()
+}
+
+/// `acc` に続きの積み上げ（`next`）を足す（SSE が同じ run の更新を 1 件にまとめるため。`merge_progress`
+/// の対話版。ここは先頭・末尾で切らない＝取りこぼしが無い）。
+pub fn merge_conversation_reply(acc: &mut ConsoleReplyAccum, next: &ConsoleReplyAccum) {
+    if next.thinking.is_some() {
+        acc.thinking = next.thinking.clone();
+    }
+    acc.steps.extend(next.steps.iter().cloned());
+    acc.text.push_str(&next.text);
+    acc.updated_at = next.updated_at.clone();
+}
+
 /// `acc` に続きの束（`next`）を足す（SSE が同じ run の更新を 1 件にまとめるため。ADR-0048 D1）。
 ///
 /// 件数と道具の回数は足し、最後の `status` と `updated_at` は新しい方で置き換え、
@@ -402,5 +506,128 @@ mod tests {
             Event::ApprovalRequested,
         )];
         assert!(group_progress(&other).is_empty());
+    }
+
+    /// ADR-0054 D2（Phase 68）: 対話 run の「育つ返事」は thinking を置き換え、text をつなげ、
+    /// tool_use/tool_result を順番どおり積む（先頭・末尾で切らない）。
+    #[test]
+    fn conversation_progress_replaces_thinking_appends_text_and_orders_steps() {
+        let t1 = TaskId::new();
+        let mut rows = Vec::new();
+        let mut id = 0u64;
+        let mut push = |rows: &mut Vec<EventRow>, secs: u32, fields: ProgressFields, msg: &str| {
+            id += 1;
+            let ts = format!("2026-09-21T01:00:{secs:02}Z");
+            rows.push(row(
+                id,
+                id,
+                t1,
+                &ts,
+                Event::worker_progress_with("run-1", msg.to_string(), fields),
+            ));
+        };
+        push(
+            &mut rows,
+            0,
+            ProgressFields::of(ProgressKind::Thinking).with_summary("考え中…"),
+            "thinking",
+        );
+        push(
+            &mut rows,
+            1,
+            ProgressFields::of(ProgressKind::ToolUse)
+                .with_tool("celerisctl")
+                .with_summary("knowledge search rust"),
+            "tool",
+        );
+        push(
+            &mut rows,
+            2,
+            ProgressFields::of(ProgressKind::ToolResult).with_summary("3 件"),
+            "tool result",
+        );
+        push(
+            &mut rows,
+            3,
+            ProgressFields::of(ProgressKind::Thinking).with_summary("まとめ中…"),
+            "thinking2",
+        );
+        push(
+            &mut rows,
+            4,
+            ProgressFields::of(ProgressKind::Text).with_summary("承知しま"),
+            "text1",
+        );
+        push(
+            &mut rows,
+            5,
+            ProgressFields::of(ProgressKind::Text).with_summary("した。"),
+            "text2",
+        );
+        push(
+            &mut rows,
+            6,
+            ProgressFields::of(ProgressKind::Status).with_summary("節目"),
+            "status",
+        );
+
+        let groups = group_conversation_progress(&rows);
+        assert_eq!(groups.len(), 1);
+        let g = &groups[0];
+        assert_eq!(g.task_id, t1);
+        assert_eq!(g.run_id, "run-1");
+        // thinking は最後の 1 行に置き換わる（積み上げない）。
+        assert_eq!(g.thinking.as_deref(), Some("まとめ中…"));
+        // text はそのまま連結される。
+        assert_eq!(g.text, "承知しました。");
+        // tool_use / tool_result は順番どおり積まれる（status は積まれない）。
+        assert_eq!(g.steps.len(), 2);
+        assert_eq!(g.steps[0].kind, ProgressKind::ToolUse);
+        assert_eq!(g.steps[0].tool.as_deref(), Some("celerisctl"));
+        assert_eq!(g.steps[0].text, "knowledge search rust");
+        assert_eq!(g.steps[1].kind, ProgressKind::ToolResult);
+        assert_eq!(g.steps[1].text, "3 件");
+        assert_eq!(g.started_at, "2026-09-21T01:00:00Z");
+        assert_eq!(g.updated_at, "2026-09-21T01:00:06Z");
+    }
+
+    /// SSE の積み上げ（`merge_conversation_reply`）は取りこぼしが無い（`merge_progress` と違い、
+    /// 先頭・末尾で切らない）。
+    #[test]
+    fn merge_conversation_reply_accumulates_without_truncation() {
+        let t1 = TaskId::new();
+        let mut acc = ConsoleReplyAccum {
+            task_id: t1,
+            run_id: "run-1".into(),
+            started_at: "2026-09-21T01:00:00Z".into(),
+            updated_at: "2026-09-21T01:00:00Z".into(),
+            thinking: Some("考え中…".into()),
+            steps: vec![ConsoleReplyStep {
+                kind: ProgressKind::ToolUse,
+                tool: Some("celerisctl".into()),
+                text: "knowledge search rust".into(),
+                error: false,
+            }],
+            text: "承知しま".into(),
+        };
+        let next = ConsoleReplyAccum {
+            task_id: t1,
+            run_id: "run-1".into(),
+            started_at: "2026-09-21T01:00:05Z".into(),
+            updated_at: "2026-09-21T01:00:05Z".into(),
+            thinking: None,
+            steps: vec![ConsoleReplyStep {
+                kind: ProgressKind::ToolResult,
+                tool: None,
+                text: "3 件".into(),
+                error: false,
+            }],
+            text: "した。".into(),
+        };
+        merge_conversation_reply(&mut acc, &next);
+        assert_eq!(acc.thinking.as_deref(), Some("考え中…"), "空なら置き換えない");
+        assert_eq!(acc.text, "承知しました。");
+        assert_eq!(acc.steps.len(), 2);
+        assert_eq!(acc.updated_at, "2026-09-21T01:00:05Z");
     }
 }

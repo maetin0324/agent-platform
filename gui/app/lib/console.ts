@@ -237,6 +237,10 @@ export function consoleWaitingCounts(blocks: readonly ConsoleBlock[]): ConsoleWa
  * SSE で届いた 1 ブロックを、いま画面にある一覧に足す。
  * - `progress` は run ごとに 1 行にまとめて表示する（D1「Console は progress を run ごとに束ねる」）ので、
  *   同じ `run_id` の既存の行があれば **その場で置き換える**（新しい 1 行として積み増さない）。
+ * - ADR-0054 D2（Phase 68）: 育つ `reply`（`state = "streaming"`）も同じく `run_id` で置き換える
+ *   （celeris が送る `text`/`thinking`/`steps` は**その接続で見た積み上げそのもの**なので、置き換えるだけで
+ *   吹き出しが育つ。完了して `state = "done"` の `reply` が届いたときも同じ `run_id` なので、同じ位置で
+ *   確定した本文に差し替わる＝「吹き出しが確定」）。
  * - それ以外で同じ `cursor`（= 同じブロック）が既にあれば、再送として無視する。
  * - `maxItems` を超えたら古い方から落とす（ブラウザのメモリを無限に増やさないための簡易な上限。
  *   越えて見たい場合は `GET /console` の `since` によるページングを別途足す余地がある。docs/PROGRESS.md 参照）。
@@ -251,6 +255,27 @@ export function appendConsoleBlock(
     if (idx >= 0) {
       const next = items.slice();
       next[idx] = incoming;
+      return next;
+    }
+  } else if (incoming.kind === "reply" && incoming.run_id) {
+    const idx = items.findIndex(
+      (b) => b.kind === "reply" && b.run_id === incoming.run_id && b.task_id === incoming.task_id,
+    );
+    if (idx >= 0) {
+      const existing = items[idx];
+      const next = items.slice();
+      // celeris は育つ返事（`state = "streaming"`）を**その接続で見た増分だけ**で送る（`text` はその回
+      // に届いた分だけ、`steps` もその回の分だけ）。GUI 側で積み上げてはじめて 1 つの育つ吹き出しになる。
+      // 確定した返事（`state = "done"`）は `messages` から来た本文そのもの（増分ではない）なので置き換える。
+      next[idx] =
+        incoming.state === "streaming" && existing.kind === "reply"
+          ? {
+              ...incoming,
+              text: existing.text + incoming.text,
+              thinking: incoming.thinking ?? existing.thinking,
+              steps: [...(existing.steps ?? []), ...(incoming.steps ?? [])],
+            }
+          : incoming;
       return next;
     }
   } else if (items.some((b) => b.cursor === incoming.cursor)) {

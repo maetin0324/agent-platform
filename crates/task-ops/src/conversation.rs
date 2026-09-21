@@ -143,11 +143,20 @@ pub fn start_with_milestone(
 
 /// 監査 M-3: そのノード・その案件の、まだ終端に達していない対話用タスク（古い順）。
 /// 新しい対話タスクの `depends_on` に入れて、返事が送った順に返るようにする。
+///
+/// ADR-0054 D1/D2（Phase 68）: **CoS**（`task_core::COS_ID`）は案件をまたいでも継続セッションが
+/// 全体で 1 本（`node_sessions` は `project_id = None` 固定）なので、待ち行列も**案件をまたいで**
+/// 直列化する（そうしないと、`scope=project:<id>` の一言と `scope=all`（無案件）の一言が同じ CoS の
+/// run として同時に走り、同じ継続セッションに 2 つの run がぶつかる）。それ以外のノードは従来どおり
+/// `project_id` が一致するものだけ（ノードの継続セッションは案件ごとには分かれていないが、対話の
+/// 直列化そのものは Phase 27 の監査 M-3 のまま案件単位でよい。人が違う案件で同時に別々の対話をしても
+/// 待たされない）。
 fn open_conversation_tasks(
     store: &dyn TaskStore,
     node_id: &str,
     project_id: Option<ProjectId>,
 ) -> Result<Vec<TaskId>, OpsError> {
+    let is_cos = node_id == task_core::COS_ID;
     let filter = ListFilter {
         statuses: vec![
             Status::Draft,
@@ -156,7 +165,8 @@ fn open_conversation_tasks(
             Status::Blocked,
             Status::Reviewing,
         ],
-        project_id,
+        // CoS は案件で絞らずストアから全部引き、下のフィルタで案件をまたいで直列化する。
+        project_id: if is_cos { None } else { project_id },
         ..ListFilter::default()
     };
     let page = store.list_page(&filter, ListOrder::CreatedDesc, None, OPEN_TASK_SCAN)?;
@@ -166,7 +176,7 @@ fn open_conversation_tasks(
         .filter(|t| {
             task_core::is_conversation(t)
                 && t.assignee.as_deref() == Some(node_id)
-                && t.project_id == project_id
+                && (is_cos || t.project_id == project_id)
         })
         .collect();
     open.sort_by_key(|t| t.created_at);
@@ -1126,6 +1136,110 @@ mod tests {
         .expect("start")
         .task;
         assert!(no_project.depends_on.is_empty());
+
+        // 1 通目が終われば 2 通目が run できる。
+        store
+            .acquire_lease(first.id, "run-1", std::time::Duration::from_secs(60))
+            .expect("lease");
+        store
+            .apply_transition(first.id, Trigger::WorkerDone, None)
+            .expect("done");
+        store
+            .apply_transition(first.id, Trigger::ReviewPass, None)
+            .expect("pass");
+        let ready: Vec<TaskId> = store
+            .ready_tasks(10)
+            .expect("ready")
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(
+            ready.contains(&second.id),
+            "1 通目が done なら 2 通目が ready: {ready:?}"
+        );
+    }
+
+    /// ADR-0054 D1/D2（Phase 68）: **CoS**（`task_core::COS_ID`）は継続セッションが全体で 1 本
+    /// （案件で分かれていない）ので、待ち行列も案件をまたいで直列化する。案件つきの一言のあと、
+    /// 案件なしの一言（`scope=all`）を打っても、CoS がまだ走っていれば 2 通目は `ready` にならない
+    /// （2 つの run が同じ継続セッションにぶつからない）。他のノードは従来どおり案件ごとに別の列。
+    #[test]
+    fn the_cos_serializes_across_projects_but_other_nodes_do_not() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        store
+            .org_upsert(&node("cos", None, OrgKind::Secretary, Some("secretary")))
+            .expect("org upsert");
+        store
+            .org_upsert(&node("coding", Some("cos"), OrgKind::Department, None))
+            .expect("org upsert");
+        let (roles, genres) = specs();
+        let project = Project {
+            archived_at: None,
+            paused_from: None,
+            id: ProjectId::new(),
+            title: "Pluvio".into(),
+            request: "r".into(),
+            status: ProjectStatus::Proposed,
+            secretary_summary: None,
+            workspace: None,
+            created_at: now(),
+            updated_at: now(),
+        };
+        store.project_create(&project).expect("project");
+
+        // 1 通目: 案件の文脈で CoS に話す。
+        let first = start(
+            &store,
+            "cos",
+            Some(project.id),
+            "この案件どう？",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
+        // 2 通目: 案件なしで CoS に話す（違う `project_id` だが同じ CoS の継続セッション）。
+        let second = start(
+            &store,
+            "cos",
+            None,
+            "雑談",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
+        assert_eq!(
+            second.depends_on,
+            vec![first.id],
+            "CoS は案件が違っても 1 通目を待つ"
+        );
+        let ready: Vec<TaskId> = store
+            .ready_tasks(10)
+            .expect("ready")
+            .iter()
+            .map(|t| t.id)
+            .collect();
+        assert_eq!(ready, vec![first.id], "2 通目はまだ run できない");
+
+        // 対照: CoS 以外のノード（"coding"）は案件をまたいだら別の列（待たない）。
+        let other_project_msg = start(
+            &store,
+            "coding",
+            None,
+            "別件",
+            &roles,
+            &genres,
+            CONVERSATION_GENRE,
+            now(),
+        )
+        .expect("start")
+        .task;
+        assert!(other_project_msg.depends_on.is_empty());
 
         // 1 通目が終われば 2 通目が run できる。
         store

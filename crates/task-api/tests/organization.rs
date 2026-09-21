@@ -8,7 +8,7 @@ mod common;
 
 use common::*;
 use serde_json::{Value, json};
-use task_core::{GenreSpec, RoleSpec, Status, TaskKind, TaskStore, Tier};
+use task_core::{GenreSpec, NodeSessionStore, RoleSpec, Status, TaskKind, TaskStore, Tier};
 
 fn auth() -> [(&'static str, String); 1] {
     [("authorization", format!("Bearer {TOKEN}"))]
@@ -176,6 +176,49 @@ async fn org_can_be_created_listed_patched_and_deleted() {
     assert_problem(&resp, 404, "org_node_not_found");
     let resp = send(&app, pa("/api/v1/org/ghost", &json!({"name": "x"}))).await;
     assert_problem(&resp, 404, "org_node_not_found");
+}
+
+/// ADR-0054 D3（Phase 68）: `GET /org` は部門長（department）の継続セッション（`kind = lead`）があれば
+/// `lead_sessions` に `node_id`/`turns`/`approx_tokens`/`last_used_at` を出す。セッションの無い部門・
+/// 部門でないノード（section・secretary）には出ない。
+#[tokio::test]
+async fn org_list_carries_lead_session_summaries_for_departments_with_a_continuing_session() {
+    let env = env_with_token();
+    let app = env.router();
+    seed_org(&app).await;
+
+    let resp = send(&app, g("/api/v1/org")).await;
+    assert!(
+        resp.json().get("lead_sessions").is_none(),
+        "まだセッションが無ければ出さない: {}",
+        resp.text()
+    );
+
+    let now = time::OffsetDateTime::now_utc();
+    env.store
+        .node_session_create(&task_core::NodeSession {
+            id: "01J9ZX5T3K8Q7W6V5R4P3N2M1J".into(),
+            node_id: "research".into(),
+            kind: task_core::SessionKind::Lead,
+            project_id: None,
+            adapter: "claude-code".into(),
+            account_id: None,
+            session_id: "sess-1".into(),
+            turns: 3,
+            approx_tokens: 12_345,
+            created_at: now,
+            last_used_at: now,
+            retired_at: None,
+        })
+        .expect("create session");
+
+    let resp = send(&app, g("/api/v1/org")).await;
+    let sessions = resp.json()["lead_sessions"].as_array().cloned().unwrap();
+    assert_eq!(sessions.len(), 1, "{sessions:?}");
+    assert_eq!(sessions[0]["node_id"], "research");
+    assert_eq!(sessions[0]["turns"], 3);
+    assert_eq!(sessions[0]["approx_tokens"], 12345);
+    assert!(sessions[0]["last_used_at"].is_string());
 }
 
 /// ADR-0033 D1: 使用中（未終了のタスクを抱えている / 子を持つ）ノードの削除は 409。

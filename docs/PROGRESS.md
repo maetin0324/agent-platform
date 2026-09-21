@@ -10933,3 +10933,154 @@ D1 の核心）、テストの追加、ドキュメントの追記を行った�
 - `resume_failed` の検出をイベントソース経由（run 途中）ではなく `resolve_node_session` 呼び出し時点の
   引数として渡す設計に統一するかどうかは、実機で resume 拒否がどのくらいの頻度・タイミングで起きるか
   観測してから判断するのが良い（今回は「要約が抜けても実害は小さい」という判断で見送った）。
+
+## Phase 68 — Console に run の進行を流す・チャット吹き出し・「新しい会話」（ADR-0054 D2/D3。2026-09-21）
+
+Phase 67（D1、継続セッション）の続き。CoS・ノードとの対話 run の進行（thinking → tool call → text）を
+Console にその場で流し（`reply` ブロックが run 中に育つ）、actions を出したら run が止まる（既存の
+仕組みを確認）、CoS の対話 run に読み取りだけの道具を許し、入力の直列化（キュー）の穴を 1 つ直し、
+GUI をチャット吹き出しにして「新しい会話」ボタンを配線した。詳しい設計判断・逸脱は
+`docs/adr/0054-stateful-sessions-and-streaming-chat.md` の「Phase 68 追記」。
+
+作業を始めた worktree は、直前の Phase 67 の merge（`worktree-agent-a1f8361ec7045b15d`）を picked up
+していなかった（ブランチが分岐した時点が早く、`node_sessions` 一式が丸ごと無かった）。`git merge --ff-only
+main` で自分のブランチを進めてから着手した（このブランチに独自コミットは無かったため非破壊）。
+
+### 受け入れ条件ごとの結果
+
+1. **run 中の progress を Console へ流す（D2）**: `crates/task-api/src/types.rs` の
+   `ConsoleBlock::Reply` に `state`（`streaming` | `done`。既定 `done`）・`thinking`（置き換え式）・
+   `steps[]`（`tool_use`/`tool_result` を順番どおり）を追加。`crates/task-ops/src/console.rs::
+   group_conversation_progress`/`merge_conversation_reply`（対話 run の `Event::WorkerProgress` を
+   `thinking` は置き換え・`text` は連結・`tool_use`/`tool_result` は `steps` に積む、という「育つ返事」に
+   折りたたむ純粋関数）。`crates/task-api/src/console.rs::event_blocks` は対話タスク（`task_core::
+   is_conversation`）の進行を `Progress` ではなく `Reply`（`state=streaming`）として出す（対話でない
+   タスクは従来どおり折り畳みの `Progress`）。`poll_console`（SSE）は `progress` と同じ「run ごとに
+   1 秒に 1 回まで」の積み上げを `Reply` にも適用（キーは既存の `progress_tie(task_id, run_id)` を
+   共有）。run が終わり `messages` に確定すると、別途 `state=done` の `Reply` が届く（GUI 側が
+   `run_id`/`task_id` で同じ吹き出しとして扱う）。
+   - claude-code/codex は `text` を最終 1 回で出す（stream-json / app-server イベントの delta 化は
+     今回やっていない。task 側の指示どおり「ストリームできないアダプタは最終テキストを 1 回出す」で可）。
+     ACP は既存の `ChunkBuffer`（改行 or 400 字で flush）で元々トークン単位の部分文字列を出している
+     ので、そのまま「育つ返事」の `text` 追記に乗る。
+   - `cargo test -p task-ops --lib console::` → **6 passed**（既存 4 + 新規 2:
+     `conversation_progress_replaces_thinking_appends_text_and_orders_steps` /
+     `merge_conversation_reply_accumulates_without_truncation`）。
+   - `cargo test -p task-api --test console` → **12 passed**（既存 10 + 新規 2:
+     `a_conversation_runs_progress_becomes_a_growing_streaming_reply`（`GET /console` が対話 run の
+     進行を 1 件の `reply`（`state=streaming`、`thinking`/`steps`/`text` が正しく組まれる）として出す）、
+     `the_stream_grows_a_reply_block_for_a_conversation_run_then_settles_it`（SSE で 2 回に分けて
+     `text` を送ると 2 回とも「その回の増分だけ」が届き、最後に `messages` から `state=done` の確定
+     ブロックが来ることを確認）。
+2. **actions で run が止まる（既存の仕組みを確認。新規実装なし）**: Phase 60b の
+   `absorb_console_actions`（run の完了処理の中で `console_action_runs` の一意制約により 1 回だけ実行）と、
+   通常の `Event::Transitioned` → `task` ブロックの経路がそのまま「actions を出したら run はそこで終わり、
+   作ったタスクが返事の直下に `task` ブロックとして出る」を満たす。既存テスト
+   `absorb_console_actions_executes_the_declared_actions_for_the_cos_only` /
+   `record_conversation_reply_runs_actions_and_attaches_the_result` が green のままであることで確認
+   （後述の `cargo test --workspace` に含む）。
+3. **CoS の対話 run に読み取りだけの道具を許す**: `crates/task-worker/src/protocol.rs` に
+   `CONVERSATION_READONLY_CELERISCTL`（`knowledge search`/`knowledge get`/`ls`/`show`/
+   `projects ls`/`projects show`）を定数で追加。`req.context.conversation_addressee ==
+   Some(ConversationAddressee::Secretary)` で判定（Phase 28 から既にある値、新しい配線は無い）。
+   - `claude-code`: `--allowedTools` に `Bash(celerisctl <サブコマンド>:*)` を 6 つ渡す。
+     `cargo test -p task-worker --lib claude_code::` → **50 passed**（既存 48 + 新規 2:
+     `the_cos_conversation_run_gets_a_readonly_tool_allowlist` / `non_cos_runs_get_no_tool_allowlist`）。
+   - `codex`: `sandbox_mode` を CoS 対話 run だけ `"read-only"`（それ以外は従来どおり
+     `"workspace-write"`）。`cargo test -p task-worker --lib codex::` → **33 passed**（既存 31 + 新規 2）。
+   - `acp`: 道具単位の許可リストが無い（`session/request_permission` に celerisctl のサブコマンドと
+     対応づけられる識別子が来ない）ため、CoS 対話 run 中は `AcpPermission::Deny` を強制（fail-closed。
+     設定が `allow` でも拒否側の選択肢を選ぶ）。`cargo test -p task-worker --lib acp::` → **24 passed**
+     （既存 23 + 新規 1）。
+   - `celerisctl projects ls|show`（`crates/celerisctl/src/commands/projects.rs`。新規。既存の `ls`/
+     `show` がタスクだけで案件の一覧・詳細が無かったため追加）。`cargo test -p celerisctl --bin
+     celerisctl projects::` → **2 passed**。
+4. **入力のキュー**: 既存の Phase 27 監査 M-3 の直列化（`task_ops::conversation::
+   open_conversation_tasks` が未終了の対話タスクを新しいタスクの `depends_on` に入れ、`ready_tasks`
+   は `depends_on` が全部 `done` のものしか返さない）が、D2 の「run 中も打てる。run が終わってから次の
+   run になる」をそのまま満たしていた。ただし CoS（`task_core::COS_ID`）は継続セッションが
+   `project_id` に関わらず全体で 1 本（D1）なのに、直列化は `project_id` が一致するものだけを見ていた
+   バグを 1 つ見つけて直した（案件つきの一言のあとに案件なしの一言を続けて打つと、直列化されずに
+   2 つの run が同じ継続セッションにぶつかる余地があった）。`node_id == COS_ID` のときだけ
+   `project_id` を無視して直列化するよう `open_conversation_tasks` を変更。`cargo test -p task-ops --lib
+   conversation::` → **11 passed**（既存 10 + 新規 1: `the_cos_serializes_across_projects_but_other_
+   nodes_do_not`。案件つき→案件なしの 2 通が直列化され、CoS 以外のノードは案件が違えば直列化され
+   ないことの両方を 1 本で検査）。
+5. **GUI（D3）**:
+   - `gui/app/components/ConsoleBlockItem.tsx`: `ReplyBlockView` が `state=streaming` のとき
+     「考え中…」の 1 行（パルスする丸のインジケータ付き）→ `steps[]` の行（`ReplyStepRow`。
+     `tool_use`/`tool_result` を `ProgressLineRow` と揃えた見た目）→ 本文、の順に同じ吹き出しの中で
+     描く。`state=done`（既定）は従来どおりの確定した吹き出し。左右の寄せ（人＝右、CoS 側＝左）は
+     Phase 71/G25 で既に実装済みだったので変更なし。
+   - `gui/app/lib/console.ts::appendConsoleBlock`: `reply` ブロックも `progress` と同じく
+     `run_id`（+`task_id`）で同じ吹き出しに束ねる。`state=streaming` は SSE が増分だけを送るため GUI 側で
+     `text` を連結・`steps` を積み増す・`thinking` は空でなければ置き換える。`state=done` は確定した
+     本文そのものなので置き換える。
+   - 「新しい会話」: `gui/app/routes/console.new-conversation.ts`（新規リソースルート、
+     `POST /console/new-conversation` の中継）+ `Console.tsx` の `NewConversationButton`
+     （`window.confirm` で確認。ブラウザ以外では確認せず送る。既存の `ProjectRepos.tsx` の「削除」と
+     同じ作り）。`CelerisClient.post` が 204・本文なしを扱えていなかった（`delete` にしか無かった）ので
+     直した。
+   - 「この案件の文脈で話す」: 既存の scope 機構（`scope=project:<id>` を見ているときの既定の返信先）は
+     Phase 60b/G22 から機能していたが、明示のラベルが無かったので `ConsoleInput` に
+     `console-scope-context` バッジを追加した。
+   - 組織画面（`/org?selected=<department>`）に「継続中のセッション: turns / tokens / 最終使用」。
+     `GET /org` の応答に `lead_sessions[]`（`NodeSessionSummary`。`effective_profiles[]` と同じ
+     「対応するものだけ渡す配列」の形）を追加（`crates/task-api/src/handlers.rs::org_list`）。部門長
+     （`OrgKind::Department`）だけが対象、CoS は対象外（D3 の記述どおり）。
+   - `pnpm gen:types` 差分を `docs/api/v1/api-v1.schema.json`（`UPDATE_SCHEMA=1 cargo test -p
+     task-api --lib`）から反映（`ConsoleReplyState`/`ConsoleReplyStep`/`OrgList.lead_sessions`/
+     `NodeSessionSummary` が増えた）。
+
+### 検証（証拠コマンドと結果）
+
+- `cargo test --workspace --no-fail-fast`: **exit 0。1685 passed / 0 failed**（73 個の `test result:`
+  ブロックを合計。doctest 含む全クレート。個別クレートの内訳は上の各節のとおり）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: **exit 0。警告 0**。
+- `UPDATE_SCHEMA=1 cargo test -p task-api --lib`: 53 passed。`docs/api/v1/api-v1.schema.json` に
+  `ConsoleReplyState`/`ConsoleReplyStep`/`NodeSessionSummary` 等が追加された差分あり（コミットに含む）。
+- `bash scripts/sync-gui-docs.sh` → `gui/docs/celeris-api-v1.md` を更新。`--check` で up to date。
+- GUI: `pnpm gen:types && git diff app/celeris/types.ts` → `ConsoleBlock.reply` に `state`/`thinking`/
+  `steps`、`ConsoleReplyStep`、`OrgList.lead_sessions`、`NodeSessionSummary` の追加のみ（再生成しても
+  安定。手で編集していない）。
+- `pnpm typecheck` exit 0。`pnpm lint` exit 0（`biome check --write` で import 順・フォーマットを 2 回
+  自動修正してから確認）。`pnpm test` **881 passed / 61 files**（Phase 72 の 878 から +3: `appendConsoleBlock`
+  の育つ返事のテスト 3 本）。`pnpm build` exit 0（client・server とも）。
+- `pnpm mobile-audit` **exit 0、違反 0 件**（21 route。ADR-0055 D1 の元の一覧に無かった
+  `/org?selected=coding`（部門長の継続セッション表示。Phase 68 で追加）を含む）。1 度、育つ返事の
+  fixture を Console の既定モック（`consoleBlocks()`）に混ぜたところ `fixed-overlay` が 2 件出た
+  （`console-stream` は内側で `overflow-y-auto` するボックスだが、`checkFixedOverlays` は文書全体しか
+  スクロールしないため、内側のボックスの中身が増えると末尾の要素の座標だけを見て偽陽性になる。
+  実際にはスクロールで見える）。育つ返事の fixture は `consoleBlocks()` には混ぜず、単体テスト専用の
+  `consoleReplyBlock()`/`consoleGrowingReplySteps()` に分けて解決した。もう 1 件（`org-detail` ルートを
+  足して初めて見えた、部門長パネルの「追加・削除は「認可」から」リンクの `tap-target`/`font-size`）は
+  Phase 68 より前からの潜在的な違反（この画面を今回まで一度も監査していなかった）で、`touchLinkClass` +
+  `text-sm` に直して解消した（`gui/app/routes/org.tsx`）。
+
+### 実機の実施状況
+
+未実施（認証・ネットワークが使えるサンドボックスではない）。本番運用手順（次の人・エージェントへの
+依頼）:
+
+1. **claude-code**: CoS に「関連研究の知識を教えて」のように話しかけ、`runs/<id>/request.json` に
+   渡した実プロセスの引数（`ps` かログ）に `--allowedTools 'Bash(celerisctl knowledge search:*),...'`
+   が渡っていること、CoS がその中の 1 つを呼んで検索結果を返せること、`celerisctl add`/`cancel` 等
+   許可リストに無い操作を試みさせても実行できないこと（プロンプトで誘導するか、確認できなければ
+   コードレビューで足りる）を確認する。
+2. **codex**: CoS の分野が codex のロールに解決する設定で同様に話しかけ、`-c sandbox_mode="read-only"`
+   が渡ること、`artifacts/result.json` が実際に書けること（Phase 68 追記の未解決事項 1）、
+   ファイルの新規作成やコマンド実行が拒否されることを確認する。
+3. **acp**: opencode 等 ACP エージェントで CoS に話しかけ、道具の許可要求（`session/request_permission`）
+   が来たときに一律拒否されること、かつ通常の対話（許可要求を経ない範囲）は返せることを確認する。
+4. **GUI**: スマホ幅（393px）で「新しい会話」を押す→確認ダイアログ→`POST /console/new-conversation`
+   が 204 で通ること、CoS に 1 往復して「考え中…」→ tool call の行 → 本文の順に同じ吹き出しが育ち、
+   完了で確定すること、案件の画面から話しかけると「この案件の文脈で話す」バッジが出ること、部門長
+   ノードを選ぶと「継続中のセッション」が出ることを確認する。
+
+### 未解決事項・提案
+
+詳細は `docs/adr/0054-stateful-sessions-and-streaming-chat.md` の「Phase 68 追記」7 を参照。要点:
+(1) codex の read-only sandbox + `--add-dir` の組み合わせで `artifacts/result.json` を書けるかは実機
+未確認、(2) ACP の読み取り許可は fail-closed（保証は「書き込みを誤って許さない」側だけ）、
+(3) claude-code の `--allowedTools` の書式（`Bash(cmd:*)`）が実際の claude-code CLI と一致するかは
+実機未確認、(4) Phase 67 の未解決事項（要約と直近のやり取りの重複）は今回も見送り。

@@ -18,6 +18,7 @@ use commands::gate::{self, AnswerArgs, ApproveArgs, RejectArgs};
 use commands::knowledge::{self, KnowledgeCommand};
 use commands::org::{self as org_cmd, OrgCommand};
 use commands::plan::{self, PlanArgs};
+use commands::projects::{self, ProjectsCommand};
 use commands::query::{self, LogArgs, LsArgs, ShowArgs};
 use commands::replay::{self, ReplayArgs};
 use commands::worker::{self, WorkerCommand};
@@ -71,6 +72,11 @@ enum Command {
         #[command(subcommand)]
         command: OrgCommand,
     },
+    /// ADR-0054 D2（Phase 68）: 案件の一覧・詳細（`ls`/`show` のタスク版）。読み取り専用。
+    Projects {
+        #[command(subcommand)]
+        command: ProjectsCommand,
+    },
 }
 
 fn resolve_db_path(cli_db: Option<PathBuf>) -> PathBuf {
@@ -94,6 +100,7 @@ fn dispatch(store: &SqliteStore, db_path: &Path, command: Command) -> Result<Exi
         Command::Answer(args) => gate::run_answer(store, args),
         Command::Log(args) => query::run_log(store, args),
         Command::Replay(args) => replay::run(store, args),
+        Command::Projects { command } => projects::run(store, command),
         // `main` が先に処理する（DB を開かない）。
         Command::Knowledge { .. } => unreachable!("handled before the store is opened"),
         Command::Worker { command } => match command {

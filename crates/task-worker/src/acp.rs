@@ -789,6 +789,25 @@ async fn run_acp(
     limits: &RunLimits,
     sink: &dyn EventSink,
 ) -> Result<RunOutcome, AdapterError> {
+    // ADR-0054 D2（Phase 68）: CoS の対話 run だけ、道具の許可要求を常に拒否する（fail-closed）。
+    // ACP には claude-code の `--allowedTools` / codex の `sandbox_mode` に相当する「道具単位の読み取り
+    // 許可」が無く、`session/request_permission` にはこのコードベースが解釈できる形で道具の識別子が
+    // 乗らない（実機で確認していない）。曖昧な照合で書き込みを誤って許すより、対話 run の間は
+    // 一律で拒否する方が安全という判断（`choose_permission_option` の `Deny` 経路をそのまま使う。
+    // `reject_always` → `reject_once` → 選択肢の最初、の優先順は変えない）。読み取りだけの道具
+    // （`celerisctl knowledge search|get` 等）は、モデルが許可要求を経ない組み込みの読み取りで
+    // 済ませられる範囲でしか使えない（ACP エージェント実装依存。`docs/adr/0054-*.md` の「Phase 68
+    // 追記」に明記）。
+    let config = &if req.context.conversation_addressee
+        == Some(crate::protocol::ConversationAddressee::Secretary)
+    {
+        AcpConfig {
+            permission: AcpPermission::Deny,
+            ..config.clone()
+        }
+    } else {
+        config.clone()
+    };
     let run_dir = req.workspace.join("runs").join(run_id);
     tokio::fs::create_dir_all(&run_dir).await?;
     let stdout_log_path = run_dir.join("stdout.jsonl");
@@ -1704,6 +1723,47 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
             std::fs::read_to_string(dir.path().join("permission_response.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&response).unwrap();
         assert_eq!(value["result"]["outcome"]["optionId"], "reject-always");
+    }
+
+    /// ADR-0054 D2（Phase 68）: CoS の対話 run（`conversation_addressee = Secretary`）は、設定が
+    /// `permission = allow` でも道具の許可要求を常に拒否する（fail-closed。ACP には道具単位の
+    /// 読み取り許可が無いため）。
+    #[tokio::test]
+    async fn the_cos_conversation_run_denies_permission_requests_even_when_configured_to_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = AcpConfig {
+            permission: AcpPermission::Allow,
+            ..stub_acp(
+                dir.path(),
+                &format!(
+                    r#"{HANDSHAKE}
+read -r _prompt
+printf '%s\n' '{{"jsonrpc":"2.0","id":100,"method":"session/request_permission","params":{{"sessionId":"sess-1","options":[{{"optionId":"reject-once","name":"Reject","kind":"reject_once"}},{{"optionId":"allow-once","name":"Allow once","kind":"allow_once"}},{{"optionId":"allow-always","name":"Allow always","kind":"allow_always"}}]}}}}'
+read -r permresp
+echo "$permresp" > permission_response.json
+printf '%s' '{{"summary":"ok","evidence":[]}}' > artifacts/result.json
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
+"#
+                ),
+            )
+        };
+        let adapter = AcpAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.conversation_addressee =
+            Some(crate::protocol::ConversationAddressee::Secretary);
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-cos", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let response =
+            std::fs::read_to_string(dir.path().join("permission_response.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            value["result"]["outcome"]["optionId"], "reject-once",
+            "no reject_always option offered here, so it falls back to reject_once"
+        );
     }
 
     /// 壁時計の超過で `session/cancel` を送ってから、応答が無ければプロセスグループごと SIGKILL する
