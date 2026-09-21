@@ -306,6 +306,10 @@ fn parse_mode(raw: &str) -> Option<task_core::TaskMode> {
         "prototype" => Some(task_core::TaskMode::Prototype),
         "production" => Some(task_core::TaskMode::Production),
         "research" => Some(task_core::TaskMode::Research),
+        // `standard` is the default tier and models occasionally copy it into both
+        // optional fields. Treat that common mix-up as the default production mode
+        // instead of dropping an otherwise valid create_task action.
+        "standard" => Some(task_core::TaskMode::Production),
         _ => None,
     }
 }
@@ -577,6 +581,38 @@ mod tests {
         assert_eq!(stored.genre.as_deref(), Some("coding"));
         assert_eq!(stored.assignee, None, "matching は別経路");
         assert!(outcome.executed[0].summary.contains("直す"));
+    }
+
+    /// 実機 2026-09-21: CoS が tier と mode の両方に `standard` を書き、正しい create_task
+    /// 全体が捨てられた。tier の common value は既定の production mode として受ける。
+    #[test]
+    fn create_task_tolerates_standard_in_mode_as_production() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_engineering(&store);
+        let task = cos_task();
+        let parsed = parse(
+            r#"{"actions":[{"type":"create_task","title":"直す","objective":"直して",
+               "acceptance":["直った"],"tier":"standard","mode":"standard"}]}"#,
+        );
+        let outcome = execute(
+            &store,
+            &[],
+            &[],
+            &[],
+            &task,
+            "run-standard-mode",
+            &parsed.0,
+            &parsed.1,
+            now(),
+        )
+        .unwrap()
+        .expect("not idempotent-skipped");
+
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        let created = outcome.executed[0].task_id.expect("task id");
+        let stored = store.get(created).unwrap().expect("task exists");
+        assert_eq!(stored.worker_hint.tier, task_core::Tier::Standard);
+        assert_eq!(stored.mode, task_core::TaskMode::Production);
     }
 
     /// 検証に落ちた action（受け入れ条件無し）は実行されず、理由が残る。
