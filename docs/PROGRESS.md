@@ -10486,3 +10486,18 @@ clusters・llm-sources のモックを編集していたため、それらには
   `deny_unknown_fields` なので affecaa より前のバイナリは読めない → **8a979f2 の昇格で有効**にする（rollback 先が affecaa になってから）。
   systemd の `celeris-qwen-tunnel.*` の撤去（`install-units.sh --remove-qwen-tunnel`）は systemctl を伴うので人が実行する。
 - PaperQA の動作確認タスクを作り直した（2 回目。celeris/standard が Codex で通るようになったため）。結果は次節。
+
+### Phase 72 の本番反映と、`[[clusters.forwards]]` 設定時の起動パニック（2026-09-21 12:39–12:42 UTC）
+
+- `release.sh main` → `8a979f24048b`（Phase 72。schema 22）。**1 回目の `verify.sh` は check 1 で失敗**: staging が起動直後に
+  `thread 'main' panicked at crates/celeris/src/lib.rs:621:31: Cannot start a runtime from within a runtime`。原因は直前に本番設定へ
+  足した `[[clusters.forwards]]`（Phase 66 の `refresh_cluster_tunnels` が、同期のディスパッチループ用に書かれた `cluster_connector`
+  （ADR-0032 D3。current_thread ランタイムを作って `block_on`）を **tokio の中から**呼ぶ）。forwards が無ければこの経路は通らないので
+  affecaa の verify・昇格では出なかった。**本番デーモン（affecaa）は起動時に読んだ設定で動いているので無事だが、この設定のままだと次の起動で落ちる**
+  ため、直ちに forwards を外して元の設定に戻した（外した版は `config.toml.with-forwards-20260921` に保存）。
+- 設定を戻して `verify.sh 8a979f24048b` 再実行 → check 1–6 true、`live_ok=true`。`promote.sh` **mode=live**（12:41:53→56）。
+  本番 = `8a979f24048b`（Phase 65/65b/66/69–72 すべて入り）。
+- 修正は **Phase 66b**（Sonnet）: tunnel の更新を async ワーカーの外で回す、`cluster_connector` は async 文脈から呼ばれたら panic ではなく
+  エラーを返す、実際の起動経路を通す回帰テスト。配備後に forwards を戻して `verify.sh` の check 1 が通ることを確認してから有効化する。
+- 教訓: 「設定で初めて通る経路」は verify の staging でも本番設定を使うので、**設定変更は昇格の前に verify に通す**（今回はそれで
+  本番を守れた）。ただし本番デーモンが次に起動するときの設定は常に「今の config.toml」なので、危険な設定を置いたまま放置しない。
