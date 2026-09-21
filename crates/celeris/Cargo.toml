@@ -16,6 +16,8 @@ task-worker = { path = "../task-worker" }
 task-dispatch = { path = "../task-dispatch" }
 task-ops = { path = "../task-ops" }
 task-api = { path = "../task-api" }
+llm-proxy = { path = "../llm-proxy" }
+async-trait = "0.1"
 time = { version = "0.3", features = ["formatting"] }
 ulid = "1"
 # ADR-0040 D4（Phase 47）: API の listener を `SO_REUSEPORT` で bind する（新旧が同じポートに並ぶ）。

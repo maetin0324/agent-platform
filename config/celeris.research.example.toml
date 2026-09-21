@@ -48,10 +48,13 @@ command = "/home/u/celeris/paperqa/.venv/bin/pqa"
 settings = "/home/u/celeris/paperqa/settings/qwen-local"
 paper_directory = "/home/u/celeris/paperqa/papers"
 index_directory = "/home/u/celeris/paperqa/index"
-# LiteLLM 経由で OpenAI 互換の口（ローカル Qwen へのトンネル等）に向ける。`api_key` は使われないダミーでよい。
+# LiteLLM 経由で OpenAI 互換の口に向ける。ADR-0053 D2（Phase 65）: celeris の LLM source プロキシ
+# （`[llm_proxy]`。既定 `127.0.0.1:18100`）に向ける。Qwen が落ちていれば celeris/standard は自動で
+# Claude/GPT のアカウントプールに倒れる（下の `model` も参照）。`OPENAI_API_KEY` は**プロキシの Bearer**
+# （`[api] token_file` の中身と同じ値。ダミーでは通らない — 直接 Qwen を叩いていた頃と違う点）。
 # `RES_OPTIONS` は、このホストで見つかった glibc の A/AAAA 並行送信の取りこぼし対策（ADR-0031 の実機記録。
 # 取得ランナーの名前解決が 5 秒待たされる症状が出たら効く）。
-env = { OPENAI_API_KEY = "unused", OPENAI_BASE_URL = "http://127.0.0.1:18000/v1", RES_OPTIONS = "single-request" }
+env = { OPENAI_API_KEY = "<[api] token_file と同じ値>", OPENAI_BASE_URL = "http://127.0.0.1:18100/v1", RES_OPTIONS = "single-request" }
 
 # 文献の取得（ADR-0035 D1）。鍵は要らない（arXiv と OpenAlex のどちらも公開 API）。
 [adapters.paperqa.acquire]
@@ -100,7 +103,9 @@ adapter = "paperqa"
 tiers = ["standard"]
 concurrency = 1
 # 空でなければ `--llm` に渡す（PaperQA の設定ファイルの llm より優先。ADR-0027 D3）。空なら設定ファイルの値のまま。
-model = "openai/qwen3.8-27b"
+# ADR-0053 D2（Phase 65）: `celeris/standard`（LiteLLM の `openai/` 接頭辞は落として渡るので、
+# プロキシが受け取るのは `celeris/standard`。供給元はプロキシが決定的に選ぶ）。
+model = "openai/celeris/standard"
 
 [[providers]]
 id = "local-fake"

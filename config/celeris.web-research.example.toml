@@ -92,9 +92,12 @@ env = { RES_OPTIONS = "single-request" }
 
 [adapters.local_deep_research.settings]
 "llm.provider" = "openai_endpoint"
-"llm.openai_endpoint.url" = "http://127.0.0.1:18000/v1"
-"llm.openai_endpoint.api_key" = "unused"
-"llm.model" = "qwen3.8-27b"
+# ADR-0053 D2（Phase 65）: celeris の LLM source プロキシに向ける（Qwen が落ちていれば celeris/cheap は
+# 自動で Claude/GPT のアカウントプールに倒れる）。`api_key` は**プロキシの Bearer**（`[api] token_file`
+# と同じ値。直接 Qwen を叩いていた頃の "unused" では通らない）。
+"llm.openai_endpoint.url" = "http://127.0.0.1:18100/v1"
+"llm.openai_endpoint.api_key" = "<[api] token_file と同じ値>"
+"llm.model" = "celeris/cheap"
 "search.tool" = "tavily"
 # SearXNG に切り替える場合の代替（このホストでは `engines` を絞らないとノイズが出る。上のコメント参照）:
 # "search.tool" = "searxng"
@@ -122,7 +125,8 @@ adapter = "local-deep-research"
 tiers = ["cheap"]
 concurrency = 1
 # 空でなければ `settings` の `llm.model` を上書きする（ADR-0029 D1）。空なら `[adapters.local_deep_research].settings` のまま。
-model = "qwen3.8-27b"
+# ADR-0053 D2（Phase 65）: 上の `[adapters.local_deep_research.settings]` と揃えて `celeris/cheap`。
+model = "celeris/cheap"
 
 [[providers]]
 id = "local-fake"

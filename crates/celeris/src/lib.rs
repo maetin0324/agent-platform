@@ -749,8 +749,46 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
     }
 }
 
+/// ADR-0053 D4（Phase 65）: `task_api::LlmSourcesReader` を `llm_proxy::ProxyState` の薄い包みで実装する
+/// （task-api は `llm-proxy`/`task-dispatch`/`task-worker` を知らない。ADR-0017 M2 と同じ境界）。
+struct LlmSourcesAdapter(Arc<llm_proxy::ProxyState>);
+
+#[async_trait::async_trait]
+impl task_api::LlmSourcesReader for LlmSourcesAdapter {
+    async fn view(&self, now: i64) -> task_api::LlmSourcesView {
+        let view = self.0.sources_view(now).await;
+        task_api::LlmSourcesView {
+            sources: view
+                .sources
+                .into_iter()
+                .map(|s| task_api::LlmSourceView {
+                    id: s.id,
+                    kind: s.kind,
+                    enabled: s.enabled,
+                    reachable: s.reachable,
+                    accounts: s
+                        .accounts
+                        .into_iter()
+                        .map(|a| task_api::LlmSourceAccountView {
+                            id: a.id,
+                            logged_in: a.logged_in,
+                            remaining: a.remaining,
+                            cooldown_until: a.cooldown_until,
+                            cooldown_reason: a.cooldown_reason,
+                        })
+                        .collect(),
+                    last_hour_requests: s.last_hour_requests,
+                    last_hour_prompt_tokens: s.last_hour_prompt_tokens,
+                    last_hour_completion_tokens: s.last_hour_completion_tokens,
+                })
+                .collect(),
+        }
+    }
+}
+
 /// `task_api::ApiSettings` を設定から作る。`instance_id` / `started_at` はディスパッチャのスナップショットと同じ値を渡す。
 /// ADR-0040 D3 / D4: `release` / `mode` / `role` は `GET /health` に出て、`role` は standby の 503 にも使う。
+/// ADR-0053 D4（Phase 65）: `llm_proxy_state` があれば `GET /llm/sources` を有効にする（`None` は 409）。
 #[allow(clippy::too_many_arguments)]
 pub fn api_settings(
     config: &Config,
@@ -762,6 +800,7 @@ pub fn api_settings(
     release: String,
     mode: DaemonMode,
     role: SharedRole,
+    llm_proxy_state: Option<Arc<llm_proxy::ProxyState>>,
 ) -> ApiSettings {
     ApiSettings {
         listen,
@@ -820,6 +859,7 @@ pub fn api_settings(
         docs_repo_root: task_core::home_dir().map(|home| home.join("workspace")),
         // ADR-0047 D1（Phase 61）: 知識ベースの正本（既定 `~/.local/share/celeris/knowledge`）。**API は作らない**。
         knowledge_root: Some(config.knowledge.root.clone()),
+        llm_sources: llm_proxy_state.map(|s| Arc::new(LlmSourcesAdapter(s)) as task_api::SharedLlmSourcesReader),
     }
 }
 
@@ -841,6 +881,69 @@ impl RunningApi {
     }
 }
 
+/// 動いている LLM source プロキシ（ADR-0053 D1。Phase 65）。`stop` で graceful に止める。
+struct RunningLlmProxy {
+    stop: tokio::sync::oneshot::Sender<()>,
+    handle: tokio::task::JoinHandle<std::io::Result<()>>,
+}
+
+impl RunningLlmProxy {
+    async fn stop(self) {
+        let _ = self.stop.send(());
+        match tokio::time::timeout(Duration::from_secs(5), self.handle).await {
+            Ok(Ok(Ok(()))) => tracing::info!("llm-proxy stopped"),
+            Ok(Ok(Err(e))) => tracing::error!(error = %e, "llm-proxy server failed"),
+            Ok(Err(e)) => tracing::error!(error = %e, "llm-proxy task panicked"),
+            Err(_) => tracing::warn!("llm-proxy did not stop within 5s"),
+        }
+    }
+}
+
+/// ADR-0053 D1（Phase 65）: `[llm_proxy]` が有効なら `llm_proxy::ProxyState` を組み立てる（bind はまだ
+/// しない。`GET /llm/sources`（主 API）とプロキシ自身の両方がこの同じ `Arc` を使うため、`run()` が
+/// 主 API の起動より前に 1 度だけ呼ぶ）。アカウントプール（cooldown・観測値）はディスパッチャの帳簿を
+/// **そのまま共有する**（`crates/task-dispatch/src/dispatcher.rs` の `account_book`。別の写しを作らない）。
+/// Bearer は `[api] token_file` と同じ（`docs/llm-source.md`）。
+fn build_llm_proxy_state(
+    config: &Config,
+    dispatcher: &Dispatcher,
+    role: SharedRole,
+) -> Result<Option<Arc<llm_proxy::ProxyState>>, DaemonError> {
+    if !config.llm_proxy.effective_enabled() {
+        return Ok(None);
+    }
+    let token = config.api.read_token()?;
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(|e| ApiError::Startup(format!("llm-proxy: could not build the HTTP client: {e}")))?;
+    let claude_book = dispatcher.account_book(task_core::AccountAdapter::ClaudeCode);
+    let codex_book = dispatcher.account_book(task_core::AccountAdapter::Codex);
+    Ok(Some(llm_proxy::ProxyState::new(
+        config.llm_proxy.clone(),
+        client,
+        claude_book,
+        codex_book,
+        token,
+        role,
+        Some(config.db.clone()),
+        StoreOptions::default().busy_timeout,
+    )))
+}
+
+/// `state` を `[llm_proxy] listen` に bind して動かす。`standby`/`draining` の間はプロキシ自身の
+/// `guard` が他の管理 API と同じく 503 を返す（bind/unbind は主 API と同じ `SO_REUSEPORT` のライフサイクル）。
+async fn start_llm_proxy(config: &Config, state: Arc<llm_proxy::ProxyState>) -> Result<RunningLlmProxy, DaemonError> {
+    let listen = config.llm_proxy.listen;
+    let listener = bind_reuseport(listen).map_err(|source| ApiError::Bind { addr: listen, source })?;
+    let addr = listener.local_addr().unwrap_or(listen);
+    tracing::info!(%addr, "llm-proxy listening");
+    let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let handle = tokio::spawn(llm_proxy::serve(listener, state, async move {
+        let _ = stop_rx.await;
+    }));
+    Ok(RunningLlmProxy { stop, handle })
+}
+
 /// ADR-0040 D4（Phase 47）: `SO_REUSEPORT` で bind する。新しいリリースの `standby` が、動いている
 /// `active` と**同じポート**に起動と同時に bind できるようにするため（カーネルが新しい接続を振り分ける。
 /// 読み書きは同じ DB なので問題ない）。`SO_REUSEADDR` も立てる（旧 listener の `TIME_WAIT` を跨ぐため）。
@@ -860,6 +963,7 @@ pub fn bind_reuseport(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListen
 /// 開けない・bind できないときは起動を失敗させる（黙って API 無しで動かない）。
 /// ADR-0040 D3 / D4: `admin = false`（verify モード）では管理系の委譲チャネルを作らない（tick ループが
 /// 動かないので、送っても誰も受け取れない）。bind は `SO_REUSEPORT` で行う。
+#[allow(clippy::too_many_arguments)]
 async fn start_api(
     config: &Config,
     listen: SocketAddr,
@@ -868,6 +972,7 @@ async fn start_api(
     mode: DaemonMode,
     role: SharedRole,
     admin: bool,
+    llm_proxy_state: Option<Arc<llm_proxy::ProxyState>>,
 ) -> Result<
     (
         RunningApi,
@@ -909,6 +1014,7 @@ async fn start_api(
         identity.release.clone(),
         mode,
         role,
+        llm_proxy_state,
     );
     let state = tokio::task::spawn_blocking(move || ApiState::new(settings, rx))
         .await
@@ -933,6 +1039,8 @@ struct RoleState {
     /// `--mode verify` では `None`（`daemon_instances` に触れない）。
     supervisor: Option<instance::Supervisor>,
     api: Option<RunningApi>,
+    /// ADR-0053 D1（Phase 65）: `[llm_proxy]` が有効なときだけ `Some`。
+    llm_proxy: Option<RunningLlmProxy>,
 }
 
 /// デーモン本体。`[api]` があれば同じランタイムで HTTP API も動かし、tick ループの終了時に止める。
@@ -1008,6 +1116,8 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
                 && task.worker_hint.adapter.as_deref() == Some(FakeAdapter::ID)
         }));
     }
+    // ADR-0053 D1/D4（Phase 65）: 主 API（`GET /llm/sources`）とプロキシ自身が同じ `Arc` を使う。
+    let llm_proxy_state = build_llm_proxy_state(&config, &dispatcher, role.clone())?;
     let (api, admin_rx) = match config.api.listen {
         Some(listen) => {
             // `standby` も起きてすぐ API を受ける（同じポートに `SO_REUSEPORT` で bind する）。
@@ -1019,16 +1129,23 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
                 opts.mode,
                 role.clone(),
                 !verify,
+                llm_proxy_state.clone(),
             )
             .await?;
             (Some(api), admin_rx)
         }
         None => (None, None),
     };
+    // ADR-0053 D1（Phase 65）: `standby`/`verify` も起きてすぐプロキシを受ける（主 API と同じ理由）。
+    let llm_proxy = match llm_proxy_state {
+        Some(state) => Some(start_llm_proxy(&config, state).await?),
+        None => None,
+    };
     let mut roles = RoleState {
         role,
         supervisor,
         api,
+        llm_proxy,
     };
     let result = tick_loop(
         &mut dispatcher,
@@ -1041,6 +1158,9 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
     .await;
     if let Some(api) = roles.api.take() {
         api.stop().await;
+    }
+    if let Some(llm_proxy) = roles.llm_proxy.take() {
+        llm_proxy.stop().await;
     }
     // ADR-0040 D4: 普通に止まったときは自分の行を消す。drain で終わったときは `drained_at` を残したまま
     // にし、新しい active が掃除する（`status.sh` が引き継ぎの結果を見られるように）。
@@ -1119,6 +1239,9 @@ async fn tick_loop(
                     dispatcher.set_accepting_new_work(false);
                     if let Some(api) = roles.api.take() {
                         api.stop().await;
+                    }
+                    if let Some(llm_proxy) = roles.llm_proxy.take() {
+                        llm_proxy.stop().await;
                     }
                     tracing::info!(
                         ticks,
@@ -2716,6 +2839,7 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
             "sha12sha12ab".into(),
             DaemonMode::Verify,
             SharedRole::new(InstanceRole::Standby),
+            None,
         );
         assert_eq!(
             settings.secrets_dir,

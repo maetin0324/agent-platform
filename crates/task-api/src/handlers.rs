@@ -174,6 +174,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::timeline::routes())
         // ADR-0048 D1（Phase 60a）: Console の読み取り側。実装は `crate::console`。
         .merge(crate::console::routes())
+        // ADR-0053 D4（Phase 65）: LLM source の観測。実装は `crate::llm_sources`。
+        .merge(crate::llm_sources::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))
@@ -2962,6 +2964,7 @@ mod tests {
             github: crate::GithubSettings::default(),
             knowledge_root: None,
             docs_repo_root: Some(dir.join("workspace")),
+            llm_sources: None,
         };
         let (_tx, rx) = tokio::sync::watch::channel(None);
         ApiState::new(settings, rx).unwrap_or_else(|e| panic!("{e}"))

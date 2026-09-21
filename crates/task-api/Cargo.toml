@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 task-core = { path = "../task-core" }
 task-ops = { path = "../task-ops" }
+async-trait = "0.1"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 tokio = { version = "1.53.1", features = ["sync", "time", "net", "rt", "macros", "fs", "io-util"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
@@ -22,6 +23,7 @@ tracing = "0.1"
 ulid = "1"
 
 [dev-dependencies]
+async-trait = "0.1"
 tempfile = "3"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }

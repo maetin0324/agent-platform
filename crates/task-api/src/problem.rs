@@ -223,6 +223,15 @@ impl ApiProblem {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_provider", detail)
     }
 
+    /// ADR-0053 D1/D4（Phase 65）: `[llm_proxy]` が無効（`effective_enabled() == false`）。
+    pub(crate) fn llm_proxy_unavailable() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "llm_proxy_unavailable",
+            "the [llm_proxy] section is not enabled in config.toml",
+        )
+    }
+
     /// ADR-0030 D1: `[secrets]` が設定されていない。
     pub(crate) fn secrets_unavailable() -> Self {
         Self::new(

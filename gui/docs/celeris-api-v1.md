@@ -1,6 +1,12 @@
 # celeris HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-21 Phase 65（ADR-0053 D1/D4、LLM source のローカル OpenAI 互換プロキシ）— **追加のみ。
+  v1 のまま**。エンドポイント 97: `GET /llm/sources`（§3.108。供給元ごとの到達性・アカウントの残量・
+  cooldown・直近 1 時間の要求/token 数。読み取りだが認証は必要。`[llm_proxy]` が無効なら 409
+  `llm_proxy_unavailable`）。GUI の表示は Phase 66。プロキシ自体（`POST /v1/chat/completions` 等）は
+  `127.0.0.1:18100` の別ポートで、この `/api/v1` 契約には含まれない（`docs/llm-source.md` 参照）。
+  DB のスキーマ版数は **22**（migration 0022: `llm_proxy_requests`。プロキシの要求記録。本文は書かない）。
 - 改訂: 2026-09-21 バグ報告の対応（昇格の成否が画面に出なかった）— **追加のみ。v1 のまま**。
   `GET /releases` の `items[]` に `promote_failed`（`promote_failed.json`。直近の昇格の試みが
   失敗した記録）が増えた。§3.66〜3.67。
@@ -2383,6 +2389,38 @@ Console の入力欄の文の入口。`POST /org/{id}/messages`（§3.47）と�
     「実行できなかった action: …」の節が付き、`reply` ブロックの `actions_result.actions_failed[]` にも理由が残る。
   - 実行結果は `Message.metadata`（`MessageMetadata`）に残り、`GET /console` の `reply` ブロックが
     `actions_result` として運ぶ（§3.98 の表）。**同じ run の actions は 1 回だけ実行される**（冪等）。
+
+### 3.108 `GET /llm/sources`（ADR-0053 D4、Phase 65。**97**）→ 200 `LlmSourcesView`
+
+LLM source のローカル OpenAI 互換プロキシ（`crates/llm-proxy`。`127.0.0.1:18100`、`/api/v1` の外）が
+使っている供給元の観測。判断（選択・cooldown）はプロキシの中で決定的に行われる。ここは**見えるように
+するだけ**（GUI の表示は Phase 66。ここでは API と型だけ用意する）。
+
+- 認証は必要（読み取り専用だが Bearer 必須。トークン不要の `GET /health` とは違う）。
+- `[llm_proxy]` が無効（`enabled = false`、または `claude_oauth`/`codex_oauth`/`openai_compatible` が
+  1 つも無い）なら **409 `llm_proxy_unavailable`**。
+
+```json
+{"sources": [
+  {"id": "claude-oauth", "kind": "claude-oauth", "enabled": true,
+   "accounts": [{"id": "acct-a", "logged_in": true, "remaining": 0.62}],
+   "last_hour_requests": 12, "last_hour_prompt_tokens": 3400, "last_hour_completion_tokens": 900},
+  {"id": "openai-compatible:qwen", "kind": "openai-compatible", "enabled": true, "reachable": true,
+   "accounts": [], "last_hour_requests": 40, "last_hour_prompt_tokens": 9000,
+   "last_hour_completion_tokens": 5000}
+]}
+```
+
+- `sources[].id`: `claude-oauth` / `codex-oauth` / `openai-compatible:<id>`（設定の `[[llm_proxy.sources.openai_compatible]] id`）。
+- `reachable`: `openai-compatible` だけ `GET <base_url>/models` の probe 結果（60 秒キャッシュ）。
+  `claude-oauth`/`codex-oauth` は到達性ではなくアカウントの残量で見るので、フィールド自体が省略される
+  （`null` を書かない。省略 = 「この供給元には意味が無い」）。
+- `accounts[].remaining`: 0.0〜1.0。測れないとき（観測が古い・無い）はフィールドを省略する（値を捏造
+  しない。ADR-0024 D3 と同じ規律）。`cooldown_until`/`cooldown_reason` も 429/401 を受けた直後だけ載る
+  （このアカウントプールは CLI ワーカーの dispatch と**同じ帳簿**を共有するので、`GET /accounts` の
+  cooldown とも一致する）。
+- `last_hour_*`: `llm_proxy_requests`（migration 0022）の直近 1 時間の集計。本文は記録しないので
+  ここにも出ない。
 
 ---
 

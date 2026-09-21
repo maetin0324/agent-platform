@@ -219,9 +219,12 @@ command = "~/.local/celeris/tools/langmem/.venv/bin/python"
 
 [knowledge.langmem]
 enabled = true
-provider = "openai-compatible"   # ローカルの Qwen トンネルもこちら
-base_url = "http://127.0.0.1:18000/v1"
-model = "qwen3.8-27b"
+provider = "openai-compatible"
+# ADR-0053 D2（Phase 65）: celeris の LLM source プロキシに向ける（`[llm_proxy]`。既定
+# 127.0.0.1:18100）。Qwen が落ちていれば celeris/cheap は自動で Claude/GPT のアカウントプールに倒れる
+# （ADR-0052 のフォールバックはプロキシの中に吸収される）。
+base_url = "http://127.0.0.1:18100/v1"
+model = "celeris/cheap"
 # api_key_secret = "langmem-openai-key"   # 鍵を確認するエンドポイントのときだけ
 
 [[providers]]

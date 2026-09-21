@@ -44,6 +44,14 @@ concurrency = 1
 # ADR-0026 D3: 空でなければ session/set_config_option { configId: model_option_id, value: model } で設定する。
 # opencode 側の設定ファイルの "model" と合わせておく（下の env の OPENCODE_CONFIG を参照）。
 # CLI の --model フラグは使わない（acp はモデルを ACP のセッション経由で渡す）。
+#
+# ADR-0053 D2（Phase 65）: celeris が張るローカルの OpenAI 互換プロキシ（`[llm_proxy]`、既定
+# `127.0.0.1:18100`）を 1 つの OpenAI 互換プロバイダとして opencode に登録すれば、Qwen が落ちていても
+# Claude/GPT のアカウントプールに自動で倒れる（`celeris/cheap`。プロキシの選択は決定的。ADR-0053 D1）。
+# opencode 側の JSON の例は `docs/llm-source.md`「opencode をプロキシに向ける」を参照
+# （`tools/opencode/` はこのリポジトリにまだ無いので、そこに書いてある。この行を使うときは下の
+# `qwen-local/qwen3.8-27b` の代わりに `celeris-proxy/celeris/cheap` にし、下の env に
+# `CELERIS_API_TOKEN`（`[api] token_file` と同じ値）を足すこと）。
 model = "qwen-local/qwen3.8-27b"
 # env はこの行にだけ渡す（優先順: celeris 自身の環境 < [adapters.acp].env < この行の env。同名キーはこちらが勝つ。
 # ADR-0026 D2）。

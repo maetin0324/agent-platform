@@ -1404,3 +1404,42 @@ pub enum ConsoleBlock {
     },
 }
 // ========== ADR-0048 D1（Phase 60a）: ここまで ==========
+
+// ========== ADR-0053 D1/D4（Phase 65。GUI 表示は Phase 66）: `GET /llm/sources` ==========
+
+/// `GET /llm/sources` の 1 アカウント（`llm-proxy` の `claude-oauth`/`codex-oauth` のプール）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LlmSourceAccountView {
+    pub id: String,
+    pub logged_in: bool,
+    /// 0.0〜1.0（測れないときは `null`。値を捏造しない。ADR-0024 D3 と同じ規律）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_until: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_reason: Option<String>,
+}
+
+/// `GET /llm/sources` の 1 供給元。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LlmSourceView {
+    /// `claude-oauth` / `codex-oauth` / `openai-compatible:<id>`。
+    pub id: String,
+    pub kind: String,
+    pub enabled: bool,
+    /// `openai-compatible` だけ probe した結果。oauth のプールは `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable: Option<bool>,
+    pub accounts: Vec<LlmSourceAccountView>,
+    pub last_hour_requests: u64,
+    pub last_hour_prompt_tokens: u64,
+    pub last_hour_completion_tokens: u64,
+}
+
+/// `GET /llm/sources`（ADR-0053 D4）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct LlmSourcesView {
+    pub sources: Vec<LlmSourceView>,
+}
+// ========== ADR-0053（Phase 65）: ここまで ==========
