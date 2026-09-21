@@ -11743,3 +11743,13 @@ Phase 68b の確認と同一テキスト（`--add-dir`・`-s/--sandbox`・`--app
 - main `88e649c` = Phase 68c merge。ゲート: cargo test **1711 passed / 0 failed**、clippy exit 0。`release.sh` → `88e649c4b53c`（schema 23）。
   `verify.sh` check 1–6 true、`live_ok=true` → `promote.sh 88e649c4b53c` **mode=live**（15:58:50→59）。
 - 実機確認（CoS を `new-conversation` で切ってから 2 回指示、選ばれたアダプタで fresh → resume）は次節。
+
+### Phase 68c の実機確認（2026-09-21 15:59–16:00 UTC）— Codex でも fresh → resume が通った
+
+- `new-conversation` → 2 回指示。1 回目 **codex** fresh（`resume:false`、全量前置き）→ done「15:59（UTC）」（in 68,697 / out 104）。
+  2 回目 **同じ codex thread `01a0c4b1-d6ae-7040-8d96-dd0542a4d80d` で `resume:true`、`session_diff` 299 バイト** → done
+  「タスクを作らず、今の時刻を一言で答える動作確認。」（in 95,087 / out 129。Codex の resume はスレッド全体を再送するので入力 token は
+  減らない。Claude はキャッシュで in 4 になる）。`node_sessions`: codex 行 turns=2、approx_tokens 164,017。
+- = ADR-0054 D1 が **Claude Code と Codex の両方で本番成立**。ADR-0054 の Phase 67〜68 系列（67/67b/67c/68/68b/68c）はこれで閉じた。
+- 提案: Codex の resume は入力 token を節約しない（むしろ増える）ので、`[sessions] rollover_tokens` は Codex セッションでは小さめ
+  （例 200k）にするか、CoS は Claude 優先の写像にする方が実用的。人の判断に委ねる。
