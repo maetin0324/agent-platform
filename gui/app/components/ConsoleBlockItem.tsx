@@ -671,7 +671,11 @@ function ReportBlockView({
           {r.headline}
         </span>
         {projectName(r.project_id, projects) && (
-          <Badge tone="neutral" className="col-span-2 max-w-full justify-self-start truncate">
+          <Badge
+            tone="neutral"
+            className="col-span-2 max-w-full justify-self-start truncate"
+            title={projectName(r.project_id, projects) ?? undefined}
+          >
             {projectName(r.project_id, projects)}
           </Badge>
         )}

@@ -26,7 +26,12 @@ export function KnowledgeMeta({
   return (
     // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
     <div className="flex flex-wrap items-center gap-2 text-sm text-fg-subtle lg:text-xs" data-testid="knowledge-meta">
-      {path && <Mono data-testid="knowledge-page-path">{path}</Mono>}
+      {/* ADR-0055 D2: パスは font-mono + break-all（フェーズ 72）。 */}
+      {path && (
+        <Mono data-testid="knowledge-page-path" className="break-all">
+          {path}
+        </Mono>
+      )}
       {scope && (
         <Badge tone="info" data-testid="knowledge-page-scope">
           {scope}

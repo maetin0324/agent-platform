@@ -4043,3 +4043,173 @@ celeris 側（`docs/PROGRESS.md` の Phase 66）が D3（Qwen トンネルを ce
 - `LlmSourceCard`/`LlmAccountRow` は `/accounts` に埋め込んだが、供給元の数が増えると縦に長くなる。
   celeris 側の運用で供給元が 4〜5 を超えるようなら、専用タブ（Console の下部タブに準じる形）への
   切り出しを検討してよい（今回は 2〜3 供給元想定のフィクスチャなので据え置いた）。
+
+## Phase G26 — スマホ UX ラウンド 4（ADR-0055。2026-09-21）
+
+Phase 72 / ADR-0055 D2（規律）・D3（ラウンドを回し続ける）。celeris・Rust 側は変更していない
+（`crates/` 無変更）。`accounts.tsx` / `clusters.tsx` / `app/celeris/types.ts` /
+`test/mock-celeris/*` の accounts・clusters・llm-sources ハンドラは触っていない（並行して別エージェントが
+編集中のため）。今回は Phase G25 の未解決事項 U7・U10・U11 の解消と、`/org`・`/org/<node>`・
+`/reports`・`/knowledge`・`/knowledge/inbox`・`/releases`・`/help` の D2 磨き、その他の画面の
+タイポグラフィ・省略表示の仕上げを行った。
+
+### U7（Console 入力欄の spacer を実測にした）
+
+- `~/components/Console.tsx` の `ConsoleInput` に `rootRef` を足し、`ResizeObserver` で自分の
+  border-box の高さ（`entry.borderBoxSize[0].blockSize`、無ければ `entry.contentRect.height`）を
+  測って `onHeightChange` で親（`Console`）へ渡すようにした。親は `inputHeight` state を持ち、
+  spacer（`aria-hidden` の `div`）の `style.height` に反映する。返信先バナーの表示・非表示や、
+  テキストエリアの行数変化にも `ResizeObserver` が追随するので、見積もりの `h-52`（13rem）は
+  「初回描画・SSR・`ResizeObserver` が無い環境（テストの `environment: "node"` 等）のフォールバック」
+  としてだけ残した（クラス名はそのまま、インライン `style` が実測値で上書きする）。
+  P-G25-1 で提案した対応そのもの。
+- `ResizeObserver` はブラウザにしか無いので `typeof ResizeObserver === "undefined"` で早期リターンし、
+  vitest（`environment: "node"`）はこの副作用を素通りする（新しい DOM テストは要らない。既存のとおり
+  レイアウト部品には unit テストを持たせない方針のまま）。
+
+### U10（Board の segmented control を横スクロールから 3×2 のグリッドにした）
+
+- `~/routes/board.tsx` の `board-column-picker` を、`flex gap-2 overflow-x-auto`（6 択を横スクロール、
+  6 番目が隠れがちだった）から `grid grid-cols-3 gap-1.5`（393px で 3 列 × 2 行、6 つ全部が一度に
+  見える）に変えた。ラベルが狭い列幅で折り返しても横はみ出しにはならない（縦に伸びるだけ）ので
+  D1-1 と両立する。念のため各ボタンに `title={label}` も付けた（U10 の選択肢のもう一方「短いラベル +
+  title」も部分的に取り入れた形）。`md:` 以上（列グリッドがそのまま出る）は変更していない。
+
+### U11（task/milestone カードを「主役 1 つ + 残りは開閉」に寄せた）
+
+- **Board のカード（`BoardCard`）**: 既に Phase 71 で「題名・状態・優先度・担当だけ折り目の上、
+  種類・レベル・途中目標・ラベル・行内編集は開閉」になっていた（主役の操作は題名のリンク 1 つ）ので
+  変更なし。確認のみ。
+- **途中目標のカード（`~/routes/projects.$id.tsx` の `MilestoneLifecycleActions`）**: 「一時停止／再開」
+  は途中目標カードの主役の操作として常に出すが、確認も要り頻度も低い「中止」を `<details>`
+  （summary「その他の操作（中止）」）に畳んだ。中止・一時停止・再開は同じ 1 つの `fetcher`
+  （`milestone-lifecycle-${id}`）のままで、確認ダイアログ（`milestone-cancel-confirm`）もその
+  `<details>` の中に移した。Project 画面のアーカイブ（Phase 71、U9）と同じ「低頻度操作は開閉に」の
+  規律に揃えている。**この 1 点はデスクトップの見た目も変わる**（U9 と同じ理由の判断）。
+  `MilestoneReviewPanel`（ok/議論/ng）は途中目標が判定待ちのときの主役の操作なのでそのまま常時表示。
+
+### `/org`・`/org/<node>` の磨き
+
+- `~/routes/org.tsx` の `OrgTreeItem` に、サブツリーごとの開閉ボタン（子がいるノードだけ、既定は
+  開いた状態 = 挙動を変えない）を足し、「木を字下げした一覧として、サブツリーごとに開閉できる」形に
+  した（大きな組織で 1 画面が長くなりすぎるのを防ぐ）。
+- ノードの行に、`GET /org` の `effective_profiles[]`（根→葉で継いだ結果。GUI は継承を再計算しない）
+  から「既定のハーネス」（`harness_default`、1 行のテキスト）と「動かす場所」（`run`。`host`/`container`
+  を `profileRunLabel` で「ホスト」/「コンテナ」の 1 語にし、`Badge` + `data-status-badge="org-mode"`
+  で出す）を添えた。値が無いノードには何も出さない（既定は空表示のまま）。
+- `/org/<node>`（`~/routes/org.$id.tsx`）は `Console` 部品をそのまま使うだけの画面なので、U7 の
+  Console 側の直しがそのまま効く。この画面自体のコードは変更していない。
+
+### `/reports` の磨き
+
+- `~/components/ReportsList.tsx` の `ReportRow`（depth 0）を、字下げだけの行から
+  `rounded-lg border border-border bg-surface` のカードにした（「一覧はカード（縦積み）」の規律。
+  差し込みの元報告 `depth > 0` は今までどおり `border-l` の字下げのまま区別する）。悪い知らせの
+  赤枠はそのまま優先される。
+- 展開した本文の下に `id: {shortId(report.id)}`（`font-mono text-xs break-all`、`title` に全文）を
+  足した（ADR-0055 D2「id は末尾だけ、全文は title」。今まで報告の id を画面上で参照する手段が
+  無かった）。
+
+### `/knowledge`・`/knowledge/inbox` の磨き
+
+- 検索結果（`?q=` のとき）の `PageLink` に `card` オプションを足し、枠付きのカード（題名 +
+  `font-mono text-xs break-all` のパス + タグのチップ）にした。ツリーの並び（`groups` の下の一覧）は
+  今までどおり軽いナビ行のまま（意図的に変えていない。ナビとしての密度を保つため）。検索欄
+  （`knowledge-search`）は既に `inputClass`（`w-full`）なので変更なし。
+- 知識ベースのパス（`~/components/KnowledgeMeta.tsx` の `Mono` によるページのパス、
+  `~/routes/knowledge.inbox.tsx` の候補のパス、`~/routes/knowledge.tsx` の置き場のルート）に
+  `break-all` を足した（ADR-0055 D2「パスは font-mono + break-all」。モックのパスは短く監査には
+  出なかったが、長い置き場でも折り返せるようにする直し）。
+
+### `/releases` の磨き
+
+- gate バッジ（`gate ✓`/`gate ✗`）と検証バッジ（`検証済み（ライブ引き継ぎ）` 等）が「1 語」ではなかった
+  （空白・括弧を含む）ので、`~/lib/releases.ts` に新しい純粋関数
+  `releaseGateBadgeLabel`（「通過」/「失敗」）と `releaseVerifyBadgeLabel`（`unverified`→「未検証」、
+  `ok_live`/`ok_stop_start`→どちらも「検証済み」、`ng`→「検証NG」。切替方法の違いは色と行の下の
+  詳細に任せる）を追加した。既存の `releaseGateLabel`/`releaseVerifyLabel`（詳細な文言）は削除せず、
+  バッジの `title` と「検証」`DataItem` の下の 1 行（`release-verify-detail`）に残したので情報は
+  失っていない。バッジには `data-status-badge` を新たに付けた（今まで対象外だったので `pnpm
+  mobile-audit` の D1-3 検査が新たに効くようになった）。
+- 「upgrade」ボタン（`release-promote`。`canPromote` の `<details>` の中、= 出ているときは常に
+  押せる）に `w-full sm:w-auto` を足し、モバイルでは全幅にした（「押せるときだけ全幅」の要件）。
+- `item.sha12` は元から 12 文字の短い sha（設計名のとおり）なので、これ以上の省略はしていない。
+
+### `/help` の磨き
+
+- 目次（`nav`）は Phase 61（G21？）から既にピル行（`rounded-lg border ... px-2.5 py-1.5` を
+  `flex flex-wrap` で並べる、`data-touch-ok`）だったので変更なし。
+- 「画面ごとの説明」「用語集」「困ったとき」の説明文（`dd`）に `leading-relaxed` を足し、長い日本語の
+  説明文の読みやすさ（行間）を上げた（タイポグラフィの仕上げ）。
+
+### 画面共通のタイポグラフィ・省略表示の仕上げ（項目 3）
+
+`truncate` を使っていて `title` の無かった箇所に `title` を足した（ADR-0055 D2「省略した表示は
+`title`/コピー用の要素で全文」・項目 3「無いまま truncate しない」）:
+
+- `~/components/task-files.tsx`（ファイルツリーの `entry.name` × 3 箇所）
+- `~/components/task-changes.tsx`（変更ファイルの `file.path`。ついでに、この行のバッジが
+  `{file.status} {changedFileStatusLabel(file.status)}`（例: 「A 追加」）と 2 語になっていたのを
+  `changedFileStatusLabel(file.status)` だけの 1 語にし、生の git 記号は `title` に移した）
+- `~/components/ProjectIntegrations.tsx`（PR/取り込み行のタスク題名リンク）
+- `~/components/ArtifactsList.tsx`（`sources.json` のリンク集の題名）
+- `~/routes/tasks.new.tsx`（`depends_on` の候補一覧の題名）
+- `~/components/ConsoleBlockItem.tsx`（report ブロックの案件名バッジ）
+
+`~/routes/tasks.tsx` の一覧行の題名リンクは既に `title={item.id}`（id を出す設計）が付いているため
+そのまま。`ConsoleBlockItem.tsx` の `who`（発言者名。`ReactNode` で文字列とは限らない）は対象外
+（短い名前がほとんどで、`title` に渡せる保証もない）。
+
+### 監査（機械検査。数値は 0 を維持したことの確認）
+
+| rule | ラウンド 3 後 | ラウンド 4 後 |
+| --- | --- | --- |
+| overflow | 0 | **0**（維持） |
+| status-badge | 0 | **0**（維持。releases の gate/verify バッジに `data-status-badge` を新設したが 1 語のまま、org のモードバッジも 1 語） |
+| fixed-overlay | 0 | **0**（維持。Console の spacer を実測にしても 0 のまま） |
+| tap-target | 0 | **0**（維持。Board の segmented control を grid にしても各セル `min-h-11` のまま） |
+| font-size | 0 | **0**（維持） |
+| 合計 | 0 | **0**（`pnpm mobile-audit` exit 0、20 route 全て 200 応答） |
+
+### 証跡
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint` | exit 0。`Checked 222 files. No fixes applied.`（一度 biome の整形差分が 2 件出たため `biome check --write` で直してから再確認） |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0。**Test Files 60 passed (60) / Tests 857 passed (857)**（Phase G25 の 856 から +1。`releaseGateBadgeLabel`/`releaseVerifyBadgeLabel` の新規ユニットテスト 1 件を `test/unit/releases.test.ts` に追加） |
+| build | `pnpm build` | exit 0（client・server とも） |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（celeris API 契約は変えていない） |
+| mobile-audit | `pnpm mobile-audit` | **exit 0。violations 0 件**。20 route 全て 200 応答、`page-error` 0 |
+
+before/after のスクリーンショット（`gui/test/mobile-audit/*.png`、git には入れない。差分の目視用）:
+`gui/test/mobile-audit/home.png`（Console）、`board.png`、`org.png`、`reports.png`、`knowledge.png`、
+`knowledge-inbox.png`、`releases.png`、`help.png`、`project-detail.png` で今回の変更を確認した
+（他 route は変更していないが同じ実行で再生成されている）。
+
+### 未解決事項
+
+- **U8（継続、未実機）**: Phase G25 の入力欄 `position: fixed` 化にともなう「キーボード表示時に
+  隠れないか」（`100dvh`）は Playwright では再現できないため、今回も未確認のまま。実機（iOS Safari /
+  Android Chrome）が使える人またはエージェントに依頼する（手順は P-G23-1 のとおり）。
+- **U9（据え置き）**: Project 画面のアーカイブ（Phase 71）に加え、今回 Milestone の「中止」も
+  デスクトップの見た目が変わる開閉化をした。人が「常に見せたい」と言えば、この 2 点をまとめて
+  次のラウンドで戻す。
+- **U12（新規）**: `/org` のサブツリー開閉は「既定で開いている」ので、大きな組織（数十ノード）での
+  効果は開閉した後にしか出ない。効果を確認するには実機か、モックの組織データを増やした検証が要る
+  （今回のモックデータは小さいノード数なので、開閉自体の動作は確認できたが「長い画面が短くなる」
+  効果は目視で確認できていない）。
+- **U13（新規）**: `/releases` の gate/verify バッジは新たに `data-status-badge` を付けたが、
+  `ok_live`/`ok_stop_start` を同じ「検証済み」の 1 語にしたことで、バッジの文字だけでは切替方法が
+  分からなくなった（色と、下の「検証」欄の詳細行でしか分からない）。人が「バッジのままで見分けたい」
+  と言うなら、色の凡例をどこかに置くか、アイコンで区別する案を次のラウンドで検討する。
+
+### 提案
+
+- **P-G26-1**: `/org` の階層バッジ（既定のハーネス・動かす場所）は `effective_profiles` の継承結果を
+  そのまま出しているので、根に近いノードほど同じ値が並びがち（例: 全ノードが根の既定を継いでいると
+  全部同じバッジになる）。差分（自分の代で上書きしたかどうか）を出す案は次のラウンド。
+- **P-G26-2**: U7 で `ConsoleInput` の実測に切り替えたことで、今後 Console の入力欄の形（例: 添付
+  ボタンの追加等）を変えても spacer 側は自動で追随する。この仕組み（`ResizeObserver` +
+  `onHeightChange`）は他の「モバイルで固定表示にしている要素」（例えば将来ボードの segmented
+  control を `sticky` から `fixed` にする等）にも転用できる。

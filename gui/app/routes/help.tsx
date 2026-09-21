@@ -341,7 +341,7 @@ export default function HelpPage() {
                   s.title
                 )}
               </dt>
-              <dd className="mt-0.5 pl-11 text-sm text-fg-muted">{s.text}</dd>
+              <dd className="mt-0.5 pl-11 text-sm leading-relaxed text-fg-muted">{s.text}</dd>
             </div>
           ))}
         </dl>
@@ -453,7 +453,7 @@ export default function HelpPage() {
           {GLOSSARY.map((entry) => (
             <div key={entry.term}>
               <dt className="font-semibold text-fg">{entry.term}</dt>
-              <dd className="mt-0.5 text-fg-muted">{entry.text}</dd>
+              <dd className="mt-0.5 leading-relaxed text-fg-muted">{entry.text}</dd>
             </div>
           ))}
         </dl>
@@ -463,14 +463,14 @@ export default function HelpPage() {
         <dl className="divide-y divide-border text-sm">
           <div className="py-3 first:pt-0">
             <dt className="font-semibold text-fg">celeris が止まっている</dt>
-            <dd className="mt-0.5 text-fg-muted">
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
               画面上部に「celeris に接続できません」という赤い帯が出て操作できなくなる。5
               秒ごとに自動で再接続を試みるので、celeris を起動すれば自動で消える。
             </dd>
           </div>
           <div className="py-3">
             <dt className="font-semibold text-fg">401</dt>
-            <dd className="mt-0.5 text-fg-muted">
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
               celeris への認証（トークン）が無い・違う場合はバナーで知らせる。GUI
               自身のログインが切れている場合、通常のページはログイン画面に 戻るが、SSE や成果物の取得はその場で 401
               になる。
@@ -478,7 +478,7 @@ export default function HelpPage() {
           </div>
           <div className="py-3">
             <dt className="font-semibold text-fg">401（プロバイダ・アカウントの追加/編集/削除）</dt>
-            <dd className="mt-0.5 text-fg-muted">
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
               管理系 API（プロバイダ・アカウントの追加/編集/削除、reload）はトークンが必須。
               <code>CELERIS_API_TOKEN_FILE</code> を celeris の <code>[api] token_file</code> と同じ内容にして GUI
               を再起動する。
@@ -486,32 +486,32 @@ export default function HelpPage() {
           </div>
           <div className="py-3">
             <dt className="font-semibold text-fg">403</dt>
-            <dd className="mt-0.5 text-fg-muted">
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
               不正なリクエスト元（CSRF）として拒否された、またはファイルの参照先がワークスペースの外に出ている。
             </dd>
           </div>
           <div className="py-3">
             <dt className="font-semibold text-fg">409</dt>
-            <dd className="mt-0.5 text-fg-muted">
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
               他の人・他のタブが先に状態を変えた、またはその状態ではその操作ができない。画面が最新の状態に更新されるので、それを見て操作をやり直す。
             </dd>
           </div>
           <div className="py-3">
             <dt className="font-semibold text-fg">422</dt>
-            <dd className="mt-0.5 text-fg-muted">
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
               入力内容が celeris の検証に落ちた。フォームの該当欄の下にメッセージが出る。
             </dd>
           </div>
           <div className="py-3">
             <dt className="font-semibold text-fg">run のログと成果物の見方</dt>
-            <dd className="mt-0.5 text-fg-muted">
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
               タスク詳細の run 一覧から個々の run
               を開くと標準出力・標準エラー・判定結果が見える。成果物はタスク詳細の一覧から開く／保存する。
             </dd>
           </div>
           <div className="py-3 last:pb-0">
             <dt className="font-semibold text-fg">docs/celeris-requests.md に書く場面</dt>
-            <dd className="mt-0.5 text-fg-muted">
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
               celeris の応答が `docs/celeris-api-v1.md` の記載と違う、または足りないと分かったとき、GUI
               側の開発者がそこに現象と証拠を記録して celeris 側に依頼する（GUI では回避しない）。
             </dd>

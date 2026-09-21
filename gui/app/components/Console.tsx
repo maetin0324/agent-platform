@@ -62,6 +62,10 @@ export function Console({ data }: { data: ConsoleData }) {
 
   const counts = consoleWaitingCounts(blocks);
   const [replyTarget, setReplyTarget] = useState<InstructReplyTarget | null>(null);
+  // フェーズ 72（ADR-0055 D2、U7 の解消）: spacer の高さは見積もり（`h-52` 固定）ではなく、
+  // `ConsoleInput` 自身の実高さを `ResizeObserver` で測って反映する。返信先バナーの表示・非表示で
+  // 高さが変わっても（`ResizeObserver` は border-box の変化を都度拾う）常に過不足なく確保できる。
+  const [inputHeight, setInputHeight] = useState<number | null>(null);
 
   function handleReply(block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) {
     setReplyTarget(replyTargetForMessageBlock(block));
@@ -76,13 +80,21 @@ export function Console({ data }: { data: ConsoleData }) {
           <BlockStream blocks={blocks} org={org} projects={projects} onReply={handleReply} />
           {/* フェーズ 71（ADR-0055 D2）: モバイルは入力欄を下部固定タブの上に `position: fixed` する
               （`ConsoleInput` 自身が `lg:static` で戻る）。フローから抜けた分の高さを、この spacer で
-              本文側にあらかじめ確保しておく（無いと固定入力欄が直前のブロックに重なる）。 */}
-          <div aria-hidden="true" className="h-52 lg:hidden" />
+              本文側にあらかじめ確保しておく（無いと固定入力欄が直前のブロックに重なる）。
+              フェーズ 72: 高さは `ConsoleInput` から届く実測値（`inputHeight`）。まだ測れていない
+              初回描画・SSR は見積もりの `h-52`（13rem）にフォールバックする。 */}
+          <div
+            aria-hidden="true"
+            data-testid="console-input-spacer"
+            className="h-52 lg:hidden"
+            style={inputHeight != null ? { height: inputHeight } : undefined}
+          />
           <ConsoleInput
             org={org}
             replyTarget={replyTarget}
             onClearReply={() => setReplyTarget(null)}
             defaultScope={parsedScope.kind === "all" ? null : scope}
+            onHeightChange={setInputHeight}
           />
         </div>
       </div>
@@ -288,18 +300,38 @@ function ConsoleInput({
   replyTarget,
   onClearReply,
   defaultScope,
+  onHeightChange,
 }: {
   org: readonly OrgNode[];
   replyTarget: InstructReplyTarget | null;
   onClearReply: () => void;
   defaultScope: string | null;
+  /** フェーズ 72（U7）: この入力欄の実高さ（border-box）が変わるたびに呼ぶ。親の spacer を正確に保つ。 */
+  onHeightChange: (height: number) => void;
 }) {
   const fetcher = useFetcher<ConsoleInstructOutcome>();
   const [text, setText] = useState("");
   const [mention, setMention] = useState<MentionQuery | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const submitting = fetcher.state !== "idle";
   const handledMessageId = useRef<string | null>(null);
+
+  // フェーズ 72（U7）: 見積もりの `h-52` をやめ、`ConsoleInput` の実高さを都度測って親（spacer）へ渡す
+  // （返信先バナーの表示・非表示、文字入力での行数の変化にも追随する）。`ResizeObserver` が無い環境
+  // （テストの node 環境等）では何もしない（spacer は見積もりの `h-52` のまま）。
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+      onHeightChange(height);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [onHeightChange]);
 
   useEffect(() => {
     const outcome = fetcher.data;
@@ -358,6 +390,7 @@ function ConsoleInput({
 
   return (
     <div
+      ref={rootRef}
       data-testid="console-input"
       // ADR-0055 D2「入力欄は画面下固定、キーボード表示時に隠れない」（フェーズ 71）。
       // モバイルは下部固定タブ（`h-16` + `env(safe-area-inset-bottom)`。`~/root.tsx`）のすぐ上に

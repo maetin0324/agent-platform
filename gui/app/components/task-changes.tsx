@@ -263,10 +263,13 @@ function RepoChangesCard({
                         className="flex min-h-11 min-w-0 items-center gap-2 font-medium text-primary hover:underline"
                         data-testid="task-changes-file-link"
                       >
-                        <Badge tone={changedFileStatusTone(file.status)}>
-                          {file.status} {changedFileStatusLabel(file.status)}
+                        {/* フェーズ 72（ADR-0055 D2）: バッジは 1 語（生の git 記号は `title` へ）。 */}
+                        <Badge tone={changedFileStatusTone(file.status)} title={file.status}>
+                          {changedFileStatusLabel(file.status)}
                         </Badge>
-                        <span className="truncate font-mono text-xs">{file.path}</span>
+                        <span className="truncate font-mono text-xs" title={file.path}>
+                          {file.path}
+                        </span>
                       </Link>
                       {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
                       <span

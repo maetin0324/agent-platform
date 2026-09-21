@@ -26,9 +26,11 @@ import {
   promoteFailedText,
   promoteFlashState,
   promoteNeedsTypedSha,
+  releaseGateBadgeLabel,
   releaseGateLabel,
   releasePositionLabel,
   releaseSubtitle,
+  releaseVerifyBadgeLabel,
   releaseVerifyLabel,
   releaseVerifyTone,
   sensitiveBadgeText,
@@ -257,11 +259,25 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
                 {position}
               </Badge>
             )}
-            <Badge tone={item.gate_ok ? "success" : "danger"} data-testid="release-gate">
-              {releaseGateLabel(item)}
+            {/* フェーズ 72（ADR-0055 D2、U10 系譜）: gate / 検証は 1 語のバッジにし（`gate ✓`/`検証済み
+                （ライブ引き継ぎ）` は語ではなかった）、詳細は `title` と下の「検証」欄に出す。 */}
+            <Badge
+              tone={item.gate_ok ? "success" : "danger"}
+              data-testid="release-gate"
+              data-status-badge="release-gate"
+              title={releaseGateLabel(item)}
+            >
+              {releaseGateBadgeLabel(item)}
             </Badge>
-            <Badge tone={releaseVerifyTone(item)} dot pulse={item.promoting} data-testid="release-verify">
-              {releaseVerifyLabel(item)}
+            <Badge
+              tone={releaseVerifyTone(item)}
+              dot
+              pulse={item.promoting}
+              data-testid="release-verify"
+              data-status-badge="release-verify"
+              title={releaseVerifyLabel(item)}
+            >
+              {releaseVerifyBadgeLabel(item)}
             </Badge>
             {sensitive && (
               <Badge tone="danger" dot data-testid="release-sensitive-badge">
@@ -290,6 +306,11 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
             <span data-testid="release-verify-at" className="text-fg-subtle">
               {item.verify?.at ?? "-"}
             </span>
+            {item.verify && (
+              <span className="block text-fg-subtle" data-testid="release-verify-detail">
+                {releaseVerifyLabel(item)}
+              </span>
+            )}
           </DataItem>
           <DataItem label="upgrade">
             <span data-testid="release-promoted-at" className="text-fg-subtle">
@@ -426,6 +447,9 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
                 size="sm"
                 disabled={submitting || (needsTyped && !typedOk)}
                 data-testid="release-promote"
+                // フェーズ 72（ADR-0055 D2 ラウンド 4）: 「押せるときだけ全幅」（`canPromote` の details の
+                // 中でしか出さない、= 出ているときは常に押せる候補なので全幅にする。モバイルのみ）。
+                className="w-full sm:w-auto"
                 onClick={(e) => {
                   // 安全に関わる変更があるときは、上の sha12 入力がそのまま確認になる（`confirm` は聞かない）。
                   if (needsTyped) {

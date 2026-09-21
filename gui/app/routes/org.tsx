@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   data,
   type FetcherWithComponents,
@@ -199,6 +199,12 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
   const selectedId = searchParams.get("selected");
   const selectedProjectId = searchParams.get("project") ?? "";
   const { roots } = useMemo(() => buildOrgTree(org.items), [org.items]);
+  // フェーズ 72（ADR-0055 D2 ラウンド 4）: ノードカードに「既定のハーネス」と動かす場所（一語のバッジ）
+  // を添える。値は `GET /org` の `effective_profiles[]`（根→葉で継いだ結果。GUI は継承を再計算しない）。
+  const effectiveProfileById = useMemo(
+    () => Object.fromEntries((org.effective_profiles ?? []).map((p) => [p.node_id, p])),
+    [org.effective_profiles],
+  );
   const selected = selectedId ? (org.items.find((n) => n.id === selectedId) ?? null) : null;
   const fetcher = useFetcher<OrgOpOutcome>();
   const submitting = fetcher.state !== "idle";
@@ -232,7 +238,14 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
               ) : (
                 <ul data-testid="org-tree" className="space-y-1">
                   {roots.map((r) => (
-                    <OrgTreeItem key={r.node.id} item={r} depth={0} selectedId={selectedId} workload={workload} />
+                    <OrgTreeItem
+                      key={r.node.id}
+                      item={r}
+                      depth={0}
+                      selectedId={selectedId}
+                      workload={workload}
+                      effectiveProfileById={effectiveProfileById}
+                    />
                   ))}
                 </ul>
               )}
@@ -394,62 +407,109 @@ function OrgTreeItem({
   depth,
   selectedId,
   workload,
+  effectiveProfileById,
 }: {
   item: OrgTreeNode;
   depth: number;
   selectedId: string | null;
   workload: Record<string, Workload>;
+  effectiveProfileById: Record<string, EffectiveProfile>;
 }) {
   const { node, children } = item;
   const active = node.id === selectedId;
   const open = workload[node.id]?.open ?? 0;
+  const hasChildren = children.length > 0;
+  // フェーズ 72（U10 系譜、ADR-0055 D2 ラウンド 4）: 木を「サブツリーごとに開閉できる、字下げした一覧」に
+  // した（深い組織で 1 画面が長くなりすぎないため）。既定は開いた状態（挙動を変えない）。
+  const [expanded, setExpanded] = useState(true);
+  const profile = effectiveProfileById[node.id];
+  const harnessDefault = profile?.harness_default;
+  const mode = profile?.run;
+
   return (
     <li>
-      <Link
-        to={`/org?selected=${encodeURIComponent(node.id)}`}
-        data-testid="org-node"
-        data-org-id={node.id}
-        className={cn(
-          // ADR-0055 D1-2: タップ領域 44×44 以上。
-          "flex min-h-11 items-center gap-2 rounded-lg px-2 py-1.5 text-sm no-underline transition-colors",
-          active ? "bg-primary-soft text-primary-soft-fg" : "text-fg hover:bg-surface-2",
+      <div className="flex items-center gap-0.5" style={{ marginLeft: depth * 14 }}>
+        {hasChildren ? (
+          <button
+            type="button"
+            aria-expanded={expanded}
+            aria-controls={`org-subtree-${node.id}`}
+            aria-label={expanded ? `${node.name} の下を畳む` : `${node.name} の下を開く`}
+            onClick={() => setExpanded((v) => !v)}
+            data-testid="org-node-toggle"
+            className="flex size-11 shrink-0 items-center justify-center rounded-lg text-fg-subtle hover:bg-surface-2 lg:size-7"
+          >
+            <Icon name={expanded ? "chevronDown" : "chevronRight"} className="size-4" />
+          </button>
+        ) : (
+          <span className="size-11 shrink-0 lg:size-7" aria-hidden="true" />
         )}
-        style={{ marginLeft: depth * 14 }}
-      >
-        {/* 「人」に見せる（監査 4）: 名前を先頭に太く、その下に一言、右端に小さく分野。
-            部・課の英語のバッジは出さない（木の形で分かる。必要な 1 文字だけ添える）。
-            ADR-0055 D1-4: 小さい注記はモバイル text-sm、デスクトップは lg: で元の大きさのまま。 */}
-        <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-baseline gap-1.5">
-            <span className="font-semibold" data-testid="org-node-name">
-              {node.name}
+        <Link
+          to={`/org?selected=${encodeURIComponent(node.id)}`}
+          data-testid="org-node"
+          data-org-id={node.id}
+          className={cn(
+            // ADR-0055 D1-2: タップ領域 44×44 以上。
+            "flex min-h-11 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 text-sm no-underline transition-colors",
+            active ? "bg-primary-soft text-primary-soft-fg" : "text-fg hover:bg-surface-2",
+          )}
+        >
+          {/* 「人」に見せる（監査 4）: 名前を先頭に太く、その下に一言、右端に小さく分野。
+              部・課の英語のバッジは出さない（木の形で分かる。必要な 1 文字だけ添える）。
+              ADR-0055 D1-4: 小さい注記はモバイル text-sm、デスクトップは lg: で元の大きさのまま。 */}
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-baseline gap-1.5">
+              <span className="font-semibold" data-testid="org-node-name">
+                {node.name}
+              </span>
+              {orgKindMark(node.kind) && (
+                <span className="text-sm text-fg-subtle lg:text-[0.7rem]">{orgKindMark(node.kind)}</span>
+              )}
+              {mode && (
+                <Badge tone="neutral" data-status-badge="org-mode" data-testid="org-node-mode">
+                  {profileRunLabel(mode)}
+                </Badge>
+              )}
             </span>
-            {orgKindMark(node.kind) && (
-              <span className="text-sm text-fg-subtle lg:text-[0.7rem]">{orgKindMark(node.kind)}</span>
+            {node.brief && (
+              <span className="mt-0.5 line-clamp-1 text-sm text-fg-muted lg:text-xs" data-testid="org-node-brief">
+                {node.brief}
+              </span>
+            )}
+            {harnessDefault && (
+              <span
+                className="mt-0.5 block truncate text-sm text-fg-subtle lg:text-[0.7rem]"
+                data-testid="org-node-harness-default"
+                title={`既定のハーネス: ${harnessDefault}`}
+              >
+                既定: {harnessDefault}
+              </span>
             )}
           </span>
-          {node.brief && (
-            <span className="mt-0.5 line-clamp-1 text-sm text-fg-muted lg:text-xs" data-testid="org-node-brief">
-              {node.brief}
+          {node.genre && (
+            <span className="mt-0.5 shrink-0 text-sm text-fg-subtle lg:text-[0.7rem]" data-testid="org-node-genre">
+              {node.genre}
             </span>
           )}
-        </span>
-        {node.genre && (
-          <span className="mt-0.5 shrink-0 text-sm text-fg-subtle lg:text-[0.7rem]" data-testid="org-node-genre">
-            {node.genre}
+          <span
+            className="mt-0.5 shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-sm tabular-nums text-fg-subtle lg:text-[0.7rem]"
+            title="抱えている仕事の数"
+          >
+            {open}
           </span>
-        )}
-        <span
-          className="mt-0.5 shrink-0 rounded-full bg-surface-2 px-1.5 py-0.5 text-sm tabular-nums text-fg-subtle lg:text-[0.7rem]"
-          title="抱えている仕事の数"
-        >
-          {open}
-        </span>
-      </Link>
-      {children.length > 0 && (
-        <ul className="mt-1 space-y-1 border-l border-border pl-2">
+        </Link>
+      </div>
+      {hasChildren && expanded && (
+        <ul id={`org-subtree-${node.id}`} className="mt-1 space-y-1 border-l border-border pl-2">
           {children.map((c) => (
-            <OrgTreeItem key={c.node.id} item={c} depth={depth + 1} selectedId={selectedId} workload={workload} />
+            <OrgTreeItem
+              key={c.node.id}
+              item={c}
+              depth={depth + 1}
+              selectedId={selectedId}
+              workload={workload}
+              effectiveProfileById={effectiveProfileById}
+            />
           ))}
         </ul>
       )}

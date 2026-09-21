@@ -34,6 +34,22 @@ export function releaseVerifyLabel(item: Pick<ReleaseItem, "verify">): string {
   return VERIFY_LABEL[releaseVerifyState(item)];
 }
 
+/**
+ * ADR-0055 D2「状態はバッジ 1 語 + 色」向けの短い語（フェーズ 72）。`ok_live` / `ok_stop_start` は
+ * どちらも「検証済み」の 1 語にし（切替方法の違いは色と、行の下の `releaseVerifyLabel` の詳細に任せる）、
+ * `ng` は「検証NG」にする。`releaseVerifyLabel` はこのまま行の下の詳細文として使い続ける。
+ */
+const VERIFY_BADGE_LABEL: Record<ReleaseVerifyState, string> = {
+  unverified: "未検証",
+  ok_live: "検証済み",
+  ok_stop_start: "検証済み",
+  ng: "検証NG",
+};
+
+export function releaseVerifyBadgeLabel(item: Pick<ReleaseItem, "verify">): string {
+  return VERIFY_BADGE_LABEL[releaseVerifyState(item)];
+}
+
 const VERIFY_TONE: Record<ReleaseVerifyState, Tone> = {
   unverified: "neutral",
   ok_live: "success",
@@ -48,6 +64,11 @@ export function releaseVerifyTone(item: Pick<ReleaseItem, "verify">): Tone {
 /** gate（`release.sh` の 7 段）の一言。 */
 export function releaseGateLabel(item: Pick<ReleaseItem, "gate_ok">): string {
   return item.gate_ok ? "gate ✓" : "gate ✗";
+}
+
+/** ADR-0055 D2「状態はバッジ 1 語 + 色」向けの短い語（フェーズ 72）。詳細は `releaseGateLabel`。 */
+export function releaseGateBadgeLabel(item: Pick<ReleaseItem, "gate_ok">): string {
+  return item.gate_ok ? "通過" : "失敗";
 }
 
 /** リリースの「いまの位置」（現行 / 直前 / それ以外）。 */

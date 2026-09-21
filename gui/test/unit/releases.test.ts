@@ -16,9 +16,11 @@ import {
   promoteFailedText,
   promoteFlashState,
   promoteNeedsTypedSha,
+  releaseGateBadgeLabel,
   releaseGateLabel,
   releasePositionLabel,
   releaseSubtitle,
+  releaseVerifyBadgeLabel,
   releaseVerifyLabel,
   releaseVerifyState,
   releaseVerifyTone,
@@ -76,6 +78,27 @@ describe("releaseVerifyState / ラベル（ADR-0040 D3）", () => {
     expect(releasePositionLabel(item({ is_current: true }))).toBe("現行");
     expect(releasePositionLabel(item({ is_previous: true }))).toBe("直前");
     expect(releasePositionLabel(item())).toBeNull();
+  });
+
+  it("フェーズ 72（ADR-0055 D2）: バッジは 1 語（gate/verify とも、空白を含まない）", () => {
+    expect(releaseGateBadgeLabel(item())).toBe("通過");
+    expect(releaseGateBadgeLabel(item({ gate_ok: false }))).toBe("失敗");
+    expect(releaseGateBadgeLabel(item())).not.toMatch(/\s/);
+    expect(releaseGateBadgeLabel(item({ gate_ok: false }))).not.toMatch(/\s/);
+
+    expect(releaseVerifyBadgeLabel(item({ verify: null }))).toBe("未検証");
+    // ok_live / ok_stop_start は同じ 1 語（切替方法の違いは色と releaseVerifyLabel の詳細に任せる）。
+    expect(releaseVerifyBadgeLabel(item())).toBe("検証済み");
+    expect(releaseVerifyBadgeLabel(item({ verify: { ok: true, live_ok: false, at: null } }))).toBe("検証済み");
+    const ng = item({ verify: { ok: false, live_ok: false, at: "2026-09-19T01:00:00Z" } });
+    expect(releaseVerifyBadgeLabel(ng)).toBe("検証NG");
+    for (const label of [
+      releaseVerifyBadgeLabel(item({ verify: null })),
+      releaseVerifyBadgeLabel(item()),
+      releaseVerifyBadgeLabel(ng),
+    ]) {
+      expect(label).not.toMatch(/\s/);
+    }
   });
 
   it("1 行の説明は built_at · ref · schema", () => {
