@@ -11088,3 +11088,14 @@ ADR-0054 D1 の設計）は CoS 対話 run の `StoreSink` には実装されて
   `verify.sh` check 1–6 true、`live_ok=true` → `promote.sh 5b3b0a649bfa` **mode=live**（14:26:34→37、API 停止なし）。
 - 障害の窓: 13:53（Phase 67 昇格）〜14:26 の 33 分間、CoS 対話と claude-code の部門長レビューは失敗する状態だった（実害は動作確認の 2 タスクのみ）。
 - 実機確認（UUID セッションで 2 往復、`node_sessions` の自己修復、turns=2）は次節。
+
+### Phase 67b の実機確認（2026-09-21 14:27 UTC）— UUID セッションで CoS が復旧、ただし 2 回目は Codex に流れた
+
+- CoS に 2 回指示。**両方 `done`**（1 回目「今日の日付は 2026 年 9 月 21 日と回答した」、2 回目「タスクを作らず、今日の日付を一言で答える動作確認」）。
+- `node_sessions`: 壊れていた ULID 行は **自己修復で retire**（turns=4 のまま retired）、新しい claude-code セッション
+  `01a0c45d-35ca-4cb9-968d-f34572f4ed09`（UUID v4）で 1 回目が `resume:false`・成功（usage in 4 / out 191。Claude のキャッシュで全量前置きでも安い）。
+- **2 回目は codex / chatgpt_plus_personal に割り当てられた**（ADR-0049 の残量スコアで Codex が上位）。そのため Claude のセッションは
+  「アカウントが変わった」として retire され、Codex の新セッションが `resume:false`・**前置き全量（input 52,629 tokens）**で走った。
+  D1 の「同じアカウントで続ける」が選択側で担保されていない（毎回アダプタが変わり得る）。→ **Phase 67c**（継続中のセッションの
+  adapter/account が使える限りそれに固定。Codex のセッション id は CLI が返す thread id を使う）を Sonnet で起動。
+- 判定: Phase 67b の受け入れ（UUID で `--session-id` が通る、非 UUID の行を retire）は実機で成立。`--resume` の実機確認は 67c の後。
