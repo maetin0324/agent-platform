@@ -11803,3 +11803,9 @@ GUI のみ（`crates/` 無変更）。`docs/adr/0055-mobile-ux.md` D2/D3 のル�
   未実施（ADR-0009 P-34。認証・ネットワークが使えるサンドボックスではないため）。
 - 詳細は gui/docs/PROGRESS.md「Phase G31」の未解決事項を参照（`contrast` ルールがアイコン・フォーカス
   リングを見ていない件、絶対日付フォールバックが UTC 基準である件など）。
+
+### Phase 75 の本番反映（2026-09-21 16:26 UTC。`468a726c2548`、ライブ切替）
+
+- main `468a726` = Phase 75 merge（GUI のみ）。GUI ゲート: typecheck / lint exit 0、`pnpm test` 925 passed、`pnpm mobile-audit` **light / dark とも違反 0**
+  （新ルール `contrast` を含む。21 route × 2 scheme）。`release.sh` → `468a726c2548`（schema 23）。`verify.sh` check 1–6 true、`live_ok=true`
+  → `promote.sh` **mode=live**（16:26:43→50）。Phase 76（アクセシブルな名前・フォーカス・ライブリージョン）を Sonnet で起動。
