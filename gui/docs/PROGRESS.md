@@ -3672,3 +3672,161 @@ D1 の 1〜6 を検査し、`test/mobile-audit/report.json` + スクリーンシ
   実際のスマホでは、キーボード表示時に `100dvh` の入力欄が動く挙動（ADR-0055 D2）まではカバーできない
   （Playwright はソフトキーボードを再現できない）。次のラウンドで Console の入力欄を作り込むときは、
   手元の実機での目視確認も添える方が安全（`docs/PROGRESS.md` の「LLM 呼び出しを伴う実機確認」と同じ扱い）。
+
+## Phase G24 — スマホ UX ラウンド 2: 下部固定タブと違反ゼロ（ADR-0055。2026-09-21）
+
+Phase 70 / ADR-0055 D2（残タスク）と D3（ラウンドを回し続ける）。前回（Phase G23）の「未解決事項」
+U1・U2・U3 に手を付けた: D2 が求める下部固定タブを実装し、タップ領域・文字サイズの違反を
+20 route 全部で 0 にした。celeris・Rust 側は変更していない（`gui/CLAUDE.md` の境界どおり）。
+
+### 下部固定タブ（ADR-0055 D2 の具体化）
+
+- **`~/root.tsx` を大きく組み替えた**: `Sidebar`（デスクトップ専用、`hidden lg:block` の `<aside>`）、
+  `MobileTopBar`（モバイルのみ、ロゴ + 接続状態 + ログアウト。`lg:hidden`）、`MobileTabBar`（モバイルの
+  下部固定タブ。`fixed inset-x-0 bottom-0 lg:hidden`）の 3 つに分けた。以前は 1 つの `<aside>` が
+  `sticky top-0` のまま、モバイルは内側の要素を `lg:hidden`/`order-*` で出し分けていた
+  （「上部 sticky」。U3 で指摘した形）。
+- **タブは 4 本 + その他**（`MOBILE_TABS`）: Console / ボード / 案件 / 認可。認可には
+  `approvalsPending` のバッジ（赤丸のみ、文字は出さない。文字を出すと D1-4 の 14px 検査に掛かるため）。
+- **「その他」は下からせり出すシート**（`MOBILE_OTHER`）: 組織・報告・リリース・知識・クラスタ・
+  アカウント・ヘルプの 7 つ（人が言った並びどおり）。閉じている間はシートの DOM 自体が無い
+  （`{sheetOpen && (...)}`）ので機械検査に影響しない。開くボタン・背景（`<button>` にして a11y の
+  「静的要素にクリックだけ付けている」警告を避けた）・Escape（`document` に `keydown` を張る）で閉じる。
+- **入力欄との関係（ADR-0055 D2「入力欄は画面下固定…隠れない」）**: Console の入力欄自体は今回も
+  `position: fixed` にしていない（既存のまま、メッセージ一覧の下の通常のフローの要素）。今回の要求は
+  「下部固定タブより上に来る・内容が隠れない」ことなので、本文側のラッパーに
+  `pb-28 lg:pb-0`（112px。タブの高さ `h-16`=64px + 余裕）を足し、D1-5 の検査（後述の直し込み後）が
+  20 route 全部で 0 のままであることで確認した。タブは
+  `style={{ paddingBottom: "env(safe-area-inset-bottom)" }}` で実機の safe area 分も確保する
+  （Playwright の headless では 0 になるので機械検査では見えない。Phase G23 の提案 P-G23-1 のとおり、
+  実機の目視確認が要る項目として下記「未解決事項」に残す）。
+- 新しいアイコン `more`（3 点）を `~/components/ui/Icon.tsx` に追加。
+
+### 監査スクリプト自身の 2 つの見落としを直した（下部固定タブを初めて作ったことで発覚）
+
+下部固定タブができるまで `position: fixed` な要素が画面に存在しなかったため、D1-5（固定要素）の検査
+（`checkFixedOverlays`）は常に `bottomBars.length === 0` で早期リターンし、**一度も実際には動いていな
+かった**。タブを作った直後に初めて動き、以下 2 つの誤検知を見つけて直した（`~/scripts/mobile-audit.mjs`）。
+
+1. **`<aside class="hidden lg:block">`（デスクトップ専用）の中身を見落とす**: `display` は継承しない
+   ので、祖先が `display:none` でも子要素自身の `getComputedStyle().display` は変わらない
+   （`"block"` のまま）。一方 `getBoundingClientRect()` は祖先が非表示ならボックスを持たず 0 になる。
+   D1-4（文字サイズ）等の検査は「自分の `style.display` だけ」を見ていたので、デスクトップ専用ナビの
+   中の小さい文字（ナビ見出し等）を「見えている」と誤検知していた。祖先をたどって判定する
+   `isNotVisible(el)` を新設し、D1-1・D1-2・D1-4・D1-5 のすべてに適用した。
+2. **閉じた `<details>` の中身が消えない**: `<details>`（`tasks.$id.tsx` の「生のイベント」）が閉じて
+   いても、Chromium は中身（`<summary>` 以外）の `getComputedStyle().display` を `"none"` に**しない**
+   （実測で確認。UA の見せ方は `display` プロパティには出ない別の仕組みらしい）。そのため
+   `isNotVisible` の祖先チェインだけでは検知できず、`task-timeline` で D1-5 が 1 件誤検知した
+   （閉じた `<details>` の中の「ありません。」という文字の `getBoundingClientRect().bottom` が実在の
+   値を返し、タブの上端より下にあると判定された）。`isNotVisible` に「直接の親が閉じた `<details>`
+   で、自分が `<summary>` でない」という構造的な判定を追加した。
+- この 2 点の副作用として、D1-4（文字サイズ）の違反数もラウンド開始直後の 200 → 168（見落とし 1 を
+  直した時点） → 162（見落とし 2 を直した時点）と、UI を 1 行も直さずに減った（デスクトップ専用要素・
+  閉じた `<details>` の中の小さい文字が正しく対象外になったため）。
+
+### タップ領域・文字サイズを 0 にした（優先順位: Console → ボード → タスクの各タブ → 案件詳細 → 残りの全画面）
+
+共有部品を先に潰すと 1 回の変更で何十件も減る（Phase G23 と同じ考え方）。主な直し方:
+
+- **`~/components/ui/badge.tsx`**（`Badge`/`KindBadge`/`RoleLabel`/`GenreLabel`）: モバイル
+  `text-sm`（`Badge` は `leading-5`）、`lg:` で元の `text-xs`/`text-[0.7rem]` に戻す。案件名・状態・
+  役割・分野など、ほぼ全画面のバッジがこれで一度に直った。
+- **`~/components/ui/misc.tsx`**: `SectionTitle` の件数ピル、`PageHeader` の `eyebrow` を同じパターンで。
+- **`~/components/ui/form.ts`**: 新しい `touchLinkClass`（孤立した文中リンクの当たり判定を 44 に広げる。
+  `-my-2.5 inline-flex min-h-11 min-w-11 items-center py-2.5`。見た目の行間は相殺で変えない）。
+  `theadClass` も `text-sm lg:text-xs` に。ADR-0055 D1-2 の「同じ行の隣接リンク群」の例外
+  （`data-touch-ok`）とは別物: `help.tsx` の目次のような隣接リンク群にはラウンド 1 のとおり
+  `data-touch-ok` を使い、孤立した 1 本のリンク（Console のタスクへのリンク、案件・タスク画面の
+  「〜へ」リンク等）には今回作った `touchLinkClass` を使う（**ADR の「文中リンクを機械的に免除しない」**
+  を守り、当たり判定を実際に広げた。免除では済ませていない）。
+- **`~/components/Console.tsx` / `~/components/ConsoleBlockItem.tsx`**: `WaitingStrip` の文字、
+  8 種のブロック（task/progress/question/approval/milestone/report/knowledge/human/reply）すべての
+  小さい文字（`text-xs`/`text-[0.7rem]`）を `text-sm lg:text-xs`（or `lg:text-[0.7rem]`）に、孤立リンク
+  （タスク題名・知識の候補リンク等）に `touchLinkClass`、progress の折りたたみボタンに `min-h-11`。
+- **`~/routes/tasks.$id.tsx`**: `TaskTabs`（5 つのタブ）に `min-h-11` を追加（5 タブ × 5 画面 = 25 件が
+  1 回の変更で消えた）。担当・案件・親タスクへのリンク、タイムラインの各行、`TaskRefList` 等に
+  `touchLinkClass`/`text-sm lg:text-xs`。
+- **`~/routes/board.tsx`**: カード題名のリンクを `min-h-11` の行に、列の件数ピル・カードの属性行を
+  `text-sm lg:text-xs`、行内編集の 3 つの `<select>`（優先度・レベル・担当）を
+  `h-11 lg:h-7 text-sm lg:text-xs`（元は `h-7 text-xs` の完全固定で、モバイルでも 28px のままだった
+  のが根本原因）。
+- **`~/routes/projects.$id.tsx` / `~/components/ReportsList.tsx`**（`/reports` と `/projects/:id` の
+  「報告」タブの共有部品）/ `~/routes/projects.tsx` / `~/routes/projects.$id.docs.tsx`: 同じパターン
+  （小さい文字・孤立リンク・行内編集 `<select>`）。
+- 残りの画面（`org.tsx`・`approvals.tsx`・`reports.tsx`・`knowledge.tsx`・`knowledge.inbox.tsx`・
+  `KnowledgeMeta.tsx`・`accounts.tsx`・`help.tsx`）も同じパターンで潰し、最後に `help.tsx` の目次・
+  本文中の孤立リンク（17 件、最後に残っていた塊）を `touchLinkClass` で直して合計 0 にした。
+  `accounts.tsx` の 2 つの `<pre>`（config.toml の例）は `font-mono` が付いていなかった不備だったので
+  付けた（コード例は等幅にするのが元々の意図で、D1-4 の対象外になるのは副作用ではなく正しい直し方）。
+
+### D2 の規律を守ったこと
+
+- 幅の固定値（`w-[...px]`）は追加していない。`min-h-11`/`min-w-11` はタップ領域そのものの最小値
+  （D1-2 が要求する値）で、レイアウト幅の固定ではない（既存の `chipLabelClass`/`Button` と同じ考え方）。
+- 状態はバッジ 1 語のまま変えていない（`data-status-badge` の対象は今回増やしていない）。
+- 既存の vitest はすべて green のまま。新しい**純関数**は今回作っていない（`touchLinkClass` はクラス名
+  の文字列定数で関数ではない。監査スクリプトの `isNotVisible` は `mobile-audit.mjs` 自身の検査ロジック
+  で、`~/lib/*.ts` の対象ではない）ので、新規のユニットテストは無し。
+
+### 証跡
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint` | exit 0。`Checked 222 files. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0。**Test Files 60 passed (60) / Tests 856 passed (856)** |
+| build | `pnpm build` | exit 0（client・server とも） |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（celeris API 契約は変えていない） |
+| mobile-audit（ラウンド開始時。Phase G23 の続き） | `node scripts/mobile-audit.mjs` | exit 1。**294 件**（tap-target 94 / font-size 200） |
+| mobile-audit（下部タブ実装直後） | 〃 | exit 1。**263 件**（tap-target 94 / font-size 168 / **fixed-overlay 1**。新規） |
+| mobile-audit（検査スクリプトの 2 つの見落としを直した後） | 〃 | exit 1。**197 件**（tap-target 94 / font-size 103 / fixed-overlay **0**） |
+| mobile-audit（Console 一式） | 〃 | exit 1。**159 件**（tap-target 84 / font-size 75） |
+| mobile-audit（`tasks.$id.tsx` 一式） | 〃 | exit 1。**101 件**（tap-target 45 / font-size 56）。task-overview/timeline/changes/files/artifacts の 5 route が 0 に |
+| mobile-audit（`board.tsx`） | 〃 | exit 1。**73 件**（tap-target 40 / font-size 33）。board が 0 に |
+| mobile-audit（案件系一式） | 〃 | exit 1。**53 件**（tap-target 30 / font-size 23）。projects/project-detail/project-docs が 0 に |
+| mobile-audit（org/approvals/reports/knowledge/knowledge-inbox/accounts） | 〃 | exit 1。**17 件**（tap-target 17 / font-size **0**） |
+| mobile-audit（`help.tsx`。最終） | `pnpm mobile-audit` | **exit 0。violations 0 件**。20 route 全て 200 応答、`page-error` 0 |
+
+#### 違反数の推移（D3「ラウンドごとに 1 行」の記録。ラウンド 1 後 → ラウンド 2 後）
+
+| rule | ラウンド 1 後 | ラウンド 2 後 | 減った理由（主なもの） |
+| --- | --- | --- | --- |
+| overflow | 0 | 0 | 変更なし |
+| status-badge | 0 | 0 | 変更なし |
+| fixed-overlay | 0（未検査） | 0 | 下部固定タブで初めて検査が動き、監査スクリプト自身の 2 つの見落とし（`isNotVisible`）を直して 0 に |
+| tap-target | 94 | **0** | `TaskTabs`（`min-h-11`）、`touchLinkClass`（新規）、board の行内編集 `<select>`、各画面の孤立リンク |
+| font-size | 200 | **0** | `Badge`/`RoleLabel`/`GenreLabel`/`SectionTitle`/`PageHeader` の共有修正で大半が一括で消え、残りは画面ごとに `text-sm lg:text-xs` |
+
+### 未解決事項（ADR-0055 D3 は「やることが無くなりにくいので最後に回し続ける」と明記しているので、
+0 を最終形とはみなさない。次にやること）
+
+- **U1（G23 から継続、実質解消）**: 文中の孤立リンクは今回 `touchLinkClass` で当たり判定を実際に
+  広げた（免除ではない）。新しい画面・新しいリンクを足すときは、単独のリンクなら `touchLinkClass`、
+  同じ行の隣接リンク群なら `data-touch-ok` を使う、という 2 つの型が揃ったので、次のラウンドはこれに
+  従うだけで良い。
+- **U2（G23 から継続、解消）**: 文字サイズの残りは共有部品（Badge・SectionTitle・PageHeader・
+  form.ts）でほぼ払底し、今回さらに個々の画面を全部見たので現在 0。今後増える画面・部品が
+  `text-xs`/`text-[0.7rem]` を新しく書いたときに再発するので、レビューで見る必要がある
+  （機械検査が捕まえるので気づける）。
+- **U3（G23 から継続、解消）**: 下部固定タブを実装した。
+- **U4（G23 から継続）**: e2e（`pnpm e2e`）は今回も未実行（実 celeris が要る既存の理由のまま）。
+- **U5（新規）**: Console の入力欄自体はまだ `position: fixed` にしていない（本文の通常のフロー）。
+  今回の受け入れ条件（下部タブより上・内容が隠れない）は `pb-28` の余白で満たしたが、ADR-0055 D2 の
+  「入力欄は画面下固定」という文字どおりの形にはまだしていない。次のラウンドで Console の入力欄を
+  実際に画面下へ固定するなら、`100dvh` とキーボード表示時の挙動を含めて実機の目視確認を添えること
+  （P-G23-1 のとおり。Playwright は software keyboard を再現しない）。
+- **U6（新規）**: 「その他」シートは 7 項目を 2 列グリッドで出す最小限の作りで、検索や並び替えは無い。
+  項目が増えたら見直しが要る。
+
+### 提案
+
+- **P-G24-1**: `mobile-audit.mjs` の `isNotVisible` は今回の 2 件（`hidden lg:block` の祖先・閉じた
+  `<details>`）はカバーしたが、他にも「`getComputedStyle` では見えるが実際には描かれない」ケース
+  （`content-visibility: hidden`、`clip-path`、画面外への `transform` 等）は理論上あり得る。今のところ
+  実害が出ていないので追加の一般化はしていないが、次に誤検知が出たら同じ考え方（構造的にたどる）で
+  直すのが良い。
+- **P-G24-2**: `touchLinkClass` は「見た目の位置を変えずに当たり判定だけ広げる」ための負のマージン
+  トリックなので、隣接する要素とレイアウト上重なる場合（詰まった行）は当たり判定が視覚的な境界を
+  超えて隣の要素に食い込むことがある。今回はそれが実害になる詰まった行は見当たらなかったが、次の
+  ラウンドで新しい画面に使うときは実機かブラウザの開発者ツールで確認するとよい。

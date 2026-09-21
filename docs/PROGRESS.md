@@ -10053,3 +10053,37 @@ LLM source の抽象層で、ハーネスと密結合にしない。
     probe に bearer を足し、401/403 は `Unknown` 扱いにする。**`langmem-main` のプロキシ化はその配備後**。
 - 次: `ldr-qwen` → `paperqa-qwen` を 1 つずつプロキシへ（`env_from_secrets` で `OPENAI_API_KEY = "celeris-api-token"`。秘密ファイルは
   `~/.config/celeris/secrets/celeris-api-token` に api.token の写し）。opencode は Phase 65 の判断どおり据え置き。
+## Phase 70 — スマホ UX ラウンド 2（ADR-0055。2026-09-21）
+
+celeris 本体（Rust）には触っていない。作業は全て `gui/` 側（詳細は `gui/docs/PROGRESS.md` の
+`## Phase G24`）。ここには受け入れ条件（下部固定タブの実装、優先画面（Console・ボード・タスク各タブ・
+案件詳細）でのタップ領域・文字サイズの違反ゼロ）に対する結果だけをまとめる。
+
+### 違反数（ラウンド 1 後 → ラウンド 2 後）
+
+| rule | ラウンド 1 後 | ラウンド 2 後 |
+| --- | --- | --- |
+| 横はみ出し（overflow） | 0 | **0**（維持） |
+| 状態バッジ 1 語化（status-badge） | 0 | **0**（維持） |
+| 固定要素（fixed-overlay） | 0（検査されていなかった） | **0** |
+| タップ領域 44×44（tap-target） | 94 | **0** |
+| 文字 14px 以上（font-size） | 200 | **0** |
+| 合計 | 294 | **0**（`pnpm mobile-audit` が exit 0） |
+
+### 何をしたか
+
+- ADR-0055 D2 の「下部固定のタブ（Console / ボード / 案件 / 認可 / その他）」を実装した
+  （`gui/app/root.tsx`）。モバイルのナビは上部 sticky から下部固定の `MobileTabBar` に変わり、
+  「その他」は組織・報告・リリース・知識・クラスタ・アカウント・ヘルプを載せたシートを開く。
+- 下部固定タブを実装したことで、`gui/scripts/mobile-audit.mjs` の D1-5（固定要素）検査が
+  **初めて実際に働いた**（それまでは `position: fixed` な要素が無く、検査が早期リターンして常に
+  0 件になっていた）。これで見つかった 2 つの検査自体の見落としを直した（下記「証跡」）。
+- タップ領域・文字サイズの違反を、優先度（Console → ボード → タスクの各タブ → 案件詳細 →
+  その他の全画面）の順に共有部品から潰し、最終的に 20 route 全部で違反 0 にした。
+
+### 証跡（GUI 側、コマンドと出力の要点。詳細は `gui/docs/PROGRESS.md` ## Phase G24）
+
+- `pnpm lint` exit 0 / `pnpm typecheck` exit 0 / `pnpm test` exit 0（**856 passed / 60 files**）/
+  `pnpm build` exit 0（client・server とも）。
+- `pnpm mobile-audit` exit 0（**違反 0 件**。overflow / status-badge / fixed-overlay / tap-target /
+  font-size のすべてが 0）。

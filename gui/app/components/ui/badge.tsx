@@ -13,7 +13,8 @@ export function Badge({
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-medium leading-4",
+        // ADR-0055 D1-4: 本文 14px 以上。モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+        "inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2 py-0.5 text-sm leading-5 font-medium lg:text-xs lg:leading-4",
         TONE_SOFT[tone],
         className,
       )}
@@ -67,7 +68,9 @@ export function KindBadge({ kind, className, ...props }: HTMLAttributes<HTMLSpan
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-md bg-surface-2 px-1.5 py-0.5 font-mono text-[0.7rem] font-medium text-fg-muted ring-1 ring-inset ring-border",
+        // font-mono は ADR-0055 D1-4 の文字検査の対象外（id/sha/パス用の例外）だが、kind は自然文の
+        // 短い語なので対象内。モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。
+        "inline-flex items-center rounded-md bg-surface-2 px-1.5 py-0.5 font-mono text-sm font-medium text-fg-muted ring-1 ring-inset ring-border lg:text-[0.7rem]",
         className,
       )}
       {...props}
@@ -82,7 +85,8 @@ export function RoleLabel({ role, className, ...props }: HTMLAttributes<HTMLSpan
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-md border border-dashed border-border-strong px-1.5 py-0.5 text-[0.7rem] font-medium text-fg-muted",
+        // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。
+        "inline-flex items-center gap-1 rounded-md border border-dashed border-border-strong px-1.5 py-0.5 text-sm font-medium text-fg-muted lg:text-[0.7rem]",
         className,
       )}
       {...props}
@@ -100,7 +104,8 @@ export function GenreLabel({ genre, className, ...props }: HTMLAttributes<HTMLSp
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border border-dashed border-border-strong px-1.5 py-0.5 text-[0.7rem] font-medium text-fg-muted",
+        // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。
+        "inline-flex items-center gap-1 rounded-full border border-dashed border-border-strong px-1.5 py-0.5 text-sm font-medium text-fg-muted lg:text-[0.7rem]",
         className,
       )}
       {...props}

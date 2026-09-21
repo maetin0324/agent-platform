@@ -23,6 +23,7 @@ import {
   textareaClass,
   thClass,
   theadClass,
+  touchLinkClass,
   trHoverClass,
 } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
@@ -214,7 +215,10 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
                         "max-sm:block max-sm:border-0 max-sm:px-1 max-sm:first:col-span-2 max-sm:first:pl-1 max-sm:last:pr-1 max-sm:break-words",
                       )}
                     >
-                      <Link to={`/projects/${project.id}`} className="font-medium underline underline-offset-2">
+                      <Link
+                        to={`/projects/${project.id}`}
+                        className={cn(touchLinkClass, "font-medium underline underline-offset-2")}
+                      >
                         {project.title}
                       </Link>
                     </td>
@@ -279,7 +283,7 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
           />
           <CardBody>
             <p className={`${hintClass} mb-3`} data-testid="project-new-secretary-hint">
-              <Link to="/" className="underline underline-offset-2">
+              <Link to="/" className={cn(touchLinkClass, "underline underline-offset-2")}>
                 Console から CoS に話しかけても、「案件として」と伝えれば同じです
               </Link>
               。
@@ -290,7 +294,10 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
             {result?.projectId && (
               <p className="my-2 text-sm text-fg-muted" data-testid="project-new-partial">
                 案件は作成されました（
-                <Link to={`/projects/${result.projectId}`} className="underline underline-offset-2">
+                <Link
+                  to={`/projects/${result.projectId}`}
+                  className={cn(touchLinkClass, "underline underline-offset-2")}
+                >
                   案件を開く
                 </Link>
                 ）。リポジトリの追加は案件の画面で続けてください。

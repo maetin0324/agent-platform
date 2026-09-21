@@ -214,7 +214,7 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
             <EmptyState icon="users" title="[accounts] が設定されていません">
               config.toml に <Mono>[accounts]</Mono> セクションを足すとプールが使えます（<Mono>claude_dir</Mono>・
               <Mono>codex_dir</Mono> のどちらか、または両方）。例:
-              <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2 p-3 text-left text-xs">
+              <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2 p-3 text-left font-mono text-xs">
                 {'[accounts]\nclaude_dir = "claude-accounts"\ncodex_dir = "codex-accounts"'}
               </pre>
             </EmptyState>
@@ -640,7 +640,7 @@ function UsageBar({
   if (!window) {
     return (
       <div data-testid={testId}>
-        <div className="flex items-center justify-between text-xs text-fg-subtle">
+        <div className="flex items-center justify-between text-sm text-fg-subtle lg:text-xs">
           <span>{label}</span>
           <span>-</span>
         </div>
@@ -652,7 +652,7 @@ function UsageBar({
   const remaining = secondsBetween(fetchedAt, window.resets_at);
   return (
     <div data-testid={testId}>
-      <div className="flex items-center justify-between text-xs text-fg-muted">
+      <div className="flex items-center justify-between text-sm text-fg-muted lg:text-xs">
         <span>{label}</span>
         <span className="tabular-nums">
           使用 {pct}% / 残り {Math.max(0, 100 - pct)}%
@@ -661,7 +661,7 @@ function UsageBar({
       <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-surface-2">
         <div className={`h-full rounded-full ${TONE_SOLID_BG[tone]}`} style={{ width: `${Math.min(100, pct)}%` }} />
       </div>
-      <p className="mt-1 text-xs text-fg-subtle">
+      <p className="mt-1 text-sm text-fg-subtle lg:text-xs">
         resets_at: {window.resets_at}（リセットまで {formatDuration(remaining)}）
       </p>
     </div>
@@ -702,7 +702,7 @@ function SecretsSection({
         <EmptyState icon="lock" title="[secrets] が設定されていません">
           config.toml に <Mono>[secrets]</Mono> セクションを足すと、GUI から API キー（Tavily / Exa 等）を預かれます。
           例:
-          <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2 p-3 text-left text-xs">
+          <pre className="mt-2 overflow-x-auto rounded-lg bg-surface-2 p-3 text-left font-mono text-xs">
             {'[secrets]\ndir = "secrets"'}
           </pre>
         </EmptyState>
@@ -843,7 +843,9 @@ function SecretCard({
           {item.fingerprint ? (
             <>
               <Mono data-testid="secret-fingerprint">{item.fingerprint}</Mono>
-              <span className="ml-1 text-xs text-fg-subtle">（値の sha256 の先頭 8 桁。値そのものではありません）</span>
+              <span className="ml-1 text-sm text-fg-subtle lg:text-xs">
+                （値の sha256 の先頭 8 桁。値そのものではありません）
+              </span>
             </>
           ) : (
             <span className="text-fg-subtle">-</span>

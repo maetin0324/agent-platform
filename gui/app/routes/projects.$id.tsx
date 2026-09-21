@@ -58,7 +58,15 @@ import { ReportsList } from "~/components/ReportsList";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { checkboxClass, hintClass, inputClass, labelClass, selectClass, textareaClass } from "~/components/ui/form";
+import {
+  checkboxClass,
+  hintClass,
+  inputClass,
+  labelClass,
+  selectClass,
+  textareaClass,
+  touchLinkClass,
+} from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
@@ -109,6 +117,7 @@ import {
 } from "~/lib/lifecycle";
 import { milestoneDecisionValid, milestoneIsStalled } from "~/lib/milestone-review";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
+import { cn } from "~/lib/utils";
 import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
 import { readWorkspaceFromForm, workspaceKindOf, workspaceSummaryText } from "~/lib/workspace-form";
 import { CelerisBanner } from "~/root";
@@ -601,8 +610,9 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
 
                       {/* 既存の直接変更は裏方の詳細に畳む（誤って押さないように。SPEC §7 のアジャイル判定は
                           本来「ok / 議論 / ng」の対話で行う。ADR-0038 D3 の依頼）。 */}
-                      <details className="text-xs text-fg-subtle" data-testid="milestone-status-details">
-                        <summary className="cursor-pointer select-none">状態を直接変える（裏方）</summary>
+                      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+                      <details className="text-sm text-fg-subtle lg:text-xs" data-testid="milestone-status-details">
+                        <summary className="min-h-11 cursor-pointer select-none">状態を直接変える（裏方）</summary>
                         <fetcher.Form method="post" className="mt-2 flex flex-wrap items-end gap-2">
                           <input type="hidden" name="intent" value="milestone_status" />
                           <input type="hidden" name="milestone_id" value={m.id} />
@@ -610,7 +620,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                             name="status"
                             defaultValue={m.status}
                             aria-label={`途中目標 ${m.title} の状態`}
-                            className={`${selectClass} h-8 text-xs`}
+                            className={cn(selectClass, "h-11 text-sm lg:h-8 lg:text-xs")}
                           >
                             {MILESTONE_STATUSES.map((s) => (
                               <option key={s} value={s}>
@@ -757,7 +767,8 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
           </Link>
         </div>
         <AddTaskForm projectId={project.id} org={org.items} testId="project-add-task" />
-        <p className="text-xs text-fg-subtle">
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <p className="text-sm text-fg-subtle lg:text-xs">
           パッと見て、おかしな方針を立てていないかを確かめるための図です。四角を押すと裏方のタスクへ移ります。
           対話の返事や報告のまとめといった裏方の作業は出しません。
         </p>
@@ -790,9 +801,10 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         <SectionTitle icon="send" id="project-reports-heading" count={reports.items.length}>
           報告
         </SectionTitle>
-        <p className="text-xs text-fg-subtle">
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <p className="text-sm text-fg-subtle lg:text-xs">
           この案件について、各段から上がってきた報告です。全体の未読（CoS まで上がったもの）は
-          <Link to="/reports" className="mx-1 underline underline-offset-2">
+          <Link to="/reports" className={cn(touchLinkClass, "mx-1 underline underline-offset-2")}>
             報告
           </Link>
           の画面で流し見できます。
@@ -808,7 +820,8 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         <SectionTitle icon="file" id="project-artifacts-heading" count={artifactRows.length}>
           成果物
         </SectionTitle>
-        <p className="text-xs text-fg-subtle">
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <p className="text-sm text-fg-subtle lg:text-xs">
           調査結果の文書とリンク集はここで読めます。コードは置き場所（普段のパス）へのリンクで示します。
         </p>
         {artifactRows.length === 0 ? (
@@ -823,7 +836,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         <SectionTitle icon="book" id="project-docs-heading">
           {DOCS_TAB_LABEL}
         </SectionTitle>
-        <p className="text-xs text-fg-subtle">{DOCS_SECTION_DESCRIPTION}</p>
+        <p className="text-sm text-fg-subtle lg:text-xs">{DOCS_SECTION_DESCRIPTION}</p>
         <Link
           to={`/projects/${project.id}/docs`}
           data-testid="project-docs-link"
@@ -1250,7 +1263,11 @@ function MilestoneReviewPanel({ milestone, projectId }: { milestone: MilestoneVi
             className={`${textareaClass} mt-1.5 w-full`}
           />
           {invalid && (
-            <p role="alert" className="mt-1 text-xs text-danger" data-testid="milestone-decide-note-required">
+            <p
+              role="alert"
+              className="mt-1 text-sm text-danger lg:text-xs"
+              data-testid="milestone-decide-note-required"
+            >
               議論・ng には一言が要ります。
             </p>
           )}
@@ -1332,12 +1349,13 @@ function WorkTreeTaskRow({
       data-task-status={task.status}
     >
       <Badge tone="neutral">{taskStatusLabel(task.status)}</Badge>
-      <Link to={`/tasks/${task.id}`} className="underline underline-offset-2">
+      <Link to={`/tasks/${task.id}`} className={cn(touchLinkClass, "underline underline-offset-2")}>
         {task.title}
       </Link>
       {task.assignee && (
         <>
-          <span className="text-xs text-fg-subtle">担当: {orgName ?? task.assignee}</span>
+          {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+          <span className="text-sm text-fg-subtle lg:text-xs">担当: {orgName ?? task.assignee}</span>
           <Link
             to={`/org/${encodeURIComponent(task.assignee)}?project=${encodeURIComponent(projectId)}`}
             data-testid="work-tree-talk"
@@ -1362,7 +1380,8 @@ function WorkTreeTaskRow({
       {(task.status === "failed" || task.status === "cancelled") && (
         <retryFetcher.Form method="post" action={`/tasks/${task.id}`} className="flex items-center gap-2">
           <input type="hidden" name="intent" value="retry" />
-          <label className="flex items-center gap-1 text-xs text-fg-subtle">
+          {/* ADR-0055 D1-2/D1-4: タップ領域 44 以上、モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+          <label className="flex min-h-11 items-center gap-1 text-sm text-fg-subtle lg:text-xs">
             <input type="checkbox" name="accept" value="true" className={checkboxClass} />
             ready で始める
           </label>

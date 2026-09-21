@@ -357,6 +357,30 @@ function cssPathRef(el) {
   return parts.join(" > ");
 }
 
+/**
+ * 要素自身だけでなく、祖先も含めて実際には描かれていない（`display:none` / `visibility:hidden`）かを見る。
+ * `getComputedStyle` は `display`/`font-size` 等を要素自身の値で返す（`display` は継承しないので、
+ * 祖先が `display:none` でも子要素自身の値は変わらない）。一方 `getBoundingClientRect()` は祖先が
+ * 非表示ならボックスを持たず 0 になる。この非対称のせいで「自分の `style.display` だけ見る」判定は
+ * デスクトップ専用の `<aside class="hidden lg:block">` の中身を見落とす。
+ *
+ * 加えて、閉じた `<details>` の中身（`<summary>` 以外の直接の子とその子孫）は Chromium では
+ * `getComputedStyle` 上は `display:none` に**ならない**（実測で確認済み。ラウンド 2 の
+ * `task-timeline` 監査で発見。D1-5 の固定要素チェックが誤検知した）。UA の既定の見せ方
+ * （`details:not([open]) > *:not(summary)` は描かれない）を構造で判定する。
+ */
+function isNotVisible(el) {
+  let node = el;
+  while (node && node.nodeType === 1) {
+    const style = getComputedStyle(node);
+    if (style.display === "none" || style.visibility === "hidden") return true;
+    const parent = node.parentElement;
+    if (parent && parent.tagName === "DETAILS" && !parent.open && node.tagName !== "SUMMARY") return true;
+    node = parent;
+  }
+  return false;
+}
+
 /** D1-1: 横はみ出し。overflow-x が auto/scroll なコンテナの中身は対象外（D1-6 と両立させるため）。 */
 function checkOverflow() {
   const violations = [];
@@ -381,7 +405,7 @@ function checkOverflow() {
   };
   for (const el of document.querySelectorAll("body *")) {
     const style = getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden") continue;
+    if (style.display === "none" || style.visibility === "hidden" || isNotVisible(el)) continue;
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) continue;
     if (rect.right > width + 0.5 && !insideScroller(el)) {
@@ -403,7 +427,7 @@ function checkTapTargets() {
   for (const el of document.querySelectorAll(selector)) {
     if (el.closest("[data-touch-ok]")) continue;
     const style = getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden") continue;
+    if (style.display === "none" || style.visibility === "hidden" || isNotVisible(el)) continue;
     let rect = el.getBoundingClientRect();
     if (rect.width === 0 && rect.height === 0) continue;
     // checkbox/radio は `<label>` で包んで見た目より大きく押せるようにするのが通常の作り
@@ -453,7 +477,7 @@ function checkFontSize() {
     if (text.length === 0) continue;
     if (el.closest(".font-mono")) continue;
     const style = getComputedStyle(el);
-    if (style.display === "none" || style.visibility === "hidden") continue;
+    if (style.display === "none" || style.visibility === "hidden" || isNotVisible(el)) continue;
     const size = Number.parseFloat(style.fontSize);
     if (!Number.isFinite(size)) continue;
     if (size < 14 - 0.1) {
@@ -494,6 +518,8 @@ function checkFixedOverlays() {
     const text = (el.textContent ?? "").trim();
     if (el.children.length > 0 && text.length > 0) continue; // 末端だけ見る（親の重複を避ける）
     if (text.length === 0) continue;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || isNotVisible(el)) continue;
     const rect = el.getBoundingClientRect();
     if (rect.bottom > maxContentBottom) {
       maxContentBottom = rect.bottom;
@@ -593,6 +619,7 @@ async function main() {
       `window.__MOBILE_AUDIT_WIDTH__ = ${VIEWPORT.width};`,
       `window.__MOBILE_AUDIT_HEIGHT__ = ${VIEWPORT.height};`,
       cssPathRef.toString(),
+      isNotVisible.toString(),
       checkOverflow.toString(),
       checkTapTargets.toString(),
       checkStatusBadges.toString(),

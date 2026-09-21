@@ -21,12 +21,13 @@ import { ReportsList } from "~/components/ReportsList";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { checkboxClass, chipLabelClass, labelClass, selectClass } from "~/components/ui/form";
+import { checkboxClass, chipLabelClass, labelClass, selectClass, touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import { notifyKindLabel, notifyResultLabel, notifyResultTone, notifyTargetHref } from "~/lib/notify";
 import { buildReportsQuery, filterReportsByKind } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
+import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/reports";
 
@@ -198,7 +199,8 @@ export default function ReportsPage({ loaderData }: Route.ComponentProps) {
 
       <div className="flex flex-wrap items-center gap-3">
         <NotificationsEnableButton />
-        <span className="text-xs text-fg-subtle">
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <span className="text-sm text-fg-subtle lg:text-xs">
           悪い知らせは即座に、それ以外は数時間ごとにブラウザの通知でお知らせします。
         </span>
       </div>
@@ -336,7 +338,8 @@ function DiscordSection({
       <SectionTitle icon="message" id="discord-heading">
         通知（Discord）
       </SectionTitle>
-      <p className="text-xs text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <p className="text-sm text-fg-subtle lg:text-xs">
         途中目標の仕事が終わった・認可の要求が来た・質問で止まっている・悪い知らせが届いた・CoS から方針の提案が 届いた
         — この 5 つ、人の判断が要るときだけ Discord にも 1 通届きます。結果が出たことは知らせません
         （それはこの「報告」の流れで見ます）。
@@ -367,7 +370,7 @@ function DiscordSection({
               <Alert tone="warning" title="未設定">
                 <p>
                   Discord への通知は未設定です。
-                  <Link to="/accounts#secrets" className="underline underline-offset-2">
+                  <Link to="/accounts#secrets" className={cn(touchLinkClass, "underline underline-offset-2")}>
                     アカウント → API キー
                   </Link>
                   に id <Mono>{notify.secret_id}</Mono> で Webhook URL を登録してください（値は二度と表示されません）。
@@ -377,9 +380,10 @@ function DiscordSection({
           </div>
 
           <div className="space-y-1.5">
-            <p className="text-xs font-medium text-fg-subtle">直近の送信</p>
+            {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+            <p className="text-sm font-medium text-fg-subtle lg:text-xs">直近の送信</p>
             {notify.recent.length === 0 ? (
-              <p className="text-xs text-fg-subtle">まだありません。</p>
+              <p className="text-sm text-fg-subtle lg:text-xs">まだありません。</p>
             ) : (
               <ul className="space-y-1">
                 {notify.recent.map((r) => {
@@ -389,7 +393,7 @@ function DiscordSection({
                       key={`${r.kind}-${r.key}-${r.created_at}`}
                       data-testid="discord-recent-row"
                       data-notification-kind={r.kind}
-                      className="flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-xs"
+                      className="flex flex-wrap items-center gap-2 rounded-lg border border-border px-3 py-1.5 text-sm lg:text-xs"
                     >
                       <Badge tone={notifyResultTone(r)}>{notifyKindLabel(r.kind)}</Badge>
                       {href ? (

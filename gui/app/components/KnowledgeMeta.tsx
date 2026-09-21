@@ -24,7 +24,8 @@ export function KnowledgeMeta({
   updated?: string | null;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-2 text-xs text-fg-subtle" data-testid="knowledge-meta">
+    // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+    <div className="flex flex-wrap items-center gap-2 text-sm text-fg-subtle lg:text-xs" data-testid="knowledge-meta">
       {path && <Mono data-testid="knowledge-page-path">{path}</Mono>}
       {scope && (
         <Badge tone="info" data-testid="knowledge-page-scope">
@@ -60,7 +61,12 @@ export function KnowledgeSources({ sources }: { sources?: string[] }) {
         const source = knowledgeSource(raw);
         if (source.kind === "task") {
           return (
-            <Link key={raw} to={source.href} data-testid="knowledge-source-task" className="no-underline">
+            <Link
+              key={raw}
+              to={source.href}
+              data-testid="knowledge-source-task"
+              className="inline-flex min-h-11 items-center no-underline"
+            >
               <Badge tone="info">{source.label}</Badge>
             </Link>
           );
@@ -73,7 +79,7 @@ export function KnowledgeSources({ sources }: { sources?: string[] }) {
               target="_blank"
               rel="noreferrer noopener"
               data-testid="knowledge-source-url"
-              className="no-underline"
+              className="inline-flex min-h-11 items-center no-underline"
             >
               <Badge tone="teal">{source.label}</Badge>
             </a>

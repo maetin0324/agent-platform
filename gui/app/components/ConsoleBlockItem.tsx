@@ -14,7 +14,7 @@ import { cn } from "~/lib/utils";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
-import { hintClass, textareaClass } from "./ui/form";
+import { hintClass, textareaClass, touchLinkClass } from "./ui/form";
 import { Icon } from "./ui/Icon";
 
 /**
@@ -125,7 +125,8 @@ function HumanBlockView({
   return (
     <BlockShell testId="console-block-human" align="end">
       <p className="whitespace-pre-wrap">{block.text}</p>
-      <div className="mt-1 flex items-center justify-between gap-2 text-[0.7rem] opacity-80">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
+      <div className="mt-1 flex items-center justify-between gap-2 text-sm opacity-80 lg:text-[0.7rem]">
         <span>
           {orgNodeName(block.node_id, org)} へ ・ {block.at}
         </span>
@@ -147,10 +148,11 @@ function ReplyBlockView({
   const result = block.actions_result;
   return (
     <BlockShell testId="console-block-reply">
-      <div className="mb-1 text-xs font-medium text-fg-subtle">{orgNodeName(block.node_id, org)}</div>
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <div className="mb-1 text-sm font-medium text-fg-subtle lg:text-xs">{orgNodeName(block.node_id, org)}</div>
       <MarkdownViewer content={block.text} />
       {result && (result.actions_executed?.length || result.actions_failed?.length) ? (
-        <div className="mt-2 space-y-1 text-xs" data-testid="console-actions-result">
+        <div className="mt-2 space-y-1 text-sm lg:text-xs" data-testid="console-actions-result">
           {result.actions_executed?.map((a, i) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: `actions_executed` はサーバの応答そのままで id を持たない
             <p key={i} className="text-success" data-testid="console-action-executed">
@@ -165,11 +167,12 @@ function ReplyBlockView({
           ))}
         </div>
       ) : null}
-      <div className="mt-1.5 flex items-center justify-between gap-2 text-[0.7rem] text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
+      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-sm text-fg-subtle lg:text-[0.7rem]">
         <span className="flex items-center gap-2">
           <span>{block.at}</span>
           {block.run_id && block.task_id && (
-            <Link to={`/tasks/${block.task_id}`} className="underline underline-offset-2">
+            <Link to={`/tasks/${block.task_id}`} className={cn(touchLinkClass, "underline underline-offset-2")}>
               この返事を作った run
             </Link>
           )}
@@ -200,16 +203,17 @@ function TaskBlockView({
     <BlockShell testId="console-block-task" className="w-full max-w-none">
       <div className="flex flex-wrap items-center gap-2">
         <Icon name="activity" className="size-3.5 text-fg-subtle" />
-        <Link to={`/tasks/${t.task_id}`} className="font-medium underline underline-offset-2">
+        <Link to={`/tasks/${t.task_id}`} className={cn(touchLinkClass, "font-medium underline underline-offset-2")}>
           {t.title}
         </Link>
         {projName && <Badge tone="neutral">{projName}</Badge>}
       </div>
-      <p className="mt-1 text-xs text-fg-subtle" data-testid="console-task-summary">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <p className="mt-1 text-sm text-fg-subtle lg:text-xs" data-testid="console-task-summary">
         {taskLineSummary(t)}
         {t.assignee && <> ・ {orgNodeName(t.assignee, org)}</>}
       </p>
-      <div className="mt-1.5 flex items-center justify-between text-[0.7rem] text-fg-subtle">
+      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1 text-sm text-fg-subtle lg:text-[0.7rem]">
         <span>{block.at}</span>
         <ReplyButton onClick={() => setCommenting((v) => !v)} />
       </div>
@@ -268,12 +272,13 @@ function ProgressBlockView({ block }: { block: Extract<ConsoleBlock, { kind: "pr
         type="button"
         onClick={() => setExpanded((v) => !v)}
         data-testid="console-progress-toggle"
-        className="flex w-full items-center gap-2 text-left"
+        className="flex min-h-11 w-full items-center gap-2 text-left"
       >
         <Icon name={expanded ? "chevronDown" : "chevronRight"} className="size-3.5 shrink-0 text-fg-subtle" />
         <span className="min-w-0 flex-1">
           <span className="font-medium">{block.title}</span>
-          <span className="ml-2 text-xs text-fg-subtle">{progressSummaryLine(block)}</span>
+          {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+          <span className="ml-2 text-sm text-fg-subtle lg:text-xs">{progressSummaryLine(block)}</span>
         </span>
       </button>
       {expanded && (
@@ -301,7 +306,10 @@ function ProgressBlockView({ block }: { block: Extract<ConsoleBlock, { kind: "pr
             type="button"
             onClick={toggleAll}
             data-testid="console-progress-show-all"
-            className="text-xs text-fg-subtle underline underline-offset-2 hover:text-fg"
+            className={cn(
+              touchLinkClass,
+              "text-sm text-fg-subtle underline underline-offset-2 hover:text-fg lg:text-xs",
+            )}
           >
             {showAll ? "閉じる" : `すべて見る（${p.count} 件）`}
           </button>
@@ -376,7 +384,8 @@ function QuestionBlockView({
   const submitting = fetcher.state !== "idle";
   return (
     <BlockShell testId="console-block-question" className="w-full max-w-none border-warning-border bg-warning-soft/40">
-      <p className="text-xs font-medium text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <p className="text-sm font-medium text-fg-subtle lg:text-xs">
         {block.node_id ? orgNodeName(block.node_id, org) : "-"} からの質問
       </p>
       <p className="mt-1" data-testid="console-question-text">
@@ -409,7 +418,8 @@ function QuestionBlockView({
           </Button>
         </fetcher.Form>
       )}
-      <p className="mt-1 text-[0.7rem] text-fg-subtle">{block.at}</p>
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
+      <p className="mt-1 text-sm text-fg-subtle lg:text-[0.7rem]">{block.at}</p>
     </BlockShell>
   );
 }
@@ -429,11 +439,12 @@ function ApprovalBlockView({
   const decided = a.decision != null;
   return (
     <BlockShell testId="console-block-approval" className="w-full max-w-none border-warning-border bg-warning-soft/40">
-      <p className="flex flex-wrap items-center gap-2 text-xs font-medium text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-fg-subtle lg:text-xs">
         {orgNodeName(a.node_id, org)}
         {projectName(a.project_id, projects) && <Badge tone="neutral">{projectName(a.project_id, projects)}</Badge>}
         {a.task_id && (
-          <Link to={`/tasks/${a.task_id}`} className="ml-auto underline underline-offset-2">
+          <Link to={`/tasks/${a.task_id}`} className={cn(touchLinkClass, "ml-auto underline underline-offset-2")}>
             裏方のタスク
           </Link>
         )}
@@ -493,7 +504,8 @@ function ApprovalBlockView({
           </div>
         </fetcher.Form>
       )}
-      <p className="mt-1 text-[0.7rem] text-fg-subtle">{block.at}</p>
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
+      <p className="mt-1 text-sm text-fg-subtle lg:text-[0.7rem]">{block.at}</p>
     </BlockShell>
   );
 }
@@ -524,7 +536,8 @@ function MilestoneBlockView({
 
   return (
     <BlockShell testId="console-block-milestone" className="w-full max-w-none border-primary-border bg-primary-soft/30">
-      <p className="flex items-center gap-2 text-xs font-medium text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <p className="flex items-center gap-2 text-sm font-medium text-fg-subtle lg:text-xs">
         途中目標の提案
         {projectName(m.project_id, projects) && <Badge tone="neutral">{projectName(m.project_id, projects)}</Badge>}
       </p>
@@ -558,7 +571,7 @@ function MilestoneBlockView({
           className={cn(textareaClass, "w-full")}
         />
         {invalid && (
-          <p role="alert" className="text-xs text-danger" data-testid="console-milestone-note-required">
+          <p role="alert" className="text-sm text-danger lg:text-xs" data-testid="console-milestone-note-required">
             議論・ng には一言が要ります。
           </p>
         )}
@@ -598,7 +611,8 @@ function MilestoneBlockView({
           </Button>
         </div>
       </fetcher.Form>
-      <p className="mt-1 text-[0.7rem] text-fg-subtle">{block.at}</p>
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
+      <p className="mt-1 text-sm text-fg-subtle lg:text-[0.7rem]">{block.at}</p>
     </BlockShell>
   );
 }
@@ -626,7 +640,10 @@ function ReportBlockView({
         <span className="min-w-0 break-words font-medium" data-testid="console-report-headline">
           {r.headline}
         </span>
-        <span className="col-span-3 min-w-0 break-words text-xs text-fg-subtle">{orgNodeName(r.node_id, org)}</span>
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <span className="col-span-3 min-w-0 break-words text-sm text-fg-subtle lg:text-xs">
+          {orgNodeName(r.node_id, org)}
+        </span>
         {projectName(r.project_id, projects) && (
           <Badge tone="neutral" className="col-span-3 max-w-full justify-self-start truncate">
             {projectName(r.project_id, projects)}
@@ -638,7 +655,8 @@ function ReportBlockView({
           <MarkdownViewer content={r.body} />
         </div>
       )}
-      <p className="mt-1 text-[0.7rem] text-fg-subtle">{block.at}</p>
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-[0.7rem] のまま。 */}
+      <p className="mt-1 text-sm text-fg-subtle lg:text-[0.7rem]">{block.at}</p>
     </BlockShell>
   );
 }
@@ -647,9 +665,10 @@ function KnowledgeBlockView({ block }: { block: Extract<ConsoleBlock, { kind: "k
   const total = (block.ingested ?? 0) + (block.inbox ?? 0) + (block.discarded ?? 0);
   return (
     <BlockShell testId="console-block-knowledge" className="w-full max-w-none">
-      <p className="flex flex-wrap items-center gap-2 text-xs font-medium text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <p className="flex flex-wrap items-center gap-2 text-sm font-medium text-fg-subtle lg:text-xs">
         <Icon name="send" className="size-3.5" />
-        <Link to={`/tasks/${block.task_id}`} className="underline underline-offset-2">
+        <Link to={`/tasks/${block.task_id}`} className={cn(touchLinkClass, "underline underline-offset-2")}>
           {block.task_title}
         </Link>
         {block.state === "failed" && <Badge tone="danger">失敗</Badge>}
@@ -664,12 +683,12 @@ function KnowledgeBlockView({ block }: { block: Extract<ConsoleBlock, { kind: "k
         この仕事から知識 {total} 件: 取り込み {block.ingested ?? 0} / 候補 {block.inbox ?? 0} / 破棄{" "}
         {block.discarded ?? 0}
       </p>
-      <div className="mt-1.5 flex items-center justify-between text-[0.7rem] text-fg-subtle">
+      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-1 text-sm text-fg-subtle lg:text-[0.7rem]">
         <span>{block.at}</span>
         {(block.inbox ?? 0) > 0 && (
           <Link
             to="/knowledge/inbox"
-            className="underline underline-offset-2"
+            className={cn(touchLinkClass, "underline underline-offset-2")}
             data-testid="console-knowledge-inbox-link"
           >
             知識の候補（_inbox）を見る

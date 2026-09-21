@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { StatusBadge } from "~/components/ui/badge";
 import { Card, CardBody } from "~/components/ui/card";
-import { tableClass, tdClass, thClass, theadClass, trHoverClass } from "~/components/ui/form";
+import { tableClass, tdClass, thClass, theadClass, touchLinkClass, trHoverClass } from "~/components/ui/form";
 import { Icon, type IconName } from "~/components/ui/Icon";
 import { PageHeader } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
@@ -295,14 +295,20 @@ export default function HelpPage() {
           <li>
             <Link
               to="/tasks/new"
-              className="text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+              className={cn(
+                touchLinkClass,
+                "text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary",
+              )}
             >
               タスクを作る
             </Link>
             （または{" "}
             <Link
               to="/plans/new"
-              className="text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+              className={cn(
+                touchLinkClass,
+                "text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary",
+              )}
             >
               Plan を作る
             </Link>
@@ -328,7 +334,7 @@ export default function HelpPage() {
                   <Icon name={s.icon} className="size-4" />
                 </span>
                 {s.href ? (
-                  <Link to={s.href} className="hover:underline">
+                  <Link to={s.href} className={cn(touchLinkClass, "hover:underline")}>
                     {s.title}
                   </Link>
                 ) : (
@@ -401,7 +407,10 @@ export default function HelpPage() {
               人間が Approval の子タスクで承認／却下して判定する（
               <Link
                 to="/"
-                className="text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary"
+                className={cn(
+                  touchLinkClass,
+                  "text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary",
+                )}
               >
                 受信箱
               </Link>

@@ -96,7 +96,8 @@ export default function KnowledgePageRoute({ loaderData }: Route.ComponentProps)
         description={KNOWLEDGE_SECTION_DESCRIPTION}
         actions={
           tree ? (
-            <span className="flex items-center gap-2 text-xs text-fg-subtle">
+            // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+            <span className="flex items-center gap-2 text-sm text-fg-subtle lg:text-xs">
               <Mono data-testid="knowledge-root">{tree.root}</Mono>
               <Link to={knowledgeInboxHref()} className={buttonClass({ variant: "secondary", size: "xs" })}>
                 <Icon name="inbox" />
@@ -308,12 +309,13 @@ function KnowledgeSidebar({
                     }
                     data-testid="knowledge-scope-folder"
                     data-open={open ? "true" : "false"}
-                    className="inline-flex items-center gap-1 rounded px-1.5 py-1 font-medium text-fg-muted hover:text-fg"
+                    className="inline-flex min-h-11 items-center gap-1 rounded px-1.5 py-1 font-medium text-fg-muted hover:text-fg"
                   >
                     <Icon name={open ? "chevronDown" : "chevronRight"} />
                     <Icon name="folder" />
                     {group.label}
-                    <span className="text-xs text-fg-subtle">{group.items.length}</span>
+                    {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+                    <span className="text-sm text-fg-subtle lg:text-xs">{group.items.length}</span>
                   </button>
                   {open && (
                     <ul className="space-y-0.5 pl-4">
@@ -465,7 +467,7 @@ function PageEditor({
               data-testid="knowledge-editor-path"
             />
             {pathProblem ? (
-              <p className="text-xs text-danger" data-testid="knowledge-path-problem">
+              <p className="text-sm text-danger lg:text-xs" data-testid="knowledge-path-problem">
                 {pathProblem}
               </p>
             ) : (
@@ -552,7 +554,7 @@ function KnowledgeHistory({ history }: { history: DocCommit[] }) {
       <h3 id="knowledge-history-heading" className="text-sm font-semibold text-fg">
         {KNOWLEDGE_HISTORY_LABEL}
       </h3>
-      <ul className="space-y-1 text-xs text-fg-muted" data-testid="knowledge-history">
+      <ul className="space-y-1 text-sm text-fg-muted lg:text-xs" data-testid="knowledge-history">
         {history.map((commit) => (
           <li key={commit.sha} className="flex flex-wrap items-center gap-2">
             <Mono>{shortDocSha(commit.sha)}</Mono>

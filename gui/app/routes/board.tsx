@@ -19,7 +19,14 @@ import { HelpLink } from "~/components/HelpLink";
 import { Badge, StatusBadge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { checkboxClass, chipLabelClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
+import {
+  checkboxClass,
+  chipLabelClass,
+  inputClass,
+  labelClass,
+  selectClass,
+  touchLinkClass,
+} from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, PageHeader } from "~/components/ui/misc";
 import {
@@ -339,7 +346,7 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
                 <Icon name="filter" />
                 絞り込み
               </Button>
-              <Link to="/board" className="text-sm text-fg-muted underline underline-offset-2">
+              <Link to="/board" className={cn(touchLinkClass, "text-sm text-fg-muted underline underline-offset-2")}>
                 条件を消す
               </Link>
             </div>
@@ -348,7 +355,8 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
       </Card>
 
       {truncated && (
-        <p className="text-xs text-fg-subtle" data-testid="board-truncated">
+        // ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+        <p className="text-sm text-fg-subtle lg:text-xs" data-testid="board-truncated">
           多すぎるので先頭 {BOARD_LIMIT} 件だけ出しています。案件やラベルで絞ってください。
         </p>
       )}
@@ -401,12 +409,13 @@ function BoardColumn({
     >
       <h2 className="flex items-center gap-2 text-sm font-semibold text-fg">
         {boardColumnLabel(id)}
-        <span className="rounded-full bg-surface px-2 py-0.5 text-xs font-semibold tabular-nums text-fg-subtle">
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <span className="rounded-full bg-surface px-2 py-0.5 text-sm font-semibold tabular-nums text-fg-subtle lg:text-xs">
           {items.length}
         </span>
       </h2>
       {items.length === 0 ? (
-        <p className="mt-3 text-xs text-fg-subtle">ありません。</p>
+        <p className="mt-3 text-sm text-fg-subtle lg:text-xs">ありません。</p>
       ) : (
         <ul className="mt-3 space-y-2">
           {items.map((item) => (
@@ -465,11 +474,12 @@ function BoardCard({
       <Link
         to={`/tasks/${item.id}`}
         data-testid="board-card-title"
-        className="mt-1.5 block font-medium text-fg no-underline hover:text-primary hover:underline"
+        className="mt-1.5 flex min-h-11 items-center font-medium text-fg no-underline hover:text-primary hover:underline"
       >
         {item.title}
       </Link>
-      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-fg-subtle lg:text-xs">
         <span data-testid="board-card-assignee">
           担当: {item.assignee ? (orgNames[item.assignee] ?? item.assignee) : "（なし）"}
         </span>
@@ -496,7 +506,7 @@ function BoardCard({
             disabled={busy}
             data-testid="board-card-priority-select"
             onChange={(e) => submitField("priority", e.target.value)}
-            className={cn(selectClass, "h-7 w-24 text-xs")}
+            className={cn(selectClass, "h-11 w-24 text-sm lg:h-7 lg:text-xs")}
           >
             {PRIORITY_LABELS.map((p) => (
               <option key={p} value={p}>
@@ -510,7 +520,7 @@ function BoardCard({
             disabled={busy}
             data-testid="board-card-tier-select"
             onChange={(e) => submitField("tier", e.target.value)}
-            className={cn(selectClass, "h-7 w-28 text-xs")}
+            className={cn(selectClass, "h-11 w-28 text-sm lg:h-7 lg:text-xs")}
           >
             {TIERS.map((t) => (
               <option key={t} value={t}>
@@ -524,7 +534,7 @@ function BoardCard({
             disabled={busy}
             data-testid="board-card-assignee-select"
             onChange={(e) => submitField("assignee", e.target.value)}
-            className={cn(selectClass, "h-7 w-36 text-xs")}
+            className={cn(selectClass, "h-11 w-36 text-sm lg:h-7 lg:text-xs")}
           >
             <option value="">（決めない）</option>
             {org.map((node) => (

@@ -21,9 +21,18 @@ export const checkboxClass = "size-4 rounded border-border-strong";
 export const chipLabelClass =
   "inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-sm text-fg-muted shadow-xs transition-colors hover:border-border-strong hover:text-fg has-[:checked]:border-primary-border has-[:checked]:bg-primary-soft has-[:checked]:text-primary-soft-fg lg:min-h-0";
 
+/**
+ * ADR-0055 D1-2（ラウンド 2）: 文中に単独で置かれたリンク（「同じ行の隣接リンク群」の例外
+ * `data-touch-ok` とは違い、孤立した 1 本のリンク）の当たり判定を 44×44 に広げる。上下は
+ * `-my-2.5`/`py-2.5` で相殺して見た目の行間は変えず、横幅が足りない語（2〜3 文字）は `min-w-11` で
+ * 確保する（見た目の幅は文字のまま。当たり判定だけが見えない分だけ広がる）。
+ */
+export const touchLinkClass = "-my-2.5 inline-flex min-h-11 min-w-11 items-center py-2.5";
+
 /** 表 */
 export const tableClass = "w-full border-collapse text-sm";
-export const theadClass = "bg-surface-2/70 text-left text-xs font-medium text-fg-subtle";
+// ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+export const theadClass = "bg-surface-2/70 text-left text-sm font-medium text-fg-subtle lg:text-xs";
 export const thClass = "whitespace-nowrap px-3 py-2.5 font-medium first:pl-5 last:pr-5";
 export const tdClass = "border-t border-border px-3 py-2.5 align-top text-fg first:pl-5 last:pr-5";
 export const trHoverClass = "transition-colors hover:bg-surface-2/60";
