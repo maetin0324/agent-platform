@@ -10194,3 +10194,25 @@ curl -s -H "Authorization: Bearer $(cat ~/.config/celeris/api.token)" \
   実機で `codex --version` 系の情報から確認して上書きするのが望ましい）。
 - `reasoning_effort` / `send_sampling_params` は既定で無効のままなので、実機の 400 が収まったあとで
   必要なら有効化を検討する（今回は「まず届くこと」を優先し、機能追加は最小にした）。
+
+### Phase 65b の本番反映と実機確認（2026-09-21 09:22–09:35 UTC。`f1ba7dd5bab3`、ライブ切替）
+
+- main `f1ba7dd` = Phase 65b の merge。ゲート: `cargo test --workspace --no-fail-fast` **1623 passed / 0 failed**、clippy `--all-targets -D warnings` exit 0。
+- `release.sh main` → `f1ba7dd5bab3`（schema 22 のまま）。`verify.sh` check 1–6 true、`ok=true live_ok=true`。`promote.sh f1ba7dd5bab3` **mode=live**
+  （新 active まで 1 秒。新デーモンが 18100 を bind し直し `llm-proxy listening`。API 停止なし）。
+- 配備前に `[knowledge.langmem]` を `base_url = …:18100/v1`、`model = celeris/cheap`、`api_key_secret = "celeris-api-token"` に変更
+  （`config.toml.bak-20260921d`）。ライブ切替は新プロセスが設定を読み直すので、reload 不要でこの変更も同時に効いた
+  （staging の check 1〜5 も同じ設定で通過 = 旧バイナリも読める）。**これで 4 プロバイダのうち LDR / PaperQA / LangMem がプロキシ経由**。
+- **上流エラーが見えるようになった**: `gpt/cheap` → 400 `The 'gpt-5-mini' model is not supported when using Codex with a ChatGPT account.`
+  同じく gpt-5 / gpt-5-codex / gpt-5.1 / gpt-5.1-codex-mini / gpt-5.2-codex / gpt-5.3-codex も 400。Codex CLI 0.155.1 の
+  バイナリに埋まっている slug（`strings … | grep '"slug"'`: gpt-5.4 / gpt-5.5 / gpt-5.6-luna / gpt-5.6-sol / gpt-5.6-terra /
+  gpt-6-astra / gpt-daybreak-*）を試すと **`gpt:gpt-5.6-terra` 200（2.7 s、pong）、`gpt:gpt-5.5` 200、`gpt:gpt-5.6-luna` 200**
+  （`x-celeris-account: chatgpt_plus_personal`）。つまり Phase 65b の要求形（store:false / stream:true / instructions）は正しく、
+  残っていたのはモデル名だけ。本番の `[llm_proxy.models.gpt]` を frontier/standard = gpt-5.6-terra、cheap = gpt-5.5 に変更
+  （`config.toml.bak-20260921e`。`[llm_proxy]` は reload 対象外なので**次の昇格から**有効）。`config/celeris.example.toml` にも注記。
+- **Claude の standard は 429**: PaperQA の動作確認タスク `01M31K37HN82V75J6DGEB3CRWC`（celeris/standard）の要求が
+  09:12〜09:22 に codex（gpt-5 → 400）と claude（claude-sonnet-5 → upstream）で両方落ち、09:29 の手動 curl では
+  `upstream rate-limited the request`（429）。`claude_max_lab` に cooldown（〜09:29）。この会話の実装エージェント（Sonnet）と同じ枠を
+  食っているため（人が許容済み）。供給元が無い間はタスクが ready↔running を繰り返すので、動作確認タスクは `cancel`
+  （`{"expected_status":"ready"}`）した。PaperQA のプロキシ経由の完走は **次の昇格（gpt の写像が有効になる）後に再確認**。
+- 提案: claude-oauth も codex と同じく上流エラーの要約（`error.message` / `error.type`）を WARN と応答に出す（Phase 65b は codex のみ）。

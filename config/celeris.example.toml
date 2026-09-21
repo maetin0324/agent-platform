@@ -189,10 +189,13 @@ dir = "../memory"
 # frontier = "claude-opus-4-5"
 # standard = "claude-sonnet-5"
 # cheap = "claude-haiku-4-5"
+# GPT は **ChatGPT アカウントの Codex backend が受ける slug だけ**が使える（2026-09-21 実機: Codex CLI 0.155.1 のプリセット
+# gpt-5.6-terra / gpt-5.6-luna / gpt-5.6-sol / gpt-5.5 / gpt-5.4 は 200。gpt-5 / gpt-5-mini / gpt-5-codex / gpt-5.x-codex は
+# 「not supported when using Codex with a ChatGPT account」で 400）。CLI を上げたら `strings $(which codex) | grep '"slug"'` で確かめる。
 # [llm_proxy.models.gpt]
-# frontier = "gpt-5-codex"
-# standard = "gpt-5"
-# cheap = "gpt-5-mini"
+# frontier = "gpt-5.6-terra"
+# standard = "gpt-5.6-terra"
+# cheap = "gpt-5.5"
 # [llm_proxy.models.qwen]
 # frontier = "qwen3.8-27b"
 # standard = "qwen3.8-27b"
