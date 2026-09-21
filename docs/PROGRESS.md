@@ -10738,3 +10738,15 @@ thread while the thread is being used to drive asynchronous tasks.
   `GET http://127.0.0.1:18100/v1/models` を 200 で通し、fallback ではなく本来の `langmem` 経路で動いた。
 - これで ADR-0053 D2 の 4 プロバイダのうち **LDR / PaperQA / LangMem がプロキシ経由**（PaperQA は pqa 側の api_key 解決を直して 3 回目を実行中）。
   `opencode-qwen` は Phase 65 の判断どおり据え置き（opencode の model id にスラッシュを含められるか未確認）。
+
+### PaperQA 動作確認 3 回目（2026-09-21 13:36–13:41 UTC）— 認証は通り、証拠の選別で 0 件
+
+- `01M322SNBBDA9RZS6YQ714BYW4`: settings から `api_key` を外した後、pqa は **celeris/standard → codex-oauth gpt-5.6-terra で 47 要求 ok**
+  （prompt 116,660 / completion 5,847 tokens）。`Paper Count=6` まで索引できた（= 認証・プロキシ経由の LLM 呼び出しは全部通った）が、
+  `Relevant Papers=0 | Current Evidence=0` → `insufficient literature evidence: cited=0 (min 2)` で failed。
+- 判断: **プロキシ経由の PaperQA は機能としては動く**（ADR-0053 D2 の「Claude / GPT で PaperQA」の経路は開いた）。0 件の原因は
+  gpt-5.6-terra の証拠スコアリングの出力形式（completion が平均 120 tokens と短い）か、問い（Rust の非同期ランタイムを HPC I/O サーバに
+  使った研究）に対する arXiv/OpenAlex の 6 本が本当に無関係かのどちらか。Qwen で走っていた以前の literature タスクは同じ evidence 規則で
+  done になっている。Qwen が戻れば `celeris/standard` は Qwen に戻るので、まずはトンネル復帰後に再確認する（提案: PaperQA の
+  `celeris/standard` の写像を Claude 優先にする設定（`claude/standard`）も選べる。Claude の standard は今日は 429 が多いので保留）。
+- これ以上の動作確認タスクは quota を食うので止める。opencode は据え置き。
