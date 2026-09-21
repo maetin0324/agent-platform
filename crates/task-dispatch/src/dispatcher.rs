@@ -129,6 +129,20 @@ pub type TunnelForwardEnsurer = Arc<dyn Fn(&str, &str, &str) -> Result<(), Strin
 /// `GET http://<listen>/v1/models` の probe（`task_worker::probe_models`）を挿す。テストは偽物を挿す。
 pub type TunnelProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+/// ADR-0053 Phase 84b: クラスタの ssh master の多重接続の有無を調べるフック。引数は
+/// `(ssh_command, host)`（`control_master_alive_blocking` と同じ形）。既定（`Dispatcher::new`）は本物の
+/// `ssh -O check`（`control_master_alive_blocking`）。
+///
+/// **観測（2026-09-21）**: このフックが無かった頃は `refresh_cluster_liveness` が常に本物の
+/// `control_master_alive_blocking` を直接呼んでいたため、`crates/celeris/src/lib.rs` の
+/// `a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b` が `host = "pegasus"` の
+/// クラスタでテストしていたところ、テストを動かすマシン自身が実際に `pegasus` へ ssh ControlMaster を
+/// 張っていた（人が別作業で張った）ため、テストの意図（master 未接続 → `cluster_connector` が呼ばれる）
+/// に反して「master 生存」と判定され、`cluster_connector` が一度も呼ばれずに落ちた。テストは実機の ssh
+/// 状態に依存してはならないので、このフックで差し替え可能にした（テストは常に偽物を挿す。本物の
+/// `ssh -O check` を経由するのは本番だけ）。
+pub type ClusterLivenessProbe = Arc<dyn Fn(&[String], &str) -> bool + Send + Sync>;
+
 /// ADR-0053 D3: トンネル 1 本の状態遷移（Console / cluster API に出す。`take_tunnel_events` で取り出す）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunnelEvent {
@@ -1058,6 +1072,10 @@ pub struct Dispatcher {
     cluster_connected: HashMap<String, bool>,
     /// ADR-0023 D1: 最後に `ssh -O check` を回した時刻（`CLUSTER_LIVENESS_INTERVAL` に 1 回だけ回す）。
     last_cluster_liveness: Option<Instant>,
+    /// ADR-0053 Phase 84b: `refresh_cluster_liveness` が使う「master 生存」判定フック。既定は本物の
+    /// `control_master_alive_blocking`（`ssh -O check`）。テストは `set_cluster_liveness_probe` で
+    /// 偽物に差し替え、実機の ssh 状態に依存しないようにする。
+    cluster_liveness_probe: ClusterLivenessProbe,
     /// tick の回数（スナップショット用）。
     ticks: u64,
     publisher: Option<SnapshotPublisher>,
@@ -1191,6 +1209,9 @@ impl Dispatcher {
             cluster_cooldown: HashMap::new(),
             cluster_connected: HashMap::new(),
             last_cluster_liveness: None,
+            cluster_liveness_probe: Arc::new(|ssh_command: &[String], host: &str| {
+                control_master_alive_blocking(ssh_command, host)
+            }),
             ticks: 0,
             publisher: None,
             account_pool_providers,
@@ -1355,6 +1376,13 @@ impl Dispatcher {
     /// ADR-0053 D3: forward の生存を見るフックを挿す。呼ばなければ常に「届かない」扱い。
     pub fn set_tunnel_probe(&mut self, probe: TunnelProbe) {
         self.tunnel_probe = Some(probe);
+    }
+
+    /// ADR-0053 Phase 84b: クラスタの ssh master の多重接続の有無を調べるフックを差し替える。
+    /// 呼ばなければ本物の `ssh -O check`（`control_master_alive_blocking`）のまま。テストは実機の ssh
+    /// 状態に依存しないよう、必ずこれで偽物に差し替える。
+    pub fn set_cluster_liveness_probe(&mut self, probe: ClusterLivenessProbe) {
+        self.cluster_liveness_probe = probe;
     }
 
     /// ADR-0053 D3: 直近のトンネル状態遷移を取り出す（呼ぶと空になる。celeris はこれを Discord/Console に流す）。
@@ -1757,7 +1785,7 @@ impl Dispatcher {
             .collect();
         specs.sort();
         for (id, host) in specs {
-            let alive = control_master_alive_blocking(&ssh_command, &host);
+            let alive = (self.cluster_liveness_probe)(&ssh_command, &host);
             self.cluster_connected.insert(id.clone(), alive);
             if alive && self.cluster_cooldown.remove(&id).is_some() {
                 tracing::info!(cluster = %id, %host, "ssh ControlMaster connection is back; cluster cooldown cleared");
