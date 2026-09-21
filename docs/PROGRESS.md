@@ -10642,3 +10642,75 @@ thread while the thread is being used to drive asynchronous tasks.
   注意: rollback 先の 8a979f2 は forwards があると起動時に panic するので、rollback するなら先に forwards を外す（`config.toml.bak-20260921f`）。
   トンネル自体は次の昇格（Phase 66c / 67）でデーモンが起動し直したときに有効になり、pegasus の master が無い間は `login_needed`
   （GUI クラスタ画面の「接続」で TOTP）になる。
+## Phase 66c — `--mode verify` が `[[clusters.forwards]]` で裏方の仕事をしていた副作用の修正（2026-09-21）
+
+**実機での確認（Phase 66b の続き）**: release `2b3aaf1d633a`（Phase 66b の修正を含む）で
+`[[clusters.forwards]]`（pegasus）を設定した状態でも `verify.sh` check 1 が通り、ログに
+`tunnel: state transition … kind: login_needed` → `down` が出て panic は起きなかった（Phase 66b の
+修正は実機で有効だったことを確認）。
+
+**新たに観測した副作用**: `verify.sh` check 2（staging が本番のコピーと件数が一致すること）が
+`reports(snapshot=135 staging=136)` で落ちた。`--mode verify` は「migrations、API と `smoke` の
+煙試験だけ。他の dispatch も裏方の仕事も無い」はずだが、`Dispatcher::tick()` は role に関わらず
+呼ばれ、`refresh_cluster_liveness`/`refresh_cluster_tunnels` は verify かどうかを見ていなかった。
+このため staging（本番データのコピー）側でも master 未接続 → `cluster_connector` 失敗 →
+`mark_login_needed` → `record_cluster_login_needed_report` と進み、`reports` テーブルに 1 行
+余計に増えていた。詳しい原因・実験は `docs/adr/0053-llm-source-proxy.md` の「Phase 66c 追記」。
+
+### 受け入れ条件ごと
+
+**1. `refresh_cluster_tunnels`（と `login_needed` の報告書き込み）を verify で完全に止める**
+
+- `crates/task-dispatch/src/dispatcher.rs` の `refresh_cluster_tunnels` の先頭に
+  `if self.eligible.is_some() { return; }` を追加。`eligible: Option<TaskFilter>` は既存の
+  「`--mode verify` の煙試験でだけ `Some`」という目印（`set_eligible_tasks` の doc コメント）を
+  そのまま使ったので、celeris 側（`build_dispatcher`/`run()`）の変更は不要だった。
+- テスト: `crates/task-dispatch/src/dispatcher.rs`
+  `verify_mode_does_not_refresh_cluster_tunnels_or_write_a_report`（新規）。`auth = "totp"` +
+  `[[clusters.forwards]]` のクラスタ・master 未接続の状態で `set_eligible_tasks` を呼んでから
+  `refresh_cluster_liveness()`/`refresh_cluster_tunnels()` を呼び、`cluster_connector`/
+  `tunnel_forward_ensurer`/`tunnel_probe` が 1 回も呼ばれないこと、`tunnel_events`/
+  `clusters_needing_login()` が空のままであること、`store.report_list(&ReportFilter::default())`
+  の件数が呼び出し前後で変わらないことを確認。**この修正を一時的に取り消して実行し、実際に
+  `assertion left == right failed: verify mode must not touch the cluster connector`（`left: 1`）
+  で落ちることを確認してから修正を復元した**（回帰テストとして機能することの検証）。
+  - `cargo test -p task-dispatch --lib` → **183 passed / 0 failed**（既存の `tunnel_*` 4 件・
+    `publickey_cluster_auto_connects_and_dispatch_continues_on_success` を含め無変更のまま green）。
+
+**2. `refresh_cluster_liveness` も副作用があるなら verify で止める**
+
+- `refresh_cluster_liveness` は `reports`/`notifications` へは書かず、`cluster_connected` という
+  メモリ上の HashMap を更新するだけなので件数差分（check 2）には無関係だった。ただし実クラスタへ
+  `ssh -O check` を打つという副作用自体が「裏方の仕事」に当たり、`--mode verify` の煙試験
+  （fake アダプタのローカルタスクだけ）はクラスタの生死を知る必要がそもそも無いため、同じ
+  `if self.eligible.is_some() { return; }` を先頭に追加してこちらも verify では丸ごと止めた。
+
+**3. Discord への二重送信は元々無かったことの確認**
+
+- `record_cluster_login_needed_report` が書くのは `reports` 表だけで、`notifications` 表への行は
+  別経路（`crates/celeris/src/lib.rs` `tick_loop` 内の `notify::schedule`）が `reports` を読んで
+  作る。その経路は `if role == InstanceRole::Active { … }` に包まれており、`--mode verify`
+  （`role = Verify`）ではそもそも実行されない（`crates/celeris/src/lib.rs:1405` 付近、確認のみで
+  変更なし）。今回の副作用は `reports` テーブルの件数差分だけで、Discord へ実際に送られることは
+  無かった。
+
+### ゲート
+
+- `cargo test --workspace --no-fail-fast`: **exit 0。1629 passed / 0 failed**（doctest 含む全
+  クレート。新規回帰テスト 1 件を含む）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: **exit 0。警告 0**。
+- 非テストコードに `unwrap()` を増やしていない（`git diff` の追加行を確認。今回の本体の変更は
+  `if self.eligible.is_some() { return; }` を 2 箇所に足しただけ）。
+- `gui/`・本番パス（`~/.config/celeris`、`~/.local/celeris`）・ポート
+  7700/7710/7712/18000/18100・`systemctl`・実 ssh・資格情報ファイルには一切触れていない。
+  `docs/DESIGN.md`/`docs/SPEC.md` も変更していない。
+
+### 未解決事項
+
+- **実機での再確認は未実施**（このセッションには本物の pegasus/bnode150 も本番の staging 環境も
+  無い。ADR-0009 P-34）。この修正を反映した release を `verify.sh` で検証し、
+  `[[clusters.forwards]]`（pegasus）を設定した状態で check 1 と check 2 の両方が通ること
+  （`reports` の staging/snapshot の件数が一致すること）を、認証・ネットワークが使える環境の人
+  （またはエージェント）が確認し、結果をここに追記すること。
+- Phase 66b の「未解決事項」（`try_auto_connect_cluster`〈`auth = "publickey"`〉側の同種の潜在
+  バグは防御ガードで panic こそしないが機能としては退避させていない）はそのまま残っている。

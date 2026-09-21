@@ -323,3 +323,62 @@ thread while the thread is being used to drive asynchronous tasks.
      (b) `dispatcher.tick()` を直接呼び、(c) `cluster_connector` だけを実物と**同じ形**
      （ネストした `current_thread` ランタイム + `block_on`。実 ssh はしない）の偽物に差し替えることで、
      この 2 点を両方満たす回帰テストにした（この修正を外すと実際にこのテストが落ちることを確認した）。
+
+### Phase 66c 追記（`--mode verify` が裏方の仕事をしていた副作用の修正。2026-09-21）
+
+Phase 66b の修正は実機で有効だった: release `2b3aaf1d633a` で `[[clusters.forwards]]` を設定した
+状態でも `verify.sh` check 1（起動して数秒生きていること）が通り、ログに
+`tunnel: state transition … kind: login_needed` → `down` が出て panic は起きなかった。
+
+**新たに観測した副作用**: `verify.sh` check 2（staging が本番のコピーと件数が一致すること）が
+`reports(snapshot=135 staging=136)` で落ちた。`--mode verify` の staging インスタンスは
+「migrations、API と `smoke` の煙試験だけ。他の dispatch も裏方の仕事も無い」
+（`crates/celeris/src/lib.rs` の `run()` のログ文言のとおり）はずなのに、`Dispatcher::tick()` は
+role に関わらず（`Active`/`Draining`/`Verify` のどれでも）呼ばれ、その中の
+`refresh_cluster_liveness()` / `refresh_cluster_tunnels()` は verify かどうかを一切見ていなかった。
+このため staging（本番データのコピー）でも `refresh_cluster_tunnels` が master 未接続 →
+`cluster_connector` 失敗 → `mark_login_needed` → `record_cluster_login_needed_report`
+（`crates/task-dispatch/src/reports.rs`）と進み、staging 側だけに `reports` 行が 1 件余計に
+増えた（本番の `reports` テーブルにはこの verify 実行由来の行は無いので、コピー元の 135 件に対して
+staging は 136 件になった）。
+
+- **原因**: `refresh_cluster_liveness` / `refresh_cluster_tunnels`（`crates/task-dispatch/src/
+  dispatcher.rs`）はどちらも `Dispatcher` が「`--mode verify` かどうか」を判定する手段を持っていな
+  かった。実は `Dispatcher` は既にその目印を持っている: `eligible: Option<TaskFilter>`
+  （`set_eligible_tasks` で設定。doc コメントに「`--mode verify` の煙試験でだけ使う」と明記されて
+  おり、celeris は `verify == true` のときだけこれを呼ぶ。`crates/celeris/src/lib.rs` の `run()`）。
+  この 2 つのメソッドはこの既存の目印を見ずに、`Active`/`Draining`/`Verify` のどの role でも無条件に
+  実クラスタへ ssh を打ち、状態を書き換えていた。
+- **修正**: `crates/task-dispatch/src/dispatcher.rs` の `refresh_cluster_liveness` /
+  `refresh_cluster_tunnels` の先頭に `if self.eligible.is_some() { return; }` を追加した。
+  `self.eligible.is_some()` は「`--mode verify` の煙試験だけに絞られている」ことの既存の目印なので、
+  celeris 側（`build_dispatcher`/`run()`）への変更は不要（`set_eligible_tasks` を呼ぶタイミングは
+  Phase 66 時点のまま）。
+  - `refresh_cluster_tunnels` を丸ごと止めることで、forward の(再)確立・probe・`cluster_connector`
+    の呼び出し・`cluster_login_needed` の報告書き込みのすべてが verify では起きなくなる
+    （`reports` の件数差分が解消する）。
+  - `refresh_cluster_liveness` は `reports`/`notifications` へは書かない（`cluster_connected` という
+    メモリ上の HashMap を更新するだけ）ため件数差分には無関係だったが、依頼どおり「副作用（実クラス
+    タへの `ssh -O check`）があるなら verify では止めるべきか」を確認し、`--mode verify` の
+    「他の dispatch も裏方の仕事も無い」という約束をより文字どおりに守るため、こちらも同じ目印で
+    止めた（verify の煙試験は fake アダプタのローカルタスクだけなので、クラスタの生死を知る必要が
+    そもそも無い）。
+- **通知（Discord）は元々二重に安全だった**: `record_cluster_login_needed_report` が書くのは
+  `reports` 表だけで、`notifications` 表への行は別経路（`crates/celeris/src/lib.rs` の
+  `notify::schedule`）が `reports` を読んで作る。その経路は `tick_loop` の中で
+  `if role == InstanceRole::Active { … }` に包まれており、`--mode verify`（`role = Verify`）では
+  そもそも実行されない。したがって今回の副作用は `reports` テーブルの件数差分だけで、Discord へ
+  実際に送られることは無かった（が、`reports` 行自体が本番のコピーと staging とで食い違うのは
+  `verify.sh` check 2 の趣旨（差分ゼロの確認）に反するので、上記の修正で塞いだ）。
+- **テスト**: `crates/task-dispatch/src/dispatcher.rs` に
+  `verify_mode_does_not_refresh_cluster_tunnels_or_write_a_report`（既存の `tunnel_*` と同じ流儀。
+  `auth = "totp"` + `[[clusters.forwards]]` のクラスタ、master 未接続、`cluster_connector`/
+  `tunnel_forward_ensurer`/`tunnel_probe` を全部フェイクの closure に差し替えて呼び出し回数を数える）
+  を追加した。`set_eligible_tasks` を呼んだ（＝ verify 相当）状態で `refresh_cluster_liveness()` /
+  `refresh_cluster_tunnels()` を呼び、(a) 3 つのフックが 1 回も呼ばれないこと、(b) `tunnel_events`/
+  `clusters_needing_login()` が空のままであること、(c) `store.report_list(&ReportFilter::default())`
+  の件数が呼び出し前後で変わらないことを確認する。**この修正を一時的に取り消して実行し、実際に
+  `assertion left == right failed: verify mode must not touch the cluster connector`（`left: 1`）で
+  落ちることを確認してから修正を復元した**（回帰テストとして機能することの検証）。
+- **ゲート**: `cargo test --workspace --no-fail-fast` / `cargo clippy --workspace --all-targets --
+  -D warnings` の結果は `docs/PROGRESS.md` の「Phase 66c」節に記載。
