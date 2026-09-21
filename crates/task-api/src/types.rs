@@ -168,6 +168,10 @@ pub enum TimelineItem {
         inbox: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         discarded: Option<u32>,
+        /// ADR-0052 D2（Phase 64）: 抽出した経路。`"langmem"`（Qwen）か `"fallback:<adapter>"`
+        /// （Qwen に届かず tier cheap の汎用ハーネスで抽出した）。分からなければ `null`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<String>,
     },
 }
 
@@ -1393,6 +1397,10 @@ pub enum ConsoleBlock {
         inbox: u32,
         /// 検査で落とした件数。
         discarded: u32,
+        /// ADR-0052 D2（Phase 64）: 抽出した経路。`"langmem"`（Qwen）か `"fallback:<adapter>"`
+        /// （Qwen に届かず tier cheap の汎用ハーネスで抽出した）。分からなければ `null`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<String>,
     },
 }
 // ========== ADR-0048 D1（Phase 60a）: ここまで ==========

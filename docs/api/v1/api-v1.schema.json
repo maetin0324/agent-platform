@@ -2208,6 +2208,13 @@
             },
             "task_title": {
               "type": "string"
+            },
+            "via": {
+              "description": "ADR-0052 D2（Phase 64）: 抽出した経路。`\"langmem\"`（Qwen）か `\"fallback:<adapter>\"`\n（Qwen に届かず tier cheap の汎用ハーネスで抽出した）。分からなければ `null`。",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [
@@ -10243,6 +10250,13 @@
             "state": {
               "description": "`scheduled`（起こしたが未適用）| `applied` | `failed`。",
               "type": "string"
+            },
+            "via": {
+              "description": "ADR-0052 D2（Phase 64）: 抽出した経路。`\"langmem\"`（Qwen）か `\"fallback:<adapter>\"`\n（Qwen に届かず tier cheap の汎用ハーネスで抽出した）。分からなければ `null`。",
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [

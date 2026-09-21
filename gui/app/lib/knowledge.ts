@@ -259,6 +259,14 @@ export function knowledgeOpTone(op: string | null | undefined): "neutral" | "inf
   }
 }
 
+/**
+ * ADR-0052 D2（Phase 64）: 知識整理 run の `via`。`"langmem"` は従来どおり Qwen で抽出したもの、
+ * `"fallback:<adapter>"` は Qwen に届かず tier cheap の汎用ハーネスで抽出したもの。
+ */
+export function isKnowledgeFallback(via: string | null | undefined): boolean {
+  return typeof via === "string" && via.startsWith("fallback:");
+}
+
 /** `op` ごとの、accept したときに何が起きるかの短い説明（Phase 62。GUI のヒント用）。 */
 export function knowledgeOpHint(op: string | null | undefined): string | null {
   switch (op) {

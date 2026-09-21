@@ -9,10 +9,16 @@
 //! celerisctl knowledge get    <path> [--json]
 //! celerisctl knowledge record --title … --scope … [--tags a,b] --source task:<id> [--confidence …] [--path …] < body.md
 //! celerisctl knowledge reindex
+//! celerisctl knowledge rerun   <task_id> [--db …]     # 管理系。**DB を開く**（ADR-0052 D3）
 //! ```
 //!
 //! 根の決め方（ADR-0047 D3）: `--root` > `CELERIS_KNOWLEDGE_ROOT` > `[knowledge] root` > `~/.local/share/celeris/knowledge`。
 //! 設定ファイルが読めない環境（コンテナの中）では黙って次の候補に落ちる。
+//!
+//! 例外は `rerun` だけ（ADR-0052 D3）。これは人が使う**管理系**で、`org migrate-v2` と同じように
+//! DB を直接開く（celerisctl は HTTP の口を持たず、他の全サブコマンドも DB を直接見る）。やることは
+//! `knowledge_runs` の 1 行を `failed` / `retried_at = NULL` に戻すだけで、**新しい run を作るのは
+//! デーモンの次の tick**（`celeris::knowledge_maint::retry_failed`）。デーモンを止める必要は無い。
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -20,6 +26,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
 use task_core::knowledge::{self as kb, Confidence};
+use task_core::{KnowledgeRunStore, SqliteStore, TaskId};
 use task_ops::knowledge::{self as ops, RecordError, RecordRequest};
 
 use crate::error::CliError;
@@ -40,6 +47,21 @@ pub enum KnowledgeCommand {
     Record(RecordArgs),
     /// `index.json` を作り直す。
     Reindex(RootArgs),
+    /// 知識整理 run をもう一度やらせる（ADR-0052 D3。**DB を開く**管理系）。
+    Rerun(RerunArgs),
+}
+
+impl KnowledgeCommand {
+    /// このサブコマンドが DB を要るか（`rerun` だけ）。`main` が store を開くかどうかを決める。
+    pub fn needs_db(&self) -> bool {
+        matches!(self, KnowledgeCommand::Rerun(_))
+    }
+}
+
+#[derive(Args, Debug)]
+pub struct RerunArgs {
+    /// 知識整理をやり直したい**元のタスク**の id（`knowledge_runs.task_id`。run 自身の id ではない）。
+    pub task_id: String,
 }
 
 /// どのサブコマンドにもある根の指定。
@@ -130,7 +152,53 @@ pub fn run(command: KnowledgeCommand) -> Result<ExitCode, CliError> {
         KnowledgeCommand::Get(args) => run_get(&args),
         KnowledgeCommand::Record(args) => run_record(&args),
         KnowledgeCommand::Reindex(args) => run_reindex(&args),
+        KnowledgeCommand::Rerun(_) => Err(CliError::msg(
+            "knowledge rerun は DB を開く（`KnowledgeCommand::needs_db` を見て store 付きで呼ぶこと）",
+        )),
     }
+}
+
+/// `rerun` だけは store が要る（ADR-0052 D3）。
+pub fn run_with_store(
+    store: &SqliteStore,
+    command: KnowledgeCommand,
+) -> Result<ExitCode, CliError> {
+    match command {
+        KnowledgeCommand::Rerun(args) => run_rerun(store, &args),
+        other => run(other),
+    }
+}
+
+/// ADR-0052 D3: `knowledge_runs` の 1 行を「まだやり直していない失敗」に戻す。
+/// 新しい run タスクを作るのは**デーモンの次の tick**（`knowledge_maint::retry_failed`）。
+fn run_rerun(store: &SqliteStore, args: &RerunArgs) -> Result<ExitCode, CliError> {
+    let task_id = args
+        .task_id
+        .parse::<TaskId>()
+        .map_err(|e| CliError::msg(format!("invalid task id {}: {e}", args.task_id)))?;
+    let Some(before) = store
+        .knowledge_run_get(task_id)
+        .map_err(|e| CliError::msg(e.to_string()))?
+    else {
+        return Err(CliError::msg(format!(
+            "knowledge run not found for task {task_id}（このタスクからは知識整理 run が起きていない）"
+        )));
+    };
+    if !store
+        .knowledge_run_reset(task_id)
+        .map_err(|e| CliError::msg(e.to_string()))?
+    {
+        return Err(CliError::msg(format!(
+            "could not reset the knowledge run for task {task_id}"
+        )));
+    }
+    outln!(
+        "reset knowledge run for task {task_id}（直前: state={} run_task={}）",
+        before.state.as_str(),
+        before.run_task_id
+    );
+    outln!("次の tick で celeris が新しい知識整理 run を 1 回だけ作ります（デーモンの再起動は不要）。");
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_init(args: &RootArgs) -> Result<ExitCode, CliError> {
@@ -336,6 +404,77 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    /// ADR-0052 D3: `knowledge rerun <task_id>` は `knowledge_runs` の 1 行を
+    /// 「まだやり直していない失敗」に戻す（run を作るのはデーモンの次の tick）。
+    #[test]
+    fn rerun_resets_the_knowledge_run_row_and_rejects_unknown_ids() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let task_id = TaskId::new();
+        let run_task_id = TaskId::new();
+        let now = time::OffsetDateTime::now_utc();
+        store
+            .knowledge_run_create(task_id, run_task_id, now)
+            .expect("create");
+        store
+            .knowledge_run_finish(
+                task_id,
+                task_core::KnowledgeRunState::Done,
+                now,
+                Some(&task_core::KnowledgeRunSummary::default()),
+                Some(task_core::VIA_LANGMEM),
+            )
+            .expect("finish");
+        store
+            .knowledge_run_retry(task_id, TaskId::new(), now)
+            .expect("retry");
+
+        assert_eq!(
+            run_rerun(
+                &store,
+                &RerunArgs {
+                    task_id: task_id.to_string()
+                }
+            )
+            .expect("rerun"),
+            ExitCode::SUCCESS
+        );
+        let run = store
+            .knowledge_run_get(task_id)
+            .expect("get")
+            .expect("some");
+        assert_eq!(run.state, task_core::KnowledgeRunState::Failed);
+        assert!(run.retried_at.is_none(), "もう 1 回だけ自動でやり直せる");
+        assert!(run.via.is_none());
+
+        // 知識整理 run が無いタスク・id の綴り間違いはエラー（黙って成功しない）。
+        assert!(
+            run_rerun(
+                &store,
+                &RerunArgs {
+                    task_id: TaskId::new().to_string()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            run_rerun(
+                &store,
+                &RerunArgs {
+                    task_id: "not-an-ulid".into()
+                }
+            )
+            .is_err()
+        );
+        // `needs_db` は rerun だけ真。
+        assert!(
+            KnowledgeCommand::Rerun(RerunArgs {
+                task_id: task_id.to_string()
+            })
+            .needs_db()
+        );
+        assert!(!KnowledgeCommand::Reindex(RootArgs::default()).needs_db());
     }
 
     /// `--root` が最優先。設定が読めなければ既定（`~/.local/share/celeris/knowledge`）に落ちる。

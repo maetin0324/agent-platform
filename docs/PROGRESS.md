@@ -9670,3 +9670,147 @@ Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus
   - `node scripts/check-upgrade.mjs` を再実行: `{"ok":true,"results":[{"scenario":"success","requests":18},{"scenario":"failure","requests":18}]}`。証跡は `/tmp/celeris-upgrade-gui-Zy9P3L/`（success-01/02, failure-01/02 の各PNG）。成功シナリオで現行ハッシュが `aaaaaaaaaaaa` → `cccccccccccc` に更新され「upgrade が完了しました」が表示、失敗シナリオでハッシュ不変＋赤いバナー「upgrade に失敗しました」を目視確認。
   - 元のチェックアウト（`/home/rmaeda/workspace/agent-platform`）や本番サービスへの変更・デプロイは行っていない。`git status` はクリーン。
 - 未解決事項: 前節と同じ（Nothing 2a実機・本番promoteは人が行う）。
+## Phase 64 — 知識整理 run のフォールバックと一度だけのやり直し（ADR-0052。2026-09-21）
+
+**完了日**: 2026-09-21。実機の事故（2026-09-20 夜〜21 朝、pegasus のトンネルが落ちている間に知識整理 run が
+4 件連続で `langmem runner exited with a non-zero status` で失敗し、「1 タスクにつき 1 回」の規則で
+**再実行されないまま** その 4 タスクの知識が永久に取り込まれなかった）への対策として、ADR-0052 の
+D1（到達性の検査）/ D2（cheap の汎用ハーネスへのフォールバック）/ D3（一度だけのやり直し）を実装した。
+
+**LLM はどこにも増えていない**（CLAUDE.md「ディスパッチャやストアに LLM 呼び出しを入れない」）。
+足したのは `GET <base_url>/models` の **1 回の HTTP GET** だけで、判断（倒すか・やり直すか・どの供給元か）は
+すべて決定的。
+
+### 何を足したか（ファイル）
+
+- `crates/task-worker/src/probe.rs`（新規）— OpenAI 互換エンドポイントの到達性の検査。
+  `std::net::TcpStream` + 最小の HTTP/1.1（依存は増やしていない）。結果は `Ok` / `Unreachable{reason}` /
+  `Unknown{reason}`（`https://`・`base_url` 無し・書き方が壊れている＝**検査できない**は従来どおり `langmem`）。
+- `crates/task-worker/src/langmem.rs` — `extraction_instructions()`（`langmem_run.py` の
+  `EXTRACTION_INSTRUCTIONS` を `include_str!` から切り出す。**出典は python のランナー 1 つだけ**）と
+  `knowledge_fallback_instructions(candidates_rel)`（抽出の指示 ＋ 出力契約）。
+- `crates/task-dispatch/src/dispatcher.rs` — dispatch の直前の検査（60 秒キャッシュ、`set_knowledge_probe`
+  で差し替え可）、`knowledge_fallback_reason`、`RunExtras::knowledge_fallback`（前置きと予算の上書き）。
+  フォールバックは **`worker_hint.adapter` を `None` にして tier を `cheap` にするだけ**で、供給元の選択は
+  ADR-0049 の `StaticPolicy::select` / アカウントプールにそのまま乗る（専用の選択コードは書いていない）。
+- `crates/task-core/src/harness.rs` — `HarnessFallback`（`fallback = { tier = "cheap" }` / `fallback = false`）、
+  `HarnessSpec::fallback_tier()`、組み込みの `knowledge` ハーネスの既定 `{ tier = "cheap" }`。
+  `HarnessRegistry::new` は、設定が同じ id を書いても `fallback` を省いていれば**組み込みの既定を継ぐ**。
+- `crates/task-core/migrations/0021_knowledge_run_retry.sql`（**schema 20 → 21**）—
+  `knowledge_runs.retried_at` と `knowledge_runs.via`。
+- `crates/task-core/src/knowledge_run.rs` — `KnowledgeRun.{retried_at, via}`、`KnowledgeRunSummary.via`、
+  `knowledge_run_finish(..., via)`、`knowledge_run_retry`（`WHERE retried_at IS NULL` の UPDATE ＝
+  「一度だけ」はストアが守る）、`knowledge_run_reset`（人の手動やり直し）。
+- `crates/celeris/src/knowledge_maint.rs` — `build_run_spec`（`schedule` と共用）、`retry_failed`
+  （失敗した run を 1 tick に 1 件だけ作り直す。**`not_before` は見ない**）、`via_of`（run の
+  `WorkerStarted.adapter` から `"langmem"` / `"fallback:<adapter>"` を決める）。
+- `crates/celeris/src/lib.rs` — tick に `knowledge_maint::retry_failed` を足した（`schedule` と
+  `apply_finished` の間）。`crates/celeris/src/config.rs` — `[[harnesses]] fallback` と
+  `[knowledge.langmem].base_url` を `DispatchConfig.knowledge` へ。
+- `crates/celerisctl/src/commands/knowledge.rs` + `main.rs` — `celerisctl knowledge rerun <task_id>`。
+- `crates/task-api/src/{types.rs, console.rs, timeline.rs}` — Console の `knowledge` ブロックと
+  タスクのタイムラインに `via`。`gui/app/lib/knowledge.ts`（`isKnowledgeFallback`）、
+  `gui/app/components/ConsoleBlockItem.tsx` と `gui/app/routes/tasks.$id.tsx` に
+  **「cheap のハーネスで抽出」**の表示。
+- 文書: `docs/knowledge.md` §7.1（Qwen が落ちたときの挙動・手動再実行）、`docs/gui/api.md`（`via`）、
+  `config/celeris.example.toml`（`[[harnesses]] id = "knowledge"` の `fallback` と `[knowledge.langmem]` の注）、
+  ADR-0052 `## Phase 64 追記`（逸脱）。
+
+### 受け入れ条件（ADR-0052 §3）ごとの証跡
+
+1. **到達性の検査**（fake の HTTP サーバで 200 / 接続不可 / タイムアウト。60 秒キャッシュ）—
+   `cargo test -p task-worker --lib probe`（6 passed）:
+   `a_200_from_a_local_fake_server_is_reachable`（`127.0.0.1:0` に束ねた偽サーバ。要求が
+   `GET /v1/models HTTP/1.1` であることも確かめる）、`a_non_2xx_answer_is_unreachable`（`HTTP 502`）、
+   `a_refused_connection_is_unreachable`（listen していないポート）、
+   `a_server_that_never_answers_times_out`（受けるだけで答えないサーバ。300 ms で打ち切る）、
+   `unprobeable_base_urls_are_unknown`（`https://`・空・壊れたポート）、
+   `urls_split_into_host_port_and_path`。**外部ネットワークには出ない**（全部 127.0.0.1）。
+   60 秒キャッシュは `cargo test -p task-dispatch --lib knowledge_fallback`
+   の `a_reachable_endpoint_keeps_using_langmem_and_the_probe_is_cached`（tick を何度回しても検査は 1 回）。
+2. **フォールバックの選択・前置き・出力契約・`via`** —
+   `cargo test -p task-dispatch --lib knowledge_fallback`（5 passed）:
+   `an_unreachable_langmem_endpoint_runs_the_extraction_on_a_cheap_generic_harness`
+   （`fake` アダプタで走り、`knowledge-candidates.json` を `apply_finished` が読む場所に書く。
+   `status` の進行に「langmem の接続先に届かない（…）。cheap のハーネスに倒す（fake）」。
+   前置きは `extraction_instructions()` をそのまま含み、`artifacts/knowledge-candidates.json` と
+   「道具は使わない」を含む。予算は `max_turns = 8` / `max_wall_secs = 600`。依頼文は元のまま）、
+   `a_reachable_endpoint_keeps_using_langmem_and_the_probe_is_cached`、
+   `fallback_false_keeps_the_dedicated_adapter_even_when_the_endpoint_is_down`（無効なら検査もしない）、
+   `without_any_cheap_generic_provider_the_run_stays_ready`（候補が無ければ従来どおり `ready` のまま＝
+   次の tick で再試行）、`other_tasks_never_trigger_the_probe`。
+   `summary_json.via` と適用の同一性は `cargo test -p celeris --lib knowledge_maint`
+   の `a_fallback_run_is_applied_the_same_way_and_records_its_via`（`via = "fallback:fake"` が
+   `knowledge_runs.via` と `summary.via` の両方に入り、候補は普段どおり KB にコミットされる）。
+   設定の読み方は `cargo test -p celeris --lib config::tests::the_knowledge_harness_fallback_is_configurable`
+   と `task-core` の `fallback_parses_from_both_toml_spellings` / `the_knowledge_harness_falls_back_to_cheap_by_default`。
+3. **一度だけのやり直し（`retried_at`。migration 0021）と `celerisctl knowledge rerun`** —
+   `cargo test -p task-core --lib knowledge_run`（`a_failed_run_is_retried_exactly_once`、
+   `reset_clears_retried_at_and_reports_a_missing_row`、`via_helpers_are_deterministic`）、
+   `cargo test -p task-core --lib migration_0021`
+   （`migration_0021_adds_retried_at_and_via_to_an_existing_knowledge_run`: schema 20 の DB を開くと
+   列が足され、既存の `failed` の行は `retried_at = NULL` のまま読めて 1 回だけ作り直せる）、
+   `cargo test -p celeris --lib knowledge_maint::tests::a_failed_run_is_retried_exactly_once`
+   （1 回目で新しい run タスクができ `retried_at` が入る → 2 回目も落ちたら 3 回目は無い →
+   `knowledge_run_reset`（= `rerun`）でもう 1 回だけ拾われる）、
+   `cargo test -p celerisctl --bin celerisctl knowledge`
+   （`rerun_resets_the_knowledge_run_row_and_rejects_unknown_ids`）。
+4. **Console / タイムラインの表示と文書** — `crates/task-api/tests/console.rs`
+   （`via` が `"langmem"` で返る）、`crates/task-api/tests/task_management.rs`
+   （タイムラインの `via` が `"fallback:codex"`）、GUI は
+   `gui/test/unit/knowledge.test.ts` の「`via` が `fallback:` で始まるときだけ…」。
+   表示は `data-testid="console-knowledge-fallback"` /「（cheap のハーネスで抽出）」。
+   `docs/knowledge.md` §7.1 に運用（落ちたときの挙動・手動再実行）。
+
+### ゲート（全部 exit 0）
+
+| コマンド | 結果 |
+|---|---|
+| `cargo test --workspace --no-fail-fast` | exit 0。**1559 passed / 0 failed / 3 ignored**。`grep -c "^test result: FAILED"` = **0** |
+| `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（warning 0） |
+| `UPDATE_SCHEMA=1 cargo test -p task-core -p task-api -p task-worker --lib` | exit 0。`docs/api/v1/api-v1.schema.json` に `via` が 2 箇所増えた |
+| `pnpm gen:types` → `git diff` | `gui/app/celeris/types.ts` は `via?: string \| null;` の 2 行だけ。2 回目の生成で差分ゼロ |
+| `pnpm lint` / `pnpm typecheck` / `pnpm test` / `pnpm build` | exit 0 / exit 0 / **846 passed（59 files）** / built |
+| `bash scripts/sync-gui-docs.sh --check` | `up to date`（exit 0） |
+| `python3 -m py_compile crates/task-worker/src/langmem_run.py` | exit 0 |
+
+`--all-targets` の clippy で **Phase 64 とは無関係の既存の違反 2 件**（`items_after_test_module`:
+`crates/task-ops/src/comment.rs` の `rereview`、`crates/task-api/src/handlers.rs` の
+`check_model_routing` / `validate_credential_refs` / `migrate_credentials`）が出たので、
+**中身を変えずにテストモジュールの前へ移した**だけの修正を含む（今までのゲートは `--all-targets`
+無しだったので気付かれていなかった）。
+
+### 本番への反映（runbook）
+
+**schema 20 → 21 なので、旧版との同時稼働はできない**（旧バイナリは schema 21 の DB を
+`SchemaTooNew` で拒否する）。Phase 60b と同じ**停止切替**になる。
+
+1. `scripts/selfdeploy/release.sh`（7 ゲート）→ `verify.sh`。`verify.sh` の `live_ok` は **false になる**
+   （旧 schema 20 のバイナリが schema 21 の DB を開けないため）。これは想定どおり。
+2. バックアップを取って `promote.sh`（停止 → 切替 → 起動）。DB のバックアップは
+   `~/.local/celeris/backups/<日時>-pre-<sha12>.sqlite3`。
+3. 起動時に migration 0021 が走り、`knowledge_runs` に `retried_at` / `via` が足される（既存の行は
+   両方 `NULL`）。
+4. **失敗していた 4 件は配備後の最初の 4 tick で自動的にやり直される**（`retry_failed` が
+   `state = failed` かつ `retried_at IS NULL` の行を 1 tick に 1 件拾う。`not_before` は見ないので
+   古い仕事でも拾われる）。トンネルが戻っていれば `langmem`（Qwen）で、落ちていれば tier `cheap` の
+   汎用ハーネス（Claude Code / Codex）で走る。
+5. 確認: `sqlite3 ~/.local/celeris/celeris.sqlite3 "SELECT task_id, state, retried_at, via FROM knowledge_runs ORDER BY created_at DESC LIMIT 10;"`
+   と、GUI の Console で `knowledge` ブロックに「cheap のハーネスで抽出」が出ること。
+6. 手でやり直したいときは `celerisctl knowledge rerun <元のタスクの id>`（デーモンは止めなくてよい。
+   次の tick が新しい run を作る）。
+
+### 未解決 / 提案
+
+- **実機の確認はまだ**（この worktree からは本番（`~/.config/celeris`・`~/.local/celeris`・7710/7700・
+  `systemctl`）に触っていない）。ADR-0052 §3 の 5.「トンネルが落ちた状態で 1 タスクを終端にし、
+  fallback で候補が KB か `_inbox` に入ること」「失敗していた 4 件が配備後にやり直されること」は
+  **配備後に人が確認して追記する**。
+- 検査は `http://` だけを見る（`https://` は `Unknown` ＝ 従来どおり `langmem` に出す）。本番の Qwen は
+  `http://127.0.0.1:18000/v1` なので今は困らないが、将来 TLS の口を使うなら TLS 対応の HTTP
+  クライアントを足すか、`Unknown` のときの既定を設定で選べるようにする必要がある（提案）。
+- 検査は `tick()` の中で同期に走る（最大 3 秒）。60 秒キャッシュがあるので通常の tick は止まらないが、
+  `ssh -O check` と同じく「tick の中で待つ」設計になっている。気になるなら
+  `refresh_cluster_liveness` と同じく tick とは別の周期に移すのが筋（提案）。
+- `celerisctl knowledge rerun` は GUI からは触れない（管理 API を足していない）。GUI から
+  やり直したいという要望が出たら `POST /knowledge/runs/{task_id}/rerun` を足す（提案）。

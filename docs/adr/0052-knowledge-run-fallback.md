@@ -59,3 +59,41 @@ pegasus 経由のトンネル越しで、トンネルは人が GUI で TOTP を�
 4. Console / タイムラインの表示（「cheap のハーネスで抽出」）。`docs/knowledge.md` に運用（Qwen が落ちたときの挙動、手動再実行）。
 5. `cargo test --workspace --no-fail-fast` / clippy / GUI 一式。実機: トンネルが落ちた状態で 1 タスクを終端にし、fallback で候補が
    KB か `_inbox` に入ること。失敗していた 4 件が配備後にやり直されること。
+
+## Phase 64 追記（2026-09-21。実装したときの逸脱と、決めたこと）
+
+1. **到達性の検査は自前の最小 HTTP/1.1**（`crates/task-worker/src/probe.rs`。`std::net::TcpStream`）。
+   `task-dispatch` も `task-worker` も HTTP クライアントを持っておらず、`tick()` は tokio のワーカー
+   スレッドから同期で呼ばれるので `reqwest::blocking` は使えない（ランタイムの中で panic する）。
+   依存を増やさずに「接続 → `GET <path>/models` → ステータス行だけ読む」を書いた。
+   結果は 3 値: `Ok` / `Unreachable{reason}` / **`Unknown{reason}`**。`https://`・`base_url` 無し・
+   書き方が壊れているものは `Unknown` で、**従来どおり `langmem`** に出す（検査できないことを
+   「落ちている」と決めつけない）。実機の Qwen は `http://127.0.0.1:18000/v1` なので影響しない。
+2. **フォールバックの選択は ADR-0049 の経路をそのまま使う**。専用の選択コードは書かず、dispatch の
+   直前に `task.worker_hint.adapter` を **`None` にして tier を `cheap` にするだけ**（`StaticPolicy` は
+   adapter 指定が無い仕事に `paperqa` / `local-deep-research` / `langmem` を渡さない規則を既に持つ）。
+   アカウントプールの残量比較・枯渇・未ログインの扱いも既存のまま。DB のタスクは書き換えず、
+   **ワーカーに渡す写しだけ**を変える（`RunExtras::knowledge_fallback`）。
+3. **前置きは「抽出の指示 ＋ 出力契約」**を役割の指示文（`RunContext.role.instructions`）に載せる。
+   `maintenance_objective` は**タスクの `objective` としてそのまま**渡る（同じ入力）ので、前置きでは
+   繰り返さない。抽出の指示は `langmem_run.py` の `EXTRACTION_INSTRUCTIONS` を Rust 側が
+   `include_str!` から切り出して使う（出典は python のランナー 1 つだけ。写し間違いが起きない。
+   `task_worker::langmem::extraction_instructions`）。
+4. **`via` は適用のときに run の `WorkerStarted.adapter` から決める**（`knowledge_maint::via_of`）。
+   ディスパッチャから `knowledge_runs` を書く経路を増やさずに済み、やり直した run でも同じ規則で決まる。
+   値は `knowledge_runs.via`（列。API はこちらを正とする）と `summary_json.via` の両方に残す。
+5. **`celerisctl knowledge rerun` は行を消さずに戻す**（`state = failed` / `retried_at = NULL` /
+   `applied_at`・`summary_json`・`via` を消す）。ADR の本文は「行を消して作り直す」だったが、
+   `schedule` は backfill 禁止（`not_before` = デーモンの起動時刻）なので、**行を消すと古い仕事は
+   二度と拾われない**（実機で落ちた 4 件はまさにそれ）。行を残して D3 のやり直しの経路
+   （`retry_failed`。`not_before` を見ない）に拾わせる方が、同じ操作で確実に 1 回やり直る。
+6. **管理 API ではなく celerisctl にした**。celerisctl は HTTP の口を持たず、`org migrate-v2` を含む
+   全サブコマンドが DB を直接開く形になっている。`rerun` がやるのは 1 行の書き換えだけで、
+   **新しい run を作るのはデーモンの次の tick** なので、デーモンを止める必要も再起動も無い。
+   `knowledge` の他のサブコマンドは今までどおり DB を開かない（コンテナの中でも動く）ままにした。
+   GUI からの操作は求められていないので API は増やしていない。
+7. `HarnessRegistry::new` を 1 箇所だけ変えた: `[[harnesses]]` に同じ id を書いても `fallback` を
+   省いていれば**組み込みの既定を継ぐ**。書いた瞬間に黙って無効になるのを避けるため
+   （消したいときは `fallback = false` と明示する）。
+8. やり直しは **1 tick に 1 件**（`schedule` と同じ間引き）。`knowledge_run_retry` は
+   `WHERE retried_at IS NULL` の UPDATE なので、「一度だけ」はストアが守る。

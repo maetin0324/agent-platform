@@ -640,6 +640,10 @@ pub struct HarnessConfig {
     /// 対話用のハーネスか（今までの「対話用分野」）。
     #[serde(default)]
     pub conversation: bool,
+    /// ADR-0052 D2（Phase 64）: 専用アダプタに届かないときに倒す先（`fallback = { tier = "cheap" }`）。
+    /// `fallback = false` で無効。省略すると組み込みの既定を継ぐ（`knowledge` は tier `cheap`）。
+    #[serde(default)]
+    pub fallback: Option<task_core::HarnessFallback>,
 }
 
 impl HarnessConfig {
@@ -649,6 +653,7 @@ impl HarnessConfig {
             id: self.id.clone(),
             description: self.description.clone(),
             adapter: self.adapter.clone(),
+            fallback: self.fallback.clone(),
             tier: self.tier,
             instructions: self.instructions.clone(),
             capabilities: self.capabilities.clone(),
@@ -2194,6 +2199,13 @@ impl Config {
             knowledge: task_dispatch::KnowledgeRuntimeConfig {
                 root: self.knowledge.root.clone(),
                 default_mounts: self.knowledge.mounts().unwrap_or_default(),
+                // ADR-0052 D1（Phase 64）: dispatch の直前に `GET <base_url>/models` を当てる先。
+                langmem_base_url: self.knowledge.langmem.base_url.clone(),
+                // ADR-0052 D2: `knowledge` ハーネスの `fallback`（組み込みの既定は tier `cheap`）。
+                fallback_tier: self
+                    .harness_registry()
+                    .get(task_core::BUILTIN_KNOWLEDGE)
+                    .and_then(task_core::HarnessSpec::fallback_tier),
             },
             // ADR-0041 D1 / ADR-0042 D3: ローカルの worktree（既定 `celeris/`）。
             worktree_branch_prefix: self.workspace.worktree_branch_prefix.clone(),
@@ -2920,6 +2932,62 @@ genre = "conversation"
         );
         // ADR-0046 D6（Phase 59）: `[conversation] genre = "conversation"` を明示している。
         assert_eq!(cfg.conversation_genre_id(), "conversation");
+        // ADR-0052 D1 / D2（Phase 64）: `[[harnesses]]` に `knowledge` を書いていない例の設定でも、
+        // 組み込みの `fallback = { tier = "cheap" }` が `DispatchConfig` に届く。
+        let dispatch = cfg.dispatch_config();
+        assert_eq!(dispatch.knowledge.fallback_tier, Some(Tier::Cheap));
+        assert_eq!(dispatch.knowledge.langmem_base_url, None, "例は無効のまま");
+    }
+
+    /// ADR-0052 D2（Phase 64）: `[[harnesses]] id = "knowledge"` の `fallback` は
+    /// `{ tier = … }` でも `false` でも書ける。書かなければ組み込みの既定（`cheap`）を継ぐ。
+    #[test]
+    fn the_knowledge_harness_fallback_is_configurable() {
+        let base = r#"
+db = "celeris.sqlite3"
+workspace_root = "."
+
+[knowledge.langmem]
+enabled = true
+base_url = "http://127.0.0.1:18000/v1"
+
+[[providers]]
+id = "p1"
+adapter = "fake"
+tiers = ["cheap", "standard", "frontier"]
+"#;
+        let write = |extra: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, format!("{base}{extra}")).unwrap();
+            let cfg = Config::load(&path).unwrap();
+            (dir, cfg.dispatch_config())
+        };
+
+        // 何も書かなければ組み込みの既定（tier cheap）。`base_url` も届く。
+        let (_d, dispatch) = write("");
+        assert_eq!(dispatch.knowledge.fallback_tier, Some(Tier::Cheap));
+        assert_eq!(
+            dispatch.knowledge.langmem_base_url.as_deref(),
+            Some("http://127.0.0.1:18000/v1")
+        );
+
+        // tier を変えられる。
+        let (_d, dispatch) = write(
+            "\n[[harnesses]]\nid = \"knowledge\"\nadapter = \"langmem\"\nfallback = { tier = \"standard\" }\n",
+        );
+        assert_eq!(dispatch.knowledge.fallback_tier, Some(Tier::Standard));
+
+        // `fallback = false` で無効。
+        let (_d, dispatch) = write(
+            "\n[[harnesses]]\nid = \"knowledge\"\nadapter = \"langmem\"\nfallback = false\n",
+        );
+        assert_eq!(dispatch.knowledge.fallback_tier, None);
+
+        // 同じ id を書いても `fallback` を省けば組み込みの既定を継ぐ。
+        let (_d, dispatch) =
+            write("\n[[harnesses]]\nid = \"knowledge\"\nadapter = \"langmem\"\n");
+        assert_eq!(dispatch.knowledge.fallback_tier, Some(Tier::Cheap));
     }
 
     /// 監査 M-1: 例の設定 2 つ（`celeris.example.toml` + `org.example.toml`）を**組み合わせて**読める。

@@ -1156,6 +1156,9 @@ impl ApplyOutcome {
                 .iter()
                 .map(|(path, why)| format!("{path}: {why}"))
                 .collect(),
+            // ADR-0052 D2: どの経路で抽出したかは呼び出し側（`celeris::knowledge_maint`）が run の
+            // `WorkerStarted` から決めて埋める（適用そのものは経路に関係なく同じ）。
+            via: None,
         }
     }
 }

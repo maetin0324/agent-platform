@@ -60,10 +60,12 @@ const MIGRATION_0017: &str = include_str!("../migrations/0017_console_actions.sq
 const MIGRATION_0020: &str = include_str!("../migrations/0020_deliveries.sql");
 const MIGRATION_0019: &str = include_str!("../migrations/0019_notification_scan.sql");
 const MIGRATION_0018: &str = include_str!("../migrations/0018_knowledge_runs.sql");
+/// ADR-0052 D2 / D3（Phase 64）: `knowledge_runs.retried_at` と `knowledge_runs.via`。
+const MIGRATION_0021: &str = include_str!("../migrations/0021_knowledge_run_retry.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 20;
+pub const SCHEMA_VERSION: u32 = 21;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -1118,6 +1120,7 @@ impl SqliteStore {
             18 => Ok(MIGRATION_0018),
             19 => Ok(MIGRATION_0019),
             20 => Ok(MIGRATION_0020),
+            21 => Ok(MIGRATION_0021),
             other => Err(StoreError::Invalid(format!(
                 "unknown migration version: {other}"
             ))),
@@ -5765,7 +5768,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 21);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -6305,7 +6308,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 21);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -6796,7 +6799,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 21);
 
         let project = store.project_get(project_id).unwrap().expect("project");
         assert_eq!(project.status, ProjectStatus::Active);
@@ -6862,7 +6865,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 21);
 
         // 導入前の行は `metadata = None` として読める。
         let messages = store.message_list("secretary", None, 10).unwrap();
@@ -6954,7 +6957,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 20);
+        assert_eq!(SCHEMA_VERSION, 21);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn
@@ -7284,5 +7287,41 @@ mod tests {
         assert_eq!(reopened.notification_scan_at().unwrap(), Some(next));
         reopened.notification_scan_mark(last).unwrap();
         assert_eq!(reopened.notification_scan_at().unwrap(), Some(next));
+    }
+
+    /// ADR-0052 D2 / D3（Phase 64）: schema 20 の DB を開くと `knowledge_runs` に `retried_at` と
+    /// `via` が足され、既存の行はそのまま（両方 `NULL`）読める。
+    #[test]
+    fn migration_0021_adds_retried_at_and_via_to_an_existing_knowledge_run() {
+        use crate::knowledge_run::{KnowledgeRunState, KnowledgeRunStore};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema20.sqlite3");
+        let task_id = TaskId::new();
+        let run_task_id = TaskId::new();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)").unwrap();
+            for version in 1..=20 {
+                SqliteStore::apply_migration_version(&mut conn, version).unwrap();
+            }
+            conn.execute(
+                "INSERT INTO knowledge_runs (task_id, run_task_id, state, created_at) \
+                 VALUES (?1, ?2, 'failed', '2026-09-20T00:00:00Z')",
+                params![task_id.to_string(), run_task_id.to_string()],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        let run = store.knowledge_run_get(task_id).unwrap().unwrap();
+        assert_eq!(run.state, KnowledgeRunState::Failed);
+        assert!(run.retried_at.is_none(), "既存の行はまだやり直していない");
+        assert!(run.via.is_none());
+        // 本番で失敗していた行は、配備後の最初の tick で 1 回だけ作り直せる。
+        assert!(
+            store
+                .knowledge_run_retry(task_id, TaskId::new(), OffsetDateTime::now_utc())
+                .unwrap()
+        );
     }
 }

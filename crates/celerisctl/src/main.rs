@@ -115,8 +115,26 @@ fn main() -> ExitCode {
         };
     }
     // ADR-0047 D3: 知識ベースの道具は **DB を開かない**（ワーカーのコンテナには DB が無い）。
+    // ADR-0052 D3 の例外は `knowledge rerun` だけ（管理系。`org migrate-v2` と同じく DB を直接開く）。
     if let Command::Knowledge { command } = cli.command {
-        return match knowledge::run(command) {
+        if !command.needs_db() {
+            return match knowledge::run(command) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        let db_path = resolve_db_path(cli.db);
+        let store = match SqliteStore::open(&db_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error: failed to open db {}: {e}", db_path.display());
+                return ExitCode::FAILURE;
+            }
+        };
+        return match knowledge::run_with_store(&store, command) {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("error: {e}");

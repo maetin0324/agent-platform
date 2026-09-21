@@ -18,8 +18,8 @@ use std::path::Path;
 use task_core::knowledge::{self as kb, MaintenanceInput, RelatedPage};
 use task_core::report::{self, support_kind};
 use task_core::{
-    GenreSpec, KnowledgeRunState, ListFilter, ListOrder, RoleSpec, Status, StoreError, TaskId,
-    TaskKind, TaskStore, Tier,
+    Event, GenreSpec, KnowledgeRunState, ListFilter, ListOrder, RoleSpec, Status, StoreError, Task,
+    TaskId, TaskKind, TaskStore, Tier,
 };
 use task_ops::add::{NewTaskSpec, PriorityInput};
 use task_worker::MemoryDir;
@@ -85,9 +85,9 @@ pub fn schedule(
         if task.role.as_deref() == Some(task_core::BUILTIN_SMOKE) {
             continue;
         }
-        let Some(assignee) = task.assignee.clone() else {
+        if task.assignee.is_none() {
             continue; // 担当ノードが無ければ知識整理タスクの担当も決められない。
-        };
+        }
         if store.knowledge_run_exists(task.id)? {
             continue;
         }
@@ -97,13 +97,98 @@ pub fn schedule(
         {
             continue;
         }
+        let Some(spec) = build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
+        else {
+            continue;
+        };
+        let run_task = match task_ops::add::create_support_task(store, spec, roles, genres, now) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, error = %e, "knowledge: could not create the maintenance task");
+                continue;
+            }
+        };
+        store.knowledge_run_create(task.id, run_task.id, now)?;
+        tracing::info!(task_id = %task.id, run_task_id = %run_task.id, "knowledge: scheduled a maintenance run");
+        return Ok(vec![run_task.id]);
+    }
+    Ok(Vec::new())
+}
+
+/// ADR-0052 D3（Phase 64）: 失敗した知識整理 run を**一度だけ**作り直す。tick ごとに 1 回呼ぶ。
+///
+/// `knowledge_runs.state = failed` で `retried_at` がまだ無い行を 1 tick に 1 件だけ拾い、同じ元タスクから
+/// 新しい run タスクを作って `retried_at` を書く（2 回目のやり直しは無い。人が
+/// `celerisctl knowledge rerun <task_id>` で `retried_at` を消したときだけまた 1 回だけ拾われる）。
+///
+/// [`schedule`] と違って `not_before`（backfill 禁止）は見ない。やり直しの対象は「既に 1 回 run を
+/// 起こした」タスクだけなので、起動より前に終端になっていた古い仕事を掘り起こすことにはならない
+/// （実機 2026-09-20/21 にトンネルが落ちて落ちた 4 件を、配備後に拾い直すための経路）。
+///
+/// 2 回目が `langmem` で走るか汎用ハーネスで走るかは、dispatch のときの到達性の検査が決める（D1）。
+#[allow(clippy::too_many_arguments)]
+pub fn retry_failed(
+    store: &dyn TaskStore,
+    knowledge_root: &Path,
+    enabled: bool,
+    max_related_pages: usize,
+    memory_dir: Option<&MemoryDir>,
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+    now: OffsetDateTime,
+) -> Result<Vec<TaskId>, StoreError> {
+    if !enabled || !task_ops::knowledge::exists(knowledge_root) {
+        return Ok(Vec::new());
+    }
+    for run in store.knowledge_run_recent(RUN_SCAN_LIMIT)? {
+        if run.state != KnowledgeRunState::Failed || run.retried_at.is_some() {
+            continue;
+        }
+        let Some(task) = store.get(run.task_id)? else {
+            continue; // 元のタスクが消えている（やり直しても依頼文を組めない）。
+        };
+        let Some(spec) = build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
+        else {
+            continue;
+        };
+        let run_task = match task_ops::add::create_support_task(store, spec, roles, genres, now) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, error = %e, "knowledge: could not create the retry task");
+                continue;
+            }
+        };
+        // `retried_at IS NULL` の行だけが書き換わる（ADR-0052 D3「一度だけ」はストアが守る）。
+        if !store.knowledge_run_retry(run.task_id, run_task.id, now)? {
+            tracing::warn!(task_id = %run.task_id, "knowledge: the run was already retried; skipping");
+            continue;
+        }
+        tracing::info!(task_id = %run.task_id, run_task_id = %run_task.id, "knowledge: retrying a failed maintenance run (once)");
+        return Ok(vec![run_task.id]);
+    }
+    Ok(Vec::new())
+}
+
+/// 元のタスク 1 件から知識整理 run の依頼（[`NewTaskSpec`]）を組む（[`schedule`] と [`retry_failed`] が
+/// 同じものを使う）。報告がまだ無い・担当がいないなら `None`。**決定的**（LLM は呼ばない）。
+fn build_run_spec(
+    store: &dyn TaskStore,
+    knowledge_root: &Path,
+    task: &Task,
+    max_related_pages: usize,
+    memory_dir: Option<&MemoryDir>,
+) -> Result<Option<NewTaskSpec>, StoreError> {
+    let Some(assignee) = task.assignee.clone() else {
+        return Ok(None);
+    };
+    {
         let reports = store.report_list(&task_core::ReportFilter {
             task_id: Some(task.id),
             limit: 1,
             ..Default::default()
         })?;
         let Some(report) = reports.into_iter().next() else {
-            continue; // まだ報告が無い（terminal と報告生成は別トランザクションなので、極短い間だけあり得る）。
+            return Ok(None); // まだ報告が無い（terminal と報告生成は別トランザクションなので、極短い間だけあり得る）。
         };
 
         let comments = store
@@ -197,18 +282,25 @@ pub fn schedule(
             category: None,
             status: None,
         };
-        let run_task = match task_ops::add::create_support_task(store, spec, roles, genres, now) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(task_id = %task.id, error = %e, "knowledge: could not create the maintenance task");
-                continue;
-            }
-        };
-        store.knowledge_run_create(task.id, run_task.id, now)?;
-        tracing::info!(task_id = %task.id, run_task_id = %run_task.id, "knowledge: scheduled a maintenance run");
-        return Ok(vec![run_task.id]);
+        Ok(Some(spec))
     }
-    Ok(Vec::new())
+}
+
+/// ADR-0052 D2: その run が**どの経路**で抽出したか（`knowledge_runs.via` と `summary_json.via`）。
+///
+/// 判断材料は run タスクの `WorkerStarted.adapter`（= 実際に走ったアダプタ）だけ。`langmem` なら
+/// `"langmem"`、それ以外なら `"fallback:<adapter>"`。run が 1 度も始まらなかったときは `None`。
+fn via_of(store: &dyn TaskStore, run_task_id: TaskId) -> Option<String> {
+    let events = store.events_for(run_task_id).ok()?;
+    let adapter = events.iter().rev().find_map(|(_, e)| match e {
+        Event::WorkerStarted { adapter, .. } => Some(adapter.clone()),
+        _ => None,
+    })?;
+    Some(if adapter == LANGMEM_ADAPTER {
+        task_core::VIA_LANGMEM.to_string()
+    } else {
+        task_core::via_fallback(&adapter)
+    })
 }
 
 /// `artifacts/knowledge-candidates.json` の形。
@@ -236,14 +328,22 @@ pub fn apply_finished(
         }
         let Some(run_task) = store.get(run.run_task_id)? else {
             // 支援タスクが（何らかの理由で）消えている。二度と進まないので failed にして終わらせる。
-            store.knowledge_run_finish(run.task_id, KnowledgeRunState::Failed, now, None)?;
+            store.knowledge_run_finish(run.task_id, KnowledgeRunState::Failed, now, None, None)?;
             continue;
         };
         if !run_task.status.is_terminal() {
             continue;
         }
+        // ADR-0052 D2: 適用は経路に関係なく同じ。どちらで走ったかだけ `via` に残す。
+        let via = via_of(store, run.run_task_id);
         if run_task.status != Status::Done {
-            store.knowledge_run_finish(run.task_id, KnowledgeRunState::Failed, now, None)?;
+            store.knowledge_run_finish(
+                run.task_id,
+                KnowledgeRunState::Failed,
+                now,
+                None,
+                via.as_deref(),
+            )?;
             continue;
         }
         let workspace_dir = workspace_root.join(run_task.id.to_string());
@@ -262,16 +362,20 @@ pub fn apply_finished(
         tracing::info!(
             task_id = %run.task_id,
             run_task_id = %run.run_task_id,
+            via = via.as_deref().unwrap_or("-"),
             committed = outcome.committed.len(),
             inboxed = outcome.inboxed.len(),
             dropped = outcome.dropped.len(),
             "knowledge: applied the maintenance run's candidates"
         );
+        let mut summary = outcome.summary();
+        summary.via = via.clone();
         store.knowledge_run_finish(
             run.task_id,
             KnowledgeRunState::Done,
             now,
-            Some(&outcome.summary()),
+            Some(&summary),
+            via.as_deref(),
         )?;
         applied += 1;
     }
@@ -729,5 +833,196 @@ mod tests {
                 .state,
             KnowledgeRunState::Scheduled
         );
+    }
+
+    /// run タスクに `WorkerStarted` を 1 つ書く（`via` の判定材料）。
+    fn started_with(store: &SqliteStore, task: &task_core::Task, adapter: &str) {
+        store
+            .append_event(
+                task.id,
+                &task_core::Event::WorkerStarted {
+                    run_id: ulid::Ulid::new().to_string(),
+                    adapter: adapter.to_string(),
+                    model: "m".into(),
+                    provider: Some("p".into()),
+                    account: None,
+                    role: None,
+                    task_role: task.role.clone(),
+                },
+            )
+            .expect("append");
+    }
+
+    /// 元タスク 1 件ぶんの「失敗した知識整理 run」を作る（報告つき）。
+    fn failed_run(store: &SqliteStore) -> (task_core::Task, task_core::Task) {
+        let source = terminal_task(Status::Done, Some("coding"), None, None, false);
+        store.insert(&source).expect("insert");
+        add_report(store, &source);
+        let run_task = terminal_task(
+            Status::Failed,
+            Some("coding"),
+            Some(report::KNOWLEDGE_ROLE),
+            None,
+            false,
+        );
+        store.insert(&run_task).expect("insert");
+        store
+            .knowledge_run_create(source.id, run_task.id, OffsetDateTime::now_utc())
+            .expect("create run");
+        (source, run_task)
+    }
+
+    /// ADR-0052 D3: 失敗した知識整理 run は次の tick で**ちょうど 1 回**だけ作り直される（3 回目は無い）。
+    /// `not_before`（backfill 禁止）は見ない ＝ 実機で 2026-09-20/21 に落ちた古い run も拾える。
+    #[test]
+    fn a_failed_run_is_retried_exactly_once() {
+        let store = store_with_node();
+        let (_dir, root) = kb_dir();
+        let workspace_root = tempfile::tempdir().expect("workspace");
+        let (source, first_run) = failed_run(&store);
+        started_with(&store, &first_run, LANGMEM_ADAPTER);
+
+        let now = OffsetDateTime::now_utc();
+        apply_finished(&store, &root, workspace_root.path(), now).expect("apply");
+        let run = store
+            .knowledge_run_get(source.id)
+            .expect("get")
+            .expect("some");
+        assert_eq!(run.state, KnowledgeRunState::Failed);
+        assert_eq!(run.via.as_deref(), Some(task_core::VIA_LANGMEM));
+        assert!(run.retried_at.is_none());
+
+        // 1 回目のやり直し: 新しい run タスクができ、`retried_at` が入る。
+        let retried =
+            retry_failed(&store, &root, true, 10, None, &[], &[], now).expect("retry_failed");
+        assert_eq!(retried.len(), 1, "1 tick に 1 件");
+        let second_run_id = retried[0];
+        assert_ne!(second_run_id, first_run.id);
+        let run = store
+            .knowledge_run_get(source.id)
+            .expect("get")
+            .expect("some");
+        assert_eq!(run.run_task_id, second_run_id);
+        assert_eq!(run.state, KnowledgeRunState::Scheduled);
+        assert!(run.retried_at.is_some());
+        assert!(run.via.is_none(), "やり直しで経路の記録は消える");
+        let second = store.get(second_run_id).expect("get").expect("some");
+        assert_eq!(second.worker_hint.adapter.as_deref(), Some(LANGMEM_ADAPTER));
+        assert_eq!(
+            task_core::report::support_kind(&second),
+            Some("knowledge"),
+            "やり直しも裏方の支援タスク"
+        );
+
+        // まだ終わっていないので 2 回目の呼び出しでは何も起きない。
+        assert!(
+            retry_failed(&store, &root, true, 10, None, &[], &[], now)
+                .expect("retry again")
+                .is_empty()
+        );
+
+        // 2 回目も失敗した（`apply_finished` が `failed` にする）→ もう作り直さない（`retried_at` あり）。
+        store
+            .knowledge_run_finish(source.id, KnowledgeRunState::Failed, now, None, None)
+            .expect("finish");
+        assert!(
+            retry_failed(&store, &root, true, 10, None, &[], &[], now)
+                .expect("no third")
+                .is_empty(),
+            "3 回目は無い"
+        );
+
+        // `celerisctl knowledge rerun` 相当（`retried_at` を消す）でもう 1 回だけ拾われる。
+        assert!(store.knowledge_run_reset(source.id).expect("reset"));
+        assert_eq!(
+            retry_failed(&store, &root, true, 10, None, &[], &[], now)
+                .expect("after rerun")
+                .len(),
+            1
+        );
+    }
+
+    /// `enabled = false` / KB 未初期化なら、やり直しも起きない。
+    #[test]
+    fn retry_noops_when_disabled_or_the_kb_is_missing() {
+        let store = store_with_node();
+        let (_dir, root) = kb_dir();
+        let (_source, run_task) = failed_run(&store);
+        started_with(&store, &run_task, LANGMEM_ADAPTER);
+        let now = OffsetDateTime::now_utc();
+        apply_finished(&store, &root, root.as_path(), now).expect("apply");
+        assert!(
+            retry_failed(&store, &root, false, 10, None, &[], &[], now)
+                .expect("disabled")
+                .is_empty()
+        );
+        assert!(
+            retry_failed(
+                &store,
+                &root.join("does-not-exist"),
+                true,
+                10,
+                None,
+                &[],
+                &[],
+                now
+            )
+            .expect("no kb")
+            .is_empty()
+        );
+    }
+
+    /// ADR-0052 D2: フォールバックで走った run も適用は同じで、`via = "fallback:<adapter>"` が
+    /// `knowledge_runs` と `summary_json` の両方に残る。
+    #[test]
+    fn a_fallback_run_is_applied_the_same_way_and_records_its_via() {
+        let store = store_with_node();
+        let (_dir, root) = kb_dir();
+        let workspace_root = tempfile::tempdir().expect("workspace");
+
+        let source = terminal_task(Status::Done, Some("coding"), None, None, false);
+        store.insert(&source).expect("insert");
+        add_report(&store, &source);
+        let run_task = terminal_task(
+            Status::Done,
+            Some("coding"),
+            Some(report::KNOWLEDGE_ROLE),
+            None,
+            false,
+        );
+        store.insert(&run_task).expect("insert");
+        // フォールバック先は汎用のアダプタ（ここでは開発用の `fake`）。
+        started_with(&store, &run_task, "fake");
+        let artifacts_dir = workspace_root
+            .path()
+            .join(run_task.id.to_string())
+            .join("artifacts");
+        std::fs::create_dir_all(&artifacts_dir).expect("mkdir");
+        std::fs::write(
+            artifacts_dir.join("knowledge-candidates.json"),
+            r#"{"candidates": [{"op": "create", "path": "environment/tools/fallback.md",
+                "title": "fallback", "tags": [], "scope": "environment", "body": "使い方。",
+                "sources": ["task:x"], "confidence": "high"}]}"#,
+        )
+        .expect("write candidates");
+        store
+            .knowledge_run_create(source.id, run_task.id, OffsetDateTime::now_utc())
+            .expect("create run");
+
+        let now = OffsetDateTime::now_utc();
+        assert_eq!(
+            apply_finished(&store, &root, workspace_root.path(), now).expect("apply"),
+            1
+        );
+        let run = store
+            .knowledge_run_get(source.id)
+            .expect("get")
+            .expect("some");
+        assert_eq!(run.state, KnowledgeRunState::Done);
+        assert_eq!(run.via.as_deref(), Some("fallback:fake"));
+        let summary = run.summary.expect("summary");
+        assert_eq!(summary.ingested, 1, "適用は経路に関係なく同じ");
+        assert_eq!(summary.via.as_deref(), Some("fallback:fake"));
+        assert!(root.join("environment/tools/fallback.md").exists());
     }
 }

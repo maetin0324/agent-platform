@@ -1910,6 +1910,11 @@ stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid �
   案件の文書の根を `git grep -l "<タスク id>"` で絞ってから front matter を確かめるので、本文に id が
   出ただけのページは載らない。`at` はそのページの**最後のコミットの時刻**（読めなければ空）。
   文書の根が無い案件・git が動かないときは**何も出さない**（タイムラインは落ちない）。
+- `knowledge`（ADR-0047 D4/D5、Phase 62）は、そのタスクの終端から起きた知識整理 run（`knowledge_runs`）を
+  1 件（`state` は `scheduled` / `applied` / `failed`。`applied` のときだけ `ingested` / `inbox` / `discarded`）。
+  ADR-0052 D2（Phase 64）で `via` が増えた: `"langmem"` なら従来どおり Qwen で抽出、`"fallback:<adapter>"` なら
+  Qwen に届かず tier `cheap` の汎用ハーネスで抽出した（GUI は後者に「cheap のハーネスで抽出」を出す）。
+  run が 1 度も始まっていなければ `via` は付かない。
 - 知らないタスクは 404 `task_not_found`。
 
 ---
@@ -2208,7 +2213,7 @@ CoS の `actions` は ADR-0048 D3（Phase 60b。§3.107）。
 | `approval` | 認可 1 件（`Approval` をそのまま。`decision` / `answer` / `decided_at` 付き） | `approvals` |
 | `milestone` | 途中目標の提案（`proposed` のものだけ）と秘書のレビューの返事 | `milestones` + `messages` |
 | `report` | 報告（見出しと本文） | `reports` |
-| `knowledge` | 知識整理 run の結果（ADR-0047 D4/D5、Phase 62）。`task_id` / `task_title` / `run_task_id` / `state`（`applied` \| `failed`。`scheduled` は出ない）/ `ingested` / `inbox` / `discarded` | `knowledge_runs`（`state != scheduled`）+ 元のタスク |
+| `knowledge` | 知識整理 run の結果（ADR-0047 D4/D5、Phase 62）。`task_id` / `task_title` / `run_task_id` / `state`（`applied` \| `failed`。`scheduled` は出ない）/ `ingested` / `inbox` / `discarded` / `via`（ADR-0052 D2、Phase 64。`"langmem"` \| `"fallback:<adapter>"`。GUI は後者に「cheap のハーネスで抽出」を出す） | `knowledge_runs`（`state != scheduled`）+ 元のタスク |
 
 範囲の効き方:
 
@@ -2675,7 +2680,8 @@ pub enum TimelineItem {
     Integration { at: String, action: String, detail: String },        // ADR-0043 A2
     Doc { at: String, project_id: ProjectId, path: String, title: String },   // ADR-0044 D7（Phase 57）
     Knowledge { at: String, run_task_id: TaskId, state: String,               // ADR-0047 D4/D5（Phase 62）
-        ingested: Option<u32>, inbox: Option<u32>, discarded: Option<u32> },
+        ingested: Option<u32>, inbox: Option<u32>, discarded: Option<u32>,
+        via: Option<String> },                                                // ADR-0052 D2（Phase 64）
 }
 
 // ---- task-ops: 受信箱 ----
@@ -3054,8 +3060,9 @@ pub enum ConsoleBlock {
     Milestone { at: String, cursor: String, milestone: Milestone, review: Option<MilestoneReviewView> },
     Report { at: String, cursor: String, report: Report },
     /// 知識整理 run の結果（ADR-0047 D4/D5、Phase 62）。`state` は `applied` | `failed`（`scheduled` は出ない）。
+    /// `via`（ADR-0052 D2、Phase 64）は `"langmem"` か `"fallback:<adapter>"`（分からなければ `null`）。
     Knowledge { at: String, cursor: String, project_id: Option<ProjectId>, task_id: TaskId, task_title: String,
-        run_task_id: TaskId, state: String, ingested: u32, inbox: u32, discarded: u32 },
+        run_task_id: TaskId, state: String, ingested: u32, inbox: u32, discarded: u32, via: Option<String> },
 }
 
 /// `task` ブロックの 1 行（`task_ops::console`）。

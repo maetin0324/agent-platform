@@ -250,6 +250,41 @@ fn consumes_interrupt(outcome: &str) -> bool {
         && outcome != "lease_expired"
 }
 
+/// 既存成果を部署のレビュアーで再判定する。新しい実装runは作らない。
+pub fn rereview(
+    store: &dyn TaskStore,
+    id: TaskId,
+    expected: Option<Status>,
+) -> Result<TransitionResult, OpsError> {
+    let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
+    if let Some(exp) = expected
+        && exp != task.status
+    {
+        return Err(OpsError::Conflict {
+            expected: exp,
+            actual: task.status,
+        });
+    }
+    if !task
+        .acceptance
+        .iter()
+        .any(|c| matches!(c.check, task_core::Check::Reviewer))
+        || task_core::support_kind(&task).is_some()
+    {
+        return Err(OpsError::Validation(
+            "reviewer条件を持つ通常タスクだけを再レビューできます".into(),
+        ));
+    }
+    let outcome = store.apply_transition(id, Trigger::Rereview, None)?;
+    Ok(TransitionResult {
+        id,
+        from: task.status,
+        to: outcome.next,
+        reason: outcome.reason.into(),
+        cascaded: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,39 +584,4 @@ mod tests {
             "消化済み"
         );
     }
-}
-
-/// 既存成果を部署のレビュアーで再判定する。新しい実装runは作らない。
-pub fn rereview(
-    store: &dyn TaskStore,
-    id: TaskId,
-    expected: Option<Status>,
-) -> Result<TransitionResult, OpsError> {
-    let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
-    if let Some(exp) = expected
-        && exp != task.status
-    {
-        return Err(OpsError::Conflict {
-            expected: exp,
-            actual: task.status,
-        });
-    }
-    if !task
-        .acceptance
-        .iter()
-        .any(|c| matches!(c.check, task_core::Check::Reviewer))
-        || task_core::support_kind(&task).is_some()
-    {
-        return Err(OpsError::Validation(
-            "reviewer条件を持つ通常タスクだけを再レビューできます".into(),
-        ));
-    }
-    let outcome = store.apply_transition(id, Trigger::Rereview, None)?;
-    Ok(TransitionResult {
-        id,
-        from: task.status,
-        to: outcome.next,
-        reason: outcome.reason.into(),
-        cascaded: Vec::new(),
-    })
 }

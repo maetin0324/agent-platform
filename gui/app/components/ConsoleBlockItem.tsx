@@ -8,6 +8,7 @@ import type {
 } from "~/celeris/action-types";
 import type { ConsoleBlock, EventsPage, OrgNode, Project } from "~/celeris/types";
 import { formatRunEventRow, progressSummaryLine, taskLineSummary } from "~/lib/console";
+import { isKnowledgeFallback } from "~/lib/knowledge";
 import { milestoneDecisionValid } from "~/lib/milestone-review";
 import { cn } from "~/lib/utils";
 import { MarkdownViewer } from "./MarkdownViewer";
@@ -652,6 +653,12 @@ function KnowledgeBlockView({ block }: { block: Extract<ConsoleBlock, { kind: "k
           {block.task_title}
         </Link>
         {block.state === "failed" && <Badge tone="danger">失敗</Badge>}
+        {/* ADR-0052 D2: Qwen に届かず tier cheap の汎用ハーネスで抽出した run。 */}
+        {isKnowledgeFallback(block.via) && (
+          <Badge tone="neutral" data-testid="console-knowledge-fallback">
+            cheap のハーネスで抽出
+          </Badge>
+        )}
       </p>
       <p className="mt-1 text-sm" data-testid="console-knowledge-line">
         この仕事から知識 {total} 件: 取り込み {block.ingested ?? 0} / 候補 {block.inbox ?? 0} / 破棄{" "}

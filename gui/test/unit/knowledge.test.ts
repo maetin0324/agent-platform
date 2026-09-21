@@ -11,6 +11,7 @@ import {
 import {
   confidenceLabel,
   confidenceTone,
+  isKnowledgeFallback,
   knowledgeDir,
   knowledgeGroups,
   knowledgeHref,
@@ -242,6 +243,16 @@ describe("言葉", () => {
     expect(knowledgeOpHint("retire")).toContain("_retired/");
     expect(knowledgeOpHint("create")).toBeNull();
     expect(knowledgeOpHint(null)).toBeNull();
+  });
+
+  // ADR-0052 D2（Phase 64）: 知識整理 run が Qwen で走ったか、cheap の汎用ハーネスに倒れたか。
+  it("`via` が `fallback:` で始まるときだけ「cheap のハーネスで抽出」と見なす", () => {
+    expect(isKnowledgeFallback("fallback:codex")).toBe(true);
+    expect(isKnowledgeFallback("fallback:claude-code")).toBe(true);
+    expect(isKnowledgeFallback("langmem")).toBe(false);
+    expect(isKnowledgeFallback(null)).toBe(false);
+    expect(isKnowledgeFallback(undefined)).toBe(false);
+    expect(isKnowledgeFallback("")).toBe(false);
   });
 });
 

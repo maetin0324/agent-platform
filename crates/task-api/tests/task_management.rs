@@ -717,7 +717,10 @@ async fn the_timeline_shows_the_knowledge_maintenance_run() {
                 inbox: 1,
                 discarded: 0,
                 discarded_reasons: Vec::new(),
+                // ADR-0052 D2（Phase 64）: どの経路で抽出したか。
+                via: Some("fallback:codex".to_string()),
             }),
+            Some("fallback:codex"),
         )
         .expect("finish run");
     let applied = send(
@@ -732,6 +735,8 @@ async fn the_timeline_shows_the_knowledge_maintenance_run() {
     assert_eq!(knowledge[0]["ingested"], 1);
     assert_eq!(knowledge[0]["inbox"], 1);
     assert_eq!(knowledge[0]["discarded"], 0);
+    // ADR-0052 D2: cheap の汎用ハーネスで抽出したことが GUI に伝わる。
+    assert_eq!(knowledge[0]["via"], "fallback:codex");
 
     // 知識整理 run を持たないタスクには出ない。
     let plain = seeded(&env, Status::Done);
