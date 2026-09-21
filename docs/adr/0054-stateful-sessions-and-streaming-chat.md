@@ -473,3 +473,119 @@
     と位置引数の順序を混在させても解釈できるため動作上は問題ないと考えているが、これも実機の
     `codex exec resume` 呼び出しでの確認はできていない（`--help` の表示だけでは呼び出し順の厳密さまでは
     分からない）。
+
+## Phase 68c 追記（`codex exec resume` の argv をホワイトリスト方式に変更。2026-09-21）
+
+Phase 68b の本番反映後、`--add-dir` は直った一方で別のフラグが resume で拒否される事象が出た。
+「`exec` が受け付けて `exec resume` が受け付けないフラグを都度 1 個ずつ引き算する」やり方は同じ穴を
+繰り返すと判断し、resume は**ホワイトリスト方式**に変えた。
+
+### 観測（本番障害、2026-09-21 15:44 UTC、release `a2942d5d8a94`。Phase 68b が本番に乗った状態）
+
+CoS の対話が codex に割り当たった。fresh run は成功（Codex 自身が確定させた thread id
+`01a0c4a2-ce4e-7751-8726-fc35845322a9` を捕捉、`done`）。しかし続く resume run が 2 回とも exit 2:
+
+```
+error: unexpected argument '--approve-for-me' found
+  tip: to pass '--approve-for-me' as a value, use '-- --approve-for-me'
+Usage: codex exec resume --json --skip-git-repo-check --config <key=value> <SESSION_ID> [PROMPT]
+```
+
+`--approve-for-me` は celeris 自身が付けているフラグではなく `[adapters.codex] extra_args`（運用側の
+設定。承認モードを自動化する codex 側のフラグ）から来ている。Phase 68b の変更は `--add-dir` だけを
+resume で落としていたが、`extra_args` は無条件に付け続けていたため、`--approve-for-me` がそのまま
+resume に渡って拒否された。
+
+### 原因の確認（`~/.local/bin/codex exec resume --help` を再実行。codex-cli 0.155.1。Phase 68b の確認と
+テキストは同一だった）
+
+```
+Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]
+Options（全量）: -c/--config <key=value>, --last, --all, --enable <FEATURE>, --disable <FEATURE>,
+-i/--image <FILE>, --strict-config, -m/--model <MODEL>, --dangerously-bypass-approvals-and-sandbox,
+--dangerously-bypass-hook-trust, --worktree, --thread-source <SOURCE>, --skip-git-repo-check,
+--ephemeral, --ignore-user-config, --ignore-rules, --output-schema <FILE>, --json,
+-o/--output-last-message <FILE>, -h/--help
+```
+
+`--add-dir`・`-s/--sandbox`・`--approve-for-me` はどれも無い（Phase 68b の確認と同じ）。しかし
+**`--help` の OPTIONS 一覧には `-m/--model` が載っているのに対し、本番の実際のエラーが示した usage 行は
+`--json`・`--skip-git-repo-check`・`--config`（＋位置引数）だけに絞られていた**。つまり「`--help` に
+載っている＝実際に受け付けられる」という Phase 68b の前提そのものが崩れた可能性がある（デプロイ済み
+バイナリの実際の受理集合が `--help` の記載より狭い）。この Phase で許可されたコマンドは
+`--help` の再実行だけで、`codex exec resume` 自体を実行して実際の受理集合を確かめることはできない。
+
+### 決定: resume の argv はホワイトリスト方式
+
+「`exec` が受け付けるが `exec resume` は受け付けない、と分かったフラグを都度落とす」引き算方式をやめ、
+**`exec resume` では本番のエラーが示した usage 行が列挙する形だけを組み立てる**方式にした:
+`--json`・`--skip-git-repo-check`・`-c/--config <key=value>`（複数可）・`<SESSION_ID>`・`[PROMPT]`。
+`crates/task-worker/src/codex.rs::run_codex` の変更:
+
+- `--json`・`--skip-git-repo-check`・`-c sandbox_mode="..."` は fresh・resume とも変更なし
+  （whitelist に含まれる）。
+- `--model` は resume のときだけ `-c model="..."` に変換する（`codex exec --help` 自身の例
+  `-c model="o3"` が `-c` 経由の等価形として明記されている。whitelist の `-c` に収まる）。
+- `--add-dir`（Phase 68b で resume では落とす、と決めた）は変更なし。
+- **`[adapters.codex] extra_args`（運用側の任意フラグ。`--approve-for-me` 等）は resume では丸ごと
+  落とす**（`git diff` 参照。個々のフラグに `-c` 等価があるかは一般には分からないため、既知でない
+  フラグを一つずつ引き算する方式には戻さない）。`extra_args` が空でなければ
+  `tracing::warn!("run {run_id}: dropping codex extra_args on \`exec resume\` ...")` で運用側に見える
+  ようにした。resume 先のスレッドは、それを生んだ最初の（非 resume の）`exec` 呼び出しで受けた承認・
+  サンドボックス設定をそのまま引き継ぐ前提（未検証。下記「未解決事項」）。
+
+### テスト（`crates/task-worker/src/codex.rs`）
+
+- `phase_68c_resume_argv_contains_no_flag_outside_the_whitelist`（新規）: `model` と
+  `extra_args = ["--approve-for-me"]` の両方を仕込んだ resume run で、argv 中の `-` で始まるトークンが
+  すべて `["--json", "--skip-git-repo-check", "-c"]` のいずれかであることを検査し、
+  `--approve-for-me`・`--add-dir`・`--model` がどこにも無いこと、`model="gpt-5-codex"`・
+  `sandbox_mode="read-only"` が `-c` 経由で乗っていることを確認する（production の再現・回帰）。
+- 既存の `phase_68b_fresh_cos_run_argv_has_readonly_sandbox_and_add_dir` /
+  `phase_68b_resume_cos_run_argv_drops_add_dir_keeps_readonly_sandbox` /
+  `phase_68b_normal_run_argv_unchanged` / `the_cos_conversation_run_gets_a_readonly_sandbox` /
+  `non_cos_runs_keep_the_workspace_write_sandbox` / `a_continuing_session_uses_exec_resume_by_default` /
+  `a_continuing_session_uses_experimental_resume_when_configured` /
+  `command_line_has_exec_json_model_then_prompt_as_last_arg` は変更なしで green のまま（model・
+  extra_args を使わない従来のケースの argv は変わっていないことの回帰）。
+
+### ゲート
+
+- `cargo test -p task-worker --lib codex::` → **exit 0、39 passed**（Phase 68b の 38 + 新規 1）。
+- `cargo test --workspace --no-fail-fast` → **exit 0。1711 passed / 0 failed**（73 個の
+  `test result:` ブロックを合計。`grep -c "test result: FAILED"` = 0）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0、警告 0**。
+- `unwrap()`: 今回の diff（`crates/task-worker/src/codex.rs`）で追加した `unwrap()` はすべて
+  `#[cfg(test)] mod tests` 内（新規テストのセットアップのみ。`git diff` で追加行を目視確認）。
+- ディスパッチャ・ストアに LLM 呼び出しを入れていない（argv 組み立てとログのみの変更）。schema 変更なし。
+- 変更ファイルは `crates/task-worker/src/codex.rs` のみ（`git status --short` で確認）。`gui/`・本番
+  パス・ports・systemctl・credential には触れていない。
+
+### 実機での確認（未実施。ADR-0009 P-34。デプロイ後に人 or エージェントが実施）
+
+1. `release.sh` → `verify.sh` → `promote.sh` でこの修正をデプロイする。
+2. CoS の対話セッションが codex に割り当たった状態で fresh → resume と連続で指示を送り、resume 側が
+   `--approve-for-me` を含む運用の `extra_args` があっても exit 2 にならず正常終了することを確認する
+   （`runs/<id>/stderr.log` に `unexpected argument` が出ないこと）。
+3. resume run が `artifacts/result.json` を実際に書けること（`--add-dir` を落としても fresh 時の
+   writable-roots が引き継がれるという Phase 68b からの未検証の前提の裏取り。今回も検証できていない）。
+4. resume run で運用が期待する承認モード（`extra_args` の `--approve-for-me` 相当）が実際に効いている
+   か（引き継がれない場合、resume 中は既定の承認モードに戻る可能性がある。動作に影響があれば別 Phase
+   で対応を検討する）。
+
+### 未解決事項
+
+- `codex exec resume --help` の OPTIONS 一覧（`-m/--model` を含む）と、本番の実際のエラーが示した
+  受理集合（`--json`・`--skip-git-repo-check`・`--config` のみ）が食い違っている理由は分かっていない
+  （デプロイ済みバイナリのバージョン差・ビルド差・設定差のいずれかが疑わしいが、`--help` の再実行以外の
+  実機操作がこの Phase では許されていないため特定できていない）。**`--config` 経由に倒した `-c
+  model="..."` が実際に resume で受理されるかも、今回も実機未検証**（`--help` の記載上は `-c` は両方の
+  Usage 行にあるが、Phase 68c 自体が「`--help` の記載と実際の受理集合は一致しないことがある」という
+  教訓から生まれている）。
+- resume 先のスレッドが fresh 時の `--add-dir`（writable-roots）や `extra_args`（承認・サンドボックス
+  設定）を引き継ぐという前提はどちらも実機未検証のまま（Phase 68b から持ち越し、今回も解消していない）。
+  上記「実機での確認」2〜4 で確かめる。
+- 今後また `exec resume` で未知のフラグが拒否される場合、ホワイトリスト方式なのでその新しいフラグは
+  celeris 側で追加していない限りそもそも argv に乗らない（同じクラスの障害の再発は原理的に防げている）。
+  ただし `-c` の値（`sandbox_mode`・`experimental_resume`・`model`）が resume で本当に効くかどうかの
+  実機確認は残っている（上記）。
