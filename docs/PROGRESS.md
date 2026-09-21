@@ -12045,3 +12045,32 @@ Phase 79）を実装した。詳細な決定・逸脱は `docs/adr/0056-mcp-serv
   変わりうる）。実機で通すエージェントに検証を依頼し、`docs/mcp.md` を確定させるとよい。
 - `[mcp] rate_limit_per_min` と `Mcp-Session-Id` のインメモリ状態を、将来 celeris が複数プロセスに
   分かれる構成になった場合はどうするか（今は単一プロセス前提）。
+
+## Phase 80 — MCP クライアントの GUI（ADR-0056 D4。2026-09-21）
+
+GUI のみ（`crates/` 無変更。`gui/CLAUDE.md`「GUI から celeris に入る依存は作らない」のとおり、この
+ワークトリークは celeris 側の実装済みの Phase 78（`GET /mcp/clients`/`GET /mcp/calls?client=`）に
+乗るだけ）。Phase 78 の PROGRESS 節が残した「「アカウント」画面の MCP クライアント節は後続の GUI Phase」を
+実装した: `/accounts` に「MCP クライアント」節（`GET /mcp/clients` の一覧・スコープ・認証の種類・失効状態・
+客ごとの直近の呼び出し）、Console の「外部（<client_id>）」帯を `GET /mcp/clients` の `name` で解決する
+ように変更、`/help` に「MCP で外から使う」節を追加した。詳細・証跡は `gui/docs/PROGRESS.md`「Phase G34」を
+参照（このリポジトリの慣例どおり、GUI の実装詳細は gui 側に書く）。
+
+### ゲート（詳細は gui/docs/PROGRESS.md Phase G34）
+
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ。型は Phase 78 で生成済み）/
+`pnpm lint` / `pnpm typecheck` / `pnpm test`（**940 passed**、Phase G33 の 925 から +15） / `pnpm build`
+/ `pnpm mobile-audit`（**exit 0、違反 0 件**。21 route × light/dark の 2 scheme = 42 通り。1 回目は
+`/accounts` の案内文中リンクが `tap-target` 違反 2 件で、`touchLinkClass` を足して解消） すべて exit 0。
+
+### 未解決事項
+
+- 実機（本物の celeris + 本物の MCP クライアントの呼び出し履歴）でのこの GUI 節の見た目は未確認
+  （ADR-0009 P-34。サンドボックスに外向きネットワークも実物のクライアントも無い）。celeris 側 Phase 78
+  の実機接続確認（`docs/mcp.md` §7.2/7.3）と合わせて確認するとよい。
+- 詳細は gui/docs/PROGRESS.md「Phase G34」の未解決事項を参照（`McpClientCallsDisclosure` の開閉状態は
+  `pnpm mobile-audit`/`pnpm test` の対象外で `pnpm e2e` か実機での確認が要る、`/tasks/:id` のタイムライン
+  タブは `Message`/`ConsoleBlock` を描画しないため対象外と確認した、など）。
+- Phase 79（ADR-0056 D3。skills の届け方）は今回のスコープ外。
+- 本番 = Phase 65〜68（b/c 含む）、69〜77。実装中: Phase 78（MCP サーバー。ADR-0056。celeris は main
+  取り込み済み）、Phase 80（このワークトリーク。celeris の Phase 78 に乗って GUI を実装）。

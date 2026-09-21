@@ -2,7 +2,7 @@ import type { ConsoleData } from "~/lib/console";
 import type { ConsoleInstructOutcome, ConsoleNewConversationOutcome } from "./action-types";
 import { toActionError } from "./actions.server";
 import type { CelerisClient } from "./client.server";
-import type { ConsoleInstructAccepted, ConsolePage, InstructBody, OrgList, ProjectList } from "./types";
+import type { ConsoleInstructAccepted, ConsolePage, InstructBody, McpClientsView, OrgList, ProjectList } from "./types";
 
 /**
  * Console（ADR-0048 D1/D3/D4、celeris Phase 60a/60b、GUI Phase G22）の中継。
@@ -17,12 +17,25 @@ import type { ConsoleInstructAccepted, ConsolePage, InstructBody, OrgList, Proje
 export const CONSOLE_PAGE_LIMIT = 100;
 
 export async function loadConsole(client: CelerisClient, scope: string, request: Request): Promise<ConsoleData> {
-  const [page, org, projects] = await Promise.all([
+  const [page, org, projects, mcpClients] = await Promise.all([
     client.get<ConsolePage>("/console", { query: { scope, limit: CONSOLE_PAGE_LIMIT }, signal: request.signal }),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => ({ items: [] }) as OrgList),
     client.get<ProjectList>("/projects", { signal: request.signal }).catch(() => ({ items: [] }) as ProjectList),
+    // ADR-0056 D4（Phase 78/80）: `GET /mcp/clients` はトークンが無いと 401 になりうる（§3.110、
+    // `GET /llm/sources` と同じ規律）。落ちても Console 自体は出す（`org` / `projects` と同じ扱い。
+    // 名前解決ができないだけで、`~/lib/mcp.ts::resolveMcpAuthorLabel` は id にフォールバックする）。
+    client
+      .get<McpClientsView>("/mcp/clients", { signal: request.signal })
+      .catch(() => ({ items: [] }) as McpClientsView),
   ]);
-  return { scope, page, org: org.items, projects: projects.items, fetchedAt: new Date().toISOString() };
+  return {
+    scope,
+    page,
+    org: org.items,
+    projects: projects.items,
+    mcpClients: mcpClients.items,
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 /** `POST /console/instruct`（**管理系**、202 `ConsoleInstructAccepted`）。応答はそのまま画面へ渡す。 */

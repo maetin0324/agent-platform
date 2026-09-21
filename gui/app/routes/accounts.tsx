@@ -1,4 +1,5 @@
-import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher } from "react-router";
+import type { SyntheticEvent } from "react";
+import { data, type FetcherWithComponents, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import {
   cancelAccountLogin,
   checkAccount,
@@ -20,6 +21,10 @@ import type {
   LlmSourceAccountView,
   LlmSourcesView,
   LlmSourceView,
+  McpCall,
+  McpCallsView,
+  McpClient,
+  McpClientsView,
   SecretList,
   SecretView,
 } from "~/celeris/types";
@@ -28,7 +33,7 @@ import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
-import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/form";
+import { hintClass, inputClass, labelClass, selectClass, touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import { TONE_SOLID_BG, type Tone } from "~/components/ui/tone";
@@ -42,6 +47,7 @@ import {
   tierLabel,
   tierResolutionLabel,
 } from "~/lib/llm-sources";
+import { mcpAuthKindWord, mcpClientStatusWord, mcpScopeLabel, sortMcpScopes } from "~/lib/mcp";
 import { relativeTimeLabel } from "~/lib/reports";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { CelerisBanner } from "~/root";
@@ -65,6 +71,10 @@ export interface AccountsData {
   llmSources: LlmSourcesView | null;
   llmSourcesUnavailable: boolean;
   llmSourcesError: ActionError | null;
+  /** `GET /mcp/clients`（ADR-0056 D4、Phase 78/80）。読み取り専用だが `GET /llm/sources` と同じ規律で
+   * トークンが要る。落ちても `/accounts` 自体は壊さず、この節だけに案内を出す（secrets と同じ扱い）。 */
+  mcpClients: McpClientsView | null;
+  mcpClientsError: ActionError | null;
   fetchedAt: string;
 }
 
@@ -112,6 +122,13 @@ export async function loadAccounts(client: CelerisClient, request: Request): Pro
       llmSourcesError = secretsListError(e);
     }
   }
+  let mcpClients: McpClientsView | null = null;
+  let mcpClientsError: ActionError | null = null;
+  try {
+    mcpClients = await client.get<McpClientsView>("/mcp/clients", { signal: request.signal });
+  } catch (e) {
+    mcpClientsError = secretsListError(e);
+  }
   return {
     accounts,
     secrets,
@@ -119,6 +136,8 @@ export async function loadAccounts(client: CelerisClient, request: Request): Pro
     llmSources,
     llmSourcesUnavailable,
     llmSourcesError,
+    mcpClients,
+    mcpClientsError,
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -223,7 +242,17 @@ function accountAdapter(item: AccountView): AccountAdapter {
 }
 
 export default function AccountsPage({ loaderData }: Route.ComponentProps) {
-  const { accounts, secrets, secretsError, llmSources, llmSourcesUnavailable, llmSourcesError, fetchedAt } = loaderData;
+  const {
+    accounts,
+    secrets,
+    secretsError,
+    llmSources,
+    llmSourcesUnavailable,
+    llmSourcesError,
+    mcpClients,
+    mcpClientsError,
+    fetchedAt,
+  } = loaderData;
   // celeris の SSE（daemon tick）による自動再検証のたびに `<Form>` の actionData は消える（React Router の仕様、
   // `app/hooks/useCelerisStream.ts`）。ログイン URL は「もう一度出せない」ものなので特に影響が大きい: 1 つの
   // `useFetcher()` にまとめ、その `fetcher.data` を表示する（fetcher の状態は revalidate() の影響を受けない）。
@@ -360,6 +389,8 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
         error={llmSourcesError}
         fetchedAt={fetchedAt}
       />
+
+      <McpClientsSection mcpClients={mcpClients} error={mcpClientsError} fetchedAt={fetchedAt} />
 
       <SecretsSection
         secrets={secrets}
@@ -502,6 +533,180 @@ function LlmAccountRow({ account, nowSec }: { account: LlmSourceAccountView; now
         )}
       </span>
     </div>
+  );
+}
+
+/**
+ * 「MCP クライアント」節（ADR-0056 D4、GUI Phase 80）: `GET /mcp/clients` をそのまま表示する
+ * （`LlmSourcesSection` と同じ作り。値の再計算はしない。判断＝認証・スコープ・流量制限は
+ * `crates/celeris-mcp` の中で決まっている）。「接続のしかた」は `/help#mcp`（`docs/mcp.md` の要約）
+ * へのリンクだけ持つ。
+ */
+function McpClientsSection({
+  mcpClients,
+  error,
+  fetchedAt,
+}: {
+  mcpClients: McpClientsView | null;
+  error: ActionError | null;
+  fetchedAt: string;
+}) {
+  return (
+    <section
+      id="mcp-clients"
+      aria-labelledby="mcp-clients-heading"
+      className="space-y-4"
+      data-testid="mcp-clients-section"
+    >
+      <SectionTitle icon="network" id="mcp-clients-heading" count={mcpClients?.items.length}>
+        MCP クライアント
+        <HelpLink anchor="mcp" label="MCP で外から使う" />
+      </SectionTitle>
+
+      <p className="text-sm text-fg-muted" data-testid="mcp-clients-hint">
+        外部エージェント（ChatGPT・Claude Code・Codex 等）が MCP 経由で Celeris を操作するときの入口です。接続のしかたは
+        <Link to="/help#mcp" className={`${touchLinkClass} mx-1 underline underline-offset-2 hover:text-fg`}>
+          使い方の「MCP で外から使う」
+        </Link>
+        （<Mono>docs/mcp.md</Mono>）を参照してください。
+      </p>
+
+      {error ? (
+        <ErrorFlash error={error} />
+      ) : !mcpClients || mcpClients.items.length === 0 ? (
+        <EmptyState icon="network" title="MCP クライアントがありません">
+          <Mono>celerisctl mcp client add &lt;name&gt;</Mono> で客を発行すると、ここに並びます。
+        </EmptyState>
+      ) : (
+        <div className="grid gap-4 xl:grid-cols-2">
+          {mcpClients.items.map((c) => (
+            <McpClientCard key={c.id} client={c} fetchedAt={fetchedAt} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function McpClientCard({ client, fetchedAt }: { client: McpClient; fetchedAt: string }) {
+  const authWord = mcpAuthKindWord(client);
+  const statusWord = mcpClientStatusWord(client);
+  const scopes = sortMcpScopes(client.scopes);
+  return (
+    <Card data-testid="mcp-client-card" data-client-id={client.id} className="min-w-0 hover:shadow-md">
+      <CardHeader
+        icon="terminal"
+        tone={statusWord === "revoked" ? "neutral" : "info"}
+        title={<span className="break-all text-sm font-semibold text-fg">{client.name}</span>}
+        description={<Mono className="break-all text-xs text-fg-subtle">{client.id}</Mono>}
+        actions={
+          <>
+            <Badge
+              tone={authWord === "token" ? "info" : "neutral"}
+              data-status-badge="mcp-auth"
+              data-testid="mcp-client-auth"
+            >
+              {authWord}
+            </Badge>
+            <Badge
+              tone={statusWord === "revoked" ? "danger" : "success"}
+              dot
+              data-status-badge="mcp-client"
+              data-testid="mcp-client-status"
+            >
+              {statusWord}
+            </Badge>
+          </>
+        }
+      />
+      <CardBody className="space-y-4">
+        {scopes.length > 0 && (
+          <div>
+            <p className={labelClass}>スコープ</p>
+            <div className="mt-1.5 flex flex-wrap gap-1.5" data-testid="mcp-client-scopes">
+              {scopes.map((s) => (
+                <Badge key={s} tone="neutral" title={s} data-testid="mcp-client-scope">
+                  {mcpScopeLabel(s)}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm sm:grid-cols-2">
+          <DataItem label="created_at">
+            <span title={client.created_at}>{relativeTimeLabel(client.created_at, fetchedAt)}</span>
+          </DataItem>
+          <DataItem label="last_used_at">
+            {client.last_used_at ? (
+              <span data-testid="mcp-client-last-used" title={client.last_used_at}>
+                {relativeTimeLabel(client.last_used_at, fetchedAt)}
+              </span>
+            ) : (
+              <span className="text-fg-subtle">未使用</span>
+            )}
+          </DataItem>
+        </dl>
+
+        <McpClientCallsDisclosure clientId={client.id} fetchedAt={fetchedAt} />
+      </CardBody>
+    </Card>
+  );
+}
+
+/**
+ * 客 1 件の直近の呼び出し（`GET /mcp/clients/:id/calls` → `GET /mcp/calls?client=`。ADR-0056 D4）。
+ * 開いたときだけ取りに行く（`ProgressBlockView` の「すべて見る」と同じ作り。`~/routes/mcp.clients.$id.calls.ts`）。
+ */
+function McpClientCallsDisclosure({ clientId, fetchedAt }: { clientId: string; fetchedAt: string }) {
+  const fetcher = useFetcher<McpCallsView>();
+  const loaded = fetcher.data != null;
+  function onToggle(e: SyntheticEvent<HTMLDetailsElement>) {
+    if (e.currentTarget.open && fetcher.state === "idle" && !loaded) {
+      fetcher.load(`/mcp/clients/${encodeURIComponent(clientId)}/calls`);
+    }
+  }
+  return (
+    <details className="group border-t border-border pt-3" data-testid="mcp-client-calls" onToggle={onToggle}>
+      <summary className="flex min-h-11 w-full cursor-pointer list-none items-center gap-1.5 text-sm font-medium text-fg-subtle hover:text-fg">
+        <Icon name="chevronRight" className="size-3.5 shrink-0 transition-transform group-open:rotate-90" />
+        直近の呼び出し
+      </summary>
+      <div className="mt-2">
+        {fetcher.state !== "idle" ? (
+          <p className="text-sm text-fg-subtle">読み込み中…</p>
+        ) : !fetcher.data ? null : fetcher.data.items.length === 0 ? (
+          <p className="text-sm text-fg-subtle">呼び出しはまだありません。</p>
+        ) : (
+          <ul className="space-y-1.5" data-testid="mcp-call-list">
+            {fetcher.data.items.map((call) => (
+              <McpCallRow key={call.id} call={call} fetchedAt={fetchedAt} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </details>
+  );
+}
+
+function McpCallRow({ call, fetchedAt }: { call: McpCall; fetchedAt: string }) {
+  return (
+    <li
+      className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm"
+      data-testid="mcp-call-row"
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <Mono className="break-all">{call.tool}</Mono>
+        <Badge tone={call.ok ? "success" : "danger"} dot data-status-badge="mcp-call" data-testid="mcp-call-status">
+          {call.ok ? "ok" : "error"}
+        </Badge>
+      </span>
+      <span className="flex flex-wrap items-center gap-3 text-fg-muted">
+        {!call.ok && call.error_kind && <span className="text-danger">{call.error_kind}</span>}
+        <span data-testid="mcp-call-latency">{call.latency_ms}ms</span>
+        <span title={call.at}>{relativeTimeLabel(call.at, fetchedAt)}</span>
+      </span>
+    </li>
   );
 }
 

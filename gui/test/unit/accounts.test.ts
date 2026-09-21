@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CelerisClient } from "~/celeris/client.server";
 import type { AccountList } from "~/celeris/types";
 import { loadAccounts } from "~/routes/accounts";
-import { type MockCeleris, sendJson, startMockCeleris } from "../mock-celeris/server";
+import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 let mock: MockCeleris;
 let client: CelerisClient;
@@ -86,5 +86,35 @@ describe("loadAccounts", () => {
     const unreachable = new CelerisClient({ baseUrl, timeoutMs: 1000 });
 
     await expect(loadAccounts(unreachable, new Request("http://gui.invalid/accounts"))).rejects.toBeTruthy();
+  });
+
+  // ADR-0056 D4（Phase 78/80）: `GET /mcp/clients` は `GET /llm/sources` / `GET /secrets` と同じ扱い
+  // （落ちても `/accounts` 自体は壊さない。この節だけにエラーを出す）。
+  it("calls GET /mcp/clients and returns it as-is under mcpClients", async () => {
+    mock.on("GET", "/api/v1/accounts", (_req, res) => sendJson(res, 200, accountsView));
+    mock.on("GET", "/api/v1/mcp/clients", (_req, res) =>
+      sendJson(res, 200, {
+        items: [{ id: "chatgpt", name: "chatgpt", created_at: "2026-09-20T00:00:00Z", scopes: ["knowledge:read"] }],
+      }),
+    );
+
+    const result = await loadAccounts(client, new Request("http://gui.invalid/accounts"));
+    expect(result.mcpClientsError).toBeNull();
+    expect(result.mcpClients?.items).toHaveLength(1);
+    expect(result.mcpClients?.items[0].id).toBe("chatgpt");
+    expect(mock.requests.some((r) => r.method === "GET" && r.url === "/api/v1/mcp/clients")).toBe(true);
+  });
+
+  it("falls back to mcpClientsError (not a thrown error) when GET /mcp/clients requires a token", async () => {
+    mock.on("GET", "/api/v1/accounts", (_req, res) => sendJson(res, 200, accountsView));
+    mock.on("GET", "/api/v1/mcp/clients", (_req, res) =>
+      sendProblem(res, { status: 401, code: "unauthorized", detail: "token required" }),
+    );
+
+    const result = await loadAccounts(client, new Request("http://gui.invalid/accounts"));
+    expect(result.mcpClients).toBeNull();
+    expect(result.mcpClientsError?.status).toBe(401);
+    // /accounts 自体は壊れない
+    expect(result.accounts).toEqual(accountsView);
   });
 });

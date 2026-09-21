@@ -28,6 +28,7 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ConsoleData
         page: { items: [], next_cursor: null },
         org: [],
         projects: [],
+        mcpClients: [],
         fetchedAt: new Date().toISOString(),
       };
     }

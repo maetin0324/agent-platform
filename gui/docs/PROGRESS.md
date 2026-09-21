@@ -5097,3 +5097,119 @@ LCP は最大 220ms 前後で、どちらも予算の 1500 / 2500ms に遠く届
   「MCP クライアント」節と合わせて設計するとよい）。
 - ゲート: `pnpm typecheck` / `pnpm lint` 差分無し、`pnpm test`（**925 passed**、Phase G32 と同数。
   今回のラベルにテストは追加していない）、`pnpm build` 成功。
+
+## Phase G34 — MCP クライアントの GUI（ADR-0056 D4、celeris Phase 78。2026-09-21）
+
+celeris 側は無変更（`crates/` 無変更。celeris は既に main に Phase 78 が入っており、`GET /mcp/clients` /
+`GET /mcp/calls?client=` は使える状態）。celeris 側 Phase 78 の PROGRESS 節が残した「「アカウント」画面の
+MCP クライアント節は後続の GUI Phase」を実装した。Phase 66 の「LLM source」節（`~/routes/accounts.tsx`）を
+パターンに、`GET /mcp/clients` をそのまま表示する節を足し、Console の「外部（<client_id>）」帯（Phase 78 の
+最小実装。id をそのまま出していた）を `GET /mcp/clients` の `name` で解決するようにした。
+
+### 1. `/accounts` の「MCP クライアント」節（受け入れ条件 1）
+
+- `app/routes/accounts.tsx`: `loadAccounts` に `GET /mcp/clients` を追加（`GET /llm/sources` /
+  `GET /secrets` と同じ規律 — 落ちても `/accounts` 自体は壊さず `mcpClientsError` に入れる。管理系の
+  トークン必須エンドポイントなので 401 になりうる）。`McpClientsSection` → `McpClientCard` を新設:
+  - id/name（`McpClient.name` を主見出し、`id` は `Mono` の副題）
+  - 認証の種類バッジ（`token_hash` の有無から `token`/`none`。1 語、`data-status-badge="mcp-auth"`）
+  - 失効状態バッジ（`revoked_at` の有無から `active`/`revoked`。1 語、`data-status-badge="mcp-client"`）
+  - スコープのチップ（`docs/mcp.md` §4 の並びに揃えて重複を落とす。`~/lib/mcp.ts::sortMcpScopes`/`mcpScopeLabel`）
+  - `last_used_at` は `relativeTimeLabel` + `title` に絶対時刻（無ければ「未使用」）
+  - 客 1 件ごとの直近の呼び出し（`GET /mcp/calls?client=<id>`）を `<details>` の開閉で遅延取得する
+    `McpClientCallsDisclosure`（`~/components/ConsoleBlockItem.tsx::ProgressBlockView` の「すべて見る」と
+    同じ `useFetcher().load()` の作り）。新設した resource route `app/routes/mcp.clients.$id.calls.ts`
+    （`routes/tasks.$id.runs.$runId.events.ts` と同じ形）が `GET /mcp/calls?client=` を中継する。
+    呼び出し 1 件は tool / ok・error バッジ / latency_ms / 時刻を表示。
+  - 「接続のしかた」の一言と `/help#mcp` へのリンク（`docs/mcp.md` の要約）。
+  - モバイル幅（393px）でカードは流動幅（`grid xl:grid-cols-2`。ADR-0055 D2 と同じ作り）。
+
+### 2. Console の「外部（<client name>）」帯（受け入れ条件 2）
+
+- `~/lib/mcp.ts::resolveMcpAuthorLabel(author, clients)`: `mcp:<client_id>` を `GET /mcp/clients` の
+  `name` に解決し、見つからなければ id にフォールバック（未取得・失効後に消えた等）。人の発言
+  （`author` 無し）は `null`（帯を出さない）。
+- `~/celeris/console.server.ts::loadConsole` に `GET /mcp/clients` を追加（`org`/`projects` と同じ
+  ベストエフォート — 落ちても Console 自体は出し、名前解決は id にフォールバックするだけ）。
+  `~/lib/console.ts::ConsoleData` に `mcpClients: McpClient[]` を追加。
+- `~/components/Console.tsx` → `BlockStream` → `~/components/ConsoleBlockItem.tsx::ConsoleBlockItem`
+  まで `mcpClients` を通し、`HumanBlockView` が `resolveMcpAuthorLabel` を呼ぶように変更（従来の
+  `block.author.replace(/^mcp:/, "")`〈id をそのまま出す最小実装〉を置き換え）。帯は人の発言と同じ
+  右寄せのまま、`Badge tone="info"`（元は `neutral`）にして目立ちすぎない程度に区別を付けた。
+- `~/routes/tasks.$id.tsx` の「タイムライン」タブは `Message`/`ConsoleBlock` の `human`/`reply`
+  ブロックを描画しておらず（`TaskComment`〈`task_comments`、`CommentAuthorKind = human|node|system`〉を
+  描画する別のデータモデル。MCP の `author` は `messages.metadata` の欄で、`task_comments` とは無関係）、
+  `~/components/ConsoleBlockItem.tsx::ReplyStepRow` だけを再利用している（`worker_progress` の 1 手表示）。
+  確認の結果、著者を表示する箇所ではないため変更していない。
+
+### 3. `/help` の「MCP で外から使う」（受け入れ条件 3）
+
+- `app/routes/help.tsx` に `Section id="mcp"` を追加（TOC にも追加）。外部エージェントは人ではないこと
+  （案件・タスクは CoS 経由、知識は `_inbox` 経由、`tools`/`permissions`/`review` は変更不可）、8
+  スコープの一覧、2 通りのつなぎ方（`auth = "token"` の Bearer 口 / `auth = "none"` の loopback 限定
+  トンネル専用口）を簡潔にまとめ、`docs/mcp.md` と `/accounts#mcp-clients` にリンクした。
+
+### 4. モックデータ・vitest（受け入れ条件 4）
+
+- `test/unit/mcp.test.ts`（新規）: `sortMcpScopes`（並び順・重複排除・空入力）、`mcpScopeLabel`（全
+  スコープが非空ラベルを持つ）、`mcpAuthKindWord`（token/none）、`mcpClientStatusWord`（active/revoked）、
+  `resolveMcpAuthorLabel`（null 早期リターン・name 解決・id フォールバック）— 計 11 件。
+- `test/unit/accounts.test.ts`: `loadAccounts` が `GET /mcp/clients` をそのまま `mcpClients` に渡すこと、
+  401 のとき `mcpClientsError` に落ちて `/accounts` 自体は壊れないこと — 2 件追加。
+- `test/unit/console.server.test.ts`: `loadConsole` が `GET /mcp/clients` を `mcpClients` に束ねること、
+  落ちても Console 自体は出す（空扱い）こと — 2 件追加。
+- `scripts/mobile-audit.mjs`: `GET /api/v1/mcp/clients`（token 付き・有効な客 1 件 + `--no-token` で
+  失効済みの客 1 件。auth = token/none・状態 = active/revoked の全パターン）、`GET /api/v1/mcp/calls`
+  （ok 1 件・error 1 件）を追加。`GET /api/v1/console` の既定の流れに `author = "mcp:chatgpt"` の
+  human ブロックを混ぜ、「外部（chatgpt）」の帯（id ではなく `GET /mcp/clients` の name で解決される
+  こと）も `home`/`org-node` などの route で監査に通した。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| 型の再生成 | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | exit 0、差分ゼロ（`McpClient` 等は Phase 78 で既に生成済み。今回は型の変更なし） |
+| lint | `pnpm lint` | exit 0。`Checked 234 files in ...ms. No fixes applied.`（Biome の自動整形を先に適用してから確認） |
+| typecheck | `pnpm typecheck` | exit 0（`~/routes/home.tsx`/`~/routes/org.$id.tsx` の `isCelerisUnavailable` フォールバック値に `mcpClients: []` を追加して解消した 2 件を含む） |
+| test | `pnpm test` | exit 0。**Test Files 63 passed (63) / Tests 940 passed (940)**（Phase G33 の 925 から +15。内訳は上記「4.」） |
+| build | `pnpm build` | exit 0（client・server とも）。`mcp.clients._id.calls` チャンクが増えた以外、既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は Phase G33 から変化なし |
+| mobile-audit（1 回目、`/help#mcp` へのインラインリンクの tap 領域を広げる前） | `pnpm mobile-audit` | exit 1。`tap-target` 違反 2 件（light/dark 各 1）: `/accounts` の「MCP クライアント」節の案内文中のインラインリンクが 202.1×17.0px（44×44 未満） |
+| 対応 | `app/routes/accounts.tsx` | そのリンクに `touchLinkClass`（`-my-2.5 inline-flex min-h-11 min-w-11 items-center py-2.5`。`~/routes/help.tsx` の本文中リンクと同じ形）を追加 |
+| mobile-audit（対応後） | `pnpm mobile-audit` | **exit 0、violations 0 件**（`by_rule: {}`、`by_scheme: {"light": 0, "dark": 0}`）。21 route × light/dark、`perf` を含む全 12 ルールが 0 件。`accounts` route の初回 JS は 432.3KB（予算 532KB 以内） |
+
+### 変更したファイル
+
+- `app/lib/mcp.ts`（新規）: `sortMcpScopes` / `mcpScopeLabel` / `mcpAuthKindWord` / `mcpClientStatusWord` / `resolveMcpAuthorLabel`
+- `app/routes/mcp.clients.$id.calls.ts`（新規、resource route）・`app/routes.ts`（登録）
+- `app/routes/accounts.tsx`（`AccountsData.mcpClients`/`mcpClientsError`、`McpClientsSection`/`McpClientCard`/`McpClientCallsDisclosure`/`McpCallRow`、`touchLinkClass` の追加インポート）
+- `app/routes/help.tsx`（`Section id="mcp"`、TOC、`Mono` の追加インポート）
+- `app/lib/console.ts`（`ConsoleData.mcpClients`）・`app/celeris/console.server.ts`（`loadConsole` に `GET /mcp/clients` を追加）
+- `app/components/Console.tsx`（`mcpClients` を `BlockStream` → `ConsoleBlockItem` へ中継）
+- `app/components/ConsoleBlockItem.tsx`（`ConsoleBlockItem`/`HumanBlockView` に `mcpClients` を追加、`resolveMcpAuthorLabel` で名前解決）
+- `app/routes/home.tsx`・`app/routes/org.$id.tsx`（`isCelerisUnavailable` フォールバックに `mcpClients: []`）
+- `scripts/mobile-audit.mjs`（`/api/v1/mcp/clients`・`/api/v1/mcp/calls` のモック、Console の流れに MCP 発の human ブロックを追加）
+- `test/unit/mcp.test.ts`（新規）・`test/unit/accounts.test.ts`・`test/unit/console.server.test.ts`（テスト追加）
+
+### 未解決事項
+
+- **U-G34-1**: `docs/mcp.md` §7.2/7.3（Claude Code / Codex の実際の接続）と同様、この GUI 節が表示する
+  `GET /mcp/clients`/`GET /mcp/calls` の実データでの見た目（本物の celeris + 本物の MCP クライアントの
+  呼び出し履歴）は未確認（ADR-0009 P-34。サンドボックスに外向きネットワークも実物のクライアントも無い）。
+  `test/mock-celeris` と `scripts/mobile-audit.mjs` の作り物のデータでのみ確認した。
+- **U-G34-2**: `McpClientCallsDisclosure` は `<details>` を開いたときにだけ `GET /mcp/clients/:id/calls`
+  を取りに行く作りのため、`pnpm mobile-audit`（`page.goto` のフルナビゲーションしかしない。閉じた
+  `<details>` の中身は開かない）では実際に開いた状態の見た目・追加のネットワーク往復は検査していない。
+  `pnpm e2e`（今回のゲートには入っていない）か実機での確認が要る。
+- **U-G34-3**: `/tasks/:id` のタイムラインタブは `Message`/`ConsoleBlock` を描画しない設計だと確認した
+  （「2.」参照）が、SPEC/ADR のどこにも明記が無く GUI コードから読み取っただけの理解。将来タイムラインに
+  対話（Console の human/reply）が混ざる設計変更があれば、この Phase の `resolveMcpAuthorLabel` をそこにも
+  適用する必要がある。
+
+### 提案
+
+- **P-G34-1**: `docs/mcp.md` §7.2/7.3 の実機接続確認（celeris 側 Phase 78 の未解決事項）が終わったら、
+  ついでにこの GUI 節の実データ表示（U-G34-1）も確認するとよい（同じ celeris インスタンスに対して行える）。
+- **P-G34-2**: `McpClientCard` の「直近の呼び出し」はクライアント 1 件あたり最大 100 件（celeris 側の
+  上限）を毎回取り直す作り。呼び出しの多い客が増えたら、`~/routes/reports.tsx` のページングのような
+  「もっと見る」の分割を検討する余地がある（今回は Phase 78 の規模〈直近 100 件〉に見合う簡潔な実装を
+  優先した）。

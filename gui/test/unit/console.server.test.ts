@@ -71,6 +71,33 @@ describe("loadConsole", () => {
     expect(result.page.items.length).toBeGreaterThan(0);
   });
 
+  // ADR-0056 D4（Phase 78/80）: `GET /mcp/clients` は human ブロックの「外部（<name>）」帯の名前解決に使う。
+  it("GET /mcp/clients を束ね、mcpClients としてそのまま渡す", async () => {
+    mock.on("GET", "/api/v1/console", (_req, res) => sendJson(res, 200, consolePage()));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/mcp/clients", (_req, res) =>
+      sendJson(res, 200, { items: [{ id: "chatgpt", name: "chatgpt", created_at: "2026-09-20T00:00:00Z" }] }),
+    );
+
+    const result = await loadConsole(client, "all", new Request("http://gui.invalid/"));
+    expect(result.mcpClients).toHaveLength(1);
+    expect(result.mcpClients[0].id).toBe("chatgpt");
+  });
+
+  it("GET /mcp/clients が落ちても（トークン未設定等）Console 自体は出す（空扱い）", async () => {
+    mock.on("GET", "/api/v1/console", (_req, res) => sendJson(res, 200, consolePage()));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] } satisfies OrgList));
+    mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [] } satisfies ProjectList));
+    mock.on("GET", "/api/v1/mcp/clients", (_req, res) =>
+      sendProblem(res, { status: 401, code: "unauthorized", detail: "token required" }),
+    );
+
+    const result = await loadConsole(client, "all", new Request("http://gui.invalid/"));
+    expect(result.mcpClients).toEqual([]);
+    expect(result.page.items.length).toBeGreaterThan(0);
+  });
+
   it("GET /console が落ちたら投げる（loader 側が celerisErrorResponse / isCelerisUnavailable で処理する）", async () => {
     mock.on("GET", "/api/v1/console", (_req, res) =>
       sendProblem(res, { status: 400, code: "bad_request", detail: "bad scope" }),

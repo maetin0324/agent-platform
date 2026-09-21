@@ -6,7 +6,7 @@ import type {
   TaskCommentOutcome,
   TransitionOutcome,
 } from "~/celeris/action-types";
-import type { ConsoleBlock, ConsoleReplyStep, EventsPage, OrgNode, Project } from "~/celeris/types";
+import type { ConsoleBlock, ConsoleReplyStep, EventsPage, McpClient, OrgNode, Project } from "~/celeris/types";
 import {
   firstLine,
   formatRunEventRow,
@@ -18,6 +18,7 @@ import {
 } from "~/lib/console";
 import { shortId, truncateLabel } from "~/lib/format";
 import { isKnowledgeFallback } from "~/lib/knowledge";
+import { resolveMcpAuthorLabel } from "~/lib/mcp";
 import { milestoneDecisionValid } from "~/lib/milestone-review";
 import { relativeTimeLabel } from "~/lib/reports";
 import { cn } from "~/lib/utils";
@@ -49,19 +50,31 @@ export function ConsoleBlockItem({
   block,
   org,
   projects,
+  mcpClients = [],
   fetchedAt,
   onReplyToConversation,
 }: {
   block: ConsoleBlock;
   org: readonly OrgNode[];
   projects: readonly Project[];
+  /** ADR-0056 D2（Phase 78/80）: human ブロックの `author`（`mcp:<client_id>`）の名前解決に使う
+   * （`~/lib/mcp.ts::resolveMcpAuthorLabel`）。省略すれば id をそのまま出す（未取得時のフォールバック）。 */
+  mcpClients?: readonly McpClient[];
   /** ADR-0055 D2 ラウンド 6: 相対時刻表示（`relativeTimeLabel`）の基準時刻。`~/lib/console.ts::ConsoleData.fetchedAt`。 */
   fetchedAt: string;
   onReplyToConversation: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
 }) {
   switch (block.kind) {
     case "human":
-      return <HumanBlockView block={block} org={org} fetchedAt={fetchedAt} onReply={onReplyToConversation} />;
+      return (
+        <HumanBlockView
+          block={block}
+          org={org}
+          mcpClients={mcpClients}
+          fetchedAt={fetchedAt}
+          onReply={onReplyToConversation}
+        />
+      );
     case "reply":
       return <ReplyBlockView block={block} org={org} fetchedAt={fetchedAt} onReply={onReplyToConversation} />;
     case "task":
@@ -177,14 +190,20 @@ function BlockHeader({
 function HumanBlockView({
   block,
   org,
+  mcpClients,
   fetchedAt,
   onReply,
 }: {
   block: Extract<ConsoleBlock, { kind: "human" }>;
   org: readonly OrgNode[];
+  mcpClients: readonly McpClient[];
   fetchedAt: string;
   onReply: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
 }) {
+  // ADR-0056 D2（Phase 78/80）: MCP 経由の発言（`author = mcp:<client_id>`）だけ「外部（<name>）」の
+  // 帯を出す。人の発言（`author` が無い）は今までどおり帯を出さない。名前は `GET /mcp/clients` から
+  // 解決し、まだ取れていない・見つからない客は id にフォールバックする（`~/lib/mcp.ts`）。
+  const authorLabel = resolveMcpAuthorLabel(block.author, mcpClients);
   return (
     <BlockShell testId="console-block-human" align="end">
       <BlockHeader
@@ -194,10 +213,10 @@ function HumanBlockView({
         fetchedAt={fetchedAt}
         align="end"
       />
-      {block.author && (
+      {authorLabel && (
         <div className="mb-1 flex justify-end">
-          <Badge tone="neutral" data-testid="console-human-author">
-            外部（{block.author.replace(/^mcp:/, "")}）
+          <Badge tone="info" data-testid="console-human-author">
+            {authorLabel}
           </Badge>
         </div>
       )}

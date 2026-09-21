@@ -4,7 +4,7 @@ import { StatusBadge } from "~/components/ui/badge";
 import { Card, CardBody } from "~/components/ui/card";
 import { tableClass, tdClass, thClass, theadClass, touchLinkClass, trHoverClass } from "~/components/ui/form";
 import { Icon, type IconName } from "~/components/ui/Icon";
-import { PageHeader } from "~/components/ui/misc";
+import { Mono, PageHeader } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
 import { TONE_ICON_WRAP } from "~/components/ui/tone";
 import { cn } from "~/lib/utils";
@@ -166,6 +166,7 @@ const TOC = [
   { id: "screens", heading: "画面ごとの説明", icon: "layers" },
   { id: "acceptance", heading: "受け入れ条件", icon: "checkCircle" },
   { id: "status", heading: "状態", icon: "activity" },
+  { id: "mcp", heading: "MCP で外から使う", icon: "network" },
   { id: "glossary", heading: "用語集", icon: "book" },
   { id: "trouble", heading: "困ったとき", icon: "help" },
 ] satisfies { id: string; heading: string; icon: IconName }[];
@@ -446,6 +447,90 @@ export default function HelpPage() {
             </tbody>
           </table>
         </div>
+      </Section>
+
+      <Section id="mcp" icon="network" tone="teal" heading="MCP で外から使う" testId="help-mcp-section">
+        <p className="text-sm text-fg-muted">
+          ChatGPT・Claude Code・Codex・opencode のような
+          <strong className="font-semibold text-fg">外部エージェント</strong>
+          が、MCP（Model Context Protocol）経由で Celeris を操作できます（ADR-0056）。外部エージェントは
+          <strong className="font-semibold text-fg">人ではない</strong>ので、案件・タスクを直接作ることはできません:
+          発言は CoS への指示として渡るだけ（人の Console 発言と同じ経路）で、案件化・タスク化は CoS
+          が判断します。知識も直接コミットはできず、候補として受信箱（<Mono>_inbox</Mono>）に入るだけです。 組織の{" "}
+          <Mono>tools</Mono> / <Mono>permissions</Mono> / <Mono>review</Mono> は外から変更できません。
+        </p>
+
+        <div className="mt-4">
+          <p className="font-semibold text-fg">スコープ</p>
+          <p className="mt-1 text-sm text-fg-muted">
+            客（クライアント）ごとに与えるスコープで、呼べる道具（tools）が決まります。スコープの無い道具は
+            一覧にすら出ません。
+          </p>
+          <dl className="mt-2 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+            <div>
+              <dt className="font-mono text-xs text-fg-subtle">knowledge:read / knowledge:propose</dt>
+              <dd className="text-fg-muted">知識の一覧・閲覧 / 候補として受信箱に置く（直接コミットはしない）</dd>
+            </div>
+            <div>
+              <dt className="font-mono text-xs text-fg-subtle">tasks:read</dt>
+              <dd className="text-fg-muted">タスク・案件の一覧・閲覧（読むだけ）</dd>
+            </div>
+            <div>
+              <dt className="font-mono text-xs text-fg-subtle">console:instruct</dt>
+              <dd className="text-fg-muted">CoS への指示（人の発言と同じ経路）と、その返事の取得</dd>
+            </div>
+            <div>
+              <dt className="font-mono text-xs text-fg-subtle">org:read / org:write</dt>
+              <dd className="text-fg-muted">組織の一覧・閲覧 / ノードの追加と skills の mount（既定では付かない）</dd>
+            </div>
+            <div>
+              <dt className="font-mono text-xs text-fg-subtle">skills:read / skills:write</dt>
+              <dd className="text-fg-muted">
+                skills の一覧・閲覧 / KB への書き込み（既定では付かない。mount されるまで効かない）
+              </dd>
+            </div>
+          </dl>
+        </div>
+
+        <div className="mt-4">
+          <p className="font-semibold text-fg">つなぎ方は 2 通り</p>
+          <dl className="mt-2 space-y-3 text-sm">
+            <div>
+              <dt className="font-medium text-fg">Bearer トークンの口（既定）</dt>
+              <dd className="mt-0.5 text-fg-muted">
+                <Mono>auth = "token"</Mono> の口（既定 <Mono>127.0.0.1:18200/mcp</Mono>）。
+                <Mono>celerisctl mcp client add &lt;name&gt;</Mono> で発行したトークンを
+                <Mono>Authorization: Bearer &lt;token&gt;</Mono> で付けて呼ぶ。Claude Code・Codex・stdio 橋（opencode
+                等）はこちら。
+              </dd>
+            </div>
+            <div>
+              <dt className="font-medium text-fg">認証なし・トンネル専用の口</dt>
+              <dd className="mt-0.5 text-fg-muted">
+                <Mono>auth = "none"</Mono> の口は <strong className="font-semibold text-fg">loopback 限定</strong>
+                で、来た要求はすべて設定した 1 つの客（<Mono>client = "..."</Mono>）として扱います。ChatGPT の Secure
+                MCP tunnel のように Bearer ヘッダを付けられない客のための配置で、認証はトークンではなく
+                「その口に届くのはトンネルだけ」という配置で担保します。
+              </dd>
+            </div>
+          </dl>
+        </div>
+
+        <p className="mt-4 text-sm text-fg-muted">
+          発行・失効は <Mono>celerisctl mcp client add|ls|revoke</Mono>（トークンの値は発行時の 1
+          回しか表示されません）。上の「アカウント」節の
+          <Link
+            to="/accounts#mcp-clients"
+            className={cn(
+              touchLinkClass,
+              "mx-1 text-primary underline decoration-primary/40 underline-offset-2 hover:decoration-primary",
+            )}
+          >
+            「MCP クライアント」
+          </Link>
+          で、発行済みの客・スコープ・直近の呼び出しを見られます。設定例・接続手順の全文は
+          <Mono>docs/mcp.md</Mono> にあります。
+        </p>
       </Section>
 
       <Section id="glossary" icon="book" tone="neutral" heading="用語集" testId="help-glossary-section">

@@ -388,6 +388,55 @@ async function setupMockCeleris() {
   mock.on("GET", "/api/v1/accounts", (_req, res) => sendJson(res, 200, { items: [], max_runs_per_account: 1 }));
   mock.on("GET", "/api/v1/secrets", (_req, res) => sendJson(res, 200, { items: [] }));
 
+  // ADR-0056 D4（Phase 78/80）: 「MCP クライアント」節（`/accounts`）。トークン付きで有効な客
+  // （スコープ・last_used_at あり）と、`--no-token` かつ失効済みの客の両方を混ぜて、チップ・バッジの
+  // 全パターン（auth = token/none、状態 = active/revoked）を監査に通す。
+  mock.on("GET", "/api/v1/mcp/clients", (_req, res) =>
+    sendJson(res, 200, {
+      items: [
+        {
+          id: "chatgpt",
+          name: "chatgpt",
+          created_at: "2026-09-19T00:00:00Z",
+          last_used_at: "2026-09-20T23:50:00Z",
+          scopes: ["knowledge:read", "knowledge:propose", "tasks:read", "console:instruct"],
+          token_hash: "a".repeat(64),
+        },
+        {
+          id: "old-claude-code",
+          name: "old-claude-code",
+          created_at: "2026-08-01T00:00:00Z",
+          revoked_at: "2026-09-10T00:00:00Z",
+          scopes: ["org:read", "skills:read"],
+          token_hash: null,
+        },
+      ],
+    }),
+  );
+  mock.on("GET", "/api/v1/mcp/calls", (_req, res) =>
+    sendJson(res, 200, {
+      items: [
+        {
+          id: "call2",
+          client_id: "chatgpt",
+          tool: "knowledge_propose",
+          ok: true,
+          latency_ms: 120,
+          at: "2026-09-20T23:50:00Z",
+        },
+        {
+          id: "call1",
+          client_id: "chatgpt",
+          tool: "console_instruct",
+          ok: false,
+          error_kind: "rate_limited",
+          latency_ms: 8,
+          at: "2026-09-20T20:00:00Z",
+        },
+      ],
+    }),
+  );
+
   mock.on("GET", "/api/v1/daemon", (_req, res) => sendJson(res, 200, { now: "2026-09-21T00:00:00Z", snapshot: null }));
   mock.on("GET", "/api/v1/inbox", (_req, res) =>
     sendJson(res, 200, { approvals: 0, attention: 0, by_status: {}, drafts: 0, questions: 0 }),
@@ -400,8 +449,24 @@ async function setupMockCeleris() {
   // 末尾要素を偽陽性で「固定バーに隠れている」と報告する既知の限界（U-G28-2 / P-G28-1）を理由に、
   // 意図的にここへ混ぜていなかった。今回 `checkFixedOverlays` に内側スクローラの追随を足した（下記）
   // ので、育つ返事の吹き出し（`ReplyStepRow` の折り畳み・トリム表示を含む）も実際に機械検査に通す。
+  // ADR-0056 D2（Phase 78/80）: MCP 経由の発言（`author = mcp:<client_id>`）の human ブロックも既定の
+  // 流れに混ぜ、「外部（<name>）」の帯（`~/components/ConsoleBlockItem.tsx::HumanBlockView`）を監査に通す。
+  // 上の `GET /mcp/clients` の `chatgpt` と同じ id にして、名前解決（id ではなく name が出る）も検査する。
+  const mcpHumanBlock = {
+    kind: "human",
+    at: "2026-09-20T00:59:50Z",
+    cursor: "00001789000000000000.0.m01MCP",
+    message_id: "01MCPMSG0000000000000001",
+    node_id: "cos",
+    text: "ChatGPT の Deep Research からの種: この方向で調べて",
+    author: "mcp:chatgpt",
+  };
   mock.on("GET", "/api/v1/console", (_req, res) =>
-    sendJson(res, 200, fx.consolePage({ items: [...fx.consoleBlocks(), fx.consoleGrowingReplySnapshot()] })),
+    sendJson(
+      res,
+      200,
+      fx.consolePage({ items: [mcpHumanBlock, ...fx.consoleBlocks(), fx.consoleGrowingReplySnapshot()] }),
+    ),
   );
   mock.on("GET", "/api/v1/stream", (_req, res) => sendSse(res));
   mock.on("GET", "/api/v1/console/stream", (_req, res) => sendSse(res));

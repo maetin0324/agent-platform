@@ -44,6 +44,9 @@ export default [
   route("daemon", "routes/daemon.tsx"),
   route("providers", "routes/providers.tsx"),
   route("accounts", "routes/accounts.tsx"),
+  // MCP クライアントの直近の呼び出し（ADR-0056 D4、Phase 80）。「MCP クライアント」節のカードを
+  // 開いたときだけ取りに行く resource route（`tasks/:id/runs/:runId/events` と同じ作り）
+  route("mcp/clients/:id/calls", "routes/mcp.clients.$id.calls.ts"),
   route("clusters", "routes/clusters.tsx"),
   // リリース（自己改善のデプロイ。Phase G14、ADR-0040 D6）
   route("releases", "routes/releases.tsx"),
