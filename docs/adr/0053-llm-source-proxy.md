@@ -234,3 +234,92 @@ D3（Qwen トンネルを celeris が張る）と D4（`GET /llm/sources` の可
   から GUI の TOTP 1 回で復帰し `celeris/cheap` が Qwen に戻ることは未確認**（ADR-0009 P-34）。
   `docs/PROGRESS.md` の「Phase 66」節に本番の運用手順（設定キー・人が一度だけ行うこと・確認方法）
   を書いた。認証・ネットワークが使える環境の人（またはエージェント）が実行し、結果を追記すること。
+
+## Phase 66b 追記（本番の起動パニックの修正。2026-09-21）
+
+**観測（本番、2026-09-21 12:40 UTC、release `8a979f24048b` = main + Phase 66）**: 上の本番運用手順
+どおり `[[clusters.forwards]] listen = "127.0.0.1:18000" target = "bnode150:18000"`（`auth = "totp"`
+の `pegasus`）を本番設定に足して celeris を起こすと、数秒で以下の panic でデーモンが落ちた
+（staging を `verify.sh` で検証する段階）。forward を外すと起動する。
+
+```
+thread 'main' (2853009) panicked at crates/celeris/src/lib.rs:621:31: Cannot start a runtime from
+within a runtime. This happens because a function (like `block_on`) attempted to block the current
+thread while the thread is being used to drive asynchronous tasks.
+```
+
+- **原因**: `crates/celeris/src/lib.rs:621` は `cluster_connector`（ADR-0032 D3 のクロージャ）の中で、
+  ネストした `current_thread` の tokio ランタイムを作って `.block_on(...)` する。このクロージャは
+  「ディスパッチループの中から**同期で**呼ばれる」（元のコメントどおり）ことを前提に書かれていたが、
+  実際には `Dispatcher::tick()`（`crates/task-dispatch/src/dispatcher.rs`）が celeris の
+  `tick_loop`（`async fn`、`#[tokio::main]` の既定＝**マルチスレッド**ランタイムの上で動く）から
+  **インラインで**（`tokio::spawn` も `spawn_blocking` も経由せず）呼ばれており、`tick()` の実行自体が
+  すでに tokio ランタイムのワーカースレッド上にある。Phase 66 の `Dispatcher::refresh_cluster_tunnels`
+  は「master が死んでいれば `auth` の値に関わらず既存の `cluster_connector` を再利用して鍵認証を試す」
+  （ADR-0053 D3。TOTP の前に鍵認証を試すため）という設計どおりに実装されていたため、これが
+  **`auth = "totp"` のクラスタで初めて** `cluster_connector` を実行に至らせた。`cluster_connector`
+  自体は ADR-0032 D3（`auth = "publickey"` の自動接続。`try_auto_connect_cluster`）のために元から
+  存在したが、本番に `auth = "publickey"` のクラスタが無かったため、この「ランタイムの中でネストした
+  ランタイムを `block_on` する」経路はこれまで一度も実行されておらず、テスト（`tunnel_*` 4 件）も
+  `ClusterConnector`/`TunnelForwardEnsurer`/`TunnelProbe` を全部フェイクの closure に差し替えていた
+  ため、実物の `cluster_connector`（celeris 側）を経由しない形でしか検証していなかった。**Phase 66
+  のレビュー・ゲート（`cargo test --workspace` / clippy）はどちらもこの経路を実際には実行しないため、
+  検出できなかった**（下の「テストが検出できなかった理由」を参照）。
+- **修正**:
+  1. `crates/task-dispatch/src/dispatcher.rs` に `run_cluster_hooks_off_async`（新規、非 pub）を足し、
+     `Dispatcher::tick()` の `self.refresh_cluster_liveness()` / `self.refresh_cluster_tunnels()` の
+     呼び出しをこれで包んだ。中身は「本物の OS スレッド（`std::thread::scope`）へ処理を逃がし、
+     呼び出し元がマルチスレッドの tokio ランタイムの上にいるときだけ `tokio::task::block_in_place` で
+     包んで join する」という形（`tokio::runtime::Handle::try_current()` と
+     `Handle::runtime_flavor()` で判定）。`block_in_place` は `current_thread` ランタイムの中で呼ぶと
+     panic するため、既存の `#[tokio::test]`（既定は `current_thread`）の `tunnel_*` 4 件やランタイムの
+     無い素の同期呼び出しはこの分岐を通らず、`std::thread::scope` だけを使う（実 OS スレッドなので
+     ネストしたランタイムを作っても常に安全）。実験で確認した性質（下記）に基づく設計。
+  2. `crates/celeris/src/lib.rs` の `cluster_connector` に「呼ばれた時点で
+     `tokio::runtime::Handle::try_current()` が `Ok` なら（＝上の 1. の契約が破られている）、
+     ネストしたランタイムを作らずに `tracing::error!` を出して
+     `Err("cluster connect must not be called from an async context")` を返す」という防御的な
+     ガードを追加した（panic の代わりに、呼び出し側で cooldown に落ちるだけにする。今回の直接原因は
+     1. で塞いだので、このガードは「将来また同じ形の呼び出しを誰かが async の中から直接書いてしまった
+     場合」の保険）。
+  3. `tunnel_forward_ensurer` / `tunnel_probe`（どちらも celeris 側。ssh の spawn と
+     `task_worker::probe_models` の TCP 直叩き）はネストしたランタイムを持たないため panic はしない
+     が、それぞれ数秒ブロックしうる（`ssh` の起動、`PROBE_TIMEOUT = 3` 秒）。これらは
+     `refresh_cluster_tunnels()` の中から呼ばれるので、1. の `run_cluster_hooks_off_async` で
+     `refresh_cluster_tunnels()` ごと async ワーカーから逃がしたことで同時に解決した（追加の変更は
+     不要だった）。
+  4. **実験で確認した tokio の挙動**（`/tmp` の使い捨てクレートで検証。ローカル実行のみ、外部
+     ネットワークには出ていない）:
+     - マルチスレッド・ランタイムの async タスクの中で、素朴に `Builder::new_current_thread().build()`
+       → `.block_on()` すると、本番と同じ文言で panic する（再現した）。
+     - `tokio::task::block_in_place(|| { let rt = Builder::new_current_thread().build()...;
+       rt.block_on(...) })` は panic しない。
+     - しかし `block_in_place` のクロージャの中でも `Handle::try_current()` は `true` のまま
+       （＝「今 tokio ランタイムの中にいるか」を防御的ガードの判定に使うなら、`block_in_place` だけ
+       では守れない）。
+     - `block_in_place` のクロージャの中で `std::thread::scope` により新しい OS スレッドを spawn する
+       と、その OS スレッドの中では `Handle::try_current()` が `false` になる（tokio の文脈は
+       スレッドローカルで、新しい OS スレッドには引き継がれない）。この性質を使って、2. の防御的
+       ガードと 1. の実際の退避を矛盾なく両立させた。
+  5. **`try_auto_connect_cluster`（`auth = "publickey"` の自動接続。ADR-0032 D3、`dispatch_ready` の
+     中から呼ばれる）は今回のスコープ外**: これも `cluster_connector` を同じインライン（tick 内、
+     async ワーカー上）の形で呼んでおり、理論上は同じ形の panic を起こしうる潜在バグだが、本番に
+     `auth = "publickey"` のクラスタが実在しないため一度も踏まれていない。2. の防御的ガードにより
+     **panic はしなくなった**（呼ばれれば `Err` → 通常の cooldown 経路に落ちる）が、`dispatch_ready`
+     の同じループ反復の**後段**でワーカー起動のため `tokio::spawn` を呼ぶ必要があり、`tick()` 全体を
+     1. と同じ形で退避させるのはこの Phase の範囲を越える（`[[clusters.forwards]]` の起動パニックと
+     いう報告された不具合ではない）。将来 `auth = "publickey"` のクラスタを本番で使うときは、同じ
+     `run_cluster_hooks_off_async` の形で `try_auto_connect_cluster` 側も退避させる必要がある
+     （`docs/PROGRESS.md` の「未解決事項」に記載）。
+  6. **テストが検出できなかった理由**: Phase 66 の `tunnel_*` 4 件（`crates/task-dispatch/src/
+     dispatcher.rs`）は `Dispatcher::refresh_cluster_tunnels()` を**直接**（`tick()` を経由せず）、
+     かつ `#[tokio::test]`（既定 flavor = `current_thread`）から呼んでいた。celeris 側の実物の
+     `cluster_connector`（ネストしたランタイムを作る形）も使わず、単純な同期の closure
+     （`Arc::new(|_, _| Ok(()))` 等）に差し替えていた。この 2 点（呼び出し経路が `tick()` を通らない・
+     ネストしたランタイムを作る実物のフックを使わない）のどちらが欠けても、本番の panic は
+     再現しない。Phase 66b で `crates/celeris/src/lib.rs` に
+     `a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b`
+     （`#[tokio::test(flavor = "multi_thread")]`）を足し、(a) `build_dispatcher` で本番と同じ配線をし、
+     (b) `dispatcher.tick()` を直接呼び、(c) `cluster_connector` だけを実物と**同じ形**
+     （ネストした `current_thread` ランタイム + `block_on`。実 ssh はしない）の偽物に差し替えることで、
+     この 2 点を両方満たす回帰テストにした（この修正を外すと実際にこのテストが落ちることを確認した）。

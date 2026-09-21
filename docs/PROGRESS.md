@@ -10486,3 +10486,119 @@ clusters・llm-sources のモックを編集していたため、それらには
   `deny_unknown_fields` なので affecaa より前のバイナリは読めない → **8a979f2 の昇格で有効**にする（rollback 先が affecaa になってから）。
   systemd の `celeris-qwen-tunnel.*` の撤去（`install-units.sh --remove-qwen-tunnel`）は systemctl を伴うので人が実行する。
 - PaperQA の動作確認タスクを作り直した（2 回目。celeris/standard が Codex で通るようになったため）。結果は次節。
+
+## Phase 66b — `[[clusters.forwards]]` 設定時の起動パニック（runtime in runtime）の修正（2026-09-21）
+
+**観測**: 上の節のとおり `[[clusters.forwards]]`（pegasus、`auth = "totp"`）を本番設定に足して
+8a979f2 昇格後の celeris を起こしたところ、2026-09-21 12:40 UTC、staging を `verify.sh` で検証する
+段階で数秒以内に以下の panic でデーモンが落ちた（forward を外せば起動する。以後 forward は撤去済み）。
+
+```
+thread 'main' (2853009) panicked at crates/celeris/src/lib.rs:621:31: Cannot start a runtime from
+within a runtime. This happens because a function (like `block_on`) attempted to block the current
+thread while the thread is being used to drive asynchronous tasks.
+```
+
+**原因**: `crates/celeris/src/lib.rs` の `cluster_connector`（ADR-0032 D3）はネストした
+`current_thread` の tokio ランタイムを作って `.block_on(...)` する形で書かれており、「ディスパッチ
+ループの中から**同期で**呼ばれる」ことを前提にしていた。しかし実際には `Dispatcher::tick()`
+（`crates/task-dispatch/src/dispatcher.rs`）は celeris の `tick_loop`（`async fn`。`#[tokio::main]`
+の既定＝マルチスレッド・ランタイムの上で動く）から**インラインで**（`tokio::spawn` も
+`spawn_blocking` も経由せず）呼ばれており、`tick()` 自体がすでに tokio ランタイムのワーカー
+スレッド上で実行されている。Phase 66 の `Dispatcher::refresh_cluster_tunnels` は ADR-0053 D3 の
+設計どおり「master が死んでいれば `auth` の値に関わらず既存の `cluster_connector` を再利用して
+鍵認証を試す」ため、これが `auth = "totp"` のクラスタで**初めて** `cluster_connector` を実行に
+至らせた（`cluster_connector` 自体は `auth = "publickey"` の自動接続用に元から存在したが、本番に
+`publickey` のクラスタが無く、この「ランタイムの中でネストしたランタイムを `block_on` する」経路は
+これまで一度も実行されていなかった）。Phase 66 の `tunnel_*` テスト 4 件は `refresh_cluster_tunnels()`
+を `tick()` を経由せず直接呼び、かつ `cluster_connector` も実物ではなく単純な同期 closure に
+差し替えていたため、この経路を検証できていなかった（詳しくは `docs/adr/0053-llm-source-proxy.md`
+の「Phase 66b 追記」）。
+
+**変更**:
+1. `crates/task-dispatch/src/dispatcher.rs`: `run_cluster_hooks_off_async`（新規）を追加し、
+   `Dispatcher::tick()` の `refresh_cluster_liveness()` / `refresh_cluster_tunnels()` の呼び出しを
+   これで包んだ。実物の OS スレッド（`std::thread::scope`）へ処理を逃がし、呼び出し元がマルチ
+   スレッドの tokio ランタイム上にいるときだけ `tokio::task::block_in_place` で包んで join する
+   （`Handle::try_current()` / `Handle::runtime_flavor()` で判定。`block_in_place` は
+   `current_thread` ランタイムの中で呼ぶと panic するため、既存の `#[tokio::test]`〈既定
+   `current_thread`〉の `tunnel_*` 4 件やランタイムの無い素の同期呼び出しはこの分岐を通らず、
+   `std::thread::scope` だけを使う）。
+2. `crates/celeris/src/lib.rs`: `cluster_connector` に防御的ガードを追加。呼ばれた時点で
+   `tokio::runtime::Handle::try_current()` が `Ok`（＝上の契約が破られている）なら、ネストした
+   ランタイムを作らず `tracing::error!` を出して
+   `Err("cluster connect must not be called from an async context")` を返す（panic の代わりに
+   cooldown へ落ちるだけにする）。
+3. `tunnel_forward_ensurer` / `tunnel_probe`（celeris 側。`ssh` の spawn と `probe_models` の TCP
+   直叩き）はネストしたランタイムを持たないため panic はしないが、数秒ブロックしうる。これらは
+   `refresh_cluster_tunnels()` の中から呼ばれるので、1. で `refresh_cluster_tunnels()` ごと
+   async ワーカーから逃がしたことで同時に解決した。
+4. **範囲外**: `try_auto_connect_cluster`（`auth = "publickey"` の自動接続、`dispatch_ready` の中から
+   呼ばれる）も同じ形で `cluster_connector` を呼んでおり、理論上は同じ panic を起こしうる潜在バグ
+   だったが、本番に `publickey` のクラスタが実在しないため一度も踏まれていない。2. のガードにより
+   panic はしなくなったが、`dispatch_ready` の同じループ反復の後段で `tokio::spawn`（ワーカー起動）
+   を呼ぶため `tick()` 全体をこの Phase で退避させるのは範囲を越える。将来 `publickey` のクラスタを
+   使うときは同じ形で退避させる必要がある（下の「未解決事項」）。
+
+### 受け入れ条件ごと
+
+**1./2. 非同期ワーカーから外す・`cluster_connector` を堅牢にする**
+
+- `crates/task-dispatch/src/dispatcher.rs` `run_cluster_hooks_off_async`、`crates/celeris/src/lib.rs`
+  `cluster_connector` の防御ガード（上記）。
+
+**3. `ssh -O forward` / `ssh -N -L` / `probe_models` を数秒ブロックさせない**
+
+- `tunnel_forward_ensurer` / `tunnel_probe` は変更していないが、呼び出し元の
+  `refresh_cluster_tunnels()` ごと `run_cluster_hooks_off_async` で退避させたことで満たした。
+
+**4. 回帰テスト（実際の配線・実際の形のネストしたランタイムで panic しないことを確認）**
+
+- `crates/celeris/src/lib.rs` `tests::a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b`
+  （`#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`）: `build_dispatcher`（`main`/
+  `--mode verify` と同じ配線）で `auth = "totp"` かつ `[[clusters.forwards]]` を持つクラスタを 1 つ
+  作り、`cluster_connector` だけ実物と同じ形（ネストした `current_thread` ランタイム +
+  `block_on`。実 ssh はしない）の偽物に差し替えて `dispatcher.tick()` を直接呼ぶ。呼ばれた時点で
+  `Handle::try_current().is_err()` を assert しつつ、`tick()` が `Ok` で返ることと、
+  `cluster_connector` が実際に呼ばれたことを確認する。
+  - **この修正を一時的に取り消して実行し、このテストが実際に落ちる（「Cannot start a runtime from
+    within a runtime」と同種の panic）ことを確認した**（回帰テストとして機能することの検証。修正は
+    その後すぐ復元した）。
+- 既存の `tunnel_*` 4 件（`crates/task-dispatch/src/dispatcher.rs`）は無変更のまま green（呼び出し
+  経路〈`refresh_cluster_tunnels()` を直接、`tick()` を経由しない〉と `#[tokio::test]` の既定
+  flavor が `current_thread` であることの両方により、`run_cluster_hooks_off_async` は
+  `std::thread::scope` だけを使う分岐を通る）。
+
+### ゲート
+
+- `cargo test --workspace --no-fail-fast`: **exit 0。1628 passed / 0 failed**（doctest 含む全
+  クレート。新規 1 件の回帰テストを含む。flaky・skip 無し）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: **exit 0。警告 0**。
+- 非テストコードに `unwrap()` を増やしていない（`git diff` の追加行を目視確認。`run_cluster_hooks_off_async`
+  は `unwrap_or(false)` / `Result` の `match` のみ、`cluster_connector` の新規ガードは `if`/`return`
+  のみ。回帰テスト内の `unwrap_or_else(|e| panic!(...))` はテストコード）。
+- ディスパッチャ・ストアに LLM 呼び出しは無い（今回の変更は既存の ssh/HTTP probe の呼び出し位置を
+  移しただけで、新しい外部呼び出しは足していない）。
+- `gui/`・本番パス（`~/.config/celeris`、`~/.local/celeris`）・ポート 7700/7710/7712/18000/18100・
+  `systemctl`・実 ssh・資格情報ファイルには一切触れていない。`docs/DESIGN.md`/`docs/SPEC.md` も
+  変更していない。
+
+### 未解決事項
+
+- `try_auto_connect_cluster`（`auth = "publickey"` の自動接続）は `cluster_connector` を同じ
+  インラインの形（`tick()` → `dispatch_ready()` → `tokio::spawn` を含む同じループ反復の中）で呼んで
+  おり、2. のガードにより panic はしなくなったが、実際に鍵認証が成功する経路はまだ塞がれたまま
+  （`Handle::try_current().is_ok()` なら常に `Err` を返す）。本番に `publickey` のクラスタが無いため
+  実害は無いが、将来使うことがあれば `dispatch_ready` 側も `run_cluster_hooks_off_async` と同じ形で
+  退避させる実装が要る。
+- **実機検証は未実施**（このセッションには本物の pegasus/bnode150 も TOTP も無い。ADR-0009 P-34）。
+  認証・ネットワークが使える環境の人（またはエージェント）に、この修正を反映した release を
+  `verify.sh` で検証したあと昇格し、以下を確認して結果をここに追記することを依頼する:
+  1. 本番設定に `[[clusters.forwards]] listen = "127.0.0.1:18000" target = "bnode150:18000"`
+     （`pegasus`、`auth = "totp"`）を戻す（Phase 66 の節にある手順のまま）。
+  2. `verify.sh` の check 1（起動して数秒生きていること）が forward を設定した状態で通ること
+     （今回の panic はここで再現していた）。
+  3. `GET /api/v1/clusters` の `tunnel_forwards[].up` が最終的に `true` になること（master が
+     生きていれば forward が張られる。TOTP が要る状態なら GUI から 1 回入力する）。
+  4. 上記が確認できたら、Phase 66 の節にある残りの本番運用手順（3〜5. systemd unit の撤去・
+     `celeris/cheap` が Qwen に戻ることの確認）を進める。

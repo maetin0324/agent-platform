@@ -612,6 +612,22 @@ fn cluster_connector(masters: ClusterMasters) -> task_dispatch::dispatcher::Clus
     Arc::new(move |cluster_id: &str, host: &str| {
         let host = host.to_string();
         let cluster_id = cluster_id.to_string();
+        // Phase 66b（本番 2026-09-21 の観測）: このクロージャは非同期の `start_connect` を専用ランタイムで
+        // `block_on` する。呼び出し元（`task_dispatch::dispatcher::run_cluster_hooks_off_async`）は
+        // tokio の文脈を持たない OS スレッドへ逃がしてから呼ぶ契約になっているが、万一これが破られて
+        // tokio ランタイムのワーカースレッドから直接呼ばれると、下の `Builder::new_current_thread().build()`
+        // 後の `.block_on()` が「Cannot start a runtime from within a runtime」で panic する
+        // （`crates/celeris/src/lib.rs:621` で実際に panic した）。ここで一度だけ確かめ、破られていたら
+        // panic ではなくエラーを返す（呼び出し側は cooldown に落とすだけで、デーモンは死なない）。
+        if tokio::runtime::Handle::try_current().is_ok() {
+            tracing::error!(
+                cluster = %cluster_id,
+                host = %host,
+                "cluster connect must not be called from an async context (Phase 66b guard; \
+                 this is a bug in the caller, not in ssh/network)"
+            );
+            return Err("cluster connect must not be called from an async context".to_string());
+        }
         // ディスパッチループは同期なので、非同期の `start_connect` を専用ランタイムで回す。
         // `Handle::current().block_on` は同じランタイムのワーカースレッドを塞いでパニックしうるため使わない。
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3044,6 +3060,90 @@ env_from_secrets = { LDR_SEARCH_ENGINE_WEB_EXA_API_KEY = "exa" }
         // celeris の tick ループが直接読む `[notify]`。
         assert_eq!(config.notify.interval_secs, 90);
     }
+    // ---- ADR-0053 D3 追記 / Phase 66b（本番 2026-09-21 の観測）: `[[clusters.forwards]]` を持つ ----
+    // ---- クラスタが設定されていても、tick がマルチスレッド tokio ランタイムの中から panic しないこと ----
+
+    /// 本番で観測した panic（`crates/celeris/src/lib.rs:621`、「Cannot start a runtime from within a
+    /// runtime」）の再現・回帰テスト。`main`/`--mode verify` と同じ配線（`build_dispatcher`）で
+    /// `auth = "totp"` かつ `[[clusters.forwards]]` を持つクラスタを 1 つ作り、master が死んでいる状態
+    /// （`cluster_connected` が空）で `dispatcher.tick()` を **`#[tokio::test(flavor = "multi_thread")]`**
+    /// （celeris の実行時と同じマルチスレッド・ランタイム）の中から直接呼ぶ。
+    ///
+    /// 実 ssh は起こさない: `cluster_connector` だけ、実物（`cluster_connector` 関数）と**同じ形**
+    /// （現在のスレッドで新しいネストした current_thread ランタイムを作って `block_on` する）の偽物に
+    /// 差し替える。これは Phase 66b の修正前なら panic した形そのものなので、この形が panic しなくなった
+    /// ことが「呼び出し元が async ワーカーから逃がしている」ことの直接の証拠になる（`tunnel_forward_ensurer`
+    /// / `tunnel_probe` は ssh・HTTP を呼ぶだけで元々 panic しないので偽物で十分）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        std::fs::create_dir_all(dir.path().join("ws")).unwrap_or_else(|e| panic!("ws: {e}"));
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+db = "celeris.sqlite3"
+workspace_root = "ws"
+
+[[providers]]
+id = "x"
+adapter = "fake"
+
+[[clusters]]
+id = "pegasus"
+host = "pegasus"
+auth = "totp"
+
+[[clusters.forwards]]
+listen = "127.0.0.1:0"
+target = "bnode150:18000"
+"#,
+        )
+        .unwrap_or_else(|e| panic!("config: {e}"));
+        let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
+        let masters: ClusterMasters = Default::default();
+        let mut dispatcher = build_dispatcher(&config, masters)
+            .unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
+
+        let connector_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connector_calls_hook = connector_calls.clone();
+        dispatcher.set_cluster_connector(Arc::new(move |_cluster_id: &str, _host: &str| {
+            connector_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Phase 66b の契約: ここに来た時点で、呼び出し元はすでに tokio の文脈を持たない OS
+            // スレッドへ逃がしているはず（さもなければこのテストの意味が無い）。
+            assert!(
+                tokio::runtime::Handle::try_current().is_err(),
+                "the cluster connector hook must run off any tokio runtime context (Phase 66b)"
+            );
+            // 実物の `cluster_connector`（本ファイルの上のほう）と同じ形: ネストした current_thread
+            // ランタイムを作って `block_on` する。修正前はこの形が「Cannot start a runtime from within
+            // a runtime」で panic した。実 ssh は起こさない。
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap_or_else(|e| panic!("nested runtime: {e}"));
+            rt.block_on(async { Err::<(), String>("test: no real ssh".to_string()) })
+        }));
+        dispatcher.set_tunnel_forward_ensurer(Arc::new(|_host: &str, _listen: &str, _target: &str| {
+            Ok(())
+        }));
+        dispatcher.set_tunnel_probe(Arc::new(|_listen: &str| false));
+        dispatcher.set_accepting_new_work(true);
+
+        // celeris の tick ループ（`tick_loop`）がしているのと同じこと: マルチスレッド tokio ランタイムの
+        // 中から、同期の `dispatcher.tick()` を直接呼ぶ。修正前はここで panic した。
+        let report = dispatcher.tick();
+        assert!(
+            report.is_ok(),
+            "the first tick must complete without panicking: {report:?}"
+        );
+        assert!(
+            connector_calls.load(std::sync::atomic::Ordering::SeqCst) >= 1,
+            "the totp cluster with a forward must still reach the cluster connector (key auth \
+             before TOTP, ADR-0053 D3)"
+        );
+    }
+
     #[test]
     fn explicit_credential_reference_missing_blocks_instead_of_using_inherited_auth() {
         let cfg: Config = toml::from_str(
