@@ -10,7 +10,7 @@ import type { Tone } from "~/components/ui/tone";
 /** celeris の `error` 文言（`crates/celeris/src/notify.rs` の `NOT_CONFIGURED` 定数）。GUI 側の文言に畳む。 */
 export const NOTIFY_NOT_CONFIGURED_ERROR = "discord webhook is not configured";
 
-/** 5 種の知らせ（ADR-0037 D1）を SPEC の言葉で。 */
+/** 知らせの種類（ADR-0037 D1、ADR-0053 D3）を SPEC の言葉で。 */
 export const NOTIFY_KIND_LABEL: Record<NotificationKind, string> = {
   milestone_ready: "途中目標の仕事が終わった",
   approval_pending: "認可の要求が来た",
@@ -18,6 +18,7 @@ export const NOTIFY_KIND_LABEL: Record<NotificationKind, string> = {
   bad_news: "悪い知らせが届いた",
   secretary_reply: "返事が届いた",
   task_ready: "仕事の成果が届いた",
+  cluster_login_needed: "クラスタのログインが必要（TOTP）",
 };
 
 export function notifyKindLabel(kind: NotificationKind): string {
@@ -67,6 +68,8 @@ export function notifyTargetHref(recent: Pick<NotifyRecent, "kind" | "key" | "pr
           : `/projects/${encodeURIComponent(recent.key)}`;
     case "milestone_ready":
       return recent.project_id ? `/projects/${encodeURIComponent(recent.project_id)}` : null;
+    case "cluster_login_needed":
+      return "/clusters";
     default:
       return null;
   }

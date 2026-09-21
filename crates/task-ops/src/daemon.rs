@@ -227,8 +227,25 @@ pub struct ClusterLive {
     /// ADR-0032 D4: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中か。古いスナップショットには無いので既定は `false`。
     #[serde(default)]
     pub connect_pending: bool,
+    /// ADR-0053 D3（Phase 66）: 鍵認証を試しても ssh master が繋がらず、人の TOTP 入力が要る状態か。
+    /// 古いスナップショットには無いので既定は `false`。
+    #[serde(default)]
+    pub tunnel_login_needed: bool,
+    /// ADR-0053 D3: このクラスタの port forward（`[[clusters]].forwards`）の生存。無ければ空
+    /// （forward を持たないクラスタ、または古いスナップショット）。
+    #[serde(default)]
+    pub tunnel_forwards: Vec<TunnelForwardLive>,
 }
 
 fn default_cluster_live_auth() -> String {
     "manual".to_string()
+}
+
+/// ADR-0053 D3（Phase 66）: 1 本の port forward の生存（`GET /clusters` にそのまま出す）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TunnelForwardLive {
+    pub listen: String,
+    pub target: String,
+    /// forward 越しに `GET <listen>/v1/models` が届くか（直近の観測）。
+    pub up: bool,
 }

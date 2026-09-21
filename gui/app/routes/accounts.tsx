@@ -14,7 +14,15 @@ import type { AccountAdapter, AccountOpOutcome, ActionError, SecretActionResult 
 import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
 import { CelerisError, type CelerisRouteErrorData, celerisErrorResponse, isCelerisUnavailable } from "~/celeris/errors";
 import { deleteSecret, putSecret, readSecretId, readSecretValue } from "~/celeris/secrets-admin.server";
-import type { AccountList, AccountView, SecretList, SecretView } from "~/celeris/types";
+import type {
+  AccountList,
+  AccountView,
+  LlmSourceAccountView,
+  LlmSourcesView,
+  LlmSourceView,
+  SecretList,
+  SecretView,
+} from "~/celeris/types";
 import { AccountActionFlash, ErrorFlash, SecretActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
@@ -24,6 +32,16 @@ import { hintClass, inputClass, labelClass, selectClass } from "~/components/ui/
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import { TONE_SOLID_BG, type Tone } from "~/components/ui/tone";
+import { shortId } from "~/lib/format";
+import {
+  cooldownRemainingLabel,
+  formatRemaining,
+  isAccountCoolingDown,
+  sourceLabel,
+  sourceStatusWord,
+  tierLabel,
+  tierResolutionLabel,
+} from "~/lib/llm-sources";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/accounts";
@@ -40,6 +58,12 @@ export interface AccountsData {
    * 画面全体は壊さず「API キー」節だけにトークン案内を出す（`GET /accounts` 自体は管理系ではない）。 */
   secrets: SecretList | null;
   secretsError: ActionError | null;
+  /** `GET /llm/sources`（ADR-0053 D4、Phase 66）。`[llm_proxy]` が無効なら 409
+   * `llm_proxy_unavailable` になるので `llmSourcesUnavailable` に落とし、それ以外の失敗だけ
+   * `llmSourcesError` に入れる（`/accounts` 自体は落とさない。secrets と同じ扱い）。 */
+  llmSources: LlmSourcesView | null;
+  llmSourcesUnavailable: boolean;
+  llmSourcesError: ActionError | null;
   fetchedAt: string;
 }
 
@@ -75,7 +99,27 @@ export async function loadAccounts(client: CelerisClient, request: Request): Pro
   } catch (e) {
     secretsError = secretsListError(e);
   }
-  return { accounts, secrets, secretsError, fetchedAt: new Date().toISOString() };
+  let llmSources: LlmSourcesView | null = null;
+  let llmSourcesUnavailable = false;
+  let llmSourcesError: ActionError | null = null;
+  try {
+    llmSources = await client.get<LlmSourcesView>("/llm/sources", { signal: request.signal });
+  } catch (e) {
+    if (e instanceof CelerisError && e.status === 409 && e.code === "llm_proxy_unavailable") {
+      llmSourcesUnavailable = true;
+    } else {
+      llmSourcesError = secretsListError(e);
+    }
+  }
+  return {
+    accounts,
+    secrets,
+    secretsError,
+    llmSources,
+    llmSourcesUnavailable,
+    llmSourcesError,
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 export async function loader({ request }: Route.LoaderArgs): Promise<AccountsData> {
@@ -178,7 +222,7 @@ function accountAdapter(item: AccountView): AccountAdapter {
 }
 
 export default function AccountsPage({ loaderData }: Route.ComponentProps) {
-  const { accounts, secrets, secretsError, fetchedAt } = loaderData;
+  const { accounts, secrets, secretsError, llmSources, llmSourcesUnavailable, llmSourcesError, fetchedAt } = loaderData;
   // celeris の SSE（daemon tick）による自動再検証のたびに `<Form>` の actionData は消える（React Router の仕様、
   // `app/hooks/useCelerisStream.ts`）。ログイン URL は「もう一度出せない」ものなので特に影響が大きい: 1 つの
   // `useFetcher()` にまとめ、その `fetcher.data` を表示する（fetcher の状態は revalidate() の影響を受けない）。
@@ -309,6 +353,13 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
         );
       })()}
 
+      <LlmSourcesSection
+        llmSources={llmSources}
+        unavailable={llmSourcesUnavailable}
+        error={llmSourcesError}
+        fetchedAt={fetchedAt}
+      />
+
       <SecretsSection
         secrets={secrets}
         secretsError={secretsError}
@@ -316,6 +367,139 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
         submitting={secretSubmitting}
         fetchedAt={fetchedAt}
       />
+    </div>
+  );
+}
+
+/**
+ * 「LLM source」節（ADR-0053 D4、Phase 66）。`GET /llm/sources` をそのまま表示する:
+ * 供給元ごとの到達性・アカウントの残量（短期/長期）・cooldown・直近 1 時間の要求/token 数と、
+ * `celeris/<tier>` が今どこに解決するか。判断（選択・cooldown）は celeris の中で決まっているので、
+ * ここでは値の整形だけ（`~/lib/llm-sources.ts`）。モバイル幅（393px）でも横はみ出しが出ないよう
+ * カードは流動的な幅にする（ADR-0055 D2）。
+ */
+function LlmSourcesSection({
+  llmSources,
+  unavailable,
+  error,
+  fetchedAt,
+}: {
+  llmSources: LlmSourcesView | null;
+  unavailable: boolean;
+  error: ActionError | null;
+  fetchedAt: string;
+}) {
+  const nowSec = Math.floor(new Date(fetchedAt).getTime() / 1000);
+  return (
+    <section
+      id="llm-sources"
+      aria-labelledby="llm-sources-heading"
+      className="space-y-4"
+      data-testid="llm-sources-section"
+    >
+      <SectionTitle icon="server" id="llm-sources-heading" count={llmSources?.sources.length}>
+        LLM source
+      </SectionTitle>
+
+      {error ? (
+        <ErrorFlash error={error} />
+      ) : unavailable || !llmSources ? (
+        <EmptyState icon="server" title="[llm_proxy] が設定されていません">
+          config.toml に <Mono>[llm_proxy]</Mono> セクションと 1 つ以上の供給元 （<Mono>claude_oauth</Mono> /{" "}
+          <Mono>codex_oauth</Mono> / <Mono>openai_compatible</Mono>）を足すと、
+          <Mono>celeris/&lt;tier&gt;</Mono> の抽象プロキシと、この節の可視化が使えます（
+          <Mono>docs/llm-source.md</Mono>）。
+        </EmptyState>
+      ) : (
+        <>
+          {(llmSources.celeris_tiers ?? []).length > 0 && (
+            <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm sm:grid-cols-3" data-testid="llm-tier-resolution">
+              {(llmSources.celeris_tiers ?? []).map((t) => (
+                <DataItem key={t.tier} label={`celeris/${tierLabel(t.tier)}`}>
+                  <span data-testid={`llm-tier-resolves-${t.tier}`}>{tierResolutionLabel(t.resolves_to)}</span>
+                </DataItem>
+              ))}
+            </dl>
+          )}
+
+          {llmSources.sources.length === 0 ? (
+            <EmptyState icon="server" title="供給元がありません" />
+          ) : (
+            <div className="grid gap-4 xl:grid-cols-2">
+              {llmSources.sources.map((source) => (
+                <LlmSourceCard key={source.id} source={source} nowSec={nowSec} />
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function LlmSourceCard({ source, nowSec }: { source: LlmSourceView; nowSec: number }) {
+  const statusWord = sourceStatusWord(source);
+  const tone: Tone = statusWord === "reachable" ? "success" : statusWord === "unreachable" ? "danger" : "neutral";
+  return (
+    <Card data-testid="llm-source-row" data-source-id={source.id} className="min-w-0 hover:shadow-md">
+      <CardHeader
+        icon="server"
+        tone={tone}
+        title={<span className="break-all">{sourceLabel(source.id)}</span>}
+        description={<Mono className="break-all text-xs text-fg-subtle">{source.id}</Mono>}
+        actions={
+          <Badge tone={tone} dot data-status-badge="llm-source" data-testid="llm-source-status">
+            {statusWord}
+          </Badge>
+        }
+      />
+      <CardBody className="space-y-4">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3">
+          <DataItem label="直近1時間 要求">
+            <span data-testid="llm-source-requests">{source.last_hour_requests}</span>
+          </DataItem>
+          <DataItem label="直近1時間 入力token">
+            <span data-testid="llm-source-prompt-tokens">{source.last_hour_prompt_tokens}</span>
+          </DataItem>
+          <DataItem label="直近1時間 出力token">
+            <span data-testid="llm-source-completion-tokens">{source.last_hour_completion_tokens}</span>
+          </DataItem>
+        </dl>
+
+        {source.accounts.length > 0 && (
+          <div className="space-y-2">
+            {source.accounts.map((account) => (
+              <LlmAccountRow key={account.id} account={account} nowSec={nowSec} />
+            ))}
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
+
+function LlmAccountRow({ account, nowSec }: { account: LlmSourceAccountView; nowSec: number }) {
+  const cooling = isAccountCoolingDown(account, nowSec);
+  return (
+    <div
+      className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm"
+      data-testid="llm-source-account"
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <Mono className="break-all" title={account.id}>
+          {shortId(account.id)}
+        </Mono>
+        {!account.logged_in && <Badge tone="neutral">未ログイン</Badge>}
+      </span>
+      <span className="flex flex-wrap items-center gap-3 text-fg-muted">
+        <span data-testid="llm-account-remaining-short">短期 {formatRemaining(account.remaining_short)}</span>
+        <span data-testid="llm-account-remaining-long">長期 {formatRemaining(account.remaining_long)}</span>
+        {cooling && account.cooldown_until != null && (
+          <Badge tone="warning" data-testid="llm-account-cooldown">
+            cooldown {cooldownRemainingLabel(account.cooldown_until, nowSec)}
+          </Badge>
+        )}
+      </span>
     </div>
   );
 }

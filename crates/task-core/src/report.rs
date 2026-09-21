@@ -440,6 +440,48 @@ pub fn report_for_cluster_unavailable(
     )
 }
 
+/// ADR-0053 D3（Phase 66）: `report_for_cluster_login_needed` の見出し。`celeris::notify` が
+/// `bad_news` の中からこれだけを `cluster_login_needed` として抜き出すのに使う（見出しでの区別。
+/// `ReportKind` に新しい種類は増やさない。既存の GUI/API が知っている種類のまま）。
+pub fn cluster_login_needed_headline(host: &str) -> String {
+    truncate_chars(&format!("{host} は TOTP ログインが必要"), HEADLINE_MAX_CHARS)
+}
+
+/// `headline` が `cluster_login_needed_headline` で作った見出しか（`celeris::notify` が
+/// `bad_news` の中から `cluster_login_needed` を抜き出すのに使う。suffix の判定を 1 か所にまとめる）。
+pub fn is_cluster_login_needed_headline(headline: &str) -> bool {
+    headline.ends_with("は TOTP ログインが必要")
+}
+
+/// クラスタの ssh master が落ち、鍵認証だけでは繋がらなかったこと（ADR-0053 D3）の報告
+/// （`kind = bad_news`、案件なし）。`report_for_cluster_unavailable` と似ているが、こちらは
+/// 「鍵認証を試して失敗した＝人の TOTP が要る」ことをはっきり書く（トンネル監視のループから
+/// 呼ばれる。dispatch できないタスクが無くても記録する）。
+pub fn report_for_cluster_login_needed(
+    node_id: &str,
+    level: u32,
+    cluster: &str,
+    host: &str,
+    now: OffsetDateTime,
+) -> Report {
+    let headline = cluster_login_needed_headline(host);
+    let body = format!(
+        "クラスタ {cluster}（{host}）の ssh 多重接続が切れ、鍵認証だけでは繋がりませんでした。\n\n\
+         GUI の「クラスタ」画面から TOTP を入力して接続してください。\n"
+    );
+    new_report(
+        node_id,
+        level,
+        None,
+        None,
+        ReportKind::BadNews,
+        headline,
+        body,
+        Vec::new(),
+        now,
+    )
+}
+
 /// 悪い知らせを祖先へ複製する（SPEC §2.4「目立つ形で届く」）。
 ///
 /// 各段のコピーの `sources` は**1 段下の報告の id**（最初のコピーは元の報告）。こうすると

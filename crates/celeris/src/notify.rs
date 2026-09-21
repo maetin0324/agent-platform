@@ -203,6 +203,7 @@ fn scan_at(
     out.extend(scan_bad_news(store, started_at, base_url)?);
     out.extend(scan_secretary_reply(store, &org, started_at, base_url)?);
     out.extend(scan_task_ready(store, started_at, base_url)?);
+    out.extend(scan_cluster_login_needed(store, started_at, base_url)?);
     // リリースの引き渡しは最新の対話・途中目標・走査時刻に隠されない。
     for delivery in store.delivery_list()? {
         if let Some(id) = delivery.notification {
@@ -407,7 +408,13 @@ fn scan_bad_news(
     let mut reports: Vec<_> = store
         .report_list(&filter)?
         .into_iter()
-        .filter(|r| r.kind == ReportKind::BadNews && r.created_at >= started_at)
+        .filter(|r| {
+            r.kind == ReportKind::BadNews
+                && r.created_at >= started_at
+                // ADR-0053 D3（Phase 66）: クラスタの TOTP ログイン待ちは `cluster_login_needed`
+                // として別に知らせる（scan_cluster_login_needed）。ここでは二重に鳴らさない。
+                && !task_core::report::is_cluster_login_needed_headline(&r.headline)
+        })
         .collect();
     reports.sort_by_key(|a| a.id);
     Ok(reports
@@ -419,6 +426,45 @@ fn scan_bad_news(
                 "悪い知らせ: {}{}",
                 excerpt(&report.headline, EXCERPT_CHARS),
                 link(base_url, "/reports")
+            ),
+            project_id: None,
+        })
+        .collect())
+}
+
+/// ADR-0053 D3（Phase 66）: クラスタの ssh master が落ち、鍵認証も失敗した（人の TOTP が要る）。
+/// `record_cluster_login_needed_report`（`task_core::report::report_for_cluster_login_needed`）が
+/// 書いた `bad_news` の中から、見出しでこれだけを拾う（`ReportKind` は増やさない）。
+/// `key` = 報告 id（Dispatcher が outage ごとに 1 回だけ報告を作るので、これで「1 outage = 1 通知」になる）。
+fn scan_cluster_login_needed(
+    store: &dyn TaskStore,
+    started_at: OffsetDateTime,
+    base_url: Option<&str>,
+) -> Result<Vec<Candidate>, StoreError> {
+    let filter = ReportFilter {
+        level: Some(0),
+        limit: REPORT_SCAN,
+        ..ReportFilter::default()
+    };
+    let mut reports: Vec<_> = store
+        .report_list(&filter)?
+        .into_iter()
+        .filter(|r| {
+            r.kind == ReportKind::BadNews
+                && r.created_at >= started_at
+                && task_core::report::is_cluster_login_needed_headline(&r.headline)
+        })
+        .collect();
+    reports.sort_by_key(|a| a.id);
+    Ok(reports
+        .into_iter()
+        .map(|report| Candidate {
+            kind: NotificationKind::ClusterLoginNeeded,
+            key: report.id.to_string(),
+            body: format!(
+                "クラスタのログインが必要: {}{}",
+                excerpt(&report.headline, EXCERPT_CHARS),
+                link(base_url, "/clusters")
             ),
             project_id: None,
         })

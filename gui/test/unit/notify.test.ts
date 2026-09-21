@@ -20,10 +20,11 @@ const KINDS: NotificationKind[] = [
   "bad_news",
   "secretary_reply",
   "task_ready",
+  "cluster_login_needed",
 ];
 
-describe("notifyKindLabel (ADR-0037 D1、SPEC の言葉で)", () => {
-  it("6 種すべてに日本語のラベルがある", () => {
+describe("notifyKindLabel (ADR-0037 D1 / ADR-0053 D3、SPEC の言葉で)", () => {
+  it("7 種すべてに日本語のラベルがある", () => {
     for (const kind of KINDS) {
       expect(notifyKindLabel(kind)).not.toBe(kind);
       expect(typeof notifyKindLabel(kind)).toBe("string");
@@ -103,6 +104,10 @@ describe("notifyTargetHref (対象へのリンク)", () => {
 
   it("secretary_reply は project_id があればそちらを優先する（Phase 40 追従）", () => {
     expect(notifyTargetHref({ kind: "secretary_reply", key: "p-old", project_id: "p-new" })).toBe("/projects/p-new");
+  });
+
+  it("cluster_login_needed は /clusters へ（ADR-0053 D3、Phase 66）", () => {
+    expect(notifyTargetHref({ kind: "cluster_login_needed", key: "pegasus" })).toBe("/clusters");
   });
 
   it("key を URI エンコードする", () => {

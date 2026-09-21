@@ -84,7 +84,8 @@ pub use stats::classify_outcome;
 pub use tree::MAX_TEXT_BYTES;
 pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView,
-    ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterView, Clusters,
+    ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterForwardView,
+    ClusterView, Clusters,
     ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, GenreConfigView, Health,
     Problem, ProviderConfigView, ProviderStats, ProviderView, Providers, ReleaseChanges,
     ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseRunning, ReleaseVerify, Releases,
@@ -108,7 +109,7 @@ pub use console::{
 };
 pub use types::{ConsoleBlock, ConsolePage};
 // ---- ADR-0053 D4（Phase 65）: LLM source のローカルプロキシの観測 ----
-pub use types::{LlmSourceAccountView, LlmSourceView, LlmSourcesView};
+pub use types::{LlmCelerisTierView, LlmSourceAccountView, LlmSourceView, LlmSourcesView};
 // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
 pub use types::{
     ChangeDiffView, ChangesView, IntegrateBody, IntegrateResult, ProjectIntegrationItem,

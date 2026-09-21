@@ -15,10 +15,38 @@ pub struct AccountSourceView {
     pub id: String,
     pub logged_in: bool,
     /// 0.0〜1.0（測れないときは `null`。`task_dispatch::accounts::measured_remaining` と同じ規律
-    /// で、値を捏造しない）。
+    /// で、値を捏造しない）。短期・長期のうち**厳しい方**（残りが少ない方）。
     pub remaining: Option<f64>,
+    /// ADR-0053 D4（Phase 66）: 短期枠（Claude の 5 時間 / Codex の週内相当）だけの残り。0.0〜1.0。
+    /// 測れないときは `null`（値を捏造しない）。
+    pub remaining_short: Option<f64>,
+    /// ADR-0053 D4: 長期枠（7 日）だけの残り。0.0〜1.0。測れないときは `null`。
+    pub remaining_long: Option<f64>,
     pub cooldown_until: Option<i64>,
     pub cooldown_reason: Option<String>,
+}
+
+/// ADR-0053 D4: 1 枠だけの残り（`measured_remaining` と同じ「観測が新しく、枠が有効」という規律を
+/// 1 枠に適用する）。観測が古い（300 秒超）・未来（壁時計のずれ）・枠が無い／期限切れ／範囲外の
+/// `utilization` はすべて `None`（測れない、を捏造しない）。
+fn window_remaining(obs: &task_core::RateLimitObservation, now: i64, window: Option<task_core::RateWindow>) -> Option<f64> {
+    if now < obs.observed_at || now - obs.observed_at > 300 {
+        return None;
+    }
+    let w = window?;
+    if w.resets_at <= now || !w.utilization.is_finite() || !(0.0..=1.0).contains(&w.utilization) {
+        return None;
+    }
+    Some(1.0 - w.utilization)
+}
+
+/// ADR-0053 D4: `celeris/<tier>` が今どこに解決するか（表示専用。副作用なし）。
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CelerisTierView {
+    /// `"frontier"` / `"standard"` / `"cheap"`。
+    pub tier: String,
+    /// 解決先の供給元 id（`sources[].id` と同じ形）。今選べる候補が無ければ `null`。
+    pub resolves_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -38,6 +66,8 @@ pub struct SourceView {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct SourcesView {
     pub sources: Vec<SourceView>,
+    /// ADR-0053 D4（Phase 66）: `celeris/<tier>` が今どこに解決するか（3 tier とも）。
+    pub celeris_tiers: Vec<CelerisTierView>,
 }
 
 impl ProxyState {
@@ -103,7 +133,28 @@ impl ProxyState {
                 last_hour_completion_tokens: counts.completion_tokens,
             });
         }
-        SourcesView { sources }
+        // ADR-0053 D4（Phase 66）: 3 tier とも同じ決定的な選択（`server.rs::attempts_for`）で解決先を見る。
+        // tier ごとにモデル写像が無ければ「選べない」= `None`（値を捏造しない）。
+        let mut celeris_tiers = Vec::new();
+        for tier in [task_core::Tier::Frontier, task_core::Tier::Standard, task_core::Tier::Cheap] {
+            let resolves_to = self.resolves_tier(tier, now).await;
+            celeris_tiers.push(CelerisTierView {
+                tier: tier_str(tier).to_string(),
+                resolves_to,
+            });
+        }
+        SourcesView {
+            sources,
+            celeris_tiers,
+        }
+    }
+}
+
+fn tier_str(tier: task_core::Tier) -> &'static str {
+    match tier {
+        task_core::Tier::Frontier => "frontier",
+        task_core::Tier::Standard => "standard",
+        task_core::Tier::Cheap => "cheap",
     }
 }
 
@@ -118,18 +169,25 @@ fn account_view(
             id: id.to_string(),
             logged_in,
             remaining: None,
+            remaining_short: None,
+            remaining_long: None,
             cooldown_until: None,
             cooldown_reason: None,
         };
     };
     let guard = book.lock().unwrap_or_else(|e| e.into_inner());
     let state = guard.state(id);
-    let remaining = state.and_then(|s| s.usage.as_ref()).and_then(|u| measured_remaining(u, now));
+    let usage = state.and_then(|s| s.usage.as_ref());
+    let remaining = usage.and_then(|u| measured_remaining(u, now));
+    let remaining_short = usage.and_then(|u| window_remaining(u, now, u.five_hour));
+    let remaining_long = usage.and_then(|u| window_remaining(u, now, u.seven_day));
     let cooldown = state.and_then(|s| s.cooldown);
     AccountSourceView {
         id: id.to_string(),
         logged_in,
         remaining,
+        remaining_short,
+        remaining_long,
         cooldown_until: cooldown.map(|c| c.until),
         cooldown_reason: cooldown.map(|c| format!("{:?}", c.reason)),
     }

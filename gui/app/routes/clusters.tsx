@@ -9,7 +9,7 @@ import {
   submitClusterConnectCode,
 } from "~/celeris/clusters-admin.server";
 import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
-import type { Clusters, ClusterView } from "~/celeris/types";
+import type { ClusterForwardView, Clusters, ClusterView } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
@@ -19,6 +19,7 @@ import { hintClass, inputClass, labelClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
+import { forwardStatusWord } from "~/lib/llm-sources";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/clusters";
@@ -231,6 +232,25 @@ function ClusterCard({
           </DataItem>
         </dl>
 
+        {item.tunnel_login_needed && (
+          <Alert tone="danger" title="ログインが必要（TOTP）" data-testid="cluster-tunnel-login-needed">
+            <p>
+              このクラスタのトンネル（下の一覧）を維持するための ssh 接続が切れ、鍵認証だけでは繋がりませんでした
+              （ADR-0053 D3）。下の「接続」から TOTP を入力してください。繋がれば celeris がトンネルを自動で
+              張り直します。
+            </p>
+          </Alert>
+        )}
+
+        {item.tunnel_forwards && item.tunnel_forwards.length > 0 && (
+          <div className="space-y-2" data-testid="cluster-tunnel-forwards">
+            <p className="text-sm font-medium text-fg-muted">トンネル（port forward）</p>
+            {item.tunnel_forwards.map((forward) => (
+              <TunnelForwardRow key={forward.listen} forward={forward} />
+            ))}
+          </div>
+        )}
+
         {item.connected === false && auth === "manual" && (
           <Alert tone="danger" title="未接続です" data-testid="cluster-login-hint">
             <p>手元で次のコマンドを実行してください（2 要素認証を通して多重接続を張ります）。</p>
@@ -352,6 +372,28 @@ function ClusterCard({
         )}
       </CardBody>
     </Card>
+  );
+}
+
+/**
+ * 1 本の port forward（ADR-0053 D3、Phase 66）。`up` の一語バッジと `listen → target` を出す。
+ * モバイル幅でも折り返せるよう `flex-wrap` にし、長い host:port は `break-all` にする。
+ */
+function TunnelForwardRow({ forward }: { forward: ClusterForwardView }) {
+  const word = forwardStatusWord(forward);
+  const tone: Tone = word === "up" ? "success" : word === "down" ? "danger" : "neutral";
+  return (
+    <div
+      className="flex min-w-0 flex-wrap items-center justify-between gap-2 rounded-lg border border-border bg-surface-2 px-3 py-2 text-xs"
+      data-testid="cluster-tunnel-forward-row"
+    >
+      <Mono className="min-w-0 break-all">
+        {forward.listen} → {forward.target}
+      </Mono>
+      <Badge tone={tone} dot data-status-badge="tunnel" data-testid="cluster-tunnel-forward-status">
+        {word}
+      </Badge>
+    </div>
   );
 }
 

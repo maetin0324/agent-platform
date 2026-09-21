@@ -862,6 +862,31 @@ pub struct ClusterConfig {
     /// ADR-0019 D2: worktree をいつ消すか。`"never"`（既定、人が消す）のみ実装。
     #[serde(default = "default_remove_worktree_when")]
     pub remove_worktree_when: String,
+    /// ADR-0053 D3（Phase 66）: このクラスタの ssh master に張る port forward（Qwen トンネル等）。
+    /// 空（既定）なら celeris はトンネルの生存を見ない（従来どおり）。
+    #[serde(default)]
+    pub forwards: Vec<ClusterForwardConfig>,
+}
+
+/// `[[clusters.forwards]]`（ADR-0053 D3）: 1 本の port forward。
+///
+/// ```toml
+/// [[clusters]]
+/// id = "pegasus"
+/// host = "pegasus"
+/// auth = "totp"
+///
+/// [[clusters.forwards]]
+/// listen = "127.0.0.1:18000"   # celeris がこの手元のアドレスに bind する
+/// target = "bnode150:18000"    # pegasus（master のホスト側）から見た転送先
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterForwardConfig {
+    /// ローカル（celeris が bind する側）。`"127.0.0.1:18000"` の形。
+    pub listen: String,
+    /// master のホスト側から見た転送先。`"bnode150:18000"` の形。
+    pub target: String,
 }
 
 fn default_cluster_concurrency() -> usize {
@@ -2688,6 +2713,15 @@ genre = {}
                             paths: c.worktree_paths.clone(),
                             ..Default::default()
                         },
+                        // ADR-0053 D3（Phase 66）。
+                        forwards: c
+                            .forwards
+                            .iter()
+                            .map(|f| task_dispatch::dispatcher::ClusterForwardSpec {
+                                listen: f.listen.clone(),
+                                target: f.target.clone(),
+                            })
+                            .collect(),
                     },
                 )
             })
