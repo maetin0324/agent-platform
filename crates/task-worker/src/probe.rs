@@ -11,6 +11,14 @@
 //! （リクエストは 1 行 + ヘッダ、応答はステータス行だけ読む）。`http://` だけを見る:
 //! `https://` や書き方の壊れた `base_url` は [`Reachability::Unknown`] にして、**従来どおり**
 //! `langmem` で走らせる（検査できないことを「落ちている」と決めつけない）。
+//!
+//! **Phase 65b 追記**: `[llm_proxy]`（ADR-0053）を `[knowledge.langmem].base_url` に向けたとき、
+//! `GET /v1/models` は Bearer トークンが無いと 401 を返す（`/healthz` を除く全エンドポイントが
+//! 認証を要求する。`docs/llm-source.md` §6）。401/403 は「LLM が落ちている」ことを意味しない
+//! （トークンが未設定・不一致というだけ）ので、[`Reachability::Unreachable`] にせず
+//! [`Reachability::Unknown`]（= 従来どおり `langmem` で走らせる）にする。呼び出し側が
+//! `[knowledge.langmem].api_key_secret` から解決した平文のトークンを渡せば、`Authorization: Bearer`
+//! ヘッダを付けて検査する。**トークンの値はどのログにも出さない**。
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -87,11 +95,13 @@ fn split_http_url(base_url: &str) -> Result<(String, u16, String), String> {
     Ok((host.to_string(), port, path))
 }
 
-/// ADR-0052 D1: `GET <base_url>/models` を `timeout` で 1 回だけ当てる。
+/// ADR-0052 D1（Phase 65b で `bearer_token` を追加）: `GET <base_url>/models` を `timeout` で
+/// 1 回だけ当てる。`bearer_token` があれば `Authorization: Bearer <token>` を付ける
+/// （celeris の `llm-proxy` のように、`/healthz` 以外の全エンドポイントが認証を要求する上流のため）。
 ///
 /// ネットワーク I/O はここだけ。返るのは決定的な 3 値（[`Reachability`]）で、判断は呼び出し側
-/// （`task_dispatch::Dispatcher`）がする。
-pub fn probe_models(base_url: &str, timeout: Duration) -> Reachability {
+/// （`task_dispatch::Dispatcher`）がする。**`bearer_token` の値はログに出さない。**
+pub fn probe_models(base_url: &str, timeout: Duration, bearer_token: Option<&str>) -> Reachability {
     let (host, port, path) = match split_http_url(base_url) {
         Ok(parts) => parts,
         Err(reason) => return Reachability::Unknown { reason },
@@ -140,9 +150,12 @@ pub fn probe_models(base_url: &str, timeout: Duration) -> Reachability {
             reason: "ソケットの時間切れを設定できない".to_string(),
         };
     }
-    let request = format!(
-        "GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: */*\r\nConnection: close\r\n\r\n"
-    );
+    let request = match bearer_token {
+        Some(token) => format!(
+            "GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: */*\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+        ),
+        None => format!("GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: */*\r\nConnection: close\r\n\r\n"),
+    };
     if let Err(e) = stream.write_all(request.as_bytes()) {
         return Reachability::Unreachable {
             reason: format!("要求を送れない: {e}"),
@@ -192,6 +205,11 @@ pub fn probe_models(base_url: &str, timeout: Duration) -> Reachability {
         .and_then(|c| c.parse::<u16>().ok());
     match code {
         Some(code) if (200..300).contains(&code) => Reachability::Ok,
+        // Phase 65b: 401/403 は「到達性が無い」ではなく「認証が合っていない」。LLM が落ちている
+        // わけではないので、フォールバックさせない（従来どおり langmem で走らせる）。
+        Some(code @ (401 | 403)) => Reachability::Unknown {
+            reason: format!("HTTP {code}（認証エラーは到達性の欠落として扱わない）"),
+        },
         Some(code) => Reachability::Unreachable {
             reason: format!("HTTP {code}"),
         },
@@ -227,7 +245,7 @@ mod tests {
             );
         });
         let base = format!("http://127.0.0.1:{}/v1", addr.port());
-        assert_eq!(probe_models(&base, PROBE_TIMEOUT), Reachability::Ok);
+        assert_eq!(probe_models(&base, PROBE_TIMEOUT, None), Reachability::Ok);
         let request = rx.recv().expect("request");
         assert!(request.starts_with("GET /v1/models HTTP/1.1"), "{request}");
         handle.join().expect("join");
@@ -244,7 +262,7 @@ mod tests {
             let _ = stream.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
         });
         let base = format!("http://127.0.0.1:{}/v1", addr.port());
-        let outcome = probe_models(&base, PROBE_TIMEOUT);
+        let outcome = probe_models(&base, PROBE_TIMEOUT, None);
         assert_eq!(outcome.should_fall_back(), Some("HTTP 502"), "{outcome:?}");
         handle.join().expect("join");
     }
@@ -256,7 +274,7 @@ mod tests {
         let port = server.local_addr().expect("addr").port();
         drop(server); // ここで誰も listen していないポートになる。
         let base = format!("http://127.0.0.1:{port}/v1");
-        let outcome = probe_models(&base, PROBE_TIMEOUT);
+        let outcome = probe_models(&base, PROBE_TIMEOUT, None);
         let reason = outcome.should_fall_back().expect("unreachable");
         assert!(reason.contains("接続できない"), "{reason}");
     }
@@ -275,7 +293,7 @@ mod tests {
         });
         let base = format!("http://127.0.0.1:{}/v1", addr.port());
         let started = Instant::now();
-        let outcome = probe_models(&base, Duration::from_millis(300));
+        let outcome = probe_models(&base, Duration::from_millis(300), None);
         assert!(
             started.elapsed() < Duration::from_secs(3),
             "制限時間で打ち切る: {:?}",
@@ -298,9 +316,75 @@ mod tests {
             "http://host:notaport/v1",
         ] {
             assert!(
-                matches!(probe_models(base, PROBE_TIMEOUT), Reachability::Unknown { .. }),
+                matches!(probe_models(base, PROBE_TIMEOUT, None), Reachability::Unknown { .. }),
                 "{base}"
             );
+        }
+    }
+
+    /// Phase 65b: `bearer_token` を渡すと `Authorization: Bearer <token>` が送られ、それが無いと
+    /// 401 を返す上流（celeris の `llm-proxy` の `/v1/models` と同じ挙動）でも到達できる。
+    #[test]
+    fn a_bearer_token_is_sent_as_an_authorization_header() {
+        let server = listener();
+        let addr = server.local_addr().expect("addr");
+        let (tx, rx) = mpsc::channel::<String>();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().expect("accept");
+            let mut buf = [0u8; 1024];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let _ = tx.send(req.clone());
+            if req.contains("Authorization: Bearer secret-proxy-token") {
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            } else {
+                let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+            }
+        });
+        let base = format!("http://127.0.0.1:{}/v1", addr.port());
+        assert_eq!(probe_models(&base, PROBE_TIMEOUT, Some("secret-proxy-token")), Reachability::Ok);
+        let request = rx.recv().expect("request");
+        assert!(request.contains("Authorization: Bearer secret-proxy-token"), "{request}");
+        handle.join().expect("join");
+    }
+
+    #[test]
+    fn without_a_bearer_token_the_same_upstream_answers_401() {
+        let server = listener();
+        let addr = server.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = server.accept().expect("accept");
+            let mut buf = [0u8; 1024];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            assert!(!req.contains("Authorization"), "{req}");
+            let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+        });
+        let base = format!("http://127.0.0.1:{}/v1", addr.port());
+        let outcome = probe_models(&base, PROBE_TIMEOUT, None);
+        assert!(matches!(outcome, Reachability::Unknown { .. }), "{outcome:?}");
+        handle.join().expect("join");
+    }
+
+    /// Phase 65b: 401/403 は「到達性が無い」ではない（＝ 認証エラーで `Unreachable` にしない。
+    /// フォールバックさせず、従来どおり `langmem` で走らせる）。
+    #[test]
+    fn a_401_or_403_from_the_probe_is_unknown_not_unreachable() {
+        for status in ["401 Unauthorized", "403 Forbidden"] {
+            let server = listener();
+            let addr = server.local_addr().expect("addr");
+            let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+            let handle = std::thread::spawn(move || {
+                let (mut stream, _) = server.accept().expect("accept");
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            });
+            let base = format!("http://127.0.0.1:{}/v1", addr.port());
+            let outcome = probe_models(&base, PROBE_TIMEOUT, None);
+            assert!(matches!(outcome, Reachability::Unknown { .. }), "{status}: {outcome:?}");
+            assert!(outcome.should_fall_back().is_none(), "{status}: フォールバックしない");
+            handle.join().expect("join");
         }
     }
 

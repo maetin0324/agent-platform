@@ -491,53 +491,79 @@ async fn claude_429_falls_back_to_the_next_account_and_records_a_cooldown() {
 // 偽の Codex Responses 上流
 // ---------------------------------------------------------------------------
 
-async fn codex_responses(headers: HeaderMap, Json(body): Json<Value>) -> axum::response::Response {
+/// Phase 65b: 本番で `codex-oauth` の要求が全て 400 で落ちていた（ChatGPT の Codex backend は
+/// Codex CLI が送る形以外を拒否する）。上流はもう非 stream の JSON を返さない（**Codex backend が
+/// それを受け付けないため**）。ここの偽の上流は Codex CLI と同じ形で要求が来ることを検証しつつ、
+/// いつも SSE を返す（`has_output` で「ツール結果が来ているか」を見て、最終テキストかツール呼び出し
+/// かを切り替える）。
+#[derive(Default)]
+struct CodexFake {
+    captured: StdMutex<Vec<Value>>,
+}
+
+async fn codex_responses(AxumState(fake): AxumState<Arc<CodexFake>>, headers: HeaderMap, Json(body): Json<Value>) -> axum::response::Response {
     assert!(headers.get("chatgpt-account-id").is_some());
     assert!(headers.get("originator").is_some());
-    let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+    assert!(headers.get("user-agent").is_some(), "codex_cli_rs の User-Agent が付くこと");
+    fake.captured.lock().expect("lock").push(body.clone());
+
     let has_output = body["input"]
         .as_array()
         .map(|items| items.iter().any(|i| i["type"] == "function_call_output"))
         .unwrap_or(false);
 
-    if stream {
+    if has_output {
         let text = sse_body(&[
-            ("response.created", json!({"response": {"id": "resp_1"}})),
-            ("response.output_text.delta", json!({"delta": "Hi"})),
-            ("response.output_text.delta", json!({"delta": " there"})),
+            ("response.created", json!({"response": {"id": "resp_final"}})),
+            ("response.output_text.delta", json!({"delta": "It is sunny "})),
+            ("response.output_text.delta", json!({"delta": "in Tsukuba."})),
             (
                 "response.completed",
-                json!({"response": {"usage": {"input_tokens": 6, "output_tokens": 2}}}),
+                json!({"response": {"usage": {"input_tokens": 12, "output_tokens": 5}}}),
             ),
         ]);
         return (StatusCode::OK, [(header::CONTENT_TYPE, "text/event-stream")], text).into_response();
     }
 
-    if has_output {
-        return Json(json!({
-            "id": "resp_final",
-            "status": "completed",
-            "output": [{"type": "message", "content": [{"type": "output_text", "text": "It is sunny in Tsukuba."}]}],
-            "usage": {"input_tokens": 12, "output_tokens": 5}
-        }))
-        .into_response();
-    }
+    let text = sse_body(&[
+        ("response.created", json!({"response": {"id": "resp_call"}})),
+        (
+            "response.output_item.done",
+            json!({"item": {"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"Tsukuba\"}"}}),
+        ),
+        (
+            "response.completed",
+            json!({"response": {"usage": {"input_tokens": 9, "output_tokens": 3}}}),
+        ),
+    ]);
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/event-stream")], text).into_response()
+}
 
-    Json(json!({
-        "id": "resp_call",
-        "status": "completed",
-        "output": [{"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"Tsukuba\"}"}],
-        "usage": {"input_tokens": 9, "output_tokens": 3}
-    }))
-    .into_response()
+/// `codex_stream_round_trip` 専用の偽の上流（テキストだけの SSE を固定で返す）。
+async fn codex_stream_text_responses(headers: HeaderMap, Json(_body): Json<Value>) -> axum::response::Response {
+    assert!(headers.get("chatgpt-account-id").is_some());
+    let text = sse_body(&[
+        ("response.created", json!({"response": {"id": "resp_stream_1"}})),
+        ("response.output_text.delta", json!({"delta": "Hi"})),
+        ("response.output_text.delta", json!({"delta": " there"})),
+        (
+            "response.completed",
+            json!({"response": {"usage": {"input_tokens": 6, "output_tokens": 2}}}),
+        ),
+    ]);
+    (StatusCode::OK, [(header::CONTENT_TYPE, "text/event-stream")], text).into_response()
 }
 
 async fn codex_refresh() -> axum::response::Response {
     Json(json!({"access_token": "fresh-gpt-access", "refresh_token": "fresh-gpt-refresh"})).into_response()
 }
 
-fn codex_router() -> Router {
-    Router::new().route("/responses", post(codex_responses)).route("/oauth/token", post(codex_refresh))
+fn codex_router(fake: Arc<CodexFake>) -> Router {
+    Router::new().route("/responses", post(codex_responses)).route("/oauth/token", post(codex_refresh)).with_state(fake)
+}
+
+fn codex_stream_router() -> Router {
+    Router::new().route("/responses", post(codex_stream_text_responses)).route("/oauth/token", post(codex_refresh))
 }
 
 fn codex_source(addr: SocketAddr, accounts_dir: std::path::PathBuf) -> CodexOauthConfig {
@@ -547,12 +573,19 @@ fn codex_source(addr: SocketAddr, accounts_dir: std::path::PathBuf) -> CodexOaut
         token_url: format!("http://{addr}/oauth/token"),
         client_id: "test-client".to_string(),
         enabled: true,
+        user_agent: "codex_cli_rs/0.45.0".to_string(),
+        send_sampling_params: false,
+        reasoning_effort: None,
     }
 }
 
+/// Phase 65b 受け入れ条件 (a) + (b): 非 stream のクライアント要求が、上流には
+/// `store:false`/`stream:true`/`instructions` あり・`temperature`/`max_output_tokens` 無しで送られ、
+/// SSE の上流応答（ツール呼び出し + usage を含む）が 1 つの集約された応答になること。
 #[tokio::test]
 async fn codex_non_stream_round_trip() {
-    let (upstream_addr, _h1) = spawn(codex_router()).await;
+    let fake = Arc::new(CodexFake::default());
+    let (upstream_addr, _h1) = spawn(codex_router(fake.clone())).await;
     let accounts_tmp = tempfile::tempdir().expect("tmp");
     write_codex_credentials(accounts_tmp.path(), "acct-g", "fake-gpt-access", "fake-gpt-refresh");
 
@@ -567,11 +600,22 @@ async fn codex_non_stream_round_trip() {
     let body: Value = resp.json().await.expect("json");
     assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
     assert_eq!(body["choices"][0]["message"]["tool_calls"][0]["function"]["name"], "get_weather");
+    assert_eq!(body["usage"]["prompt_tokens"], 9);
+    assert_eq!(body["usage"]["completion_tokens"], 3);
+
+    let captured = fake.captured.lock().expect("lock");
+    let sent = &captured[0];
+    assert_eq!(sent["store"], false, "{sent}");
+    assert_eq!(sent["stream"], true, "クライアントは stream:false で要求したが上流へはいつも stream:true: {sent}");
+    assert!(sent["instructions"].as_str().is_some_and(|s| !s.is_empty()), "{sent}");
+    assert!(sent.get("temperature").is_none(), "{sent}");
+    assert!(sent.get("max_output_tokens").is_none(), "{sent}");
 }
 
 #[tokio::test]
 async fn codex_tool_call_round_trip() {
-    let (upstream_addr, _h1) = spawn(codex_router()).await;
+    let fake = Arc::new(CodexFake::default());
+    let (upstream_addr, _h1) = spawn(codex_router(fake)).await;
     let accounts_tmp = tempfile::tempdir().expect("tmp");
     write_codex_credentials(accounts_tmp.path(), "acct-g", "fake-gpt-access", "fake-gpt-refresh");
     let mut config = base_config();
@@ -602,7 +646,7 @@ async fn codex_tool_call_round_trip() {
 
 #[tokio::test]
 async fn codex_stream_round_trip() {
-    let (upstream_addr, _h1) = spawn(codex_router()).await;
+    let (upstream_addr, _h1) = spawn(codex_stream_router()).await;
     let accounts_tmp = tempfile::tempdir().expect("tmp");
     write_codex_credentials(accounts_tmp.path(), "acct-g", "fake-gpt-access", "fake-gpt-refresh");
     let mut config = base_config();
@@ -617,6 +661,32 @@ async fn codex_stream_round_trip() {
     assert!(text.contains("\"content\":\" there\""), "{text}");
     assert!(text.contains("\"finish_reason\":\"stop\""), "{text}");
     assert!(text.ends_with("data: [DONE]\n\n"));
+}
+
+/// Phase 65b 受け入れ条件 (c): ChatGPT backend が返す `{"detail": "..."}` 形の 400 が、
+/// プロキシのエラー本文にそのまま（要約として）残ること。
+#[tokio::test]
+async fn codex_400_upstream_error_surfaces_the_detail_field() {
+    async fn bad_request(Json(_body): Json<Value>) -> axum::response::Response {
+        (StatusCode::BAD_REQUEST, Json(json!({"detail": "Store must be set to false"}))).into_response()
+    }
+    let app = Router::new().route("/responses", post(bad_request)).route("/oauth/token", post(codex_refresh));
+    let (upstream_addr, _h1) = spawn(app).await;
+    let accounts_tmp = tempfile::tempdir().expect("tmp");
+    write_codex_credentials(accounts_tmp.path(), "acct-g", "fake-gpt-access", "fake-gpt-refresh");
+
+    let mut config = base_config();
+    config.sources.codex_oauth = Some(codex_source(upstream_addr, accounts_tmp.path().to_path_buf()));
+    let state = ProxyState::new(config, reqwest::Client::new(), None, Some(Arc::new(StdMutex::new(AccountBook::new_in_memory()))), None, SharedRole::default(), None, std::time::Duration::from_secs(5));
+    let (addr, _h2) = spawn(router(state)).await;
+    let client = reqwest::Client::new();
+    let resp = post_chat(&client, addr, &chat_request("gpt/standard", false), None).await;
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: Value = resp.json().await.expect("json");
+    assert!(
+        body["error"]["message"].as_str().expect("message").contains("Store must be set to false"),
+        "{body}"
+    );
 }
 
 // ---------------------------------------------------------------------------
