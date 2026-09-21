@@ -4604,3 +4604,120 @@ ADR-0055 D1 が定める 21 route（監査対象そのもの）を `EmptyState`/
 - **P-G30-1**: U-G30-2 のとおり、`formatDuration`/`relativeTimeLabel` に「時間」「日」の単位を足す
   リファクタリングは影響範囲が広い（`/approvals`・`/artifacts`・`/reports`・Console・`/tasks/:id` 全部）
   ので、専用のラウンドとして切り出すとよい。
+
+## Phase G31 — スマホ UX ラウンド 7（時刻表記・ダークモード監査・カード密度。ADR-0055、Phase 75。2026-09-21）
+
+celeris 側は無変更（`crates/` 無変更）。Phase 75 の依頼（`gui/CLAUDE.md`・ADR-0055・Phase G30 の
+U-G30-2 / P-G30-1）に沿って 3 項目を実装した。
+
+### 1. 相対時刻・期間表示の日本語化（P-G30-1 の解消。受け入れ条件 1）
+
+- `~/lib/time-delta.ts`: `formatDuration` を「分・秒だけ」（`"3m12s"`/`"45s"`）から、上位 2 単位までに
+  丸めた日本語表記（`"3分12秒"`・`"1時間12分"`・`"2日3時間"`。ちょうどの単位は下位を出さない: `"1時間"`・
+  `"1日"`）に変えた。内部で新規 `splitDuration`（日/時間/分/秒への分解。負値は 0）を export し、
+  `~/lib/reports.ts::relativeTimeLabel` からも使えるようにした。
+- `~/lib/reports.ts::relativeTimeLabel`（「n 前」表示）は `formatDuration` を呼ぶのをやめ、独自ロジックに
+  した: `formatDuration` の 2 単位より粗く、**1 単位だけ**に丸める（コンパクトにするため。「3分12秒前」
+  ではなく「3分前」）。10 秒未満は「たった今」。7 日（`RELATIVE_ABSOLUTE_THRESHOLD_SECONDS`）を超えたら
+  絶対日付にフォールバックする新規 `absoluteDateLabel`（同じ年なら `"M/D"`、年をまたぐと `"YYYY/M/D"`。
+  UTC の年月日で比較。celeris の ISO は UTC でそのまま扱う既存方針に合わせた）。どちらの関数も絶対時刻
+  そのものは返さない（呼び出し側が `title` 属性に生の ISO を残す規律は変えていない）。
+- 呼び出し側の統一: `~/routes/accounts.tsx` に 2 箇所あった `` `${formatDuration(secondsBetween(...))} 前` ``
+  という手書きパターン（`observed_at`・秘密の`updated_at`）を `relativeTimeLabel` の直接呼び出しに揃えた
+  （`formatDuration`/`secondsBetween` 自体は cooldown 残り・使用量リセットまでの残り時間表示に残るので
+  import は維持）。`~/components/ReportsList.tsx` の相対時刻表示に `title={report.created_at}` が
+  抜けていたのを追加した（他の相対時刻表示箇所は Phase 74 で既に `title` を持っていたことを確認済み:
+  Console・タイムライン・run 一覧・`/approvals`・`ArtifactsList`）。`~/routes/daemon.tsx`・
+  `~/routes/providers.tsx`・`~/lib/llm-sources.ts` の `formatDuration`（経過・cooldown 残り。「n 前」
+  ではない期間表示）はそのまま新しい日本語書式に切り替わる（呼び出し側の変更なし）。
+- テスト: `test/unit/time-delta.test.ts` を `splitDuration`/`formatDuration` の table-driven テスト
+  （`it.each`、0 秒・59 秒・ちょうど 1 分/1 時間/1 日の境界・負値を含む 17 ケース）に作り直した。
+  `test/unit/reports.test.ts::relativeTimeLabel` も table-driven（たった今・n 秒前・分/時間/日の切り替え・
+  7 日境界・年またぎの絶対日付、8 ケース）に作り直した。副作用として `test/unit/llm-sources.test.ts`
+  （`cooldownRemainingLabel`）・`test/unit/console.test.ts`（`progressSummaryLine`/`taskLineSummary` の
+  「経過」表示）にあった旧書式（`"1m0s"`・`"24s"`・`"33s"`）の期待値を新書式に更新した。
+
+### 2. ダークモードの機械検査・コントラスト規則（受け入れ条件 2）
+
+- `gui/scripts/mobile-audit.mjs`: 各画面を `page.emulateMedia({ colorScheme })` で `light`/`dark` の
+  2 回ずつ開くようにした（`goto` 前に設定するので初回描画から `app/app.css` の
+  `@media (prefers-color-scheme: dark)` が効く）。スクリーンショットは light が従来どおり `<route>.png`、
+  dark が新規 `<route>.dark.png`（21 route × 2 scheme = 42 ファイル）。`report.json` の `routes`/
+  `violations` に `scheme` を追加し、サマリの標準エラー出力に `by_scheme`（light/dark 別の違反数）を足した。
+- 新規ルール `contrast`（WCAG AA）: `getComputedStyle` で要素の `color` と、要素自身から祖先へ
+  `backgroundColor` をたどって合成した実効背景色（`findEffectiveBackground`。半透明の背景が複数重なる
+  ケースがあるため、単純な「最初に見つかった不透明色」ではなく `compositeOver` で実際にアルファ合成する。
+  ダークモードのバッジ背景 `rgb(.. / 0.12〜0.26)` はこの合成をしないと実際の色より大きく誤る）に対する
+  相対輝度比（`relativeLuminance`/`contrastRatio`、WCAG の標準式）を計算し、`font-size < 18px` は 4.5:1、
+  `>= 18px` は 3:1 を下回ったら違反にした。対象は直接テキストを持つ末端要素のみ（`checkFontSize` と同じ
+  絞り込み方針）。`runChecks`/注入スクリプトの両方に配線し、CI は 1 件でも違反があれば非 0 のまま。
+- 実測: `docs/adr/0011-visual-design-system.md` のコメントどおり `app/app.css` のトークン（`--fg`/
+  `--fg-muted`/`--fg-subtle` × `--bg`/`--surface`/`--surface-2`/`--surface-3`、ソフトバッジの
+  `*-soft-fg` × `*-soft`）を Python で手計算したところ、ライト・ダークとも全組み合わせが 4.5:1 以上
+  だった（ダークのソフトバッジは `--bg`/`--surface`/`--surface-2` の上に合成しても 6.5:1 以上）。
+  実際に `pnpm mobile-audit` を回しても `contrast` 違反は 0 件（下記「監査」参照）で、トークン側の
+  手直しは不要だった（**デザイントークンは変更していない**。受け入れ条件の「トークンで直す」は今回
+  違反が出なかったので該当なし）。
+
+### 3. ボードカードの密度（受け入れ条件 3）
+
+- `~/routes/board.tsx::BoardCard`: 3 箇所の `gap-1.5`（6px。4/8/12/16 のスケール外）を `gap-2`（8px）に
+  揃えた（状態・優先度バッジの行、種類・レベルバッジの行、行内編集の `<select>` 群の行）。題名リンクの
+  `mt-1.5` も `mt-2` に揃えた（`lg:` 側の間隔は変えていない。`lg:mt-1.5` はデスクトップ専用クラスなので
+  触っていない）。
+- 題名（`board-card-title`）を 2 行クランプにした: `Link`（タップ領域確保のため `flex min-h-11
+  items-center` は維持）の中に `<span className="line-clamp-2 min-w-0 [overflow-wrap:anywhere]">` を
+  新設し、`title={item.title}`（全文）を `Link` に付けた。`line-clamp-2` は `display: -webkit-box` を
+  要求し `flex` と両立しないため、外側の `Link` ではなく内側の `span` に掛けている（`min-w-0` は
+  flex item がクランプ前に横に伸びきらないようにするため）。`overflow-wrap: anywhere` は Console の
+  `ConsoleBlockItem.tsx` と同じ `[overflow-wrap:anywhere]` の書き方（id やハイフン無しの長い英数字が
+  混じっても単語の途中で折り返せる）。
+- 機械検査で実データを通すため、`gui/scripts/mobile-audit.mjs` の `/api/v1/tasks` モックに 2 件目の
+  カード（日本語 + 区切りの無い英数字混じり、90 字超の題名。モバイルの既定タブ `ready` で見える
+  ステータス）を混ぜた。`test/mobile-audit/board.png`/`board.dark.png` を目視確認: 長い題名が 2 行で
+  末尾「…」に丸まり、バッジ行の間隔がそろっている（下記「証跡」参照）。
+
+### 監査（機械検査）
+
+| rule | G30 後 | G31 後（light） | G31 後（dark、新規） |
+| --- | --- | --- | --- |
+| overflow / status-badge / fixed-overlay / tap-target / font-size / table-wrap | 0 | 0 | 0 |
+| contrast（新規） | - | **0** | **0** |
+| 合計 | 0 | **0** | **0** |
+
+`pnpm mobile-audit` は 21 route × 2 scheme = 42 通り全て 200 応答、違反 0 件で exit 0
+（`by_scheme: {"light": 0, "dark": 0}`）。
+
+### 証跡（コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint`（`accounts.tsx` の 1 箇所で `pnpm exec biome check --write .` による自動整形が要った） | exit 0。`Checked 227 files in 98ms. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0。**Test Files 62 passed (62) / Tests 925 passed (925)**（Phase G30 の 904 から +21: `splitDuration` 6 件・`formatDuration` 11 件（旧 3 件を置き換え）・`relativeTimeLabel` 8 件（旧 1 件を置き換え）で、差し引き正味 +21） |
+| build | `pnpm build` | exit 0（client・server とも） |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（API 変更なし） |
+| mobile-audit | `pnpm mobile-audit` | **exit 0。violations 0 件**（`by_rule: {}`、`by_scheme: {"light": 0, "dark": 0}`）。21 route × 2 scheme = 42 通り全て 200 応答 |
+
+### 変更したファイル
+
+- `app/lib/time-delta.ts`（`formatDuration` を日本語 2 単位表記に、`splitDuration` 新規 export）
+- `app/lib/reports.ts`（`relativeTimeLabel` を 1 単位・「たった今」・7 日超で絶対日付にする独自ロジックへ、`absoluteDateLabel` 新規）
+- `app/routes/accounts.tsx`（2 箇所を `relativeTimeLabel` 直接呼び出しに統一）
+- `app/components/ReportsList.tsx`（相対時刻表示に `title` を追加）
+- `app/routes/board.tsx`（`BoardCard` の gap/margin を 4/8/12/16 スケールに揃え、題名を 2 行クランプ + `overflow-wrap: anywhere` + `title`）
+- `scripts/mobile-audit.mjs`（`contrast` ルール新設、light/dark 二重実行、`<route>.dark.png`、`/api/v1/tasks` モックに長い題名のカードを追加）
+- `test/unit/time-delta.test.ts`・`test/unit/reports.test.ts`（table-driven に作り直し）
+- `test/unit/llm-sources.test.ts`・`test/unit/console.test.ts`（期間表示の期待値を新書式に更新）
+
+### 未解決事項
+
+- **U-G31-1（実機未確認、ADR-0009 P-34 継続）**: ダークモードの実際の見え方（OLED での黒つぶれ・
+  コントラストの主観的な見やすさ）、`line-clamp-2` の Safari 系ブラウザでの挙動（`-webkit-line-clamp`
+  ベースなので最新の Chromium/Safari では動くはずだが、Playwright の Chromium でしか確認していない）は
+  実機での確認が要る（認証・ネットワークが使えるサンドボックスではないため今回も未実施）。
+- **U-G31-2**: `contrast` ルールは leaf text 要素のみを見ており、アイコン（SVG の `fill`）やフォーカス
+  リングの色対比は検査していない（ADR-0055 D1 のスコープ外）。
+- **U-G31-3**: `formatDuration`/`relativeTimeLabel` の絶対日付フォールバック（7 日超）は UTC の年月日
+  比較で、ブラウザのローカルタイムゾーンでの「日付が変わった」感覚とはずれうる（celeris・GUI とも
+  タイムゾーン変換をしない既存方針に合わせた。ずれが問題になったら次のラウンドで検討）。

@@ -42,6 +42,7 @@ import {
   tierLabel,
   tierResolutionLabel,
 } from "~/lib/llm-sources";
+import { relativeTimeLabel } from "~/lib/reports";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/accounts";
@@ -590,8 +591,7 @@ function AccountCard({
           <DataItem label="observed_at" wide>
             {item.usage ? (
               <>
-                {item.usage.observed_at}（{formatDuration(secondsBetween(item.usage.observed_at, fetchedAt))} 前・
-                {item.usage.source}）
+                {item.usage.observed_at}（{relativeTimeLabel(item.usage.observed_at, fetchedAt)}・{item.usage.source}）
               </>
             ) : (
               "-"
@@ -1015,7 +1015,7 @@ function SecretCard({
           <span data-testid="secret-updated-at">
             {item.updated_at ? (
               <>
-                {item.updated_at}（{formatDuration(secondsBetween(item.updated_at, fetchedAt))} 前）
+                {item.updated_at}（{relativeTimeLabel(item.updated_at, fetchedAt)}）
               </>
             ) : (
               "未設定（設定はこの秘密を参照していますが、まだ値が入っていません）"

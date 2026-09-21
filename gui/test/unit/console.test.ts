@@ -236,7 +236,7 @@ describe("progressSummaryLine / taskLineSummary", () => {
   it("progressSummaryLine: 担当・harness・tier・経過・tool 回数・最後の status を 1 行に", () => {
     const line = progressSummaryLine(progressBlock());
     expect(line).toContain("research / fake / standard");
-    expect(line).toContain("経過 24s");
+    expect(line).toContain("経過 24秒");
     expect(line).toContain("tool 2 回");
     expect(line).toContain("最後: searching");
   });
@@ -254,7 +254,7 @@ describe("progressSummaryLine / taskLineSummary", () => {
       mode: "worktree",
       elapsed_secs: 33,
     });
-    expect(line).toBe("running → done（worker_done） ・ research / fake / standard / worktree ・ 経過 33s");
+    expect(line).toBe("running → done（worker_done） ・ research / fake / standard / worktree ・ 経過 33秒");
   });
 });
 

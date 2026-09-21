@@ -132,9 +132,25 @@ async function setupMockCeleris() {
   mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [fx.project({ id: PROJECT_ID })] }));
   mock.on("GET", "/api/v1/tasks", (_req, res) =>
     sendJson(res, 200, {
-      items: [fx.taskSummary({ assignee: "coding-poc", project_id: PROJECT_ID })],
-      total: 1,
-      counts_by_status: { running: 1 },
+      items: [
+        fx.taskSummary({ assignee: "coding-poc", project_id: PROJECT_ID }),
+        // Phase 75（ADR-0055 D2 ラウンド 7）: ボードのカード密度（題名の 2 行クランプ・
+        // `overflow-wrap: anywhere`）が実データで機械検査を通ることを確認するため、長い題名
+        // （日本語 + 区切りの無い英数字混じり、90 字超）を持つカードを、モバイルの既定タブ
+        // （`activeColumn` の既定値。`ready`）で見えるよう混ぜる。
+        fx.taskSummary({
+          id: "01BOARDTASK00000000000002",
+          assignee: "coding-poc",
+          project_id: PROJECT_ID,
+          status: "ready",
+          title:
+            "長い題名のタスク: 関連研究のサーベイと実装方針の検討および " +
+            "VeryLongUnbrokenIdentifierWithoutSpacesThatCouldOverflowTheCard-01BOARDTASK00000000000002",
+          labels: ["survey", "impl"],
+        }),
+      ],
+      total: 2,
+      counts_by_status: { ready: 2 },
       next_cursor: null,
     }),
   );
@@ -620,6 +636,100 @@ function checkFixedOverlays() {
   return violations;
 }
 
+/**
+ * コントラスト（ADR-0055 D1、Phase 75 追加）。`getComputedStyle` の `color`/`backgroundColor` を、
+ * 要素自身から祖先へたどりながら合成する（背景が半透明な場合があるため。例: ダークモードの
+ * バッジ背景 `rgb(.. / 0.14)` は下地と混ざって初めて実際の色になる）。全て透明なまま `<html>` まで
+ * 抜けたら、キャンバス（描画面）の既定色として白を仮定する。WCAG AA: 18px 未満の文字は 4.5:1、
+ * 18px 以上は 3:1。
+ */
+function parseColor(str) {
+  if (!str) return null;
+  const m = str.match(/rgba?\(([^)]+)\)/);
+  if (!m) return null;
+  const parts = m[1].split(",").map((s) => Number.parseFloat(s.trim()));
+  const [r, g, b, a = 1] = parts;
+  if (![r, g, b].every(Number.isFinite)) return null;
+  return { r, g, b, a: Number.isFinite(a) ? a : 1 };
+}
+
+function compositeOver(top, bottomRgb) {
+  return {
+    r: top.r * top.a + bottomRgb.r * (1 - top.a),
+    g: top.g * top.a + bottomRgb.g * (1 - top.a),
+    b: top.b * top.a + bottomRgb.b * (1 - top.a),
+  };
+}
+
+function relativeLuminance({ r, g, b }) {
+  const [rs, gs, bs] = [r, g, b].map((c) => {
+    const cs = c / 255;
+    return cs <= 0.03928 ? cs / 12.92 : ((cs + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * rs + 0.7152 * gs + 0.0722 * bs;
+}
+
+function contrastRatio(c1, c2) {
+  const l1 = relativeLuminance(c1);
+  const l2 = relativeLuminance(c2);
+  const lighter = Math.max(l1, l2);
+  const darker = Math.min(l1, l2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/** 要素自身から `<html>` まで、背景色レイヤーを集めてから下地（白）に向かって合成する。 */
+function findEffectiveBackground(el) {
+  const layers = [];
+  let node = el;
+  while (node) {
+    const style = getComputedStyle(node);
+    const bg = parseColor(style.backgroundColor);
+    if (bg && bg.a > 0) {
+      layers.push(bg);
+      if (bg.a >= 0.999) break;
+    }
+    node = node.parentElement;
+  }
+  let result = { r: 255, g: 255, b: 255 };
+  for (let i = layers.length - 1; i >= 0; i -= 1) result = compositeOver(layers[i], result);
+  return result;
+}
+
+function checkContrast() {
+  const violations = [];
+  const seen = new Set();
+  for (const el of document.querySelectorAll("body *")) {
+    if (el.children.length > 0) continue; // 直接テキストを持つ末端要素だけ
+    const text = (el.textContent ?? "").trim();
+    if (text.length === 0) continue;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || isNotVisible(el)) continue;
+    const rawFg = parseColor(style.color);
+    if (!rawFg) continue;
+    const bg = findEffectiveBackground(el);
+    const fg = rawFg.a < 1 ? compositeOver(rawFg, bg) : rawFg;
+    const ratio = contrastRatio(fg, bg);
+    const size = Number.parseFloat(style.fontSize);
+    if (!Number.isFinite(size)) continue;
+    const threshold = size >= 18 ? 3 : 4.5;
+    if (ratio < threshold - 0.02) {
+      const key = cssPathRef(el);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const round = (c) => `${Math.round(c.r)},${Math.round(c.g)},${Math.round(c.b)}`;
+      violations.push({
+        rule: "contrast",
+        selector: key,
+        box: {},
+        detail:
+          `contrast=${ratio.toFixed(2)}:1 < ${threshold}:1 (font-size=${size}px, ` +
+          `fg=rgb(${round(fg)}), bg=rgb(${round(bg)}), text=${JSON.stringify(text.slice(0, 24))})`,
+      });
+    }
+  }
+  return violations;
+}
+
 /** D1-6: 横スクロールが要る表は overflow-x-auto の箱に入っている。 */
 function checkTables() {
   const violations = [];
@@ -654,6 +764,7 @@ function runChecks() {
     ...checkFontSize(),
     ...checkFixedOverlays(),
     ...checkTables(),
+    ...checkContrast(),
   ];
 }
 
@@ -709,36 +820,58 @@ async function main() {
       checkFontSize.toString(),
       checkFixedOverlays.toString(),
       checkTables.toString(),
+      parseColor.toString(),
+      compositeOver.toString(),
+      relativeLuminance.toString(),
+      contrastRatio.toString(),
+      findEffectiveBackground.toString(),
+      checkContrast.toString(),
       runChecks.toString(),
       "window.__runMobileAudit = runChecks;",
     ].join("\n");
     await context.addInitScript(auditSource);
 
+    // Phase 75（ADR-0055 D1、P-G30-1 の一環でダークモードも監査対象に）: 各画面を light / dark の
+    // 両方の `prefers-color-scheme` で開く。`page.emulateMedia` は `goto` 前に設定すれば初回描画から
+    // 反映される（`app/app.css` の `@media (prefers-color-scheme: dark)` がトークンを切り替える作り）。
     for (const { route, path: routePath } of ROUTES) {
-      const page = await context.newPage();
-      const pageErrors = [];
-      page.on("pageerror", (err) => pageErrors.push(err.message));
-      const response = await page.goto(`http://${guiBind}${routePath}`, { waitUntil: "load" });
-      const status = response?.status() ?? 0;
-      if (status !== 200) {
-        allViolations.push({
-          route,
-          rule: "http-status",
-          selector: routePath,
-          box: {},
-          detail: `GET ${routePath} -> ${status}`,
-        });
-      } else {
-        const violations = await page.evaluate(() => window.__runMobileAudit());
-        for (const v of violations) allViolations.push({ route, ...v });
+      for (const scheme of /** @type {const} */ (["light", "dark"])) {
+        const page = await context.newPage();
+        await page.emulateMedia({ colorScheme: scheme });
+        const pageErrors = [];
+        page.on("pageerror", (err) => pageErrors.push(err.message));
+        const response = await page.goto(`http://${guiBind}${routePath}`, { waitUntil: "load" });
+        const status = response?.status() ?? 0;
+        if (status !== 200) {
+          allViolations.push({
+            route,
+            scheme,
+            rule: "http-status",
+            selector: routePath,
+            box: {},
+            detail: `GET ${routePath} -> ${status}`,
+          });
+        } else {
+          const violations = await page.evaluate(() => window.__runMobileAudit());
+          for (const v of violations) allViolations.push({ route, scheme, ...v });
+        }
+        if (pageErrors.length > 0) {
+          allViolations.push({
+            route,
+            scheme,
+            rule: "page-error",
+            selector: routePath,
+            box: {},
+            detail: pageErrors.join(" / "),
+          });
+        }
+        // light は既存どおり `<route>.png`、dark は `<route>.dark.png`（目視差分用。git には入れない）。
+        const shotName = scheme === "dark" ? `${route}.dark.png` : `${route}.png`;
+        const shotPath = path.join(OUT_DIR, shotName);
+        await page.screenshot({ path: shotPath, fullPage: true }).catch(() => {});
+        routeReports.push({ route, path: routePath, scheme, status });
+        await page.close();
       }
-      if (pageErrors.length > 0) {
-        allViolations.push({ route, rule: "page-error", selector: routePath, box: {}, detail: pageErrors.join(" / ") });
-      }
-      const shotPath = path.join(OUT_DIR, `${route}.png`);
-      await page.screenshot({ path: shotPath, fullPage: true }).catch(() => {});
-      routeReports.push({ route, path: routePath, status });
-      await page.close();
     }
   } finally {
     await browser?.close();
@@ -756,11 +889,21 @@ async function main() {
   );
 
   const byRule = {};
-  for (const v of allViolations) byRule[v.rule] = (byRule[v.rule] ?? 0) + 1;
+  const byScheme = { light: 0, dark: 0 };
+  for (const v of allViolations) {
+    byRule[v.rule] = (byRule[v.rule] ?? 0) + 1;
+    if (v.scheme) byScheme[v.scheme] = (byScheme[v.scheme] ?? 0) + 1;
+  }
   // `gui/biome.json` は `console.log` を禁止している（`error`/`warn` だけ許可）ので `console.error` で出す。
   console.error(
     JSON.stringify(
-      { ok: allViolations.length === 0, total: allViolations.length, by_rule: byRule, report: REPORT_PATH },
+      {
+        ok: allViolations.length === 0,
+        total: allViolations.length,
+        by_rule: byRule,
+        by_scheme: byScheme,
+        report: REPORT_PATH,
+      },
       null,
       2,
     ),

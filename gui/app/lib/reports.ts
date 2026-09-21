@@ -1,6 +1,6 @@
 import type { Query } from "~/celeris/client.server";
 import type { OrgNode, Project, Report, ReportKind, ReportsLive } from "~/celeris/types";
-import { formatDuration, secondsBetween } from "~/lib/time-delta";
+import { secondsBetween, splitDuration } from "~/lib/time-delta";
 
 /**
  * 「報告の流れ」（SPEC §3.5・§4 の 4、ADR-0033 D3、ADR-0034）の純粋関数。
@@ -52,9 +52,38 @@ export function reportNodeName(report: Pick<Report, "node_id">, org: OrgNode[]):
   return org.find((n) => n.id === report.node_id)?.name ?? report.node_id;
 }
 
-/** 相対時刻（`app/routes/accounts.tsx` の `secret-updated-at` と同じ「n 前」の作り方）。 */
+/** 7 日（ADR-0055 D2 ラウンド 7）を超えたら「n 前」ではなく絶対日付にする。 */
+const RELATIVE_ABSOLUTE_THRESHOLD_SECONDS = 7 * 86400;
+
+/**
+ * 7 日を超えた `relativeTimeLabel` のフォールバック絶対日付。UTC の年月日で比較・整形する
+ * （celeris が返す ISO は UTC、GUI はタイムゾーン変換をしない。他の絶対時刻表示と同じ方針）。
+ * 同じ年なら `"M/D"`、違えば `"YYYY/M/D"`。
+ */
+function absoluteDateLabel(iso: string, fetchedAtIso: string): string {
+  const d = new Date(iso);
+  const now = new Date(fetchedAtIso);
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  return y === now.getUTCFullYear() ? `${m}/${day}` : `${y}/${m}/${day}`;
+}
+
+/**
+ * 相対時刻（「n 前」）。Console・タイムライン・`/approvals`・`/accounts` 等で使う（ADR-0055 D2
+ * ラウンド 7、P-G30-1）。1 単位に丸める（`formatDuration` の期間表示より粗い。コンパクトにするため）:
+ * 10 秒未満は「たった今」、それ以降は秒・分・時間・日のうち最大の単位を 1 つだけ出し、7 日を超えたら
+ * 絶対日付にする。絶対時刻は返さない（呼び出し側が `title` 属性に生の ISO 文字列を残す）。
+ */
 export function relativeTimeLabel(iso: string, fetchedAtIso: string): string {
-  return `${formatDuration(secondsBetween(iso, fetchedAtIso))} 前`;
+  const totalSeconds = secondsBetween(iso, fetchedAtIso);
+  if (totalSeconds >= RELATIVE_ABSOLUTE_THRESHOLD_SECONDS) return absoluteDateLabel(iso, fetchedAtIso);
+  const { days, hours, minutes, seconds } = splitDuration(totalSeconds);
+  if (days > 0) return `${days}日前`;
+  if (hours > 0) return `${hours}時間前`;
+  if (minutes > 0) return `${minutes}分前`;
+  if (seconds < 10) return "たった今";
+  return `${seconds}秒前`;
 }
 
 /** ナビの「報告」バッジの色（SPEC §4「良い知らせも悪い知らせも」。bad_news があれば赤）。 */

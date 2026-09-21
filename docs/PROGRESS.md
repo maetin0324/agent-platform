@@ -11782,3 +11782,24 @@ GUI のみ（`crates/` 無変更）。`docs/adr/0055-mobile-ux.md` D2/D3 のル�
 - main `f5e62c1` = Phase 74 merge（GUI のみ）。GUI ゲート: typecheck / lint exit 0、`pnpm test` 904 passed、`pnpm mobile-audit` 違反 0。
   `release.sh` → `f5e62c18fd78`（schema 23）。`verify.sh` check 1–6 true、`live_ok=true` → `promote.sh` **mode=live**（16:08:50→55）。
 - 本番 = Phase 65〜68（各 b/c 含む）、69〜74。Phase 75（時刻表記・ダークモード contrast 監査・カード密度）を Sonnet で起動。
+## Phase 75 — スマホ UX ラウンド 7（時刻表記・ダークモード監査・カード密度。ADR-0055。2026-09-21）
+
+GUI のみ（`crates/` 無変更）。`docs/adr/0055-mobile-ux.md` D2/D3 のループを続け、Phase G30（ラウンド 6）
+の未解決事項 U-G30-2 / 提案 P-G30-1（`formatDuration`/`relativeTimeLabel` が分・秒だけで時間・日の単位を
+持たない件）から着手し、`gui/scripts/mobile-audit.mjs` のダークモード対応とコントラスト（WCAG AA）検査の
+新設、ボードカードの余白・題名の 2 行クランプまで進めた。詳細・証跡は `gui/docs/PROGRESS.md`
+「Phase G31」を参照（このリポジトリの慣例どおり、GUI の実装詳細は gui 側に書く）。
+
+### ゲート（詳細は gui/docs/PROGRESS.md Phase G31）
+
+`pnpm lint` / `pnpm typecheck` / `pnpm test`（925 passed、Phase G30 の 904 から +21）/ `pnpm build` /
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ）/ `pnpm mobile-audit`
+（**exit 0、違反 0 件。21 route × light/dark の 2 scheme = 42 通り全て 200**。新設した `contrast`
+ルールも light/dark とも 0 件）すべて exit 0。
+
+### 未解決事項
+
+- 実機（iOS Safari / Android Chrome、ダークモードの OLED での見え方を含む）での目視・操作確認は今回も
+  未実施（ADR-0009 P-34。認証・ネットワークが使えるサンドボックスではないため）。
+- 詳細は gui/docs/PROGRESS.md「Phase G31」の未解決事項を参照（`contrast` ルールがアイコン・フォーカス
+  リングを見ていない件、絶対日付フォールバックが UTC 基準である件など）。
