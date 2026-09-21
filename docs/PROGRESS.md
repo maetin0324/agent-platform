@@ -12450,3 +12450,4 @@ celeris-mcp の `org_mount_skill`/`org_unmount_skill` と**同じ** `task_ops::k
   clippy exit 0、`pnpm gen:types` 差分なし、typecheck / lint exit 0、`pnpm test` 965 passed、`pnpm mobile-audit` 違反 0（23 route × light/dark）。
   `release.sh` → `618708a1c954`（schema 24）。`verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（20:02:46→50）。
 - 実機: `GET /skills` に `celeris-commit-style`（`mounted_by: engineering`）が出る（次行の出力を参照）。GUI からの mount/unmount の目視は人に依頼。
+
