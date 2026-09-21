@@ -1261,6 +1261,29 @@ async fn tick_loop(
                         tracing::warn!(error = %e, "knowledge: could not schedule the maintenance runs")
                     }
                 }
+                // ADR-0052 D3（Phase 64）: 失敗した知識整理 run を**一度だけ**作り直す（`retried_at`）。
+                // 2 回目が Qwen で走るか cheap の汎用ハーネスで走るかは dispatch 時の到達性の検査が決める。
+                match knowledge_maint::retry_failed(
+                    store.as_ref(),
+                    &config.knowledge.root,
+                    config.knowledge.langmem.enabled,
+                    config.knowledge.langmem.max_related_pages,
+                    memory_dir.as_ref(),
+                    &config.role_specs(),
+                    &config.genre_specs(),
+                    now,
+                ) {
+                    Ok(retried) if !retried.is_empty() => {
+                        tracing::info!(
+                            count = retried.len(),
+                            "knowledge: failed maintenance runs retried (once)"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "knowledge: could not retry the failed maintenance runs")
+                    }
+                }
                 if config.knowledge.langmem.enabled {
                     match knowledge_maint::apply_finished(
                         store.as_ref(),

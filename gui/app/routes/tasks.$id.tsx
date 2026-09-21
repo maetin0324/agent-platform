@@ -76,6 +76,7 @@ import type { Tone } from "~/components/ui/tone";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { isValidLabel, MAX_LABELS, PRIORITY_LABELS } from "~/lib/board";
 import { defaultPromotePath, docsHref, isMarkdownName } from "~/lib/docs";
+import { isKnowledgeFallback } from "~/lib/knowledge";
 import {
   ASSIGNED_WHY_LABEL,
   assignedScoreLabel,
@@ -1891,6 +1892,12 @@ function TimelineBody({ taskId, item }: { taskId: string; item: TimelineItem }) 
                 </>
               )}
             </>
+          )}
+          {/* ADR-0052 D2（Phase 64）: Qwen に届かず tier cheap の汎用ハーネスで抽出した run。 */}
+          {isKnowledgeFallback(item.via) && (
+            <span className="ml-1 text-fg-subtle" data-testid="timeline-knowledge-fallback">
+              （cheap のハーネスで抽出）
+            </span>
           )}
         </p>
       );

@@ -52,6 +52,55 @@ const PROGRESS_PREFIX: &str = "progress:";
 /// これが出ていれば `retryable = false`（venv のセットアップが要る。再試行しても直らない）。
 pub const LANGMEM_MISSING_MARKER: &str = "CELERIS_LANGMEM_MISSING";
 
+/// `langmem_run.py` の `EXTRACTION_INSTRUCTIONS` の始まりと終わり（ADR-0052 D2: フォールバックの
+/// 前置きは**同じ文面**を使う。2 か所に写して食い違わせない）。
+const EXTRACTION_BEGIN: &str = "EXTRACTION_INSTRUCTIONS = \"\"\"\\\n";
+const EXTRACTION_END: &str = "\n\"\"\"\n";
+
+/// ADR-0047 D4 の抽出の指示（`langmem_run.py` が LangMem に渡しているのと**同じ文面**）。
+///
+/// 出典は python のランナー 1 つだけ（`include_str!` した [`RUNNER_SCRIPT`] から切り出す）。
+/// 切り出せなければ空を返す（前置きは出力契約だけになる。`unwrap` はしない）。
+pub fn extraction_instructions() -> &'static str {
+    let Some((_, rest)) = RUNNER_SCRIPT.split_once(EXTRACTION_BEGIN) else {
+        return "";
+    };
+    rest.split_once(EXTRACTION_END)
+        .map(|(body, _)| body)
+        .unwrap_or("")
+}
+
+/// ADR-0052 D2: フォールバック run（tier `cheap` の汎用ハーネス）に渡す前置き。
+///
+/// 中身は「[`extraction_instructions`]（= LangMem に渡しているのと同じ指示）＋ 出力契約」。
+/// 依頼文（`task_core::knowledge::maintenance_objective` が組んだ `maintenance_objective`）は
+/// タスクの `objective` としてそのまま渡るので、ここでは繰り返さない。
+///
+/// 決定的（LLM も I/O も無い）。`candidates_rel` はワーカーから見た候補ファイルの位置
+/// （通常 `artifacts/knowledge-candidates.json`）。
+pub fn knowledge_fallback_instructions(candidates_rel: &str) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "この run は**知識整理**（ADR-0047 D4）です。いつもの `langmem` の接続先（Qwen）に届かなかったので、\
+         あなたのハーネスで同じ抽出をします（ADR-0052 D2）。下の依頼文には、終わった仕事 1 件の\
+         題名・目的・報告・コメント・関連する既存の知識ベースのページ・担当の手帳・既存の索引の題名が\
+         すでに全部入っています。\n\n### 抽出の規則 (extraction rules)\n",
+    );
+    out.push_str(extraction_instructions());
+    out.push_str("\n### 出力の契約 (output contract)\n");
+    out.push_str(&format!(
+        "- `{candidates_rel}` に **JSON を 1 つだけ**書く: \
+         `{{\"candidates\": [{{\"op\", \"path\", \"title\", \"tags\", \"scope\", \"body\", \"sources\", \"confidence\"}}]}}`。\n"
+    ));
+    out.push_str(
+        "- 残す価値のあるものが 1 つも無ければ `{\"candidates\": []}`（空の配列）を書く。無理に作らない。\n\
+         - **他のファイルは作らない**（知識ベースに直接書かない。検査と適用は celeris が決定的に行う）。\n\
+         - **道具は使わない**。読む必要のあるものは全部この前置きと下の依頼文にある（検索も取得も要らない）。\n\
+         - 終わったら結果ファイルの `summary` に、候補を何件書いたかを 1 行で書く。\n",
+    );
+    out
+}
+
 /// `[knowledge.langmem].provider`。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -459,6 +508,33 @@ mod tests {
 
     use super::*;
     use crate::protocol::{PROTOCOL_VERSION, RunContext};
+
+    /// ADR-0052 D2: フォールバックの前置きは `langmem_run.py` の `EXTRACTION_INSTRUCTIONS` を
+    /// **そのまま**使う（出典は python のランナー 1 つだけ。写し間違いが起きない）。
+    #[test]
+    fn the_fallback_preamble_reuses_the_python_runners_extraction_instructions() {
+        let instructions = extraction_instructions();
+        assert!(
+            instructions.starts_with("You are the knowledge-base maintainer"),
+            "{instructions}"
+        );
+        assert!(
+            instructions.ends_with("Do not force a candidate just to produce output."),
+            "末尾: {:?}",
+            instructions.chars().rev().take(60).collect::<String>()
+        );
+        // 抜けやすい規則が入っていること（ADR-0047 D4「保存するもの・しないもの・出典」）。
+        for needle in ["Never include secrets", "Always attach at least one source"] {
+            assert!(instructions.contains(needle), "{needle}");
+        }
+
+        let preamble = knowledge_fallback_instructions("artifacts/knowledge-candidates.json");
+        assert!(preamble.contains(instructions));
+        assert!(preamble.contains("artifacts/knowledge-candidates.json"));
+        assert!(preamble.contains("\"candidates\": []"));
+        assert!(preamble.contains("他のファイルは作らない"));
+        assert!(preamble.contains("道具は使わない"));
+    }
 
     #[derive(Default)]
     struct RecordingSink {

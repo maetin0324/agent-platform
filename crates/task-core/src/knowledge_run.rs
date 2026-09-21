@@ -64,6 +64,10 @@ pub struct KnowledgeRunSummary {
     /// 落とした候補の `path` と理由（実機 2026-09-20: 件数だけでは、なぜ捨てられたかを後から追えなかった）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub discarded_reasons: Vec<String>,
+    /// ADR-0052 D2（Phase 64）: どの経路で抽出したか。`"langmem"`（Qwen）か `"fallback:<adapter>"`
+    /// （Qwen に届かず tier cheap の汎用ハーネスに倒した）。`knowledge_runs.via` と同じ値。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 impl KnowledgeRunSummary {
@@ -89,6 +93,28 @@ pub struct KnowledgeRun {
     pub applied_at: Option<OffsetDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<KnowledgeRunSummary>,
+    /// ADR-0052 D3（Phase 64）: 失敗した run を**一度だけ**作り直したときの時刻。`None` ならまだ
+    /// やり直していない（次の tick で 1 回だけ作り直す対象）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::knowledge_run::opt_rfc3339")]
+    #[schemars(with = "Option<String>")]
+    pub retried_at: Option<OffsetDateTime>,
+    /// ADR-0052 D2（Phase 64）: 実際に抽出した経路（`"langmem"` | `"fallback:<adapter>"`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
+/// ADR-0052 D2: `knowledge_runs.via` の値。
+pub const VIA_LANGMEM: &str = "langmem";
+
+/// ADR-0052 D2: 汎用ハーネスに倒したときの `via`（`fallback:<adapter>`）。
+pub fn via_fallback(adapter: &str) -> String {
+    format!("fallback:{adapter}")
+}
+
+/// ADR-0052 D2: `via` が「フォールバックで抽出した」ことを表しているか（Console・タイムラインの表示）。
+pub fn via_is_fallback(via: &str) -> bool {
+    via.starts_with("fallback:")
 }
 
 mod opt_rfc3339 {
@@ -134,14 +160,29 @@ pub trait KnowledgeRunStore: Send + Sync {
         run_task_id: TaskId,
         now: OffsetDateTime,
     ) -> Result<(), StoreError>;
-    /// run が終端になったときに `state`/`applied_at`/`summary` を書く。
+    /// run が終端になったときに `state`/`applied_at`/`summary`/`via` を書く
+    /// （ADR-0052 D2: `via` は `"langmem"` か `"fallback:<adapter>"`。分からなければ `None`）。
     fn knowledge_run_finish(
         &self,
         task_id: TaskId,
         state: KnowledgeRunState,
         applied_at: OffsetDateTime,
         summary: Option<&KnowledgeRunSummary>,
+        via: Option<&str>,
     ) -> Result<(), StoreError>;
+    /// ADR-0052 D3: 失敗した run を**一度だけ**作り直す。`run_task_id` を新しい支援タスクに差し替え、
+    /// `state` を `scheduled` に戻し、`retried_at` を書く（`applied_at`/`summary_json`/`via` は消す）。
+    /// `retried_at` が既に入っている行は**何もしない**（`false` を返す。二度目は無い）。
+    fn knowledge_run_retry(
+        &self,
+        task_id: TaskId,
+        run_task_id: TaskId,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
+    /// ADR-0052 D3: 人の手動やり直し（`celerisctl knowledge rerun`）。`state = failed` /
+    /// `retried_at = NULL` に戻し、次の tick の [`KnowledgeRunStore::knowledge_run_retry`] に拾わせる。
+    /// 行が無ければ `false`。
+    fn knowledge_run_reset(&self, task_id: TaskId) -> Result<bool, StoreError>;
     fn knowledge_run_get(&self, task_id: TaskId) -> Result<Option<KnowledgeRun>, StoreError>;
     fn knowledge_run_by_run_task(
         &self,
@@ -161,6 +202,8 @@ fn row_to_knowledge_run(
     let created_at: String = row.get(3)?;
     let applied_at: Option<String> = row.get(4)?;
     let summary_json: Option<String> = row.get(5)?;
+    let retried_at: Option<String> = row.get(6)?;
+    let via: Option<String> = row.get(7)?;
     let Ok(task_id) = task_id.parse::<TaskId>() else {
         return Ok(Err(StoreError::Invalid(format!(
             "invalid knowledge_runs.task_id: {task_id}"
@@ -184,6 +227,10 @@ fn row_to_knowledge_run(
         Ok(t) => t,
         Err(e) => return Ok(Err(e)),
     };
+    let retried_at = match retried_at.map(|s| parse_rfc3339(&s)).transpose() {
+        Ok(t) => t,
+        Err(e) => return Ok(Err(e)),
+    };
     let summary = summary_json
         .as_deref()
         .and_then(|s| serde_json::from_str::<KnowledgeRunSummary>(s).ok());
@@ -194,11 +241,13 @@ fn row_to_knowledge_run(
         created_at,
         applied_at,
         summary,
+        retried_at,
+        via,
     }))
 }
 
-const SELECT_KNOWLEDGE_RUN: &str =
-    "SELECT task_id, run_task_id, state, created_at, applied_at, summary_json FROM knowledge_runs";
+const SELECT_KNOWLEDGE_RUN: &str = "SELECT task_id, run_task_id, state, created_at, applied_at, \
+     summary_json, retried_at, via FROM knowledge_runs";
 
 impl KnowledgeRunStore for SqliteStore {
     fn knowledge_run_create(
@@ -228,6 +277,7 @@ impl KnowledgeRunStore for SqliteStore {
         state: KnowledgeRunState,
         applied_at: OffsetDateTime,
         summary: Option<&KnowledgeRunSummary>,
+        via: Option<&str>,
     ) -> Result<(), StoreError> {
         let ts = format_rfc3339(applied_at)?;
         let summary_json = summary
@@ -236,10 +286,44 @@ impl KnowledgeRunStore for SqliteStore {
             .map_err(|e| StoreError::Invalid(format!("could not serialize summary: {e}")))?;
         let conn = self.lock()?;
         conn.execute(
-            "UPDATE knowledge_runs SET state = ?2, applied_at = ?3, summary_json = ?4 WHERE task_id = ?1",
-            rusqlite::params![task_id.to_string(), state.as_str(), ts, summary_json],
+            "UPDATE knowledge_runs SET state = ?2, applied_at = ?3, summary_json = ?4, via = ?5 \
+             WHERE task_id = ?1",
+            rusqlite::params![task_id.to_string(), state.as_str(), ts, summary_json, via],
         )?;
         Ok(())
+    }
+
+    fn knowledge_run_retry(
+        &self,
+        task_id: TaskId,
+        run_task_id: TaskId,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let ts = format_rfc3339(now)?;
+        let conn = self.lock()?;
+        // `retried_at IS NULL` が「まだ 1 回も作り直していない」の唯一の判定（ADR-0052 D3「一度だけ」）。
+        let changed = conn.execute(
+            "UPDATE knowledge_runs SET run_task_id = ?2, state = ?3, retried_at = ?4, \
+             applied_at = NULL, summary_json = NULL, via = NULL \
+             WHERE task_id = ?1 AND retried_at IS NULL",
+            rusqlite::params![
+                task_id.to_string(),
+                run_task_id.to_string(),
+                KnowledgeRunState::Scheduled.as_str(),
+                ts,
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    fn knowledge_run_reset(&self, task_id: TaskId) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "UPDATE knowledge_runs SET state = ?2, retried_at = NULL, applied_at = NULL, \
+             summary_json = NULL, via = NULL WHERE task_id = ?1",
+            rusqlite::params![task_id.to_string(), KnowledgeRunState::Failed.as_str()],
+        )?;
+        Ok(changed > 0)
     }
 
     fn knowledge_run_get(&self, task_id: TaskId) -> Result<Option<KnowledgeRun>, StoreError> {
@@ -338,10 +422,17 @@ mod tests {
             inbox: 2,
             discarded: 0,
             discarded_reasons: Vec::new(),
+            via: Some(VIA_LANGMEM.to_string()),
         };
         let applied_at = now + time::Duration::minutes(5);
         store
-            .knowledge_run_finish(task_id, KnowledgeRunState::Done, applied_at, Some(&summary))
+            .knowledge_run_finish(
+                task_id,
+                KnowledgeRunState::Done,
+                applied_at,
+                Some(&summary),
+                Some(VIA_LANGMEM),
+            )
             .expect("finish");
         let run = store
             .knowledge_run_get(task_id)
@@ -350,7 +441,9 @@ mod tests {
         assert_eq!(run.state, KnowledgeRunState::Done);
         assert!(run.applied_at.is_some());
         assert_eq!(run.summary, Some(summary));
-        assert_eq!(run.summary.as_ref().unwrap().total(), 3);
+        assert_eq!(run.summary.as_ref().expect("summary").total(), 3);
+        assert_eq!(run.via.as_deref(), Some(VIA_LANGMEM));
+        assert!(run.retried_at.is_none());
 
         let by_run = store
             .knowledge_run_by_run_task(run_task_id)
@@ -372,5 +465,101 @@ mod tests {
             None
         );
         assert!(store.knowledge_run_recent(10).expect("recent").is_empty());
+    }
+
+    /// ADR-0052 D3: 失敗した run は**一度だけ**作り直せる（2 回目の `knowledge_run_retry` は false）。
+    #[test]
+    fn a_failed_run_is_retried_exactly_once() {
+        let store = store();
+        let task_id = TaskId::new();
+        let first = TaskId::new();
+        let now = OffsetDateTime::now_utc();
+        store
+            .knowledge_run_create(task_id, first, now)
+            .expect("create");
+        store
+            .knowledge_run_finish(task_id, KnowledgeRunState::Failed, now, None, None)
+            .expect("finish");
+
+        let second = TaskId::new();
+        assert!(
+            store
+                .knowledge_run_retry(task_id, second, now)
+                .expect("retry"),
+            "1 回目のやり直しは通る"
+        );
+        let run = store
+            .knowledge_run_get(task_id)
+            .expect("get")
+            .expect("some");
+        assert_eq!(run.run_task_id, second);
+        assert_eq!(run.state, KnowledgeRunState::Scheduled);
+        assert!(run.retried_at.is_some());
+        assert!(run.applied_at.is_none());
+
+        // 2 回目は通らない（`retried_at` が入っているので UPDATE が 0 行）。
+        assert!(
+            !store
+                .knowledge_run_retry(task_id, TaskId::new(), now)
+                .expect("retry again")
+        );
+        assert_eq!(
+            store
+                .knowledge_run_get(task_id)
+                .expect("get")
+                .expect("some")
+                .run_task_id,
+            second
+        );
+    }
+
+    /// ADR-0052 D3: 人の手動やり直し（`celerisctl knowledge rerun`）は `retried_at` を消し、
+    /// もう 1 回だけ自動のやり直しを許す。行が無ければ `false`。
+    #[test]
+    fn reset_clears_retried_at_and_reports_a_missing_row() {
+        let store = store();
+        let task_id = TaskId::new();
+        let now = OffsetDateTime::now_utc();
+        assert!(!store.knowledge_run_reset(task_id).expect("reset missing"));
+
+        store
+            .knowledge_run_create(task_id, TaskId::new(), now)
+            .expect("create");
+        store
+            .knowledge_run_finish(
+                task_id,
+                KnowledgeRunState::Done,
+                now,
+                Some(&KnowledgeRunSummary::default()),
+                Some(VIA_LANGMEM),
+            )
+            .expect("finish");
+        assert!(
+            store
+                .knowledge_run_retry(task_id, TaskId::new(), now)
+                .expect("retry")
+        );
+        assert!(store.knowledge_run_reset(task_id).expect("reset"));
+        let run = store
+            .knowledge_run_get(task_id)
+            .expect("get")
+            .expect("some");
+        assert_eq!(run.state, KnowledgeRunState::Failed);
+        assert!(run.retried_at.is_none());
+        assert!(run.summary.is_none());
+        assert!(run.via.is_none());
+        // reset した後はもう 1 回だけ自動で作り直せる。
+        assert!(
+            store
+                .knowledge_run_retry(task_id, TaskId::new(), now)
+                .expect("retry after reset")
+        );
+    }
+
+    #[test]
+    fn via_helpers_are_deterministic() {
+        assert_eq!(via_fallback("codex"), "fallback:codex");
+        assert!(via_is_fallback(&via_fallback("claude-code")));
+        assert!(!via_is_fallback(VIA_LANGMEM));
     }
 }

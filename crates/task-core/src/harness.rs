@@ -49,6 +49,44 @@ impl HarnessBudget {
     }
 }
 
+/// ADR-0052 D2（Phase 64）: ハーネスの**フォールバック**（`[[harnesses]] fallback`）。
+///
+/// ```toml
+/// fallback = { tier = "cheap" }   # 専用アダプタに届かないとき、この tier の汎用ハーネスへ倒す
+/// fallback = false                # 倒さない（従来どおり失敗する）
+/// ```
+///
+/// 今のところ読むのは `knowledge` ハーネス（ADR-0047 D4 の知識整理 run）だけ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(untagged)]
+pub enum HarnessFallback {
+    /// `fallback = false`（無効）/ `fallback = true`（既定の tier = `cheap`）。
+    Switch(bool),
+    /// `fallback = { tier = "cheap" }`。
+    Tier(HarnessFallbackTier),
+}
+
+/// [`HarnessFallback::Tier`] の中身。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HarnessFallbackTier {
+    pub tier: Tier,
+}
+
+/// `fallback = true` と書かれたときの tier（ADR-0052 D2 の既定）。
+pub const DEFAULT_FALLBACK_TIER: Tier = Tier::Cheap;
+
+impl HarnessFallback {
+    /// 倒す先の tier（無効なら `None`）。
+    pub fn tier(&self) -> Option<Tier> {
+        match self {
+            HarnessFallback::Switch(false) => None,
+            HarnessFallback::Switch(true) => Some(DEFAULT_FALLBACK_TIER),
+            HarnessFallback::Tier(t) => Some(t.tier),
+        }
+    }
+}
+
 /// ADR-0046 D3: ハーネス 1 件（`[[harnesses]]` の 1 行）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct HarnessSpec {
@@ -75,9 +113,17 @@ pub struct HarnessSpec {
     /// 対話用のハーネスか（今までの「対話用分野」）。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub conversation: bool,
+    /// ADR-0052 D2（Phase 64）: 専用アダプタに届かないときに倒す先。`None` は「倒さない」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<HarnessFallback>,
 }
 
 impl HarnessSpec {
+    /// ADR-0052 D2: 倒す先の tier（`fallback` を書いていない・`fallback = false` なら `None`）。
+    pub fn fallback_tier(&self) -> Option<Tier> {
+        self.fallback.as_ref().and_then(HarnessFallback::tier)
+    }
+
     /// 旧い `[[roles]]` の 1 行に戻す（既存の経路が使う互換の射影。`id` はハーネス id）。
     pub fn role_spec(&self) -> RoleSpec {
         RoleSpec {
@@ -175,6 +221,10 @@ pub fn builtin_harnesses() -> Vec<HarnessSpec> {
                 max_wall_secs: Some(900),
                 max_retries: Some(1),
             },
+            // ADR-0052 D2: Qwen（`langmem`）に届かなければ tier `cheap` の汎用ハーネスへ倒す。
+            fallback: Some(HarnessFallback::Tier(HarnessFallbackTier {
+                tier: Tier::Cheap,
+            })),
             ..HarnessSpec::default()
         },
     ]
@@ -192,8 +242,16 @@ impl HarnessRegistry {
     pub fn new(declared: Vec<HarnessSpec>) -> Self {
         let mut harnesses = declared;
         for builtin in builtin_harnesses() {
-            if !harnesses.iter().any(|h| h.id == builtin.id) {
-                harnesses.push(builtin);
+            match harnesses.iter_mut().find(|h| h.id == builtin.id) {
+                // ADR-0052 D2: `fallback` は**組み込みの既定**。同じ id を設定に書いただけで黙って
+                // 無効にならないよう、設定が `fallback` を書いていなければ組み込みの値を継ぐ
+                // （消したいときは `fallback = false` と明示する）。
+                Some(declared) => {
+                    if declared.fallback.is_none() {
+                        declared.fallback = builtin.fallback.clone();
+                    }
+                }
+                None => harnesses.push(builtin),
             }
         }
         Self { harnesses }
@@ -468,5 +526,82 @@ mod tests {
         for builtin in BUILTIN_HARNESSES {
             assert!(ids.iter().any(|id| id == builtin), "{builtin}");
         }
+    }
+
+    /// ADR-0052 D2: `knowledge` ハーネスの組み込みの `fallback` は tier `cheap`。
+    /// `[[harnesses]]` で同じ id を書いても（`fallback` を書かなければ）その既定を継ぐ。
+    /// `fallback = false` と明示したときだけ無効になる。
+    #[test]
+    fn the_knowledge_harness_falls_back_to_cheap_by_default() {
+        let registry = HarnessRegistry::builtins_only();
+        let knowledge = registry.get(BUILTIN_KNOWLEDGE).expect("knowledge");
+        assert_eq!(knowledge.fallback_tier(), Some(Tier::Cheap));
+        // 他の組み込みは倒さない。
+        assert_eq!(
+            registry
+                .get(BUILTIN_REVIEWER)
+                .expect("reviewer")
+                .fallback_tier(),
+            None
+        );
+
+        // `fallback` を書かない上書きは組み込みの既定を継ぐ。
+        let overridden = HarnessRegistry::new(vec![HarnessSpec {
+            id: BUILTIN_KNOWLEDGE.into(),
+            adapter: Some("langmem".into()),
+            ..HarnessSpec::default()
+        }]);
+        assert_eq!(
+            overridden
+                .get(BUILTIN_KNOWLEDGE)
+                .expect("knowledge")
+                .fallback_tier(),
+            Some(Tier::Cheap)
+        );
+
+        // `fallback = false` は無効。
+        let disabled = HarnessRegistry::new(vec![HarnessSpec {
+            id: BUILTIN_KNOWLEDGE.into(),
+            fallback: Some(HarnessFallback::Switch(false)),
+            ..HarnessSpec::default()
+        }]);
+        assert_eq!(
+            disabled
+                .get(BUILTIN_KNOWLEDGE)
+                .expect("knowledge")
+                .fallback_tier(),
+            None
+        );
+    }
+
+    /// ADR-0052 D2: `fallback = { tier = "frontier" }` と `fallback = false` の両方が TOML から読める。
+    #[test]
+    fn fallback_parses_from_both_toml_spellings() {
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            harnesses: Vec<HarnessSpec>,
+        }
+        let parsed: Wrapper = toml::from_str(
+            r#"
+[[harnesses]]
+id = "a"
+fallback = { tier = "frontier" }
+
+[[harnesses]]
+id = "b"
+fallback = false
+
+[[harnesses]]
+id = "c"
+"#,
+        )
+        .expect("parse");
+        assert_eq!(parsed.harnesses[0].fallback_tier(), Some(Tier::Frontier));
+        assert_eq!(parsed.harnesses[1].fallback_tier(), None);
+        assert_eq!(parsed.harnesses[2].fallback, None);
+        assert_eq!(
+            HarnessFallback::Switch(true).tier(),
+            Some(DEFAULT_FALLBACK_TIER)
+        );
     }
 }

@@ -566,6 +566,7 @@ pub(crate) fn side_blocks(
         if after_nanos.is_some_and(|a| nanos < a) {
             continue;
         }
+        let via = run.via.clone();
         let summary = run.summary.unwrap_or_default();
         blocks.push(ConsoleBlock::Knowledge {
             cursor: ConsoleCursor::new(nanos, format!("k{}", run.task_id), 0).encode(),
@@ -582,6 +583,8 @@ pub(crate) fn side_blocks(
             ingested: summary.ingested,
             inbox: summary.inbox,
             discarded: summary.discarded,
+            // ADR-0052 D2: 列（`knowledge_runs.via`）を正とし、無ければ summary の写しを使う。
+            via: via.or(summary.via),
         });
     }
 

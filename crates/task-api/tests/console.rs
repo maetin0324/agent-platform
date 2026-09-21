@@ -395,7 +395,9 @@ async fn knowledge_blocks_show_the_applied_summary_and_respect_scope() {
                 inbox: 2,
                 discarded: 0,
                 discarded_reasons: Vec::new(),
+                via: Some(task_core::VIA_LANGMEM.to_string()),
             }),
+            Some(task_core::VIA_LANGMEM),
         )
         .expect("finish run");
 
@@ -416,6 +418,8 @@ async fn knowledge_blocks_show_the_applied_summary_and_respect_scope() {
     assert_eq!(block["inbox"], 2);
     assert_eq!(block["discarded"], 0);
     assert_eq!(block["project_id"], pluvio.id.to_string());
+    // ADR-0052 D2（Phase 64）: どの経路で抽出したか（Qwen で抽出したのでフォールバックではない）。
+    assert_eq!(block["via"], task_core::VIA_LANGMEM);
 
     // 案件で絞れる。
     let scoped = send(

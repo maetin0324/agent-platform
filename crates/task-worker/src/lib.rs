@@ -22,6 +22,8 @@ pub mod paperqa;
 pub mod preamble;
 /// ADR-0044 §5 Phase 53 追記（Phase 55）: run の止め方を 1 つにする（プロセスグループごと止める）。
 pub mod process_group;
+/// ADR-0052 D1（Phase 64）: OpenAI 互換エンドポイントの到達性の検査（LLM は呼ばない）。
+pub mod probe;
 /// ADR-0048 D2（Phase 60a）: 進行の正規化にアダプタが使う共通の小道具（写像はアダプタ側）。
 mod progress;
 pub mod protocol;
@@ -54,7 +56,11 @@ pub use container::{
 };
 pub use delegate_file::{DELEGATE_FILE_NAME, clear_delegate_file, forward_delegate_file};
 pub use fake::FakeAdapter;
-pub use langmem::{LANGMEM_MISSING_MARKER, LangMemAdapter, LangMemConfig, LangMemProvider};
+pub use langmem::{
+    LANGMEM_MISSING_MARKER, LangMemAdapter, LangMemConfig, LangMemProvider,
+    knowledge_fallback_instructions,
+};
+pub use probe::{PROBE_CACHE_TTL, PROBE_TIMEOUT, Reachability, probe_models};
 pub use local_deep_research::{EvidenceThresholds, LdrAdapter, LdrConfig, LdrMode};
 pub use local_worktree::{
     BaseKind, BaseRef, CleanupOutcome, DEFAULT_BRANCH_PREFIX, LocalWorktree, WORKTREE_DIR_NAME,

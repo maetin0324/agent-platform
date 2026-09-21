@@ -139,6 +139,9 @@ dir = "../memory"
 #   api_key_secret      — `[secrets] dir` の下の id。省略すると渡さない（ローカルの OpenAI 互換
 #                          エンドポイントは鍵を確認しないことが多い）。
 #   max_related_pages   — 依頼文に入れる関連ページの上限（既定 10）。
+#
+# ADR-0052 D1（Phase 64）: 知識整理タスクを起こす直前に `GET <base_url>/models` を 3 秒で当て、届かなければ
+# 下の `[[harnesses]] id = "knowledge"` の `fallback` に従って tier cheap の汎用ハーネスに倒す（60 秒キャッシュ）。
 [knowledge.langmem]
 # enabled = false
 # provider = "openai-compatible"
@@ -202,6 +205,17 @@ instructions = """あなたは人の Chief of Staff。案件を受け取り、�
 仕事の場所は案件に持たせ、担当に ssh で
 リモートの作業ツリーへ直接書かせない（編集は手元、検証はリモート）。
 担当（誰がやるか）は celeris が決めるので、あなたが名指しで人を選ぶ必要はない。"""
+
+# ADR-0052 D2（Phase 64）: 知識整理（ADR-0047 D4）。組み込みのままで動くので普段は書かなくてよい。
+# `fallback` は「専用アダプタ（`langmem` = Qwen）に届かないとき、どの tier の汎用ハーネスに倒すか」。
+# 組み込みの既定は `{ tier = "cheap" }`。ここで書き換えられ、`fallback = false` で倒さなくなる
+# （＝ Qwen が落ちている間の知識整理 run は Phase 63 までと同じく失敗する）。
+# [[harnesses]]
+# id = "knowledge"
+# adapter = "langmem"
+# tier = "cheap"
+# fallback = { tier = "cheap" }
+# budget = { max_turns = 4, max_wall_secs = 900, max_retries = 1 }
 
 [[harnesses]]
 id = "plan"

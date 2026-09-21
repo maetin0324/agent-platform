@@ -201,6 +201,11 @@ export type ConsoleBlock =
        */
       task_id: string;
       task_title: string;
+      /**
+       * ADR-0052 D2（Phase 64）: 抽出した経路。`"langmem"`（Qwen）か `"fallback:<adapter>"`
+       * （Qwen に届かず tier cheap の汎用ハーネスで抽出した）。分からなければ `null`。
+       */
+      via?: string | null;
     };
 /**
  * 途中目標の一意識別子（ULID）。
@@ -595,6 +600,11 @@ export type TimelineItem =
        * `scheduled`（起こしたが未適用）| `applied` | `failed`。
        */
       state: string;
+      /**
+       * ADR-0052 D2（Phase 64）: 抽出した経路。`"langmem"`（Qwen）か `"fallback:<adapter>"`
+       * （Qwen に届かず tier cheap の汎用ハーネスで抽出した）。分からなければ `null`。
+       */
+      via?: string | null;
     };
 
 /**

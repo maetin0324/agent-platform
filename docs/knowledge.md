@@ -73,6 +73,7 @@ celerisctl knowledge get    <path> [--json]
 celerisctl knowledge record --title … --scope … [--tags a,b] --source task:<id> \
                             [--confidence high|medium|low] [--path <取り込み先>] < body.md
 celerisctl knowledge reindex
+celerisctl knowledge rerun  <task_id>                      # 管理系。**DB を開く**（ADR-0052 D3）
 ```
 
 - **このサブコマンドだけは DB を開かない**。KB のファイルを直接読み書きするので、コンテナの中でも
@@ -201,7 +202,7 @@ run が書く `artifacts/knowledge-candidates.json` の各候補
 - Console の `knowledge` ブロック: 「この仕事から知識 N 件: 取り込み a / 候補 b / 破棄 c」
   （`GET /console`。適用が終わってから 1 件出る。`_inbox` への案内は `/knowledge/inbox`）
 - タスクのタイムライン（`GET /tasks/{id}/timeline`）: `kind: "knowledge"` の 1 件
-  （`state: scheduled | applied | failed`）
+  （`state: scheduled | applied | failed`。`via` が `fallback:<adapter>` なら「（cheap のハーネスで抽出）」）
 - `_inbox` の一覧（`GET /knowledge/inbox`）: 各候補の `op` と、取り込み元のタスクへのリンク（`sources`
   の `task:<id>`）
 
@@ -232,6 +233,61 @@ concurrency = 1
 
 celeris を再起動（または `POST /reload` で読み直せない設定なので再起動）すれば、次の tick から
 知識整理 run が起き始める。
+
+## 7.1 Qwen が落ちているとき（ADR-0052。Phase 64）
+
+知識整理 run の LLM は pegasus のトンネル越しの Qwen で、**トンネルは人が GUI で TOTP を通さないと
+復帰しない**。Phase 63 までは落ちている間の run がそのまま `failed` になり、「1 タスクにつき 1 回」の
+規則で二度と起こされなかったので、その間に終わった仕事の知識は永久に取り込まれなかった
+（実機 2026-09-20〜21 に 4 件）。Phase 64 で次の 3 つが入った。
+
+### (1) dispatch の直前に到達性を見る（D1）
+
+知識整理タスクを起こす直前に、ディスパッチャが `[knowledge.langmem].base_url` へ
+**`GET <base_url>/models` を 3 秒**で当てる（`crates/task-worker/src/probe.rs`。**LLM は呼ばない**）。
+結果は `base_url` ごとに **60 秒キャッシュ**するので、tick ごとには叩かない。
+
+- 2xx → 従来どおり `langmem` アダプタ（Qwen）で走る
+- 接続不可・時間切れ・2xx 以外 → **(2) のフォールバック**へ。run の進行に
+  `status`「langmem の接続先に届かない（<理由>）。cheap のハーネスに倒す（<adapter>）」が 1 行残る
+- `base_url` が無い・`https://`・書き方が壊れている → **検査しない**（従来どおり `langmem`）
+
+### (2) tier `cheap` の汎用ハーネスに倒す（D2）
+
+`knowledge` ハーネスの `fallback`（組み込みの既定は `{ tier = "cheap" }`。`[[harnesses]]` で上書きでき、
+`fallback = false` で無効）に従い、ADR-0049 の選び方で **tier `cheap` の汎用の供給元**（Claude Code /
+Codex / ACP。枯渇・未ログインのプールは飛ばす）を決定的に 1 つ選んで、そのアダプタで同じ仕事をさせる。
+
+- 前置き = `langmem_run.py` の `EXTRACTION_INSTRUCTIONS`（**同じ文面**を Rust 側が切り出して使う）
+  ＋ 出力契約「`artifacts/knowledge-candidates.json` に `{"candidates": […]}` を書く。無ければ空配列。
+  他のファイルは作らない。道具は使わない」
+- 依頼文（`maintenance_objective`）は Qwen に渡すものと**同じ**
+- 予算は `max_turns = 8` / `max_wall_secs = 600`
+- tier `cheap` の汎用の供給元が 1 つも無ければ、従来どおり dispatch されずに `ready` のまま残る
+  （供給が戻れば次の tick で拾われる）
+- 適用（`apply_candidates`）は経路に関係なく同じ。`knowledge_runs.via` と `summary_json.via` に
+  `"langmem"` か `"fallback:<adapter>"` が残り、Console のブロックとタスクのタイムラインに
+  **「cheap のハーネスで抽出」**が出る
+
+### (3) 失敗した run は一度だけやり直す（D3）
+
+`knowledge_runs.state = failed` で `retried_at` がまだ無い行は、次の tick で **1 回だけ**作り直される
+（`knowledge_maint::retry_failed`。1 tick に 1 件。`retried_at` を書く）。2 回目が Qwen で走るか
+汎用ハーネスで走るかは (1) の検査が決める。2 回目も落ちたらそのまま `failed`（3 回目は無い）。
+
+### 人が手で もう一度 やらせる
+
+```bash
+celerisctl knowledge rerun <元のタスクの id> [--db ~/.local/celeris/celeris.sqlite3]
+```
+
+`knowledge_runs` の 1 行を `state = failed` / `retried_at = NULL` に戻すだけ（`applied_at` /
+`summary_json` / `via` は消える）。**新しい run を作るのはデーモンの次の tick**なので、デーモンを
+止める必要も再起動も要らない。`<元のタスクの id>` は知識整理 run 自身の id ではなく、その run の
+**元になった仕事**の id（Console の `knowledge` ブロックや `/tasks/<id>` のタイムラインから引く）。
+
+> `knowledge` のサブコマンドで **DB を開くのはこの `rerun` だけ**（`org migrate-v2` と同じ管理系。
+> celerisctl は HTTP の口を持たず、他のサブコマンドは DB を開かないままなのでコンテナの中でも動く）。
 
 ## 8. まだやらないこと
 

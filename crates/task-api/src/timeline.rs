@@ -160,6 +160,7 @@ fn store_items(store: &SqliteStore, id: TaskId) -> Result<(Task, Vec<TimelineIte
     // ADR-0047 D4/D5（Phase 62）: このタスクの終端から知識整理 run が起きていれば 1 件。
     if let Some(run) = store.knowledge_run_get(id).map_err(store_problem)? {
         let at = crate::handlers::rfc3339(run.applied_at.unwrap_or(run.created_at));
+        let via = run.via.clone();
         let (state, ingested, inbox, discarded) = match run.state {
             task_core::KnowledgeRunState::Scheduled => ("scheduled", None, None, None),
             task_core::KnowledgeRunState::Failed => ("failed", None, None, None),
@@ -180,6 +181,8 @@ fn store_items(store: &SqliteStore, id: TaskId) -> Result<(Task, Vec<TimelineIte
             ingested,
             inbox,
             discarded,
+            // ADR-0052 D2（Phase 64）: どの経路で抽出したか（`langmem` / `fallback:<adapter>`）。
+            via,
         });
     }
 
