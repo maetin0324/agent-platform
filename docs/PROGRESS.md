@@ -10945,3 +10945,16 @@ D1 の核心）、テストの追加、ドキュメントの追記を行った�
 - 起動後: `llm-proxy listening 127.0.0.1:18100`、tunnel `login_needed`（pegasus の TOTP 待ち。変わらず）、`node_sessions` は 0 行（まだ対話 run が無い）。
 - 実機確認（ADR-0054 D1「CoS に往復して 2 回目以降が `--resume`、前置きが差分だけ」）: CoS に 2 回指示を送って `node_sessions` と
   `runs/<id>/request.json` を確認中（結果は次節）。Phase 68（Console に run の進行を流す・チャット UI）を Sonnet で起動。
+
+### Phase 67 の実機確認 — セッション機構は動いたが Claude Code が ULID のセッション id を拒否（2026-09-21 13:53–13:56 UTC）
+
+- CoS に 2 回指示（`POST /console/instruct`）。`node_sessions` に `cos | conversation | claude-code | claude_max_lab | turns=1` が 1 行。
+  run の `request.json`: 1 回目 `session.resume=false`、前置き全量（memory 15.5 KB / conversation 15.4 KB / organization 5.5 KB）。
+  2 回目以降（同じタスクの再試行、2 つ目のタスク）は **`resume=true` で `session_diff` 276 / 146 バイトだけ**（memory / organization /
+  conversation / active_projects は空）。= ADR-0054 D1 の「初回全量・継続は差分」は実機で成立。
+- しかし **4 run すべて `claude result: error_during_execution`**: 1 回目の stderr `Error: Invalid session ID. Must be a valid UUID.`、
+  以降 `--resume requires a valid session ID … "01M323X6TJQSFEP0MKXABWVY78" is not a UUID`。Claude Code 2.1.278 は `--session-id` /
+  `--resume` に **UUID** を要求するが、Phase 67 は ULID を発行していた（fake アダプタは任意の文字列を受けるので検出できなかった）。
+- 影響: **本番の CoS 対話と、claude-code で走る部門長のレビュー run が、修正が入るまで全部失敗する**（in-flight 0 のため今のところ被害はこの 2 タスク）。
+  → **Phase 67b** を Sonnet で即時起動（UUID v4 の発行、非 UUID の既存行を自動で retire、アダプタ境界での検証、resume 拒否時の retire）。
+  rollback（5d3414a）は schema 23 → 22 の DB 復元が要るので採らない。
