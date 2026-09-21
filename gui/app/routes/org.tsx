@@ -576,16 +576,6 @@ function OrgNodeDetail({
           <DataItem label="担当した仕事（累計）">
             <span className="tabular-nums">{workload?.total ?? 0}</span>
           </DataItem>
-          {/* ADR-0054 D3（Phase 68）: 部門長（レビュー・切り分け run。ADR-0051）の継続セッション。
-              無いノード（部門長でない・まだ 1 度もレビューしていない）には出さない。 */}
-          {leadSession && (
-            <DataItem label="継続中のセッション" wide>
-              <span data-testid="org-node-lead-session" className="tabular-nums">
-                {leadSession.turns} turns ・ {leadSession.approx_tokens.toLocaleString("ja-JP")} tokens ・ 最終使用{" "}
-                {leadSession.last_used_at}
-              </span>
-            </DataItem>
-          )}
         </dl>
 
         {/* ADR-0054 D3（Phase 68）: 部門長（レビュー・切り分け run。ADR-0051）の継続セッション。
