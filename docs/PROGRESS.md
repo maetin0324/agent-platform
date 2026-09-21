@@ -12339,3 +12339,9 @@ forward_does_not_panic_the_first_tick_phase_66b` と同じ配線の publickey �
 ### 提案
 
 - なし。
+
+### Phase 81 の本番反映（2026-09-21 19:12 UTC。`149551bf7c7a`、ライブ切替）
+
+- main `149551b` = Phase 81 merge（unmount 後の skills の掃除、publickey 自動接続を async ワーカーの外へ）。ゲート: cargo test **1778 passed / 0 failed**、
+  clippy exit 0。`release.sh` → `149551bf7c7a`（schema 24）。`verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（19:12:13→16）。
+- 起動中: Phase 82（skills を GUI から見る・mount する。API + GUI）。
