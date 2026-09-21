@@ -12242,3 +12242,12 @@ dispatcher.rs` に `Dispatcher::skills_context`（担当ノードの実効 profi
   GUI ゲート: typecheck / lint exit 0、`pnpm test` 940 passed、`pnpm mobile-audit` 違反 0。`release.sh` → `751995ce4aec`（schema 24）。
   `verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（18:38:25→39:53。今回も `systemctl start` の返りが遅かった。API 停止なし）。
 - Phase 79（skills の届け方）は merge 済み・cargo test 1774 passed。release → verify → ライブ切替は次節。
+
+### Phase 79 の本番反映（2026-09-21 18:45 UTC。`ace7c0887537`、ライブ切替）
+
+- main `ace7c08` = Phase 79 merge（Rust: `RunContext.skills`、claude-code / codex / acp への届け方、`request.json` の記録）。
+  ゲート: cargo test **1774 passed / 0 failed**、clippy exit 0、`pnpm gen:types` 差分なし。`release.sh` → `ace7c0887537`（schema 24）。
+  `verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（18:45:41→45）。
+- 本番 = ADR-0053 / 0054 / 0055（ラウンド 1〜9）/ 0056（Phase 78・79・80）すべて。
+- 実機確認（ADR-0056 §3 Phase 79）: MCP 経由で `skills_put celeris-commit-style` → `org_mount_skill engineering` → coding タスク 1 件を起こして
+  `request.json` の `context.skills` と作業場所の `.claude/skills/` を見る（結果は次節）。
