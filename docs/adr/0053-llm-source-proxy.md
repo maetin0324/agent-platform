@@ -382,3 +382,48 @@ staging は 136 件になった）。
   落ちることを確認してから修正を復元した**（回帰テストとして機能することの検証）。
 - **ゲート**: `cargo test --workspace --no-fail-fast` / `cargo clippy --workspace --all-targets --
   -D warnings` の結果は `docs/PROGRESS.md` の「Phase 66c」節に記載。
+
+## Phase 81 追記（2026-09-21。Phase 66b の未解決事項 5.: `try_auto_connect_cluster` の退避）
+
+Phase 66b の修正 5. が「`try_auto_connect_cluster`（`auth = "publickey"` の自動接続。
+`dispatch_ready` の中から呼ばれる）は今回のスコープ外」として残していた潜在バグ（`cluster_connector`
+を `refresh_cluster_tunnels` と同じ「tick 内・async ワーカー上でインラインに呼ぶ」形のままにしていた
+ため、`auth = "publickey"` のクラスタが実在すれば `run_cluster_hooks_off_async` を経由せず、
+`cluster_connector` 側の防御的ガード頼みになっていた）を塞いだ。
+
+- **決めたこと**: `try_auto_connect_cluster` を、`refresh_cluster_liveness`/`refresh_cluster_tunnels`
+  と同じ `run_cluster_hooks_off_async`（`crates/task-dispatch/src/dispatcher.rs`。本物の OS
+  スレッドへ逃がし、マルチスレッド・ランタイムの上でだけ `block_in_place` で包む）に通した。
+  `cluster_connector(&spec.id, &spec.host)` の呼び出しをそのままクロージャに包んで渡す形
+  （`Result<(), String>` を返す必要があるため、`run_cluster_hooks_off_async` 自体を
+  `FnOnce() + Send`〈戻り値 `()`〉から `FnOnce() -> T + Send, T: Send` へ一般化した。既存の 2
+  呼び出し〈`refresh_cluster_liveness`/`refresh_cluster_tunnels`、どちらも `()` を返す〉は
+  そのまま通る）。
+- **`cluster_connector`（`crates/celeris/src/lib.rs`）の防御的ガードは変更していない**: Phase
+  66b が足した「`Handle::try_current().is_ok()` なら panic の代わりに `Err` を返す」ガードは
+  そのまま残す（将来また同じ形の呼び出しを誰かが async の中から直接書いてしまった場合の保険。
+  ADR-0009 の多層防御の考え方どおり、退避〈今回の本体の修正〉とガード〈保険〉を両方持つ）。
+- **テスト**: `crates/task-dispatch/src/dispatcher.rs` の既存 2 本
+  （`publickey_cluster_auto_connects_and_dispatch_continues_on_success`、
+  `publickey_cluster_auto_connect_failure_gets_a_distinguishable_reason`。どちらも
+  `#[tokio::test]`〈既定 `current_thread`〉から `dispatcher.tick()` を直接呼ぶ）は無変更で
+  green のまま（`run_cluster_hooks_off_async` は `current_thread` ランタイムの上では
+  `block_in_place` を使わず素の OS スレッドだけを使うため、挙動が変わらない）。
+  `crates/celeris/src/lib.rs` に
+  `a_publickey_cluster_with_a_ready_task_does_not_panic_the_first_tick_phase_81`
+  （`#[tokio::test(flavor = "multi_thread")]`。`a_totp_cluster_with_a_forward_does_not_panic_the_
+  first_tick_phase_66b` と同じ配線 — `build_dispatcher`、`dispatcher.tick()` を直接呼ぶ、
+  `cluster_connector` を実物と同じ形〈ネストした `current_thread` ランタイム + `block_on`〉の
+  偽物に差し替える）を新設し、`auth = "publickey"` のクラスタに ready なタスクを 1 件置いて
+  `dispatch_ready` から `try_auto_connect_cluster` を実際に通した。偽の `cluster_connector` は
+  `Handle::try_current().is_err()` を assert してから `Err`（自動接続失敗）を返す
+  （**成功を返さなかったのは意図的**: 成功させると後続の `SshWorkspace::prepare` が実際の
+  ssh/rsync を試みてテストが外部ネットワークに出てしまうため。CLAUDE.md の「テストで外部
+  ネットワークに出ない」を優先し、`try_auto_connect_cluster` が off-async で呼ばれることと
+  tick がパニックしないことの確認に絞った）。
+- **やっていないこと**: 成功パス（`try_auto_connect_cluster` が `Ok(())` を返し、その後
+  `dispatch_ready` が実際に worker を spawn するところまで）を celeris の実配線（`build_dispatcher`
+  + `FakeAdapter`）で確認する統合テストは追加していない（`SshWorkspace::prepare` の実 ssh/rsync を
+  避けられないため）。この経路は `task-dispatch` 側の
+  `publickey_cluster_auto_connects_and_dispatch_continues_on_success`（`InstantAdapter` で
+  workspace 準備自体をバイパスする既存のユニットテスト）でカバー済みという判断。

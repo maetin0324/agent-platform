@@ -213,20 +213,26 @@ const CLUSTER_LIVENESS_INTERVAL: Duration = Duration::from_secs(5);
 /// する（`block_in_place` は `current_thread` ランタイムの中で呼ぶと panic するため、既存の
 /// `#[tokio::test]`〈既定は current_thread〉の `tunnel_*` テストや、ランタイムが無い素の同期呼び出しでは
 /// 使わない。どちらの場合も `f` は素の OS スレッドで動くので、ネストしたランタイムを作っても安全）。
-fn run_cluster_hooks_off_async<F: FnOnce() + Send>(f: F) {
+///
+/// Phase 81: `f` の戻り値をそのまま返す（`try_auto_connect_cluster` は `Result<(), String>` を
+/// 呼び出し元に返す必要があるため、`refresh_cluster_liveness`/`refresh_cluster_tunnels` の頃の
+/// `FnOnce() + Send`〈戻り値 `()`〉から一般化した。既存の 2 呼び出し（`()` を返す）はそのまま通る）。
+fn run_cluster_hooks_off_async<F, T>(f: F) -> T
+where
+    F: FnOnce() -> T + Send,
+    T: Send,
+{
     let on_multi_thread_runtime = tokio::runtime::Handle::try_current()
         .map(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread)
         .unwrap_or(false);
-    let spawn_and_join = move || {
-        std::thread::scope(|scope| match scope.spawn(f).join() {
-            Ok(()) => {}
-            Err(panic) => std::panic::resume_unwind(panic),
-        });
+    let spawn_and_join = move || match std::thread::scope(|scope| scope.spawn(f).join()) {
+        Ok(v) => v,
+        Err(panic) => std::panic::resume_unwind(panic),
     };
     if on_multi_thread_runtime {
-        tokio::task::block_in_place(spawn_and_join);
+        tokio::task::block_in_place(spawn_and_join)
     } else {
-        spawn_and_join();
+        spawn_and_join()
     }
 }
 
@@ -1698,12 +1704,24 @@ impl Dispatcher {
     /// ADR-0032 D3: `auth = "publickey"` のクラスタに接続フックが刺さっていれば 1 回だけ接続を試みる。
     /// フックが無い、または `auth` が `"publickey"` でなければ `None`（＝試みなかった。呼び出し側は従来どおり
     /// cooldown に落とす）。試みた場合は結果（`Ok(())` = 成功、`Err(detail)` = 失敗の理由）を返す。
+    ///
+    /// ADR-0053 Phase 66b の「未解決事項」/ Phase 81: `dispatch_ready`（この関数の呼び出し元）は
+    /// celeris の tick ループの中から**同期のまま**呼ばれ、そのループ自身がマルチスレッドの tokio
+    /// ランタイムの上で動く async タスクなので、`cluster_connector`（ネストしたランタイムを
+    /// `block_on` しうる）をここでインラインに呼ぶと `refresh_cluster_tunnels` と同じ形で panic
+    /// しうる（本番はまだ踏んでいないが、理論上の危険性は Phase 66b で指摘済み）。
+    /// `refresh_cluster_liveness`/`refresh_cluster_tunnels` と同じ `run_cluster_hooks_off_async`
+    /// （本物の OS スレッドへ逃がし、マルチスレッド・ランタイムの上でだけ `block_in_place` で包む）に
+    /// 通すことで、`cluster_connector` 側の防御的ガード（`Handle::try_current().is_ok()` なら
+    /// エラーを返す）に頼らずに済むようにした。
     fn try_auto_connect_cluster(&self, spec: &ClusterSpec) -> Option<Result<(), String>> {
         if spec.auth != "publickey" {
             return None;
         }
-        let connector = self.cluster_connector.as_ref()?;
-        Some(connector(&spec.id, &spec.host))
+        let connector = self.cluster_connector.as_ref()?.clone();
+        let id = spec.id.clone();
+        let host = spec.host.clone();
+        Some(run_cluster_hooks_off_async(move || connector(&id, &host)))
     }
 
     /// ADR-0018 D2: 設定の全クラスタについて、多重接続の有無を 1 tick に 1 回調べる（`ssh -O check` は unix ソケットを

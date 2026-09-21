@@ -11,11 +11,45 @@
 //!   `<!-- celeris:skills:end -->` の間を run ごとに書き直す（既存の `AGENTS.md` の他の内容は保つ。
 //!   無ければ作る）。
 //! - `acp`: 前置き（プロンプト文面）に `## Skills（celeris）` 節として直接埋め込む。
+//!
+//! ADR-0056 Phase 81 追記: `claude-code` は unmount した skill のディレクトリが `.claude/skills/`
+//! に残り続ける問題があった（Phase 79 は「対象の skill だけ置き換える」までしかやらず、
+//! 「前回あったが今回は無い」skill の削除は範囲外だった）。`<cwd>/.celeris/skills.json` に
+//! 前回 celeris が書いた skill 名の一覧を残し、次回の届け先でそこにあって今回無い名前だけを
+//! 消す（マーカーに無いディレクトリ＝人・他の仕組みが置いたものには触れない）。`codex` の
+//! `AGENTS.md` は区切りの節を run ごとに丸ごと書き直す（`rewrite_agents_md`）ので、同じ問題は
+//! 元から無い（マーカーは要らない）。
 
 use std::path::Path;
 use std::pin::Pin;
 
 use crate::protocol::SkillMount;
+
+/// Phase 81: `claude-code` が前回書いた skill 名の一覧（`.celeris/skills.json`）。
+const SKILLS_MARKER_REL: &str = ".celeris/skills.json";
+
+fn skills_marker_path(cwd: &Path) -> std::path::PathBuf {
+    cwd.join(SKILLS_MARKER_REL)
+}
+
+/// マーカーを読む。無い・壊れている・読めないときは空（＝前回の記録が無いものとして扱う。
+/// 削除を試みない方が安全 — ユーザーが手で作ったディレクトリを誤って消さないため）。
+async fn read_skills_marker(cwd: &Path) -> Vec<String> {
+    match tokio::fs::read_to_string(skills_marker_path(cwd)).await {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// マーカーを書く（`.celeris/` が無ければ作る）。書けなくても run は落とさない（呼び出し側が warn する）。
+async fn write_skills_marker(cwd: &Path, names: &[String]) -> std::io::Result<()> {
+    let path = skills_marker_path(cwd);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let json = serde_json::to_string(names).unwrap_or_else(|_| "[]".to_string());
+    tokio::fs::write(&path, json).await
+}
 
 /// `codex` の `AGENTS.md` に足す節の区切り。この 2 行の間だけを run ごとに書き直す。
 pub const SECTION_BEGIN: &str = "<!-- celeris:skills:start -->";
@@ -125,12 +159,36 @@ fn copy_dir<'a>(src: &'a Path, dest: &'a Path) -> BoxFuture<'a, std::io::Result<
 }
 
 /// `claude-code` 用: KB の `<mount.path>/` を丸ごと `<cwd>/.claude/skills/<name>/` へ写す
-/// （そのディレクトリ**だけ**を置き換える。`.claude` の他の内容には触れない）。`skills` が空なら
-/// 何もしない。
+/// （そのディレクトリ**だけ**を置き換える。`.claude` の他の内容には触れない）。
+///
+/// Phase 81: 前回このワーカーが書いた skill 名（`.celeris/skills.json`）を読み、今回の `skills` に
+/// 無い名前だけ `.claude/skills/<name>/` を削除する（マーカーに無い名前＝人・他の仕組みが置いた
+/// ディレクトリには触れない）。`skills` が空でも、前回の記録があれば掃除だけは行う（マーカーも
+/// 空にする）。前回の記録が無く今回も空なら、何も無いので `.claude` すら作らない（従来どおり）。
 pub async fn deliver_claude_code(cwd: &Path, skills: &[SkillMount]) -> std::io::Result<()> {
+    let previous = read_skills_marker(cwd).await;
+    let current_names: Vec<String> = skills.iter().map(|m| m.name.clone()).collect();
+
+    if !previous.is_empty() {
+        let root = cwd.join(".claude").join("skills");
+        for name in &previous {
+            if current_names.contains(name) {
+                continue;
+            }
+            let dest = root.join(name);
+            if tokio::fs::try_exists(&dest).await.unwrap_or(false) {
+                tokio::fs::remove_dir_all(&dest).await?;
+            }
+        }
+    }
+
     if skills.is_empty() {
+        if !previous.is_empty() {
+            write_skills_marker(cwd, &current_names).await?;
+        }
         return Ok(());
     }
+
     let root = cwd.join(".claude").join("skills");
     tokio::fs::create_dir_all(&root).await?;
     for mount in skills {
@@ -140,6 +198,7 @@ pub async fn deliver_claude_code(cwd: &Path, skills: &[SkillMount]) -> std::io::
         }
         copy_dir(Path::new(&mount.path), &dest).await?;
     }
+    write_skills_marker(cwd, &current_names).await?;
     Ok(())
 }
 
@@ -374,5 +433,104 @@ mod tests {
             .unwrap();
         let second = std::fs::read_to_string(cwd.path().join("AGENTS.md")).unwrap();
         assert_eq!(first, second);
+    }
+
+    // ---- ADR-0056 Phase 81 追記: unmount 後の stale な skill ディレクトリの掃除 ----
+
+    /// mount A+B → マーカーに両方が載る。次に mount A だけにすると、B のディレクトリは消え、
+    /// マーカーに無い（celeris が書いていない）C は生き残る。
+    #[tokio::test]
+    async fn deliver_claude_code_removes_unmounted_directories_but_keeps_user_authored_ones() {
+        let kb = tempfile::tempdir().unwrap();
+        let mount_a = write_skill(kb.path(), "a", "skill a", "");
+        let mount_b = write_skill(kb.path(), "b", "skill b", "");
+        let cwd = tempfile::tempdir().unwrap();
+
+        // ユーザーが自分で置いた C（celeris は一度も書いていない）。
+        std::fs::create_dir_all(cwd.path().join(".claude/skills/c")).unwrap();
+        std::fs::write(
+            cwd.path().join(".claude/skills/c/SKILL.md"),
+            "user authored\n",
+        )
+        .unwrap();
+
+        // 1 回目: A + B を mount。
+        deliver_claude_code(cwd.path(), &[mount_a.clone(), mount_b.clone()])
+            .await
+            .unwrap();
+        assert!(cwd.path().join(".claude/skills/a/SKILL.md").exists());
+        assert!(cwd.path().join(".claude/skills/b/SKILL.md").exists());
+        assert!(cwd.path().join(".claude/skills/c/SKILL.md").exists());
+        let marker_path = cwd.path().join(".celeris/skills.json");
+        let marker: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+        assert_eq!(marker, vec!["a".to_string(), "b".to_string()]);
+
+        // 2 回目: A だけを mount。B は消え、C（マーカーに無い）は残る。
+        deliver_claude_code(cwd.path(), &[mount_a]).await.unwrap();
+        assert!(cwd.path().join(".claude/skills/a/SKILL.md").exists());
+        assert!(
+            !cwd.path().join(".claude/skills/b").exists(),
+            "b was unmounted; its directory must be removed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cwd.path().join(".claude/skills/c/SKILL.md")).unwrap(),
+            "user authored\n",
+            "c is not in the marker (celeris never wrote it); it must survive"
+        );
+        let marker: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+        assert_eq!(marker, vec!["a".to_string()]);
+    }
+
+    /// mount A+B の後に skills が空になったら、A と B の両方が消え、マーカーも空になる
+    /// （マーカーに無い C は触れない）。
+    #[tokio::test]
+    async fn deliver_claude_code_removes_all_previously_mounted_when_skills_becomes_empty() {
+        let kb = tempfile::tempdir().unwrap();
+        let mount_a = write_skill(kb.path(), "a", "skill a", "");
+        let mount_b = write_skill(kb.path(), "b", "skill b", "");
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".claude/skills/c")).unwrap();
+        std::fs::write(cwd.path().join(".claude/skills/c/SKILL.md"), "user\n").unwrap();
+
+        deliver_claude_code(cwd.path(), &[mount_a, mount_b])
+            .await
+            .unwrap();
+        deliver_claude_code(cwd.path(), &[]).await.unwrap();
+
+        assert!(!cwd.path().join(".claude/skills/a").exists());
+        assert!(!cwd.path().join(".claude/skills/b").exists());
+        assert!(cwd.path().join(".claude/skills/c").exists());
+        let marker_path = cwd.path().join(".celeris/skills.json");
+        let marker: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&marker_path).unwrap()).unwrap();
+        assert!(marker.is_empty());
+    }
+
+    /// `codex`: mount A+B → AGENTS.md の節に両方。次に mount A だけにすると、節から B が消え、
+    /// A だけ残る（`rewrite_agents_md` が節を丸ごと書き直すので、`claude-code` のような別マーカーは
+    /// 要らない）。
+    #[tokio::test]
+    async fn deliver_agents_md_shrinks_the_section_when_a_skill_is_unmounted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mount_a = write_skill(dir.path(), "a", "skill a", "");
+        let mount_b = write_skill(dir.path(), "b", "skill b", "");
+        let cwd = tempfile::tempdir().unwrap();
+
+        deliver_agents_md(cwd.path(), &[mount_a.clone(), mount_b])
+            .await
+            .unwrap();
+        let with_both = std::fs::read_to_string(cwd.path().join("AGENTS.md")).unwrap();
+        assert!(with_both.contains("### a"));
+        assert!(with_both.contains("### b"));
+
+        deliver_agents_md(cwd.path(), &[mount_a]).await.unwrap();
+        let with_one = std::fs::read_to_string(cwd.path().join("AGENTS.md")).unwrap();
+        assert!(with_one.contains("### a"));
+        assert!(
+            !with_one.contains("### b"),
+            "b was unmounted; the section must shrink to just a"
+        );
     }
 }
