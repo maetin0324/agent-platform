@@ -29,7 +29,9 @@ release.sh <ref>  →  verify.sh <sha12>  →  promote.sh <sha12>        （戻�
   previous -> releases/<sha12>    直前の版（rollback 先）
   releases/<sha12>/     bin/{celeris,celerisctl}  gui/  manifest.json  gate.json  verify.json
                         changes.json      この版で何が変わるか（ADR-0041 D4。§2）
-                        promoted.json     昇格の記録 {promoted_at, mode, from}（ADR-0041 D3。§4）
+                        promoted.json     昇格の記録 {promoted_at, mode, from}（ADR-0041 D3。§4。成功したときだけ）
+                        promote_failed.json  直近の昇格が失敗した記録 {failed_at, error}（§4。失敗したときだけ。
+                                          次の昇格の試みが始まると消える）
                         scripts/          selfdeploy 一式の写し（ADR-0040 D6。昇格に作業チェックアウトが要らない）
                         promote.log       この API 経由の昇格の出力（§4c）
                         promote.lock      昇格中の pid
@@ -275,6 +277,13 @@ scripts/selfdeploy/promote.sh <sha12>
 - ログは `~/.local/celeris/backups/promote-<ts>.log`。DB のコピーは `~/.local/celeris/backups/<ts>-pre-<sha12>.sqlite3`。
 - 成功したら `~/.local/celeris/releases/<sha12>/promoted.json` に `{promoted_at, mode, from}` を書く
   （ADR-0041 D3。`GET /releases` の `promoted_at` と `status.sh` はこれを読む）。
+- **失敗したら**（`sd_die` を含め、`set -e` でどこで止まっても）`~/.local/celeris/releases/<sha12>/promote_failed.json`
+  に `{failed_at, error}` を書く（`error` は `promote-<ts>.log` の末尾 20 行）。バグ報告（2026-09-21）:
+  `promote.sh` は API から detached で起こされる（§4c）ので、失敗しても呼び出し元の celeris は
+  「起動できた」ことしか知らない。この印が無いと、GUI は「昇格が終わった（`promoting` が偽に戻った）」
+  ようにしか見えず、成功したのか失敗したのか区別できなかった。次の昇格の試みが始まると消える
+  （`POST /releases/{sha12}/promote` が spawn の直前に消す）ので、古い失敗が残り続けることはない。
+  `GET /releases` の `items[].promote_failed` と `status.sh` の `promote_failed` はこれを読む。
 - **git リポジトリには触れない。** `main` への反映は人がやる（次節）。
 
 ### 4d. 昇格したら `main` に戻す（ADR-0041 D3）
@@ -399,7 +408,8 @@ scripts/selfdeploy/status.sh
 ```
 
 JSON 1 つ。`current` / `previous`、`releases[]`（`gate`（各段の exit と秒数）、`verify`（`ok` / `live_ok` /
-落ちた検査の名前）、`promoted_at` / `promoted`（`promoted.json`）、`on_main`、`changes`（`base` / `stale` /
+落ちた検査の名前）、`promoted_at` / `promoted`（`promoted.json`）、`promote_failed`（`promote_failed.json`。
+直近の失敗が残っていれば `{failed_at, error}`、無ければ `null`）、`on_main`、`changes`（`base` / `stale` /
 `commit_count` / `file_count` / `sensitive`））、本番 `:7710` の `/health`、`:7700` の `/healthz`、
 `daemon_instances`、`backups` の新しい 10 件。**読むだけ**なので誰が実行してもよい
 （`on_main` の git も `merge-base --is-ancestor` だけ。`$SD_REPO` に `main` が無ければ `null`）。

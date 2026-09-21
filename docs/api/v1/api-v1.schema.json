@@ -7713,6 +7713,17 @@
             "null"
           ]
         },
+        "promote_failed": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReleasePromoteFailure"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "直近の昇格の試みが失敗した記録（`<release>/promote_failed.json`）。次の昇格の試みが\n始まると消える（celeris の `start_promote` が書き直す前に消す）ので、`null` なら\n「まだ一度も失敗していない」か「その後もう一度試している」のどちらか。\n昇格が成功すると `promoted_at` が新しくなる一方でこれは残らない（`promote.sh` は\n成功時にこのファイルを書かない）。GUI はこれが非 `null` かつ `promoting` が偽のときだけ\n赤いバナーで出す。"
+        },
         "promoted_at": {
           "description": "ADR-0041 D3: `promoted.json` の `promoted_at`（`promote.sh` が昇格に成功したときだけ書く）。\n一度も昇格していないリリースは `null`。",
           "type": [
@@ -7789,6 +7800,24 @@
         "log",
         "started_at",
         "script_from"
+      ],
+      "type": "object"
+    },
+    "ReleasePromoteFailure": {
+      "description": "`<release>/promote_failed.json` の中身（`promote.sh` が非 0 で終わったときだけ書く）。",
+      "properties": {
+        "error": {
+          "description": "`promote.log` の末尾（最大 20 行）。原因を画面で分かる範囲だけ見せる（全文は `promote.log`）。",
+          "type": "string"
+        },
+        "failed_at": {
+          "description": "RFC 3339。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "failed_at",
+        "error"
       ],
       "type": "object"
     },

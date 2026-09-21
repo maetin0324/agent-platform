@@ -117,10 +117,12 @@ if os.path.isdir(releases_dir):
         gate = load(os.path.join(d, "gate.json")) or {}
         verify = load(os.path.join(d, "verify.json"))
         promoted = load(os.path.join(d, "promoted.json"))
+        promote_failed = load(os.path.join(d, "promote_failed.json"))
         changes = load(os.path.join(d, "changes.json"))
         items.append({
             "promoted_at": (promoted or {}).get("promoted_at"),
             "promoted": promoted,
+            "promote_failed": promote_failed,
             # ADR-0041 D3: 本番に出た版が `main` に戻っているか（null = 分からない）。
             "on_main": on_main(manifest.get("sha") or name),
             # ADR-0041 D4: 昇格したら何が変わるか（`release.sh` がビルド時に書いた要約）。

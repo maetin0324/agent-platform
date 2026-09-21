@@ -79,6 +79,7 @@ export function releaseItem(overrides: Partial<ReleaseItem> = {}): ReleaseItem {
     is_current: false,
     is_previous: false,
     promoting: false,
+    promote_failed: null,
     ...overrides,
   };
 }

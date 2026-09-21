@@ -23,6 +23,7 @@ import {
   promoteAvailability,
   promoteConfirmText,
   promotedAtText,
+  promoteFailedText,
   promoteNeedsTypedSha,
   releaseGateLabel,
   releasePositionLabel,
@@ -219,6 +220,7 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
   const sensitive = sensitiveBadgeText(item);
   const notOnMain = notOnMainText(item);
   const promotedAt = promotedAtText(item);
+  const promoteFailed = promoteFailedText(item);
   const summary = changesSummaryText(item);
   const stale = staleChangesText(item);
   // 安全に関わる変更があるときは sha12 を打たせる（ADR-0041 D4）。打った文字はこの行だけの状態。
@@ -368,6 +370,18 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
         {item.promoting && (
           <Alert tone="warning" title="昇格が走っています" data-testid="release-promoting">
             <p>このリリースへの切り替えが進行中です。完了まで数十秒かかります。</p>
+          </Alert>
+        )}
+
+        {promoteFailed && (
+          <Alert tone="danger" title="昇格に失敗しました" data-testid="release-promote-failed">
+            <p className="break-all whitespace-pre-wrap font-mono text-xs">{promoteFailed}</p>
+            {item.promote_failed?.failed_at && (
+              <p className={hintClass}>失敗した日時: {item.promote_failed.failed_at}</p>
+            )}
+            <p className={hintClass}>
+              旧いバージョンのまま動き続けています（何も壊れていません）。原因を確認してから、もう一度「昇格」を押してください。
+            </p>
           </Alert>
         )}
 

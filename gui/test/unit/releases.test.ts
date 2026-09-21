@@ -13,6 +13,7 @@ import {
   promoteAvailability,
   promoteConfirmText,
   promotedAtText,
+  promoteFailedText,
   promoteNeedsTypedSha,
   releaseGateLabel,
   releasePositionLabel,
@@ -186,6 +187,32 @@ describe("main への反映と昇格の記録（ADR-0041 D3）", () => {
   it("promoted_at は promoted.json があるときだけ", () => {
     expect(promotedAtText(item({ promoted_at: "2026-09-19T12:31:36Z" }))).toBe("2026-09-19T12:31:36Z");
     expect(promotedAtText(item())).toBeNull();
+  });
+
+  // バグ報告 2026-09-21: 昇格ボタンを押したあと、失敗しても画面に何も出なかった
+  // （promote.sh が set -e で死ぬだけで、`promoting` が偽に戻るのと見分けがつかなかった）。
+  it("promote_failed があれば、その内容を出す", () => {
+    const failed = item({
+      promote_failed: { failed_at: "2026-09-19T12:31:36Z", error: "old celeris is still serving" },
+    });
+    expect(promoteFailedText(failed)).toBe("old celeris is still serving");
+  });
+
+  it("一度も失敗していなければ null", () => {
+    expect(promoteFailedText(item())).toBeNull();
+  });
+
+  it("走っている最中は（promote_failed が残っていても）出さない", () => {
+    const stillRunning = item({
+      promoting: true,
+      promote_failed: { failed_at: "2026-09-19T12:31:36Z", error: "old celeris is still serving" },
+    });
+    expect(promoteFailedText(stillRunning)).toBeNull();
+  });
+
+  it("error が空文字でも、失敗したこと自体は伝える文言を出す", () => {
+    const failed = item({ promote_failed: { failed_at: "2026-09-19T12:31:36Z", error: "" } });
+    expect(promoteFailedText(failed)).toBe("昇格に失敗しました（詳しい原因は promote.log を見てください）。");
   });
 });
 

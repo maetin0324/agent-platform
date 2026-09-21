@@ -959,9 +959,26 @@ pub struct ReleaseItem {
     pub is_previous: bool,
     /// `promote.lock` に書かれた pid がまだ生きている（昇格が走っている最中）。
     pub promoting: bool,
+    /// 直近の昇格の試みが失敗した記録（`<release>/promote_failed.json`）。次の昇格の試みが
+    /// 始まると消える（celeris の `start_promote` が書き直す前に消す）ので、`null` なら
+    /// 「まだ一度も失敗していない」か「その後もう一度試している」のどちらか。
+    /// 昇格が成功すると `promoted_at` が新しくなる一方でこれは残らない（`promote.sh` は
+    /// 成功時にこのファイルを書かない）。GUI はこれが非 `null` かつ `promoting` が偽のときだけ
+    /// 赤いバナーで出す。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promote_failed: Option<ReleasePromoteFailure>,
     /// `manifest.json` / `gate.json` が読めなかったときの一行（GUI が「壊れている」と出す）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,
+}
+
+/// `<release>/promote_failed.json` の中身（`promote.sh` が非 0 で終わったときだけ書く）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleasePromoteFailure {
+    /// RFC 3339。
+    pub failed_at: String,
+    /// `promote.log` の末尾（最大 20 行）。原因を画面で分かる範囲だけ見せる（全文は `promote.log`）。
+    pub error: String,
 }
 
 /// `verify.json` の要約（ADR-0040 D3）。

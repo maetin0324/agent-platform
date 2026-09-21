@@ -31,7 +31,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use task_api::types::{
-    ReleaseChanges, ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseVerify,
+    ReleaseChanges, ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleasePromoteFailure,
+    ReleaseVerify,
 };
 use task_api::{ReleasePromoteError, ReleaseSource, ReleasesFs};
 use time::OffsetDateTime;
@@ -315,6 +316,7 @@ fn read_release(
     let gate = read_json(&dir.join("gate.json"));
     let verify = read_json(&dir.join("verify.json"));
     let promoted = read_json(&dir.join("promoted.json"));
+    let promote_failed = read_json(&dir.join("promote_failed.json"));
 
     let mut problems: Vec<&str> = Vec::new();
     if manifest.is_none() {
@@ -364,6 +366,10 @@ fn read_release(
         is_current: current == Some(sha12),
         is_previous: previous == Some(sha12),
         promoting: promoting_pid(dir).is_some(),
+        promote_failed: promote_failed.as_ref().map(|v| ReleasePromoteFailure {
+            failed_at: as_string(v.get("failed_at").cloned()).unwrap_or_default(),
+            error: as_string(v.get("error").cloned()).unwrap_or_default(),
+        }),
         problem: (!problems.is_empty()).then(|| problems.join("; ")),
     }
 }
@@ -455,6 +461,11 @@ pub fn start_promote(
             )));
         }
     };
+
+    // 新しい試みを始めるので、前回の失敗の印は消す（残っていると GUI がいつまでも赤いバナーを出す）。
+    // 消せなくても（無い／権限が無い）このまま続ける — 古い失敗が誤って表示され続けるだけで、
+    // 昇格そのものを止める理由にはならない。
+    let _ = std::fs::remove_file(dir.join("promote_failed.json"));
 
     let log = dir.join("promote.log");
     let lock = dir.join("promote.lock");
@@ -922,6 +933,89 @@ mod tests {
         // 壊れた promoted.json でも落ちない。
         std::fs::write(root.join("bbbbbbbbbbbb").join("promoted.json"), "{ broken").expect("write");
         assert_eq!(scan(&root, None).items.len(), 2);
+    }
+
+    /// バグ報告（2026-09-21）: 昇格ボタンを押したあと、失敗しても GUI に何も出なかった。
+    /// `promote.sh` は `set -e` で `sd_die` した瞬間にただ死ぬだけで、成否をどこにも残していなかった
+    /// （`promoted.json` は成功のときだけ）。`promote.lock` の pid が消えれば `promoting` は偽に戻るので、
+    /// 「昇格が終わった」ようにしか見えなかった。`promote_failed.json` を読んで `promote_failed` に写す。
+    #[test]
+    fn promote_failed_json_becomes_promote_failed() {
+        let (_dir, root) = env();
+        release(
+            &root,
+            "aaaaaaaaaaaa",
+            Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
+        std::fs::write(
+            root.join("aaaaaaaaaaaa").join("promote_failed.json"),
+            r#"{"failed_at":"2026-09-19T12:31:36Z","error":"promote.sh: ERROR: old celeris is still serving"}"#,
+        )
+        .expect("write");
+        release(
+            &root,
+            "bbbbbbbbbbbb",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            None,
+        );
+
+        let scanned = scan(&root, None);
+        let by = |sha: &str| {
+            scanned
+                .items
+                .iter()
+                .find(|i| i.sha12 == sha)
+                .expect("item")
+                .clone()
+        };
+        let failed = by("aaaaaaaaaaaa").promote_failed.expect("promote_failed");
+        assert_eq!(failed.failed_at, "2026-09-19T12:31:36Z");
+        assert!(failed.error.contains("old celeris is still serving"));
+        assert_eq!(
+            by("bbbbbbbbbbbb").promote_failed,
+            None,
+            "失敗したことが無いリリースは null"
+        );
+        // 壊れた promote_failed.json でも落ちない。
+        std::fs::write(
+            root.join("bbbbbbbbbbbb").join("promote_failed.json"),
+            "{ broken",
+        )
+        .expect("write");
+        assert_eq!(scan(&root, None).items.len(), 2);
+    }
+
+    /// 前回の失敗の印は、次の昇格の試みが始まると消える（残ったままだと新しい試みが進行中でも
+    /// 赤いバナーが出続けてしまう）。
+    #[test]
+    fn starting_a_new_promotion_clears_the_previous_failure_marker() {
+        let (_dir, root) = env();
+        release(
+            &root,
+            "abcdef123456",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#),
+        );
+        std::fs::write(
+            root.join("abcdef123456").join("promote_failed.json"),
+            r#"{"failed_at":"2026-09-19T12:00:00Z","error":"boom"}"#,
+        )
+        .expect("write");
+        fake_script(&root, "abcdef123456", "retry");
+
+        start_promote(&root, "abcdef123456").expect("202");
+
+        assert!(
+            !root
+                .join("abcdef123456")
+                .join("promote_failed.json")
+                .exists(),
+            "start_promote は前回の失敗の印を消す"
+        );
     }
 
     /// ADR-0041 D4: `changes.json` が `changes` になる。`stale` は**いまの** `current` と比べて決める。

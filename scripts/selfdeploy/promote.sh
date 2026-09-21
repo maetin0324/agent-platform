@@ -42,6 +42,25 @@ SD_LOG_FILE="$SD_BACKUPS/promote-$TS.log"
 sd_log "promote $SHA12 (log: $SD_LOG_FILE)"
 
 REL="$(sd_release_dir "$SHA12")"
+
+# GUI の昇格ボタンは detached なこのプロセスの成否を直接見られない（celeris は起動できたことしか
+# 知らない）。だから **失敗したら `$REL/promote_failed.json` を残す**（`sd_die` に限らず、`set -e` で
+# 途中終了した場合も含めて EXIT トラップで拾う）。`promoted.json`（成功）と対になる印で、
+# `GET /releases` の `items[].promote_failed` に写り、GUI が赤いバナーで出す。
+# 次の昇格の試みが始まるとき（celeris 側の `start_promote`）に消される — 古い失敗を引きずらない。
+record_promote_failure() {
+  local ec=$?
+  [ "$ec" -eq 0 ] && return
+  [ -d "$REL" ] || return
+  {
+    printf '{\n'
+    printf '  "failed_at": %s,\n' "$(sd_json_str "$(sd_ts)")"
+    printf '  "error": %s\n' "$(sd_json_str "$(tail -n 20 "$SD_LOG_FILE" 2>/dev/null | tr -d '\r')")"
+    printf '}\n'
+  } >"$REL/promote_failed.json" 2>/dev/null || true
+}
+trap record_promote_failure EXIT
+
 [ -d "$REL" ] || sd_die "no such release: $REL"
 [ -x "$REL/bin/celeris" ] || sd_die "missing $REL/bin/celeris"
 [ -f "$REL/verify.json" ] || sd_die "$SHA12 has no verify.json — run verify.sh first"

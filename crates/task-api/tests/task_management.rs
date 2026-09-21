@@ -818,6 +818,7 @@ async fn the_timeline_lists_the_releases_that_contain_this_tasks_commits() {
             is_current: false,
             is_previous: false,
             promoting: false,
+            promote_failed: None,
             problem: None,
         }
     }

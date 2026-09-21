@@ -1,6 +1,9 @@
 # celeris HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-21 バグ報告の対応（昇格の成否が画面に出なかった）— **追加のみ。v1 のまま**。
+  `GET /releases` の `items[]` に `promote_failed`（`promote_failed.json`。直近の昇格の試みが
+  失敗した記録）が増えた。§3.66〜3.67。
 - 改訂: 2026-09-20 Phase 59（ADR-0046、組織 = Agent Profile の継承木）— **追加のみ。v1 のまま**。
   (1) 組織のノードが `profile` を持つようになった（`OrgNode.profile`、`GET /org` の `effective_profiles[]`、
   `POST /org` と `PATCH /org/{id}` の `profile`。§3.42〜3.44）。
@@ -1597,6 +1600,7 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
       "is_current": false,
       "is_previous": false,
       "promoting": false,             // promote.lock の pid がまだ生きている
+      "promote_failed": null,         // promote_failed.json（直近の昇格の試みが失敗したときだけ）。§3.67 の後注
       "problem": null                 // manifest/gate が読めなかったときだけ一行（普段は省略）
     }
   ]
@@ -1658,6 +1662,14 @@ stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid �
   共有するので接続は切れない）。
 - `promote.sh` は `verify.json.ok` を自分でも確かめる（`--force` は無い）。この API の 409 はその前段の
   早い拒否で、二重の防壁になっている。
+- **`promote.sh` が detached で始まった後に失敗しても、この 202 は変わらない**（celeris は「起こせた」
+  ことしか知らない）。バグ報告（2026-09-21）: 押した後 GUI に何も出ず、成功も失敗も分からなかった —
+  `promote.sh` は落ちるとただ死ぬだけで、`promote.lock` の pid が消えると `promoting` が偽に戻るので、
+  「終わった」ようにしか見えなかった。`promote.sh` はどこで死んでも（EXIT トラップ）
+  `<release>/promote_failed.json` に `{failed_at, error}`（`error` はログの末尾 20 行）を書くようになった。
+  `GET /releases` の `items[].promote_failed` はこれを写す（§3.66）。次の昇格の試みが始まる
+  （この API が呼ばれる）と、そのリリースの `promote_failed.json` は消える — 古い失敗が残り続けない。
+  GUI は `promoting` が偽で `promote_failed` が非 `null` のときだけ赤いバナーを出す。
 
 ### 3.68〜3.71 案件のリポジトリ（ADR-0043 D1、Phase 52。**57〜60。変更系はすべて管理系: `token_file` 未設定でも 401**）
 

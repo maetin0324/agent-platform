@@ -194,3 +194,14 @@ export function releaseSubtitle(item: ReleaseItem): string {
 export function promotedAtText(item: Pick<ReleaseItem, "promoted_at">): string | null {
   return item.promoted_at ?? null;
 }
+
+/**
+ * 直近の昇格の試みが失敗したか（バグ報告 2026-09-21: 押したあと成功も失敗も画面に出なかった）。
+ * `promoting` の最中は「走っている」の帯（`release-promoting`）を優先するので、そちらが出ているときは
+ * `false`（celeris 側が新しい試みを始めるときに `promote_failed.json` を消すので、実際には同時に
+ * 両方立つことは無いはずだが、表示の優先順位として二重に出さない）。
+ */
+export function promoteFailedText(item: Pick<ReleaseItem, "promoting" | "promote_failed">): string | null {
+  if (item.promoting || !item.promote_failed) return null;
+  return item.promote_failed.error || "昇格に失敗しました（詳しい原因は promote.log を見てください）。";
+}
