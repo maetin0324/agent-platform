@@ -11496,3 +11496,14 @@ main への `git merge` コマンドそのものは実行していない。パ�
   使えるサンドボックスではないため）。「最新へ」ピル・キーボード表示時の入力欄・overflow メニューの
   タップ操作は実機で確認するとよい。
 - 詳細は gui/docs/PROGRESS.md「Phase G29」の未解決事項を参照。
+
+### Phase 67c・73 の本番反映（2026-09-21 15:16–15:20 UTC）
+
+- main `314e706` = Phase 67c merge。ゲート: cargo test **1707 passed / 0 failed**、clippy exit 0。`release.sh` → `314e7064933b`（schema 23）。
+  `verify.sh` check 1–6 true、`live_ok=true` → `promote.sh 314e7064933b` **mode=live**（15:19:43→48）。
+- main `019ea9d`〜`85e4c0e` = Phase 73 merge（GUI のみ）。Phase 73 の worktree は Phase 68 未取り込みの時点から分岐していたため、エージェントが
+  Phase 68 の差分を `git apply` で同期してから作業しており、merge では GUI 4 ファイル＋docs 3 ファイルが衝突。GUI は Phase 73 側（Phase 68 の内容を含む
+  上位集合）を採り、docs は両方を残した。自動 merge された `org.tsx` に Phase 68 の dl 項目と Phase 73 のカードが二重に残ったので Phase 73 側に一本化。
+  GUI ゲート: typecheck / lint exit 0、`pnpm test` 893 passed、`pnpm mobile-audit` 違反 0。release は 15:21 に開始。
+- 注意（運用）: Phase 67c の sticky により、いま現役の CoS セッションが **codex** なら Phase 68b（`codex exec resume` の argv）が入るまで CoS の
+  対話は失敗し続ける。回避として conversation ハーネスを一時的に claude-code に固定するか、`POST /console/new-conversation` で切る（次節）。
