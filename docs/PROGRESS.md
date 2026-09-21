@@ -11507,3 +11507,14 @@ main への `git merge` コマンドそのものは実行していない。パ�
   GUI ゲート: typecheck / lint exit 0、`pnpm test` 893 passed、`pnpm mobile-audit` 違反 0。release は 15:21 に開始。
 - 注意（運用）: Phase 67c の sticky により、いま現役の CoS セッションが **codex** なら Phase 68b（`codex exec resume` の argv）が入るまで CoS の
   対話は失敗し続ける。回避として conversation ハーネスを一時的に claude-code に固定するか、`POST /console/new-conversation` で切る（次節）。
+
+### Phase 73 の本番反映（2026-09-21 15:24–15:28 UTC。`85e4c0ec7300`、ライブ切替）と systemctl の 3.5 分の遅れ
+
+- `release.sh` → `85e4c0ec7300`（schema 23）。`verify.sh` check 1–6 true（conversation ハーネスを claude-code に固定した設定で通過）、`live_ok=true`。
+- `promote.sh 85e4c0ec7300` **mode=live** だが **`systemctl --user start` が返るまで 3 分 41 秒かかった**（15:24:47 に起動指示 → systemd の
+  `Started celeris@85e4c0ec7300` は 15:28:28）。新デーモン自身は起動から 2 秒で active。API は旧が応答し続けたので停止は無い。
+  原因は systemd の user manager 側（ジョブ待ち）と思われる。詳細は `journalctl --user` を人が見ること（提案: promote.sh に `systemctl start`
+  の所要時間を記録し、60 秒を超えたら `systemctl --user list-jobs` を吐く）。
+- 起動後: `llm-proxy listening`、tunnel `login_needed`（変わらず）。conversation ハーネスの `adapter = "claude-code"` 固定がこの起動から有効。
+  CoS の現役セッション（codex）は `POST /console/new-conversation` で retire 済み。sticky の実機確認（2 往復が同じ Claude セッションで、
+  2 回目が `resume:true`・差分前置き）は次節。
