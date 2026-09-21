@@ -12646,3 +12646,16 @@ cargo のゲートが通らないリスクは実質無いと判断したが、CL
   気づけるようにするとよい。
 - `SD_E2E_TIMEOUT` の既定 240 秒は画面数（現状 13〜23、実在データの有無で変動）× 2 viewport の実測から
   余裕を見て決めた。今後画面が増えたら実測を見て調整する。
+
+### Phase 83 の本番反映と、ディスク逼迫の対処（2026-09-21 20:30–20:41 UTC。`8c3e8c7eb9b9`、ライブ切替）
+
+- **ディスク**: Phase 83 のエージェントが `cargo test` 中に ENOSPC を踏んだ（`/home` 1007G 中 958G 使用、3.1G 空き）。原因は
+  `.claude/worktrees/`（実装エージェントの worktree 24 本）に残った `target/`（1 本 20〜33 GB、合計 265 GB）。全部 merge 済みだったので
+  `target/`・`gui/node_modules`・`gui/build` を削除 → **268 GB 空き（73%）**。残る大物: `~/.local/celeris/workspaces` 193 GB（タスクの作業場所。
+  本番の状態なので人が判断）、`releases/.cargo-target-pre-celeris` 41 GB（同じく人）、main の `target/` 59 GB（ゲート用に維持）。
+  教訓: **merge したら worktree の build 生成物をすぐ消す**（今後のラウンドの手順に入れる）。
+- main `8c3e8c7` = Phase 83 merge。ゲート: cargo test **1784 passed / 0 failed**、clippy exit 0、GUI typecheck / lint exit 0、`pnpm test` 965 passed、
+  **`pnpm e2e:mock` ok**。`release.sh` → `8c3e8c7eb9b9`（schema 24）。`verify.sh`: check 1–4 true、**check 4b (gui-e2e) true**（`pnpm e2e:staging`、
+  17 秒。staging の GUI 7701 / API 7711 に対し 393×851 と 1280×800 で全 route を読み取り専用で確認）、check 5・6 true → `verify.json.checks` に
+  `4b` が入り `ok=true live_ok=true`。`promote.sh` **mode=live**（20:41:12→16）。
+- これで verify は「起動・件数・主要 GET・GUI・**GUI e2e**・N-1・煙試験」の 7 段。ADR-0055 D3 の「実 celeris が要る e2e」の穴が塞がった。
