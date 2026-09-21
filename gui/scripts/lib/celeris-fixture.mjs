@@ -65,8 +65,15 @@ export function buildRoutes({
       { route: "project-docs", path: `/projects/${projectId}/docs` },
     );
   }
+  // Phase 84: 作成・編集フォーム（`SkillEditor`）自体も監査対象にする（GET だけなので e2e:staging でも安全。
+  // 一覧・詳細の閲覧だけでは、files 入力・雛形ボタン・インラインの検証エラー表示の画面が一度も機械検査を
+  // 通らないまま「監査 0 件」を名乗ってしまう事故を防ぐ）。
+  routes.push({ route: "knowledge-skill-create", path: "/knowledge/skills?create=1" });
   if (skillName) {
-    routes.push({ route: "knowledge-skill-detail", path: `/knowledge/skills?name=${skillName}` });
+    routes.push(
+      { route: "knowledge-skill-detail", path: `/knowledge/skills?name=${skillName}` },
+      { route: "knowledge-skill-edit", path: `/knowledge/skills?name=${skillName}&edit=1` },
+    );
   }
   if (taskId) {
     for (const tab of ["overview", "timeline", "changes", "files", "artifacts"]) {

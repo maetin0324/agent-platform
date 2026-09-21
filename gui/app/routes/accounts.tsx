@@ -35,7 +35,8 @@ import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { hintClass, inputClass, labelClass, selectClass, touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
-import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { Alert, CopyButton, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { Skeleton } from "~/components/ui/skeleton";
 import { TONE_SOLID_BG, type Tone } from "~/components/ui/tone";
 import { shortId } from "~/lib/format";
 import {
@@ -47,7 +48,7 @@ import {
   tierLabel,
   tierResolutionLabel,
 } from "~/lib/llm-sources";
-import { mcpAuthKindWord, mcpClientStatusWord, mcpScopeLabel, sortMcpScopes } from "~/lib/mcp";
+import { mcpAuthKindWord, mcpClientStatusWord, mcpConnectionUrlHint, mcpScopeLabel, sortMcpScopes } from "~/lib/mcp";
 import { relativeTimeLabel } from "~/lib/reports";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { CelerisBanner } from "~/root";
@@ -646,6 +647,14 @@ function McpClientCard({ client, fetchedAt }: { client: McpClient; fetchedAt: st
               <span className="text-fg-subtle">未使用</span>
             )}
           </DataItem>
+          {/* Phase 84: 接続 URL のヒント（`docs/mcp.md` §2 の既定値。トークンは絶対に出さない）。
+              コピーしてクライアント側の設定にそのまま貼れるように `CopyButton` を添える。 */}
+          <DataItem label="接続 URL のヒント" wide>
+            <span className="flex flex-wrap items-center gap-2" data-testid="mcp-client-url-hint">
+              <Mono className="break-all">{mcpConnectionUrlHint(client)}</Mono>
+              <CopyButton value={mcpConnectionUrlHint(client)} label="URL" />
+            </span>
+          </DataItem>
         </dl>
 
         <McpClientCallsDisclosure clientId={client.id} fetchedAt={fetchedAt} />
@@ -674,7 +683,7 @@ function McpClientCallsDisclosure({ clientId, fetchedAt }: { clientId: string; f
       </summary>
       <div className="mt-2">
         {fetcher.state !== "idle" ? (
-          <p className="text-sm text-fg-subtle">読み込み中…</p>
+          <McpCallListSkeleton />
         ) : !fetcher.data ? null : fetcher.data.items.length === 0 ? (
           <p className="text-sm text-fg-subtle">呼び出しはまだありません。</p>
         ) : (
@@ -686,6 +695,19 @@ function McpClientCallsDisclosure({ clientId, fetchedAt }: { clientId: string; f
         )}
       </div>
     </details>
+  );
+}
+
+/** 直近の呼び出しの読み込み中（Phase 84）。`useFetcher().load()` の応答を待つ間の骨組み。 */
+function McpCallListSkeleton() {
+  return (
+    <ul className="space-y-1.5" aria-hidden="true" data-testid="mcp-call-list-skeleton">
+      {[0, 1].map((i) => (
+        <li key={i} className="rounded-lg border border-border bg-surface-2 px-3 py-2">
+          <Skeleton className="h-4 w-2/3" />
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -702,7 +724,12 @@ function McpCallRow({ call, fetchedAt }: { call: McpCall; fetchedAt: string }) {
         </Badge>
       </span>
       <span className="flex flex-wrap items-center gap-3 text-fg-muted">
-        {!call.ok && call.error_kind && <span className="text-danger">{call.error_kind}</span>}
+        {/* Phase 84: エラーの種類も 1 語のバッジに揃える（ADR-0055 D1-3 と同じ規律。地の文にしない）。 */}
+        {!call.ok && call.error_kind && (
+          <Badge tone="danger" data-status-badge="mcp-call-error" data-testid="mcp-call-error-kind">
+            {call.error_kind}
+          </Badge>
+        )}
         <span data-testid="mcp-call-latency">{call.latency_ms}ms</span>
         <span title={call.at}>{relativeTimeLabel(call.at, fetchedAt)}</span>
       </span>

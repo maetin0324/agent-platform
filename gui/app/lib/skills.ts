@@ -84,15 +84,53 @@ export function skillMarkdownBody(raw: string): string {
 }
 
 /**
- * 送る前の frontmatter の検査（celeris の 422 `validation` を先に人に見せるだけ。
- * **判定の正本は celeris**）。通るなら `null`、通らないなら理由。
+ * 名前欄だけの検査（Phase 84: フィールドごとのインラインエラー表示のため `skillMarkdownProblem` から
+ * 切り出した）。通るなら `null`。
  */
-export function skillMarkdownProblem(name: string, skillMd: string): string | null {
-  if (!isValidSkillName(name)) return "skill 名は英小文字・数字・ハイフンだけ（1〜64 文字）にしてください。";
+export function skillNameProblem(name: string): string | null {
+  return isValidSkillName(name) ? null : "skill 名は英小文字・数字・ハイフンだけ（1〜64 文字）にしてください。";
+}
+
+/**
+ * SKILL.md 欄だけの検査（frontmatter の有無・`name` の一致・`description` の有無。Phase 84 で
+ * `skillMarkdownProblem` から切り出した）。**判定の正本は celeris**（ここは 422 を先に見せるだけ）。
+ * 通るなら `null`。
+ */
+export function skillBodyProblem(name: string, skillMd: string): string | null {
   const front = parseSkillFrontMatter(skillMd);
   if (front.name === null) return "先頭に `---` で始まる frontmatter が要ります（`name` / `description`）。";
-  if (front.name !== name) return `frontmatter の \`name: ${front.name ?? ""}\` が URL の skill 名と違います。`;
+  if (front.name !== name) return `frontmatter の \`name: ${front.name ?? ""}\` が上の名前と違います。`;
   if (!front.description || front.description.trim() === "") return "frontmatter の `description` を書いてください。";
+  return null;
+}
+
+/**
+ * 送る前の frontmatter の検査（celeris の 422 `validation` を先に人に見せるだけ。
+ * **判定の正本は celeris**）。`skillNameProblem`/`skillBodyProblem` を順に見るだけの合成関数
+ * （保存ボタンの活性・不活性の判断に使う）。通るなら `null`、通らないなら理由。
+ */
+export function skillMarkdownProblem(name: string, skillMd: string): string | null {
+  return skillNameProblem(name) ?? skillBodyProblem(name, skillMd);
+}
+
+/** `SKILL.md` 自身のファイル名（付属ファイルには使えない）。 */
+const SKILL_FILE_NAME = "SKILL.md";
+
+/**
+ * 付属ファイルのパスの検査（celeris の `task_ops::knowledge::safe_relative_path` と同じ規則の TypeScript
+ * 版。送る前に明らかに 422 になるものだけ先に見せる。**判定の正本は celeris**）。空文字は「まだ入力して
+ * いないだけ」として `null`（送信時にその行ごと落とされる。`readSkillPutBody` と同じ規律）。
+ */
+export function skillFilePathProblem(path: string): string | null {
+  const trimmed = path.trim();
+  if (trimmed === "") return null;
+  if (trimmed.startsWith("/")) return "絶対パスは使えません（先頭に `/` を付けない）。";
+  if (trimmed.includes("\\")) return "パス区切りは `/` にしてください（`\\` は使えません）。";
+  if (trimmed === SKILL_FILE_NAME) return "SKILL.md 自身は付属ファイルにできません（本文欄で編集してください）。";
+  const segments = trimmed.split("/");
+  if (segments.some((seg) => seg === "" || seg === "." || seg === "..")) {
+    return "パスに `..` や空の区切りは使えません。";
+  }
   return null;
 }
 

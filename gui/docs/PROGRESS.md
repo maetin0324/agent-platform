@@ -5453,3 +5453,177 @@ celeris 側（`scripts/selfdeploy/verify.sh` に検査 4b として組み込み�
 - **P-G36-2**: U-G36-1 の実機確認が終わったら、`E2E_SKIP_BUILD`/`E2E_REQUIRE_STAGING` の名前や既定値を
   実際の運用に合わせて見直す余地があるかもしれない（現状は celeris 側 `verify.sh` の呼び方に合わせて
   決め打ちしたもの）。
+
+## Phase G37 — スマホ UX ラウンド 10: skills / MCP 画面の磨きと残件（ADR-0055、celeris Phase 84。2026-09-21）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。`docs/adr/0055-mobile-ux.md`・Phase 80〜83・
+`gui/docs/PROGRESS.md` Phase G30〜G36 の未解決事項から、skills / MCP 画面の磨きと 3 つの leftover を対応した。
+
+### 1. skills 画面の磨き（`/knowledge/skills`・詳細・`/org` の mount 済み skills。受け入れ条件 1）
+
+- **付属ファイルの入力（U-G35-2 の解消）**: `~/routes/knowledge.skills.tsx::SkillEditor` に行入力を追加
+  （パス欄 + 中身のテキストエリアの組を「追加」/「削除」できる。API はもともと `SkillPutBody.files` を
+  受け付けていたので `~/celeris/skills-admin.server.ts::readSkillPutBody`（`file_path`/`file_content` の
+  並行配列を読む）は無変更）。`PUT /skills/{name}` は送った分のファイルだけ書き、触れなかった既存ファイル
+  はそのまま残る仕様（`task_ops::knowledge::skills_put`）なので、既存の付属ファイル（`GET /skills/{name}`
+  は名前だけ返す。中身は運ばない — ADR-0056 D3 P-79-a）は「参考情報として名前だけ表示、中身は読み込まない」
+  にした（勝手に空文字で上書きする事故を避けるため）。付属ファイルのパスは `~/lib/skills.ts::
+  skillFilePathProblem`（celeris の `safe_relative_path` と同じ規則。絶対パス・`\`・`..`・`SKILL.md`
+  自身を拒否）で送信前に検査し、行ごとにインラインでエラーを出す。
+- **frontmatter 雛形ボタン**: SKILL.md 欄の上に「雛形を使う」ボタン（`skillMarkdownTemplate` を呼んで
+  本文を差し替える。既存の作成時の初期値と同じ雛形）。
+- **検証メッセージのインライン化**: 従来 1 本にまとまっていた `skillMarkdownProblem` を
+  `skillNameProblem`（名前欄だけ）/`skillBodyProblem`（SKILL.md 欄だけ）に分割し（`skillMarkdownProblem`
+  はこの 2 つを順に見るだけの合成関数として残す。保存ボタンの活性判定に使用）、名前欄・SKILL.md 欄・
+  付属ファイルの行それぞれの直下にそのフィールドの理由だけを出す（以前は 1 つのエラー文をフォーム全体の
+  下にまとめて出していた）。
+- **mounted-by チップの省略 + title（受け入れ条件「shortId 風の省略と title」）**: `~/routes/
+  knowledge.skills.tsx` の一覧カードの `mounted_by` チップ、詳細画面の mount 先バッジのどちらも
+  `~/lib/format.ts::shortId`（既存。id/sha 表示で使っている末尾省略関数）で表示を短くし、`title`（一覧側）
+  または `title`+`aria-label`（詳細側。バッジは `<Link>` の中にあるのでアクセシブルな名前も全文にする）に
+  全文を残した。組織ノードの id はケバブケースの短い文字列がほとんどで today の fixture では実際には
+  省略が起きないものもあるが、`~/lib/format.ts` の既存の省略規約（ADR-0055 D2「id・sha・パスは末尾に省略、
+  全文は title」）に揃えた。
+- **SKILL.md の `#` 見出しが `<h1>` を 2 つ作らない件（Phase 82 の監査対応）**: `~/lib/skills.ts::
+  skillMarkdownBody`（front matter を落とし見出しを 1 段落とす）は変更していない。今回の変更後も
+  `pnpm mobile-audit` の `a11y-structure` が 0 件のままであることを確認した（下記「監査」）。
+- **画面 1 つに主操作 1 つ**: 編集フォームの `variant="primary"` は「保存」の 1 つだけ（「雛形を使う」
+  「付属ファイルを追加」「削除」は `ghost`/`secondary`/`danger`）。詳細画面は「直す」（`secondary`）と
+  折りたたみの中の「削除する」（`danger`）だけで primary は無い。一覧画面も「新しい skill」は
+  `secondary`。
+- **監査対象に作成・編集フォームを追加**: これまで `gui/scripts/lib/celeris-fixture.mjs::buildRoutes` は
+  `/knowledge/skills`（一覧）と `?name=` （詳細）だけを監査していて、`?create=1`/`?edit=1`（今回磨いた
+  フォーム本体）が一度も `pnpm mobile-audit`/`pnpm e2e:*` を通っていなかった（「監査 0 件」を名乗りながら
+  実際には新しい UI を検査していない、という事故になりかねない穴だった）。`knowledge-skill-create`
+  （`/knowledge/skills?create=1`）・`knowledge-skill-edit`（`/knowledge/skills?name=<x>&edit=1`）を
+  route 一覧に追加した（GET だけなので `pnpm e2e:staging` でも安全）。`mobile-audit.mjs`/`e2e-check.mjs`
+  はこの一覧を共有しているので、両方に一度で効く。
+
+### 2. MCP クライアント節の磨き（`/accounts`。受け入れ条件 2）
+
+- **直近の呼び出しの遅延読み込みにスケルトン**: `~/routes/accounts.tsx::McpClientCallsDisclosure` は
+  `<details>` を開いたときだけ `useFetcher().load()` する作り（Phase G34）のまま、読み込み中の表示を
+  「読み込み中…」の 1 行から `McpCallListSkeleton`（`~/components/ui/skeleton.tsx::Skeleton` を使った
+  行 2 本ぶんの骨組み、`aria-hidden`）に変えた。
+- **エラーの種類を 1 語のバッジに**: `~/routes/accounts.tsx::McpCallRow` の `call.error_kind`
+  （地の文の `<span className="text-danger">` だった）を `Badge tone="danger"`
+  （`data-status-badge="mcp-call-error"`）に変更（ADR-0055 D1-3「状態バッジは 1 語」の規律をエラー種別にも
+  揃えた。`pnpm mobile-audit` の `status-badge` ルールは空白・12 文字超を違反にするが、`error_kind` は
+  `rate_limited` のような celeris 側の固定語彙なので該当しない）。
+- **接続 URL のヒント + コピー**: `~/lib/mcp.ts::mcpConnectionUrlHint(client)`（新規、純粋関数）が
+  `docs/mcp.md` §2 の既定値（`auth = "token"` は `http://127.0.0.1:18200/mcp`、`auth = "none"` は
+  `http://127.0.0.1:18201/mcp`）を `mcpAuthKindWord` から選んで返す（**トークンの値は一切含まない** —
+  `token_hash` はそもそも値そのものを持たない）。`McpClientCard` の `dl` にこのヒントと
+  `~/components/ui/misc.tsx::CopyButton`（新規、`navigator.clipboard.writeText`。失敗（API 無し・拒否）
+  は静かに諦める）を添えた行を追加した。実際の `[mcp] listen` はデプロイごとの設定で変わりうるので
+  「よくある既定」のヒントである旨をコードコメントに明記した。
+
+### 3. 残件 3 件（受け入れ条件 3）
+
+**U-G32-2（`role="status"` を board/task の状態バッジに広げる）**: `~/lib/live-status.ts`（新規）に
+`isLiveStatusScreen(screen)` という小さな純粋関数を切り出した。root の SSE（`~/hooks/
+useCelerisStream.ts`）は「今開いている画面の loader」を再検証するだけで celeris は差分を送らないため、
+「全バッジに付けると煩くなる」という Phase 76 の懸念への回答は「SSE の再検証で更新され続ける画面かどうか」
+だけに絞ることにした。対象は `board`/`task-list`/`task-detail` の 3 画面（`~/routes/board.tsx` のボード
+カード、`~/routes/tasks.tsx` の一覧行、`~/routes/tasks.$id.tsx` のヘッダ）。`task-new-candidates`
+（`/tasks/new` の depends_on 候補。作るときに一度読むだけ）・`project-integrations`・`help-example`
+（説明用の例）は対象外として関数の union 型に残し、対象外であることをテストで固定した（Console の task
+ブロックは Phase 76 で個別対応済みなのでこの関数の対象に含めていない）。
+
+**tool_use 要約の展開にキーボード操作（Phase 74）**: `~/components/ConsoleBlockItem.tsx::ReplyStepRow`
+を確認したところ、`tool_use`/`tool_result` の展開トグルは Phase 74 の時点で既にネイティブな
+`<button type="button" aria-expanded=...>` になっていた（コードコメントにも「キーボード（Enter/Space）
+でも操作できるようにした」と明記済み）。ネイティブ `<button>` は Enter/Space を標準で処理するので追加の
+`onKeyDown` は不要 — **コード変更は無し**。`gui/scripts/mobile-audit.mjs::checkFocusOrder`（Tab キーで
+実際に押して `activeElement` が進むかを見る）が `home`/`org-node`（Console のモックデータに `tool_use`/
+`tool_result` の展開可能な行を含む）で 0 件のままであることを今回のフルラウンドの監査で再確認し、回帰が
+無いことを確かめた。
+
+**U-G31-3（絶対日付フォールバックが UTC）**: `~/lib/reports.ts::absoluteDateLabel` を `getUTCFullYear`/
+`getUTCMonth`/`getUTCDate` から `getFullYear`/`getMonth`/`getDate`（実行環境のローカルタイムゾーン）に
+変更した。絶対時刻そのものは返さない規律（呼び出し側が `title` に生の ISO を残す）は変えていない。
+**既知の限界**（コードコメントと本節「未解決事項」に明記）: SSR（GUI サーバーの Node プロセス）と
+CSR（ブラウザ）は同じ `Date` のローカル getter を使うが、両者のタイムゾーンが同じ保証は無い
+（ADR-0055 が想定するスマホからのリモートアクセスでは、GUI サーバーのホストとブラウザが別タイムゾーンに
+ありうる）。ずれた場合、7 日を超えた絶対日付表示だけ SSR の文字列とハイドレーション後の文字列が食い違い、
+React が 1 回だけ静かに client 側の値に差し替える（相対表示・7 日以内はどちらの環境でも同じ計算になる
+ので影響しない）。今回はこのずれの検出・警告抑制までは実装していない（下記「未解決事項」）。
+
+### テスト（新規・変更）
+
+- `test/unit/skills.test.ts`: `skillNameProblem`/`skillBodyProblem`（分割後の単体、既存の
+  `skillMarkdownProblem` の合成としての振る舞いも確認）・`skillFilePathProblem`（相対パスは通す、空文字は
+  エラーにしない、絶対パス・`\`・`..`・`SKILL.md` 自身は拒否）を追加。
+- `test/unit/mcp.test.ts`: `mcpConnectionUrlHint`（token/none の既定 URL、トークンの値そのものを含まない
+  ことの確認）を追加。
+- `test/unit/live-status.test.ts`（新規）: `isLiveStatusScreen` の全 6 パターンを table-driven で確認
+  （board/task-list/task-detail が true、それ以外が false）。
+- `test/unit/reports.test.ts`: `relativeTimeLabel` の絶対日付フォールバックが `process.env.TZ` に応じて
+  変わることを 2 ケース（`UTC`・`Pacific/Kiritimati`）で確認（同じ ISO でもタイムゾーンで結果が変わる
+  ことを直接示す。UTC のままなら両ケースが同じ値になってしまうので、これが違うこと自体がローカル化の
+  証拠になる）。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint`（`pnpm exec biome check --write .` で import 順・未使用 import を 1 回自動整形） | exit 0。`Checked 243 files in ...ms. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0。**Test Files 65 passed (65) / Tests 982 passed (982)**（Phase G36 の 965 から +17: `skills.test.ts` 9、`mcp.test.ts` 3、`live-status.test.ts` 6、`reports.test.ts` 2 の内訳） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は Phase G33 から変化なし |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（celeris の API 契約は変えていない） |
+| mobile-audit | `MOBILE_AUDIT_SKIP_BUILD=1 pnpm mobile-audit` | **exit 0、violations 0 件**（`by_rule: {}`、`by_scheme: {"light": 0, "dark": 0}`）。**25 route**（`knowledge-skill-create`/`knowledge-skill-edit` を追加。Phase G36 の 23 から +2） × light/dark。新ルートの初回 JS は 416.9KB（予算 532KB 以内）、`accounts` は 433.7KB |
+| e2e:mock | `E2E_SKIP_BUILD=1 pnpm e2e:mock` | **`{"ok": true, "mode": "mock", "failures": []}`、exit 0** |
+
+### 変更したファイル
+
+- `app/lib/skills.ts`（`skillNameProblem`/`skillBodyProblem`/`skillFilePathProblem` 新規、
+  `skillMarkdownProblem` を合成関数に）
+- `app/routes/knowledge.skills.tsx`（`SkillEditor` に付属ファイル行入力・雛形ボタン・フィールドごとの
+  インラインエラー、`SkillsSidebar`/`SkillView` の mounted-by チップに `shortId`+`title`/`aria-label`）
+- `app/lib/mcp.ts`（`mcpConnectionUrlHint` 新規）
+- `app/components/ui/misc.tsx`（`CopyButton` 新規）・`app/components/ui/Icon.tsx`（`copy` アイコン新規）
+- `app/routes/accounts.tsx`（`McpClientCard` に接続 URL ヒント行、`McpClientCallsDisclosure` に
+  `McpCallListSkeleton`、`McpCallRow` の `error_kind` をバッジに）
+- `app/lib/live-status.ts`（新規、`isLiveStatusScreen`）
+- `app/routes/board.tsx`・`app/routes/tasks.tsx`・`app/routes/tasks.$id.tsx`（状態バッジに
+  `role="status"` を条件付きで追加）
+- `app/lib/reports.ts`（`absoluteDateLabel` を UTC からローカルタイムゾーンへ）
+- `scripts/lib/celeris-fixture.mjs`（`knowledge-skill-create`/`knowledge-skill-edit` を監査対象に追加）
+- `test/unit/skills.test.ts`・`test/unit/mcp.test.ts`・`test/unit/live-status.test.ts`（新規）・
+  `test/unit/reports.test.ts`
+
+### 未解決事項
+
+- **U-G37-1（U-G31-3 の残り、実機未確認、ADR-0009 P-34 継続）**: 絶対日付フォールバックをローカル
+  タイムゾーン化したことで、**SSR（GUI サーバー）とブラウザのタイムゾーンが異なる実配置では、7 日を
+  超えた絶対日付表示だけ 1 回の hydration mismatch が起きる**（コードコメントに詳細を明記）。このサンドボックス
+  はサーバー・ブラウザとも UTC のため `pnpm mobile-audit`/`pnpm e2e:mock` では再現しない。実機（スマホの
+  ブラウザ、日本時間 UTC+9 を想定）で `/reports`・`/accounts` 等の 7 日超の日付表示を開き、ブラウザの
+  開発者コンソールに hydration 関連の警告/エラーが出ないか、日付が正しく現地日付で見えるかを確認する
+  必要がある。出るようであれば、次のラウンドで `suppressHydrationWarning` かクライアント限定コンポーネント
+  への切り出しを検討する。
+- **U-G37-2（実機未確認、ADR-0009 P-34 継続）**: skills 編集フォームの付属ファイル入力・MCP クライアント節の
+  コピー機能・呼び出し履歴のスケルトンは、いずれも実際のブラウザでの操作感（`navigator.clipboard` の許可
+  ダイアログの出方、`<details>` を開いた瞬間のスケルトン→実体の差し替わり方）を実機か `pnpm e2e`
+  （Playwright の対話操作。今回のゲートには入っていない）で確認していない。
+- **U-G37-3**: `mcpConnectionUrlHint` は `docs/mcp.md` §2 の**既定値**を返すだけで、実際にそのデプロイが
+  使っている `[mcp]` の `listen` 設定は見ていない（GUI は celeris の設定ファイルを読まない）。設定を
+  変えている環境では実際の URL と表示が食い違う。ヒントである旨は UI・コードコメントの両方に明記した。
+- **U-G37-4**: `~/lib/live-status.ts::isLiveStatusScreen` の対象は今回の 3 画面（board/task-list/
+  task-detail）に絞った。案件詳細（`ProjectIntegrations`）等、他の画面の状態バッジも理屈のうえでは
+  SSE 経由で更新されうるが、今回はスコープを「board/task の状態バッジ」に限定する指示だったため広げて
+  いない。次に広げるなら、案件・タスクの区別なく「開いたまま流れを追う画面」を一つずつ確認してから
+  `LIVE_STATUS_SCREENS` に足すとよい。
+- 本番反映は次節（コーディネータが `release.sh`/`verify.sh`/`promote.sh` を実行）。
+
+### 提案
+
+- **P-G37-1**: U-G37-1 が実機で問題になるようなら、`~/lib/reports.ts` の絶対日付表示だけをクライアント
+  限定（`useEffect` で初回マウント後に local 値へ差し替える、または `suppressHydrationWarning`）にする
+  小さな wrapper コンポーネントを作ると安全に倒せる。ただし今回はこの後方互換な広い書き換えを避け、
+  「小さな純粋関数 + テスト」という指示の分量に収めた。
+- **P-G37-2**: skills の付属ファイル入力は「今回のフォーム内だけの追加/上書き」で、KB 上の個別ファイル
+  削除（サーバー側 API が個別ファイル削除を提供していない）はできない。運用でファイル削除の要望が出たら、
+  celeris 側に `DELETE /skills/{name}/files/{path}` 相当を足すかどうかの検討が要る（このワークトリーク
+  からは `crates/` に触れないため提案のみ）。

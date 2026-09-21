@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { data, isRouteErrorResponse, Link, useFetcher } from "react-router";
 import type { SkillOpOutcome } from "~/celeris/action-types";
 import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
@@ -14,11 +14,13 @@ import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { hintClass, inputClass, labelClass, textareaClass, touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, Mono, PageHeader } from "~/components/ui/misc";
+import { shortId } from "~/lib/format";
 import {
-  isValidSkillName,
+  skillBodyProblem,
+  skillFilePathProblem,
   skillMarkdownBody,
-  skillMarkdownProblem,
   skillMarkdownTemplate,
+  skillNameProblem,
   skillsHref,
 } from "~/lib/skills";
 import { cn } from "~/lib/utils";
@@ -147,8 +149,12 @@ export default function KnowledgeSkillsRoute({ loaderData }: Route.ComponentProp
             )}
             {create || (edit && name) ? (
               <SkillEditor
+                // create/名前ごとに state（名前・本文・付属ファイル行）をやり直す（別の skill を編集し
+                // 始めたのに前の入力が残る事故を防ぐ）。
+                key={create ? "create" : (name ?? "")}
                 initialName={create ? "" : (name ?? "")}
                 skillMd={create ? skillMarkdownTemplate("") : (detail?.skill_md ?? "")}
+                existingFiles={create ? [] : (detail?.files ?? [])}
                 creating={create}
                 submitting={submitting}
                 fetcher={fetcher}
@@ -226,8 +232,9 @@ function SkillsSidebar({ items, name }: { items: SkillSummaryView[]; name: strin
                   <span className="mt-1.5 flex flex-wrap items-center gap-1">
                     {(item.mounted_by ?? []).length > 0 ? (
                       (item.mounted_by ?? []).map((nodeId) => (
-                        <Badge key={nodeId} tone="teal" data-testid="skill-mounted-by-chip">
-                          {nodeId}
+                        // ADR-0055 D2: id は末尾に省略し、全文は title に残す（`~/lib/format.ts::shortId`）。
+                        <Badge key={nodeId} tone="teal" title={nodeId} data-testid="skill-mounted-by-chip">
+                          {shortId(nodeId)}
                         </Badge>
                       ))
                     ) : (
@@ -286,12 +293,15 @@ function SkillView({
             <div className="mt-1.5 flex flex-wrap gap-1.5">
               {mountedBy.map((nodeId) => (
                 // ADR-0055 D1-2: タップ領域 44×44 以上（バッジ自体は小さいので、リンクの当たり判定を広げる）。
+                // Phase 84: id は末尾に省略し、全文は title と（読み上げ用の）aria-label に残す。
                 <Link
                   key={nodeId}
                   to={`/org?selected=${encodeURIComponent(nodeId)}`}
                   className="inline-flex min-h-11 items-center"
+                  title={nodeId}
+                  aria-label={nodeId}
                 >
-                  <Badge tone="teal">{nodeId}</Badge>
+                  <Badge tone="teal">{shortId(nodeId)}</Badge>
                 </Link>
               ))}
             </div>
@@ -348,24 +358,65 @@ function SkillView({
   );
 }
 
-/** 右の列（作る・書くとき）: 名前・本文・付属ファイル。保存は `PUT /skills/{name}`。 */
+/** 付属ファイル 1 行（フォーム上だけの状態。`id` は React の key 用でサーバーには送らない）。 */
+interface SkillFileRow {
+  id: number;
+  path: string;
+  content: string;
+}
+
+/**
+ * 右の列（作る・書くとき）: 名前・本文・付属ファイル。保存は `PUT /skills/{name}`。
+ *
+ * Phase 84（U-G35-2 の解消）: 付属ファイル（`SkillPutBody.files`）を送れる行入力を足した。API は
+ * 送った分だけ書く・触れなかった既存ファイルはそのまま残す作り（`task_ops::knowledge::skills_put`）なので、
+ * ここでの「追加/削除」は「送信するファイルの集合をこのフォームの中だけで編集する」意味で、既存の付属
+ * ファイル自体を KB から消す機能ではない（消すには同じ名前で空/別内容を送って上書きするか、skill ごと
+ * 削除する）。`GET /skills/{name}` はファイルの中身を返さない（索引だけ）ので、既存ファイルは名前だけ
+ * 参考情報として出し、内容を勝手に空で埋めて上書きしないようにした（`existingFiles`）。
+ */
 function SkillEditor({
   initialName,
   skillMd,
+  existingFiles,
   creating,
   submitting,
   fetcher,
 }: {
   initialName: string;
   skillMd: string;
+  existingFiles: string[];
   creating: boolean;
   submitting: boolean;
   fetcher: ReturnType<typeof useFetcher<SkillOpOutcome>>;
 }) {
   const [name, setName] = useState(initialName);
   const [body, setBody] = useState(skillMd);
-  // 名前欄が空のまま（作成フォームでまだ何も入れていない）ときは、frontmatter の検証エラーをまだ出さない。
-  const showProblem = name.trim() !== "" ? skillMarkdownProblem(name.trim(), body) : null;
+  const [files, setFiles] = useState<SkillFileRow[]>([]);
+  const nextFileId = useRef(0);
+
+  // 名前欄が空のまま（作成フォームでまだ何も入れていない）ときは、まだ検証エラーを出さない。
+  const trimmedName = name.trim();
+  const nameProblem = trimmedName !== "" ? skillNameProblem(trimmedName) : null;
+  const bodyProblem = trimmedName !== "" ? skillBodyProblem(trimmedName, body) : null;
+  const fileProblems = files.map((f) => skillFilePathProblem(f.path));
+  const hasFileProblem = fileProblems.some((p) => p !== null);
+  const canSave = !submitting && trimmedName !== "" && nameProblem === null && bodyProblem === null && !hasFileProblem;
+
+  function addFile() {
+    const id = nextFileId.current;
+    nextFileId.current += 1;
+    setFiles((rows) => [...rows, { id, path: "", content: "" }]);
+  }
+  function removeFile(id: number) {
+    setFiles((rows) => rows.filter((r) => r.id !== id));
+  }
+  function updateFile(id: number, patch: Partial<Pick<SkillFileRow, "path" | "content">>) {
+    setFiles((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+  function useTemplate() {
+    setBody(skillMarkdownTemplate(trimmedName));
+  }
 
   return (
     <Card data-testid="skill-editor">
@@ -384,17 +435,28 @@ function SkillEditor({
               value={name}
               disabled={!creating}
               onChange={(e) => setName(e.target.value)}
-              aria-invalid={creating && name.trim() !== "" && !isValidSkillName(name.trim()) ? true : undefined}
+              aria-invalid={nameProblem !== null ? true : undefined}
               data-testid="skill-editor-name"
             />
             <p className={hintClass}>
               英小文字・数字・ハイフンだけ（1〜64 文字）。frontmatter の <Mono>name:</Mono> と一致させます。
             </p>
+            {nameProblem && (
+              <p className="text-sm text-danger lg:text-xs" data-testid="skill-editor-name-problem">
+                {nameProblem}
+              </p>
+            )}
           </div>
           <div className="space-y-1">
-            <label className={labelClass} htmlFor="skill-md">
-              SKILL.md（frontmatter を含む）
-            </label>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <label className={labelClass} htmlFor="skill-md">
+                SKILL.md（frontmatter を含む）
+              </label>
+              <Button type="button" variant="ghost" size="xs" onClick={useTemplate} data-testid="skill-editor-template">
+                <Icon name="sparkles" />
+                雛形を使う
+              </Button>
+            </div>
             <textarea
               id="skill-md"
               name="skill_md"
@@ -402,25 +464,88 @@ function SkillEditor({
               className={textareaClass}
               value={body}
               onChange={(e) => setBody(e.target.value)}
+              aria-invalid={bodyProblem !== null ? true : undefined}
               data-testid="skill-editor-body"
             />
             <p className={hintClass}>
               先頭に <Mono>---</Mono> で囲った frontmatter（<Mono>name</Mono> / <Mono>description</Mono> 必須）。
             </p>
+            {bodyProblem && (
+              <p className="text-sm text-danger lg:text-xs" data-testid="skill-editor-body-problem">
+                {bodyProblem}
+              </p>
+            )}
           </div>
-          {showProblem && (
-            <p className="text-sm text-danger lg:text-xs" data-testid="skill-editor-problem">
-              {showProblem}
-            </p>
-          )}
+
+          <div className="space-y-2">
+            <p className={labelClass}>付属ファイル（任意）</p>
+            {existingFiles.length > 0 && (
+              <p className={hintClass} data-testid="skill-editor-existing-files">
+                既存の付属ファイル: <Mono className="break-all">{existingFiles.join(", ")}</Mono>
+                （中身はここには読み込みません。同じパスをここに書くと上書きします。触れなければそのまま残ります）。
+              </p>
+            )}
+            {files.length > 0 && (
+              <ul className="space-y-2" data-testid="skill-editor-files">
+                {files.map((f, i) => {
+                  const problem = fileProblems[i];
+                  return (
+                    <li
+                      key={f.id}
+                      className="space-y-1.5 rounded-lg border border-border bg-surface-2/30 p-2"
+                      data-testid="skill-editor-file-row"
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          name="file_path"
+                          value={f.path}
+                          onChange={(e) => updateFile(f.id, { path: e.target.value })}
+                          placeholder="例: refs/checklist.md"
+                          className={cn(inputClass, "min-w-0 flex-1")}
+                          aria-invalid={problem !== null ? true : undefined}
+                          aria-label={`付属ファイル ${i + 1} のパス`}
+                          data-testid="skill-editor-file-path"
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="xs"
+                          onClick={() => removeFile(f.id)}
+                          aria-label={`付属ファイル ${f.path.trim() || i + 1} を削除`}
+                          data-testid="skill-editor-file-remove"
+                        >
+                          <Icon name="xCircle" />
+                        </Button>
+                      </div>
+                      <textarea
+                        name="file_content"
+                        value={f.content}
+                        onChange={(e) => updateFile(f.id, { content: e.target.value })}
+                        rows={4}
+                        className={textareaClass}
+                        placeholder="ファイルの中身"
+                        aria-label={`付属ファイル ${i + 1} の中身`}
+                        data-testid="skill-editor-file-content"
+                      />
+                      {problem && (
+                        <p className="text-sm text-danger lg:text-xs" data-testid="skill-editor-file-problem">
+                          {problem}
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            <Button type="button" variant="secondary" size="xs" onClick={addFile} data-testid="skill-editor-file-add">
+              <Icon name="plus" />
+              付属ファイルを追加
+            </Button>
+          </div>
+
           <div className="flex items-center gap-2">
-            <Button
-              type="submit"
-              variant="primary"
-              size="sm"
-              disabled={submitting || name.trim() === "" || showProblem !== null}
-              data-testid="skill-save"
-            >
+            <Button type="submit" variant="primary" size="sm" disabled={!canSave} data-testid="skill-save">
               <Icon name="check" />
               保存
             </Button>

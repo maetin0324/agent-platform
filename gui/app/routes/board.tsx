@@ -53,6 +53,7 @@ import {
   tierLabel,
 } from "~/lib/labels";
 import { milestoneIsPaused, projectIsPaused } from "~/lib/lifecycle";
+import { isLiveStatusScreen } from "~/lib/live-status";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { isSupportTask } from "~/lib/work-tree";
@@ -573,7 +574,9 @@ function BoardCard({
       {/* Phase 75（ADR-0055 D2 ラウンド 7）: カードの余白・間隔を 4/8/12/16 のスケールに揃える
           （6px の gap-1.5 をやめて gap-2 = 8px に）。 */}
       <div className="flex flex-wrap items-center gap-2">
-        <StatusBadge status={item.status} />
+        {/* U-G32-2 の解消（Phase 84）: ボードは開いたまま SSE の再検証で更新され続ける画面なので、
+            状態バッジをライブリージョンにする（`~/lib/live-status.ts` が画面ごとに判断を集約）。 */}
+        <StatusBadge status={item.status} role={isLiveStatusScreen("board") ? "status" : undefined} />
         <Badge tone="primary" data-testid="board-card-priority">
           {priority}
         </Badge>

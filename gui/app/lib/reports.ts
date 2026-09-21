@@ -56,17 +56,26 @@ export function reportNodeName(report: Pick<Report, "node_id">, org: OrgNode[]):
 const RELATIVE_ABSOLUTE_THRESHOLD_SECONDS = 7 * 86400;
 
 /**
- * 7 日を超えた `relativeTimeLabel` のフォールバック絶対日付。UTC の年月日で比較・整形する
- * （celeris が返す ISO は UTC、GUI はタイムゾーン変換をしない。他の絶対時刻表示と同じ方針）。
- * 同じ年なら `"M/D"`、違えば `"YYYY/M/D"`。
+ * 7 日を超えた `relativeTimeLabel` のフォールバック絶対日付。**実行環境のローカルタイムゾーン**の年月日で
+ * 比較・整形する（`Date` のローカル getter。Phase 84、U-G31-3 の解消。以前は UTC の年月日で比較していたが、
+ * ユーザーが見ている「今日」の感覚とずれることがあった）。同じ年なら `"M/D"`、違えば `"YYYY/M/D"`。
+ * 絶対時刻そのものは返さない（呼び出し側が `title` 属性に生の ISO 文字列を残す規律は変えていない。
+ * ローカル日付はあくまで短い表示用で、正確な時刻はそちらで確認できる）。
+ *
+ * **既知の限界**: SSR（GUI サーバーの Node プロセス）と CSR（ブラウザ）は同じ `Date` のローカル getter を
+ * 使うが、両者のタイムゾーンは同じ保証が無い（ADR-0055 が想定するスマホからのアクセスでは、GUI サーバーの
+ * ホストとブラウザは別のタイムゾーンにありうる）。ずれると、7 日を超えた絶対日付表示だけ SSR の文字列と
+ * ハイドレーション後の文字列が食い違い、React が 1 回だけ静かに client 側の値に差し替える
+ * （hydration mismatch。相対表示・7 日以内はどちらの環境でも同じ計算になるので影響しない）。今回はこの
+ * ずれを検出・警告抑制する仕組みまでは入れていない（`docs/PROGRESS.md` Phase 84 の未解決事項）。
  */
 function absoluteDateLabel(iso: string, fetchedAtIso: string): string {
   const d = new Date(iso);
   const now = new Date(fetchedAtIso);
-  const y = d.getUTCFullYear();
-  const m = d.getUTCMonth() + 1;
-  const day = d.getUTCDate();
-  return y === now.getUTCFullYear() ? `${m}/${day}` : `${y}/${m}/${day}`;
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  return y === now.getFullYear() ? `${m}/${day}` : `${y}/${m}/${day}`;
 }
 
 /**

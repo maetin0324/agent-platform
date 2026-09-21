@@ -232,6 +232,13 @@ const PATHS = {
       <path d="M8.5 16.5a5 5 0 0 1 7 0M5 13a10 10 0 0 1 5.17-2.83M19 13a10 10 0 0 0-2.3-1.6M2 8.82a15 15 0 0 1 4.17-2.65M22 8.82A15 15 0 0 0 11 5.08M12 20h.01" />
     </>
   ),
+  // Phase 84: クリップボードへのコピー（`~/components/ui/misc.tsx::CopyButton`）。
+  copy: (
+    <>
+      <rect x="9" y="9" width="13" height="13" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </>
+  ),
 } satisfies Record<string, ReactNode>;
 
 export type IconName = keyof typeof PATHS;

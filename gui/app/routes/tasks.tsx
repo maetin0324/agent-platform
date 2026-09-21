@@ -13,6 +13,7 @@ import { checkboxClass, chipLabelClass, inputClass, labelClass, selectClass, the
 import { Icon } from "~/components/ui/Icon";
 import { EmptyState, PageHeader } from "~/components/ui/misc";
 import { TONE_SOFT, TONE_SOLID_BG } from "~/components/ui/tone";
+import { isLiveStatusScreen } from "~/lib/live-status";
 import { buildTaskPlacements, type TaskPlacement } from "~/lib/project-index";
 import { cn } from "~/lib/utils";
 import { isSupportTask } from "~/lib/work-tree";
@@ -387,7 +388,9 @@ export default function TasksPage({ loaderData }: Route.ComponentProps) {
                       {item.title}
                     </Link>
                     <span className="w-28 shrink-0">
-                      <StatusBadge status={item.status} />
+                      {/* U-G32-2 の解消（Phase 84）: 一覧は開いたまま SSE の再検証で更新され続ける画面
+                          なので、状態バッジをライブリージョンにする（`~/lib/live-status.ts`）。 */}
+                      <StatusBadge status={item.status} role={isLiveStatusScreen("task-list") ? "status" : undefined} />
                     </span>
                     <span className="hidden w-20 shrink-0 xl:block">
                       <KindBadge kind={item.kind} />

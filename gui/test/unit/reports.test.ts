@@ -155,6 +155,28 @@ describe("relativeTimeLabel", () => {
   });
 });
 
+// Phase 84（U-G31-3 の解消）: 絶対日付フォールバックは UTC ではなく実行環境のローカルタイムゾーンの
+// 年月日を使う。`process.env.TZ` を切り替えて、同じ ISO でもタイムゾーンによって結果が変わることを確認する
+// （UTC のままなら両ケースとも同じ値になってしまうので、これが違うこと自体がローカル化の証拠になる）。
+describe("relativeTimeLabel の絶対日付フォールバック — ローカルタイムゾーン（Phase 84, U-G31-3）", () => {
+  const originalTz = process.env.TZ;
+
+  afterEach(() => {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  });
+
+  it("UTC 環境では UTC の年月日と同じ結果", () => {
+    process.env.TZ = "UTC";
+    expect(relativeTimeLabel("2025-12-31T23:00:00Z", "2026-09-17T00:00:00Z")).toBe("2025/12/31");
+  });
+
+  it("UTC+14（Pacific/Kiritimati）ではローカル日付が 1 日進み、年またぎが解消されて M/D になる", () => {
+    process.env.TZ = "Pacific/Kiritimati";
+    expect(relativeTimeLabel("2025-12-31T23:00:00Z", "2026-09-17T00:00:00Z")).toBe("1/1");
+  });
+});
+
 describe("reportsBadgeTone", () => {
   it("null は neutral", () => {
     expect(reportsBadgeTone(null)).toBe("neutral");

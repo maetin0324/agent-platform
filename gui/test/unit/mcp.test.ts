@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { McpClient, McpScope } from "~/celeris/types";
-import { mcpAuthKindWord, mcpClientStatusWord, mcpScopeLabel, resolveMcpAuthorLabel, sortMcpScopes } from "~/lib/mcp";
+import {
+  mcpAuthKindWord,
+  mcpClientStatusWord,
+  mcpConnectionUrlHint,
+  mcpScopeLabel,
+  resolveMcpAuthorLabel,
+  sortMcpScopes,
+} from "~/lib/mcp";
 
 /**
  * `~/lib/mcp.ts` の純粋関数（ADR-0056 D4、GUI Phase 80）。`~/lib/llm-sources.ts` と同じ方針で、
@@ -64,6 +71,22 @@ describe("mcpClientStatusWord", () => {
   it("is active otherwise", () => {
     expect(mcpClientStatusWord({ revoked_at: null })).toBe("active");
     expect(mcpClientStatusWord({ revoked_at: undefined })).toBe("active");
+  });
+});
+
+describe("mcpConnectionUrlHint（Phase 84。docs/mcp.md §2 の既定値。トークンの値は含まない）", () => {
+  it("token 付きの客は既定の Bearer トークンの口（18200）", () => {
+    expect(mcpConnectionUrlHint({ token_hash: "abc123" })).toBe("http://127.0.0.1:18200/mcp");
+  });
+
+  it("--no-token の客は既定の認証なし・トンネル専用の口（18201）", () => {
+    expect(mcpConnectionUrlHint({ token_hash: null })).toBe("http://127.0.0.1:18201/mcp");
+    expect(mcpConnectionUrlHint({ token_hash: undefined })).toBe("http://127.0.0.1:18201/mcp");
+  });
+
+  it("トークンの値そのものは文字列に含まれない", () => {
+    const hint = mcpConnectionUrlHint({ token_hash: "super-secret-hash" });
+    expect(hint).not.toContain("super-secret-hash");
   });
 });
 

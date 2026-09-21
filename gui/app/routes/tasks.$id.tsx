@@ -110,6 +110,7 @@ import {
   tierLabel,
   timelineKindLabel,
 } from "~/lib/labels";
+import { isLiveStatusScreen } from "~/lib/live-status";
 import { milestoneTitle } from "~/lib/project-index";
 import { relativeTimeLabel } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
@@ -445,7 +446,13 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
           <div className="flex flex-wrap items-start justify-between gap-5">
             <div className="min-w-0 flex-1 space-y-2.5">
               <div className="flex flex-wrap items-center gap-2">
-                <StatusBadge status={task.status} data-testid="task-status" />
+                {/* U-G32-2 の解消（Phase 84）: 詳細は開いたまま SSE の再検証で更新され続ける画面なので、
+                    状態バッジをライブリージョンにする（`~/lib/live-status.ts`）。 */}
+                <StatusBadge
+                  status={task.status}
+                  role={isLiveStatusScreen("task-detail") ? "status" : undefined}
+                  data-testid="task-status"
+                />
                 <KindBadge kind={task.kind} data-testid="task-kind" />
                 <RoleLabel role={detail.role ?? "-"} data-testid="task-role" />
                 {/* 分野（ADR-0027 D1）。role と同じ理由で色分けはせずテキストのラベルだけ。分野なしは "-"。 */}

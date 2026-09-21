@@ -13,9 +13,12 @@ import {
   isValidSkillName,
   type MountedSkills,
   parseSkillFrontMatter,
+  skillBodyProblem,
+  skillFilePathProblem,
   skillMarkdownBody,
   skillMarkdownProblem,
   skillMarkdownTemplate,
+  skillNameProblem,
   skillsHref,
   splitMountedSkills,
   splitSkillFrontMatter,
@@ -91,6 +94,47 @@ describe("SKILL.md の frontmatter（純粋関数）", () => {
     expect(skillMarkdownProblem("rust-review", "---\nname: other\ndescription: y\n---\n")).toMatch(/違います/);
     expect(skillMarkdownProblem("rust-review", "---\nname: rust-review\ndescription: \n---\n")).toMatch(/description/);
     expect(skillMarkdownProblem("rust-review", "---\nname: rust-review\ndescription: 手順\n---\n")).toBeNull();
+  });
+});
+
+// Phase 84: フィールドごとのインラインエラー表示のため `skillMarkdownProblem` を 2 つに割った
+// （`skillNameProblem`/`skillBodyProblem`）。`skillMarkdownProblem` はこの 2 つを順に見るだけの合成。
+describe("skillNameProblem / skillBodyProblem（フィールドごとの検査。Phase 84）", () => {
+  it("skillNameProblem は名前の形だけを見る", () => {
+    expect(skillNameProblem("rust-review")).toBeNull();
+    expect(skillNameProblem("Bad Name")).toMatch(/英小文字/);
+    expect(skillNameProblem("")).toMatch(/英小文字/);
+  });
+
+  it("skillBodyProblem は frontmatter の有無・name の一致・description の有無だけを見る（名前の形は見ない）", () => {
+    expect(skillBodyProblem("rust-review", "本文だけ")).toMatch(/frontmatter/);
+    expect(skillBodyProblem("rust-review", "---\nname: other\ndescription: y\n---\n")).toMatch(/違います/);
+    expect(skillBodyProblem("rust-review", "---\nname: rust-review\ndescription: \n---\n")).toMatch(/description/);
+    expect(skillBodyProblem("rust-review", "---\nname: rust-review\ndescription: 手順\n---\n")).toBeNull();
+  });
+
+  it("skillMarkdownProblem は skillNameProblem を先に見る（名前が不正なら本文は見ない）", () => {
+    expect(skillMarkdownProblem("Bad Name", "本文だけ")).toBe(skillNameProblem("Bad Name"));
+  });
+});
+
+describe("skillFilePathProblem（付属ファイルのパス検査。Phase 84）", () => {
+  it("相対パスなら通す", () => {
+    expect(skillFilePathProblem("checklist.md")).toBeNull();
+    expect(skillFilePathProblem("refs/checklist.md")).toBeNull();
+  });
+
+  it("空文字はまだ入力していないだけ（エラーにしない。送信時に行ごと落とされる）", () => {
+    expect(skillFilePathProblem("")).toBeNull();
+    expect(skillFilePathProblem("   ")).toBeNull();
+  });
+
+  it("絶対パス・`\\`・`..`・SKILL.md 自身は拒否する", () => {
+    expect(skillFilePathProblem("/etc/passwd")).toMatch(/絶対パス/);
+    expect(skillFilePathProblem("a\\b")).toMatch(/\\/);
+    expect(skillFilePathProblem("../secret")).toMatch(/\.\./);
+    expect(skillFilePathProblem("a//b")).toMatch(/\.\./);
+    expect(skillFilePathProblem("SKILL.md")).toMatch(/SKILL\.md/);
   });
 });
 

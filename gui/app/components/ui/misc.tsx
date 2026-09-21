@@ -1,5 +1,6 @@
-import type { HTMLAttributes, ReactNode } from "react";
+import { type HTMLAttributes, type ReactNode, useState } from "react";
 import { cn } from "~/lib/utils";
+import { Button } from "./button";
 import { Icon, type IconName } from "./Icon";
 import { TONE_ICON_WRAP, TONE_SOFT, type Tone } from "./tone";
 
@@ -217,4 +218,48 @@ export function DataItem({
 /** ID 等の等幅表示 */
 export function Mono({ className, ...props }: HTMLAttributes<HTMLSpanElement>) {
   return <span className={cn("font-mono text-[0.8em] text-fg-muted", className)} {...props} />;
+}
+
+/**
+ * クリップボードへコピーするボタン（Phase 84、`/accounts` の MCP 接続 URL ヒント用）。
+ * **トークン等の秘密は絶対にここへ渡さない**（呼び出し側の規律。このコンポーネント自体は `value` を
+ * そのままコピーするだけで中身を検査しない）。Clipboard API が使えない・拒否された環境では静かに諦める
+ * （例外を投げない。`navigator.clipboard` はブラウザだけの API なので、クリックハンドラの中でだけ触る —
+ * SSR では呼ばれない）。
+ */
+export function CopyButton({
+  value,
+  label = "コピー",
+  className,
+}: {
+  value: string;
+  label?: string;
+  className?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  async function onClick() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API が無い・許可が無い等。何もしない。
+    }
+  }
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="xs"
+      onClick={onClick}
+      className={className}
+      aria-label={copied ? "コピーしました" : `${label}をコピー`}
+      data-testid="copy-button"
+    >
+      <Icon name={copied ? "check" : "copy"} />
+      {copied ? "コピーしました" : label}
+    </Button>
+  );
 }

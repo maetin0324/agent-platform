@@ -58,6 +58,17 @@ export function mcpClientStatusWord(client: Pick<McpClient, "revoked_at">): "rev
 }
 
 /**
+ * 接続 URL のヒント（`docs/mcp.md` §2 の既定値。ADR-0056 D1 の 2 つの口 — `auth = "token"` の
+ * 既定 `127.0.0.1:18200`、`auth = "none"`（loopback 限定トンネル専用）の既定 `127.0.0.1:18201`）。
+ * **トークンの値は一切含まない**（`token_hash` はそもそも値そのものを持たない）。実際の `listen` は
+ * デプロイごとの設定（`[mcp]`）で変わりうるので、あくまで「よくある既定」のヒント（Phase 84、
+ * `/accounts` の「MCP クライアント」節でコピーできるようにする）。
+ */
+export function mcpConnectionUrlHint(client: Pick<McpClient, "token_hash">): string {
+  return mcpAuthKindWord(client) === "token" ? "http://127.0.0.1:18200/mcp" : "http://127.0.0.1:18201/mcp";
+}
+
+/**
  * Console の human ブロック（ADR-0056 D2）の `author`（`mcp:<client_id>` または `null`）を
  * 「外部（<client name>）」の帯の文言にする。`clients` に該当する客が見つかれば `name` を、
  * 見つからなければ（未取得・失効後に消えた等）id をそのまま使う。人の発言（`author` が無い）は `null`

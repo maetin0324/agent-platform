@@ -12659,3 +12659,40 @@ cargo のゲートが通らないリスクは実質無いと判断したが、CL
   17 秒。staging の GUI 7701 / API 7711 に対し 393×851 と 1280×800 で全 route を読み取り専用で確認）、check 5・6 true → `verify.json.checks` に
   `4b` が入り `ok=true live_ok=true`。`promote.sh` **mode=live**（20:41:12→16）。
 - これで verify は「起動・件数・主要 GET・GUI・**GUI e2e**・N-1・煙試験」の 7 段。ADR-0055 D3 の「実 celeris が要る e2e」の穴が塞がった。
+
+## Phase 84 — スマホ UX ラウンド 10（skills / MCP 画面の磨きと残件。ADR-0055。2026-09-21）
+
+GUI のみ（`crates/` 無変更。`gui/CLAUDE.md`「GUI から celeris に入る依存は作らない」のとおり）。
+`docs/adr/0055-mobile-ux.md` D3 のループどおり、rounds 1〜9・skills/MCP 画面（Phase 80/82）が残した
+未解決事項を対象に磨いた: 1) `/knowledge/skills` の作成・更新フォームに付属ファイル（`SkillPutBody.files`）
+の入力・frontmatter 雛形ボタン・フィールドごとのインライン検証メッセージを足し、skill カード・詳細画面の
+mounted-by チップを `shortId` 省略 + `title` にした（U-G35-2 の解消。Phase 82 の h1 重複対策は維持）。
+2) `/accounts` の MCP クライアント節: 直近の呼び出しの遅延読み込みにスケルトン、エラー種別を 1 語バッジ化、
+接続 URL のヒント（トークンは一切出さない）+ コピー機能を追加。3) leftover 3 件: `role="status"` を
+board/task の状態バッジに `~/lib/live-status.ts::isLiveStatusScreen`（小さな純粋関数）で判断して広げた
+（U-G32-2 の解消）、`tool_use` 要約の展開トグルは Phase 74 の時点で既にネイティブ `<button>`
+（キーボード対応済み）だったことをコード確認・`focus-order` 監査で再確認（コード変更なし）、絶対日付
+フォールバックを UTC からブラウザのローカルタイムゾーンに切り替え、ISO は `title` に残した（U-G31-3 の
+解消。ただし SSR/CSR のタイムゾーンが異なる実配置では 1 回の hydration mismatch が起きる既知の限界が
+残る — 詳細は `gui/docs/PROGRESS.md`「Phase G37」の未解決事項 U-G37-1）。詳細・証跡は
+`gui/docs/PROGRESS.md`「Phase G37」を参照（このリポジトリの慣例どおり、GUI の実装詳細は gui 側に書く）。
+
+### ゲート（詳細は gui/docs/PROGRESS.md Phase G37）
+
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ。celeris の API 契約は変えて
+いない）/ `pnpm lint` / `pnpm typecheck` / `pnpm test`（**982 passed**、Phase G36 の 965 から +17）/
+`pnpm build` / `pnpm mobile-audit`（**exit 0、違反 0 件**。25 route × light/dark = 50 通り。
+`knowledge-skill-create`/`knowledge-skill-edit` を新規に監査対象へ追加し、今回磨いたフォーム本体が
+機械検査を通ることを確認した）/ `pnpm e2e:mock`（**ok**）すべて exit 0。`crates/` を一切変更していない
+ため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` はこの Phase のスコープ外
+（実行していない。Phase 80/82/83 と同じ扱い）。
+
+### 未解決事項
+
+- 実機（本物の celeris + 本物のブラウザ、特に日本時間 UTC+9 のスマホ）でのこの Phase の見た目・挙動は
+  未確認（ADR-0009 P-34。サンドボックスに外向きネットワークが無い）。特に絶対日付表示のローカル化
+  （U-G37-1）は、SSR（GUI サーバー）とブラウザのタイムゾーンが異なると hydration mismatch が起きる
+  既知の限界があるため、実機での確認を優先してほしい。
+- 詳細は `gui/docs/PROGRESS.md`「Phase G37」の未解決事項を参照（MCP のコピー機能・接続 URL ヒントの
+  既定値であること・`isLiveStatusScreen` の対象範囲など）。
+- 本番 = Phase 65〜68（b/c 含む）、69〜83。実装中: Phase 84（このワークトリーク。GUI のみ）。
