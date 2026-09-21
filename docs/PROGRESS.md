@@ -11647,3 +11647,13 @@ OPTIONS（抜粋）: -c/--config <key=value>, --last, --all, -m/--model <MODEL>,
   `verify.sh` check 1–6 true、`live_ok=true`。昇格前に conversation ハーネスの一時固定 `adapter = "claude-code"` を外した
   （`config.toml.bak-20260921h` が固定ありの版）。`promote.sh a2942d5d8a94` **mode=live**（15:42:16→20）。
 - 実機確認: CoS セッションを `new-conversation` で切ってから 2 回指示し、選ばれたアダプタで fresh → resume が通ることを確認中（次節）。
+
+### Phase 68b の実機確認（2026-09-21 15:43–15:44 UTC）— Codex は fresh は通り、resume は `--approve-for-me` で exit 2
+
+- `new-conversation` で切ってから 2 回指示。1 回目は **codex**（ADR-0049 の残量で選択）で `resume:false`、**done**（「15:43（UTC）」、in 46,738 tokens）。
+  Codex が返した thread id `01a0c4a2-ce4e-7751-8726-fc35845322a9` が `node_sessions` に入った（67c の「Codex 自身の id」も実機で成立）。
+- 2 回目は同じ codex セッションで `resume:true`・`session_diff` 299 バイトだったが、`codex exec resume` が今度は **`--approve-for-me` を拒否**して exit 2
+  （68b は `--add-dir` だけ落としていた）。`exec resume` の usage は `--json --skip-git-repo-check --config <k=v> <SESSION_ID> [PROMPT]` のみ。
+  → **Phase 68c**（resume の argv を usage の許可リストだけにする）を同じエージェントに依頼。codex セッションは再び `new-conversation` で retire。
+- 影響: CoS が codex に割り当たると 2 通目から失敗する（Claude なら 2 往復とも成功。67c で確認済み）。68c 配備までの間、人が Console を使う
+  ときは「新しい会話」を押せば 1 通目は通る。
