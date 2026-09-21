@@ -12451,3 +12451,4 @@ celeris-mcp の `org_mount_skill`/`org_unmount_skill` と**同じ** `task_ops::k
   `release.sh` → `618708a1c954`（schema 24）。`verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（20:02:46→50）。
 - 実機: `GET /skills` に `celeris-commit-style`（`mounted_by: engineering`）が出る（次行の出力を参照）。GUI からの mount/unmount の目視は人に依頼。
 
+  実測（GET /skills、20:05 UTC）: celeris-commit-style mounted_by=engineering,software-engineering,systems-performance（mounted_by は継承先の子ノードも含む）
