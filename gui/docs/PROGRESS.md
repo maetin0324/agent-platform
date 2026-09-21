@@ -5325,3 +5325,131 @@ mount/unmount の挙動は GUI 経由でも MCP 経由でも同一（`docs/adr/0
 - **P-G35-2**: `MountedSkillsSection` の picker は現状 `GET /skills` の全件を毎回渡すだけ（件数の上限は
   celeris 側の `MAX_INDEX_ITEMS` 相当に準じる想定）。skill の数が増えたら検索欄を足すか、
   `~/components/ui/form.ts` の `multiSelectClass` を使った複数選択に変えるとよい。
+
+## Phase G36 — `pnpm e2e:staging`/`pnpm e2e:mock`: verify.sh の検査 4b が使う read-only e2e（celeris Phase 83、ADR-0041 D3/D5、ADR-0055 D3。2026-09-21）
+
+celeris 側 `verify.sh`（`docs/PROGRESS.md`「Phase 83」）が staging（本番 DB のスナップショット）に対して
+GUI の e2e を検査 4b として組み込めるように、**読み取り専用**の e2e を新設した。既存の `gui/e2e/*.spec.ts`
+（`pnpm e2e`）は `scripts/celeris.sh` で自分専用の celeris を起こしタスクを作る結合テストで、staging の
+「検査 6 の煙試験だけが書き込む」という前提を壊すため、そのままでは使えなかった（ADR-0055 D3 が残した
+既知のギャップ。celeris 側の背景は `docs/PROGRESS.md`「Phase 83」参照）。
+
+### 1. `gui/e2e/*.spec.ts`（`pnpm e2e`）の棚卸し
+
+`g0`〜`g9`・`g13`・`g5-a11y`・`g5-release` の 13 ファイルすべてが `execFileSync` で `scripts/celeris.sh`
+（`build`/`fixture`/`start`/`stop`）を呼ぶ、**自分専用の使い捨て celeris を前提にした結合テスト**だった。
+読み取りだけのアサーションを持つファイルもセットアップ自体が書き込みを伴うため、1 ファイルも staging へ
+そのまま流用できず、**全 13 ファイルを `pnpm e2e` 用のまま無変更で残した**。
+
+### 2. `gui/scripts/lib/celeris-fixture.mjs`（新規。`mobile-audit.mjs` からの切り出し）
+
+`gui/scripts/mobile-audit.mjs`（ADR-0055 D1）が持っていた「偽の celeris」（`node:http`、
+`test/mock-celeris/fixtures.ts` の値）と「画面一覧」をここに切り出した。画面一覧は
+`buildRoutes({taskId, projectId, orgId, orgHeadId, skillName})` という関数にし、引数省略時は
+`mobile-audit.mjs` がこれまで使っていた固定の fixture id（`TASK_ID`/`PROJECT_ID`/`ORG_NODE_ID`
+`= "coding-poc"`/`ORG_HEAD_ID = "coding"`/`SKILL_NAME`）になる。`mobile-audit.mjs` は
+`import { ROUTES, getFreePort, setupMockCeleris, waitForHealth } from "./lib/celeris-fixture.mjs"` に
+変え、自前で持っていた同名の関数・定数を削除した。**切り出しの前後で `pnpm mobile-audit` の出力が
+変わらないことを確認済み**（下の「ゲート」参照。途中 `/org?selected=coding` を誤って `orgId`
+〈`coding-poc`〉と混同する取り違えを 1 度入れてしまい `pnpm mobile-audit` が 254 件の `overflow` 違反を
+出したが、`orgHeadId`〈部門長ノード。葉ノードの `orgId` とは別の id〉として分離して直した）。
+
+### 3. `gui/scripts/e2e-check.mjs`（新規。`pnpm e2e:mock`/`pnpm e2e:staging` の実体）
+
+`mobile-audit.mjs` と同じ作り（`@playwright/test` から Playwright の test runner を使わず `chromium`
+だけを `createRequire` で借りる、生の Node スクリプト）で書いた。2 通りのモード:
+
+- **`pnpm e2e:mock`**（`E2E_GUI_URL` 未設定）: `setupMockCeleris()` と `pnpm build` 済みの GUI を
+  自分のポートに起こす。CI・オフラインでの動作確認用。
+- **`pnpm e2e:staging`**（`E2E_REQUIRE_STAGING=1`。`E2E_GUI_URL`/`E2E_API_URL`/`E2E_TOKEN_FILE`）:
+  **何も起動しない**。`E2E_GUI_URL` に接続するだけ。`discoverIds()` が **Node 側の `fetch`**
+  （ブラウザではない。gui/CLAUDE.md「ブラウザから celeris を直接呼ぶコードを書かない」を守る）で
+  `E2E_API_URL` から `taskId`/`projectId`/`orgId`/`orgHeadId`/`skillName` を読む。見つからなければ、
+  その id が要る画面と `/tasks/<id>` のタブ切り替え検査をスキップし、理由を `notes` に積む
+  （タスクは絶対に作らない）。
+
+検査する内容（両モード共通）:
+
+1. `buildRoutes()` の画面一覧を 393×851 と 1280×800 の両方で `page.goto`（`waitUntil: "load"`）し、
+   200 応答・コンソールエラー無し・失敗した要求（`status >= 400`。**401 のみ許容**）無しを確認。
+2. `/`（desktop viewport のときだけ）: `[data-testid="console-screen"]` が描画されること。
+   ブロック数（`[data-console-block]` の件数）は `notes` に参考情報として出す（0 件でも失敗にしない
+   — staging のスナップショットに Console 発言が無いことはありうるため）。
+3. `/accounts`: `[data-testid="llm-sources-section"]`・`[data-testid="mcp-clients-section"]` が
+   描画されること（`app/routes/accounts.tsx` はデータが空でもこの 2 節の外枠は常に描く作りなので、
+   0 件データでも失敗にならない）。
+4. `/knowledge/skills`: `[data-testid="knowledge-skills"]` が描画されること。
+5. `ids.taskId` があれば `/tasks/<id>?tab=overview` を開き、5 つのタブ（`TASK_TABS` と同じ
+   overview/timeline/changes/files/artifacts）を `[data-testid="task-tab-<tab>"]` の `<Link>` クリックで
+   切り替え、対応する節（`info-section`/`timeline-section`/`changes-section`/`files-section`/
+   `artifacts-section`）が `waitForSelector` で出ることを確認。`?tab=` を差し替えるだけの `<Link>`
+   （`replace` ナビゲーション）で `POST` は一切無い。
+
+外部ネットワーク不使用の後押しとして、`context.route("**/*", ...)` で GUI のオリジン以外への要求を
+`abort` する（`mobile-audit.mjs` と同じ。`page.on("response")` の失敗要求判定はこの遮断対象を除外して
+数える — 自分で塞いだ要求を「失敗した要求」として誤検知しないため）。
+
+`gui/package.json`: `"e2e:mock": "node scripts/e2e-check.mjs"`、
+`"e2e:staging": "E2E_REQUIRE_STAGING=1 node scripts/e2e-check.mjs"`。`E2E_REQUIRE_STAGING=1` かつ
+`E2E_GUI_URL` 未設定なら usage を出して exit 2（`pnpm e2e:staging` を env 無しで直接叩いたときに
+mock にフォールバックして誤解させないため）。`@playwright/test` が無い環境（celeris 側の release の
+`gui/`。`pnpm install --prod` で devDependency が剥がれる）では exit 3 で「未インストール」を返す
+（クラッシュしない）。`gui/.gitignore` に `test/e2e-check/`（レポート置き場。`test/mobile-audit/` と
+同じ扱い）を追加。
+
+### ゲート
+
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（celeris の API 契約は変えていないので
+差分ゼロ）/ `pnpm typecheck`（新規 `.mjs` 2 本は `tsconfig.node.json` の `scripts/**/*.mjs` に含まれ
+checkJs で型検査される。`mobile-audit.mjs` と違い DOM/ブラウザの関数を `toString()` で送る作りではない
+ので除外リストには入れず、`node:http`/`node:net` の戻り値や `catch (e)` の `e` に JSDoc で型を付けて
+素通りさせた）/ `pnpm lint`（biome。import の並び順と `test/e2e-check/report.json` の整形を `--write`
+で 1 回直した）/ `pnpm test`（**965 passed**、Phase G35 から変化なし — 新規ファイルに unit テストは
+足していない。判断ロジックを持つ純粋関数を切り出していないため）/ `pnpm build` すべて exit 0。
+
+`pnpm mobile-audit`（`MOBILE_AUDIT_SKIP_BUILD=1`）→ **exit 0、violations 0 件**（`gui/scripts/lib/
+celeris-fixture.mjs` への切り出し前後で出力が変わらないことを確認。1 回目のビルド直後の実行では
+`focus-order` が 1 件出たが、同じビルドに対する 2 回目の実行では 0 件になったので、ビルド直後の CPU
+負荷による既知のフレーク〈Tab キー送出のタイミング依存〉と判断した）。
+
+`pnpm e2e:mock` → **`{"ok": true, "mode": "mock", "failures": [], "notes": ["home: rendered 7 console
+block(s)"]}`、exit 0**（`pnpm build` からの通しと `E2E_SKIP_BUILD=1` の両方で確認）。`pnpm e2e:staging`
+の staging 経路（`discoverIds`・自前で何も起動しない）は、偽の celeris + GUI を自分のポートに起こして
+外側から `E2E_REQUIRE_STAGING=1 E2E_GUI_URL=... E2E_API_URL=...` で呼ぶ使い捨てのスクリプトで確認した
+（`{"ok": true, "mode": "staging", ...}`、`discoverIds` が実際に `GET /projects`/`/org`/`/skills`/`/tasks`
+を叩いて id を見つけ、タブ切り替えまで通ることを確認。リポジトリには残していない）。
+
+celeris 側（`scripts/selfdeploy/verify.sh` に検査 4b として組み込み。詳細は `docs/PROGRESS.md`
+「Phase 83」）: `bash -n scripts/selfdeploy/verify.sh` / `bash -n scripts/selfdeploy/lib.sh` exit 0。
+`cargo test --workspace`/`cargo clippy` はホストのディスク逼迫（`docs/PROGRESS.md`「Phase 83」の
+「重大: ディスク」参照）のため未実行 — `crates/` はこの Phase で無変更。
+
+### 変更したファイル
+
+- `scripts/lib/celeris-fixture.mjs`（新規）
+- `scripts/e2e-check.mjs`（新規）
+- `scripts/mobile-audit.mjs`（上の lib に委譲。出力は無変更）
+- `package.json`（`e2e:mock`/`e2e:staging`）・`.gitignore`（`test/e2e-check/`）
+
+### 未解決事項
+
+- **U-G36-1**: `pnpm e2e:staging` を本物の staging（celeris 側の `verify.sh` が起こす release ビルドの
+  GUI）に対して実際に走らせたことはまだ無い（celeris 側 Phase 83 の未解決事項と同じ）。オフラインの
+  代替確認（偽の celeris + GUI）でコード経路は通したが、本物の release ビルド（`pnpm install --prod`
+  済みの `gui/`）から `$SD_REPO/gui` の Playwright を使って staging を叩く、という celeris 側の分岐は
+  実機で確認できていない。
+- **U-G36-2**: staging のスナップショットに `tasks`/`projects`/`org` が 1 件も無いと、動的な画面は
+  すべてスキップされ `ok` が固定画面だけの検査で真になりうる（celeris 側「Phase 83」の未解決事項と同じ）。
+- **U-G36-3**: コンソールのブロック数・失敗した要求の**内容**までは検査結果に反映しない（`notes` に
+  出すだけ）。将来 GUI 側でこの検査結果を見せる画面を作るなら、`report.json`（`test/e2e-check/`）の
+  形をそのまま使えるが、今回は `verify.json` に文字列 1 行（`detail`）が載るだけ。
+
+### 提案
+
+- **P-G36-1**: `e2e-check.mjs` の画面一覧（`buildRoutes`）は `mobile-audit.mjs` の一覧を流用しているが、
+  mobile 専用の見た目チェック（タップ領域・コントラスト等）とナビゲーション（e2e）で本来必要な画面が
+  完全に一致するとは限らない。乖離が出てきたら `buildRoutes` に「audit 用」「e2e 用」のフラグを足すことも
+  検討する。
+- **P-G36-2**: U-G36-1 の実機確認が終わったら、`E2E_SKIP_BUILD`/`E2E_REQUIRE_STAGING` の名前や既定値を
+  実際の運用に合わせて見直す余地があるかもしれない（現状は celeris 側 `verify.sh` の呼び方に合わせて
+  決め打ちしたもの）。

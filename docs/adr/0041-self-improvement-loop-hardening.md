@@ -117,3 +117,24 @@ ADR-0019 がリモートに対して決めたことを、ローカルにも同�
   実機: `release.sh main` → `verify.sh` で検査 6 が通る。
 - **実機（Phase 49–51 の後）**: 自己改善案件の最初のタスクが worktree で動き、`release.sh`/`verify.sh` を自分で通し、GUI の
   「リリース」画面に差分と `on_main` が出て、人が昇格する。
+
+## 5. Phase 83 追記（2026-09-21）: 検査 4b — GUI の e2e（read-only）
+
+D5 の煙試験は「dispatch → ワーカー起動 → 結果の取り込み → レビュー → 終端 → 報告の生成」という celeris 側の
+回帰は拾うが、GUI 側の回帰（画面が壊れて 200 は返すが中身が描画されない・コンソールエラーが出る等）は
+検査 3/4 の「200 か JSON か」までしか見ていなかった。`gui/CLAUDE.md` の e2e（`pnpm e2e`、`gui/e2e/*.spec.ts`）は
+使い捨ての celeris にタスクを作って承認する結合テストで、ADR-0041 D2/D5 が前提にした「staging は検査 6 の
+煙試験だけが書き込む」を壊すので、そのままでは verify.sh に組み込めなかった（ADR-0055 D3 が残した既知のギャップ）。
+
+`verify.sh` に**検査 4b（gui-e2e）**を足す。検査 4 が起こした staging の GUI/celeris に対して、
+**読み取り専用**（ナビゲーションと `?tab=` の切り替えだけ。`POST` は一切しない）の
+`pnpm e2e:staging`（`gui/scripts/e2e-check.mjs`）を走らせる。**検査 6（煙試験）より前**に置く（検査 6 が
+足す 1 件が e2e のナビゲーションに写り込まないように）。`verify.json.ok` の条件は「1〜4・4b・6 が全部真」に
+広がる（`live_ok`＝検査 5 の意味は変わらない）。
+
+release の `gui/`（`release.sh` の `pnpm install --prod`）には Playwright が devDependency なので入っていない。
+検査 4b は `$SD_REPO/gui`（作業チェックアウトの `pnpm install` 済みの方）があればそちらを使い、無ければ
+release の `gui/` を試し、どちらにも `@playwright/test` が無ければ `false — not installed` にする
+（クラッシュさせない。ADR-0041 D2 の「本番には触れない」は変えない設計判断: Playwright が無い環境でも
+verify.sh 自体は最後まで走り切り、原因が分かる形で false になる）。詳細は `docs/selfdeploy.md` の
+「検査 4b」節、受け入れ条件は `docs/PROGRESS.md` の Phase 83。
