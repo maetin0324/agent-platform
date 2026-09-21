@@ -23,7 +23,13 @@ export async function loader({ request }: Route.LoaderArgs): Promise<ConsoleData
     return await loadConsole(getCelerisClient(), scope, request);
   } catch (e) {
     if (isCelerisUnavailable(e)) {
-      return { scope, page: { items: [], next_cursor: null }, org: [], projects: [] };
+      return {
+        scope,
+        page: { items: [], next_cursor: null },
+        org: [],
+        projects: [],
+        fetchedAt: new Date().toISOString(),
+      };
     }
     throw celerisErrorResponse(e);
   }

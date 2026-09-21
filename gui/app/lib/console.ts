@@ -22,6 +22,12 @@ export interface ConsoleData {
   page: ConsolePage;
   org: OrgNode[];
   projects: Project[];
+  /**
+   * ADR-0055 D2 ラウンド 6: 相対時刻表示（`relativeTimeLabel`）の基準時刻。loader が読み込んだ時刻
+   * （`~/routes/approvals.tsx` 等の `fetchedAt` と同じ作り）。root の SSE が daemon tick ごとに
+   * このルートを再検証するたびに更新されるので、Console を長く開いていても大きくずれない。
+   */
+  fetchedAt: string;
 }
 
 /**
@@ -248,6 +254,21 @@ export function firstLine(text: string): string {
 /** `text` が 1 行目より長い（＝ `firstLine` の裏に隠れている内容がある）か。 */
 export function hasMoreThanFirstLine(text: string): boolean {
   return text.length > firstLine(text).length;
+}
+
+/**
+ * `tool_use` の要約（`~/components/ConsoleBlockItem.tsx::ReplyStepRow`）を省略する長さ（ADR-0055 D2
+ * ラウンド 5 から。フェーズ 73 では `truncateLabel(step.text, 90)` にハードコードしていた値を定数化した）。
+ */
+export const TOOL_SUMMARY_MAX_LENGTH = 90;
+
+/**
+ * `tool_use` の要約が `TOOL_SUMMARY_MAX_LENGTH` を超えていて省略が起きるか（ADR-0055 D2 ラウンド 6、
+ * U-G29-2 / P-G29-2 の解消）。スマホには hover が無いので、これが true のときだけ行をタップで
+ * 展開できるようにする（`title` 属性だけでは全文を見る手段が無かった）。
+ */
+export function toolSummaryTruncated(text: string, maxLength = TOOL_SUMMARY_MAX_LENGTH): boolean {
+  return text.length > maxLength;
 }
 
 /**

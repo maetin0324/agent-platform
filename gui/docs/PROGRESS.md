@@ -4453,3 +4453,154 @@ before/after のスクリーンショット（`gui/test/mobile-audit/*.png`、gi
   余地がある。今のところ他の検査で内側スクロールに起因する誤検知は出ていないので急ぎではない。
 - **P-G29-2**: U-G29-2 のとおり、`tool_use` の要約をタップで展開できるようにする（`tool_result` と
   同じ `<details>` にするか、別の折り畳みにするか）は次のラウンドの候補。
+
+## Phase G30 — スマホ UX ラウンド 6（ADR-0055 D2、Phase 74。2026-09-21）
+
+celeris 側は無変更（`crates/` 無変更）。Phase 74 の依頼（`gui/CLAUDE.md`・ADR-0055・ADR-0048 D2）に沿って
+5 項目を実装した。ラウンド 5（Phase G29）の未解決事項 U-G29-2 / 提案 P-G29-2（`tool_use` の要約のタップ
+展開）から始め、タスク詳細画面のタイムライン、`/approvals` 等の時刻表示、空・エラー状態の確認まで進めた。
+
+### 1. tool_use の要約をタップで展開（U-G29-2 / P-G29-2 の解消。受け入れ条件 1）
+
+- `~/lib/console.ts` に `TOOL_SUMMARY_MAX_LENGTH`（= 90。Phase 73 でハードコードしていた値を定数化）と
+  純粋関数 `toolSummaryTruncated(text, maxLength = TOOL_SUMMARY_MAX_LENGTH)` を追加（vitest 3 本）。
+- `~/components/ConsoleBlockItem.tsx::ReplyStepRow` を作り直した: `tool_use` も `tool_result` も、
+  省略・折り畳みが起きるときは同じ「行全体をタップで開閉」の作り（`useState` + `button` +
+  `aria-expanded`）にした。`tool_result` はこれまで `<details>`/`<summary>` を使っていたが、
+  `<details>` は開閉状態を `aria-expanded` として公開しない（ブラウザによって扱いが違う）ため、
+  受け入れ条件が明示する disclosure semantics（`aria-expanded` を持つ、キーボード操作可能、44px の
+  タップ領域）を満たすよう `button` ベースに揃えた。閉じているときは `title` にも全文を残す（マウス操作
+  の人にはホバーでも見える）。`ReplyStepRow` を `export` し、`~/routes/tasks.$id.tsx` のタイムライン
+  （2 で説明）から再利用する。
+- 機械検査で実データを通すため、`test/mock-celeris/fixtures.ts::consoleGrowingReplySnapshot()` の
+  `tool_use` の要約を 95 字（90 字超）にし、`gui/scripts/mobile-audit.mjs` の Console モックが展開ボタン
+  （縮めた状態）を実際に描画するようにした（screenshot で目視確認。下記「証跡」参照）。
+
+### 2. タスク詳細（`/tasks/<id>`）の worker progress（ADR-0048 D2、受け入れ条件 2）
+
+- これまでタイムラインタブは `worker_progress` イベントを 1 件ずつ生の `event.msg`（構造化前の文字列）
+  で出していた（ADR-0048 D2 が定義した `kind`/`tool`/`summary`/`detail`/`error` を一切使っていなかった）。
+  celeris 側に run 単位の集約 API が無い（Console の `progress` ブロックは `GET /console` がその集約を
+  返す）ので、GUI 側で「連続する `worker_progress` イベント」を 1 つの折り畳みにまとめることにした。
+- 新規 `~/lib/task-timeline.ts`（純粋関数、DOM を持ち込まない。`~/lib/console.ts` と同じ方針）:
+  - `groupTimelineWorkerProgress(items)`: 連続する `worker_progress` を `{kind:"progress_group", items}`
+    にまとめる（1 件だけでも `progress_group`。折り畳みの有無は呼び出し側が `items.length` で決める）。
+  - `timelineProgressGroupSummary(items)`: 「N 件 ・ 最後: <kind>」の一行要約（受け入れ条件 2 の
+    「最後の progress kind」）。時刻は呼び出し側で別途 `relativeTimeLabel` を添える。
+  - `workerProgressStep(event)`: `Event`（`worker_progress`）を Console の `ConsoleReplyStep` と同じ形
+    （`{kind, text: summary ?? msg, tool, error}`）にする。`~/lib/console.ts::formatRunEventRow` の
+    `summary ?? msg` と同じ規則。
+  - vitest: `groupTimelineWorkerProgress`（連続まとめ・1 件・別種に挟まれた 2 区間・無し・空配列）、
+    `timelineProgressGroupSummary`、`workerProgressStep`（8 本、`test/unit/task-timeline.test.ts`）。
+- `~/routes/tasks.$id.tsx` に `TimelineProgressGroupRow` を追加: 既定は折り畳み（`aria-expanded` を持つ
+  `button`、44px のタップ領域）、見出しは他の `event` 行と同じ体裁（時刻・`timelineKindLabel("event")`
+  バッジ・`Mono` の `worker_progress`）のすぐ下に一行要約、開くと `ReplyStepRow`（1 で export したもの）
+  が並ぶ = Console の progress ブロックを開いたときと同じ見た目になる。`groupTimelineWorkerProgress` は
+  タイムラインの描画直前（`TimelineTab` の `<ol>`）で呼び、`progress_group` は `TimelineProgressGroupRow`、
+  それ以外は既存の `TimelineRow` に出し分ける。
+- 機械検査で実データを通すため、`test/mock-celeris/fixtures.ts::timelineWorkerProgressItems()`（新規。
+  `tool_use` ×2（うち 1 件は 90 字超、`Bash` の長いコマンドライン）+ `tool_result` ×1（複数行）の 3 件）
+  を追加し、`gui/scripts/mobile-audit.mjs` の `/tasks/{id}/timeline` モックに混ぜた。
+
+### 3. 時刻表示の統一（受け入れ条件 3）
+
+- 監査の結果、Console のブロック（`block.at`）と `/tasks/:id` のタイムライン（`item.at`）・run 一覧
+  （`run.started_at`/`finished_at`）は celeris が返す**生の ISO 文字列をそのまま**表示していた
+  （393px には長すぎ、`/approvals`・`/artifacts` 等が既に使っている「n 前」の相対表示
+  `~/lib/reports.ts::relativeTimeLabel` と揃っていなかった）。加えて `~/lib/artifacts.ts::
+  artifactRelativeTime` が `relativeTimeLabel` と**実装が一字一句同じ**まま別名で重複していた
+  （「2 つの形式が混在していたら 1 つの pure helper に揃える」の該当箇所）。
+  - `artifactRelativeTime` を削除し、`~/components/ArtifactsList.tsx` は `relativeTimeLabel`
+    （`~/lib/reports.ts`）を直接使うように変更（`test/unit/artifacts.test.ts` から重複テストを削除。
+    `relativeTimeLabel` 自体のテストは既存の `test/unit/reports.test.ts` にある）。
+  - Console: `~/lib/console.ts::ConsoleData` に `fetchedAt`（loader が読み込んだ時刻。`~/celeris/
+    console.server.ts::loadConsole` が `new Date().toISOString()` を足す）を追加。`root` の SSE が
+    daemon tick ごとに全ルートを再検証するので、Console を長く開いていても `fetchedAt` は定期的に
+    更新される（1 回だけ読んで固定、ではない）。`~/components/ConsoleBlockItem.tsx::BlockHeader` の
+    `at`（文字列そのまま）を `atIso` + `fetchedAt` に変え、内部で `relativeTimeLabel(atIso, fetchedAt)`
+    を出し、絶対時刻は `title` に残した（8 ブロック種すべて + `TaskBlockView` の行内時刻）。
+  - `/tasks/:id`: `TaskDetailData` に `fetchedAt` を追加（loader）。タイムラインの `item.at`、run 一覧の
+    `started_at`/`finished_at` を `relativeTimeLabel` + `title`（絶対時刻）に変えた。
+  - `/approvals`: 既存の 2 箇所（認可待ち・決めたもの）の `relativeTimeLabel` 表示に `title`（絶対時刻）
+    を足し、`StandingRuleRow`（永続の認可）の `rule.created_at` 生表示も `relativeTimeLabel` + `title`
+    に揃えた（`fetchedAt` を新しい prop として渡す）。
+- 「1 つの primary action per card」の確認（受け入れ条件 3 の後半）: `/approvals`・`/inbox` のカードを
+  読み直した。認可カードの「今回だけ／今後ずっと／認めない」は 3 択の決定 UI（メニューの寄せ集めではない）
+  なので対象外、`/inbox` の draft カードも「受け入れ／取り消し」+ グループ単位の「全部受け入れ」で
+  意図的に分かれている。変更は不要と判断した（コードは変えていない）。
+
+### 4. 空・エラー状態の確認（受け入れ条件 4。実装は無し、確認のみ）
+
+ADR-0055 D1 が定める 21 route（監査対象そのもの）を `EmptyState`/`Alert`/`ErrorBoundary` の有無で
+確認した。すべて何らかの形でカバーされている:
+
+- ほとんどのルートは自前の `EmptyState`（一覧が空のとき）と `ErrorBoundary`（`celerisErrorResponse` /
+  404 等）を持つ。
+- `/`・`/org/<node>` は `~/components/Console.tsx::BlockStream` が持つ 1 つの `EmptyState`
+  （「まだ何も流れていません」）を共有し、自前の `ErrorBoundary` は持たない（celeris 停止中はローカルで
+  拾って 200 のまま出す。それ以外は `~/root.tsx` の共有 `ErrorBoundary` に委ねる。`/org/secretary` は
+  リダイレクトのみで描画しない）。この委譲は既存の意図した設計（`home.tsx`/`org.$id.tsx` のコメント）で、
+  今回変更していない。
+- `/help` は celeris に問い合わせない静的ページ（loader 無し）なので、空・エラー状態そのものが無い。
+- `/tasks/:id` の「変更」「ファイル」タブの中身（`~/components/task-changes.tsx`/`task-files.tsx`）は
+  個別に `EmptyState`（リポジトリ無し・差分無し・ディレクトリが空 等）と `Alert`（busy・conflict 等）を
+  複数持つ。
+- 393px でのはみ出しは `pnpm mobile-audit`（D1-1）がそのまま検査する。今回は空・エラー状態を**新しく
+  作っていない**（既存で足りていた）ので、コード変更は無い。
+
+### 監査（機械検査）
+
+| rule | G29 後 | G30 後 |
+| --- | --- | --- |
+| overflow / status-badge / fixed-overlay / tap-target / font-size | 0 | **0**（維持） |
+| 合計 | 0 | **0**（`pnpm mobile-audit` exit 0、21 route 全て 200） |
+
+新しく混ぜた実データ（`tool_use` 95 字の要約、`worker_progress` の折り畳み groupの見出し行）でも
+違反 0 のまま（`test/mobile-audit/home.png`・`task-timeline.png` で目視確認: 展開ボタンの `…` と
+折り畳みの一行要約が 393px 内に収まっている）。
+
+### 証跡（コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint`（事前に `pnpm exec biome check --write .` で新規コードの整形・import 順を自動修正） | exit 0。`Checked 227 files. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0。**Test Files 62 passed (62) / Tests 904 passed (904)**（Phase G29 の 893 から +11: `toolSummaryTruncated` 3 件、`groupTimelineWorkerProgress`/`timelineProgressGroupSummary`/`workerProgressStep` 8 件） |
+| build | `pnpm build` | exit 0（client・server とも） |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（API 変更なし） |
+| mobile-audit | `pnpm mobile-audit` | **exit 0。violations 0 件**。21 route 全て 200 応答 |
+
+### 変更したファイル
+
+- `app/lib/console.ts`（`TOOL_SUMMARY_MAX_LENGTH`/`toolSummaryTruncated`、`ConsoleData.fetchedAt`）
+- `app/lib/task-timeline.ts`（新規: `groupTimelineWorkerProgress`/`timelineProgressGroupSummary`/`workerProgressStep`）
+- `app/lib/artifacts.ts`（`artifactRelativeTime` 削除）
+- `app/celeris/console.server.ts`（`loadConsole` が `fetchedAt` を足す）
+- `app/components/ConsoleBlockItem.tsx`（`ReplyStepRow` 作り直し・export、`BlockHeader` を `atIso`/`fetchedAt` に、全ブロック種に `fetchedAt` を通す）
+- `app/components/Console.tsx`・`app/components/ArtifactsList.tsx`（`fetchedAt`/`relativeTimeLabel` の配線）
+- `app/routes/home.tsx`・`app/routes/org.$id.tsx`（celeris 停止中のフォールバックに `fetchedAt` を追加）
+- `app/routes/tasks.$id.tsx`（`TaskDetailData.fetchedAt`、`TimelineProgressGroupRow` 新設、run 一覧の時刻表示）
+- `app/routes/approvals.tsx`（`title` 属性の追加、`StandingRuleRow` の時刻表示）
+- `test/mock-celeris/fixtures.ts`（`timelineWorkerProgressItems()` 新規、`consoleGrowingReplySnapshot()` の要約を長く）
+- `scripts/mobile-audit.mjs`（`/tasks/{id}/timeline` モックに worker_progress を混ぜる）
+- `test/unit/console.test.ts`・`test/unit/task-timeline.test.ts`（新規）・`test/unit/artifacts.test.ts`・`test/unit/tasks.detail.loader.test.ts`
+
+### 未解決事項
+
+- **U-G30-1（実機未確認）**: `ReplyStepRow`/`TimelineProgressGroupRow` のタップ展開、`aria-expanded`
+  のスクリーンリーダーでの読み上げは Playwright の機械検査（クリック操作をしない）では確認していない。
+  実機（iOS Safari / Android Chrome、または VoiceOver/TalkBack）での確認が要る。
+- **U-G30-2**: `relativeTimeLabel` の元になる `formatDuration`（`~/lib/time-delta.ts`）は分・秒だけの
+  表示で、時間・日をまとめない（例: 3 日前が「4320m0s 前」になる）。今回この表示を Console・タイムライン・
+  run 一覧・`StandingRuleRow` に広げたことで、古い時刻ほどこの読みにくさが目立つ場所が増えた。
+  `/approvals` 等では以前から同じ形式だったので新しい不具合ではないが、次のラウンドで「時間」「日」の
+  単位を足すか検討する余地がある（`formatDuration` 自体の変更は他画面にも影響するため、今回は見送った）。
+- **U-G30-3**: `/tasks/:id` の「生のイベント（絞り込み）」節（`~/routes/tasks.$id.tsx` の `raw-events`
+  `<details>`）は `worker_progress` を従来どおり `event.msg` のまま出している（今回のグループ化はタイム
+  ラインタブの `<ol>` だけに適用し、裏方向けの生ログはあえて変えていない）。
+
+### 提案
+
+- **P-G30-1**: U-G30-2 のとおり、`formatDuration`/`relativeTimeLabel` に「時間」「日」の単位を足す
+  リファクタリングは影響範囲が広い（`/approvals`・`/artifacts`・`/reports`・Console・`/tasks/:id` 全部）
+  ので、専用のラウンドとして切り出すとよい。

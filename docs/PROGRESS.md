@@ -11753,3 +11753,26 @@ Phase 68b の確認と同一テキスト（`--add-dir`・`-s/--sandbox`・`--app
 - = ADR-0054 D1 が **Claude Code と Codex の両方で本番成立**。ADR-0054 の Phase 67〜68 系列（67/67b/67c/68/68b/68c）はこれで閉じた。
 - 提案: Codex の resume は入力 token を節約しない（むしろ増える）ので、`[sessions] rollover_tokens` は Codex セッションでは小さめ
   （例 200k）にするか、CoS は Claude 優先の写像にする方が実用的。人の判断に委ねる。
+
+## Phase 74 — スマホ UX ラウンド 6（ADR-0055。2026-09-21）
+
+GUI のみ（`crates/` 無変更）。`docs/adr/0055-mobile-ux.md` D2/D3 のループを続け、Phase G29（ラウンド 5）の
+未解決事項 U-G29-2 / 提案 P-G29-2（`tool_use` の要約のタップ展開）から着手し、タスク詳細のタイムライン
+（ADR-0048 D2 の worker progress を Console と同じ見た目に揃える）、時刻表示の統一（`relativeTimeLabel`
+への一本化。`~/lib/artifacts.ts::artifactRelativeTime` という完全な重複実装を発見して削除）、空・エラー
+状態の存在確認（変更不要と判断）まで進めた。詳細・証跡は `gui/docs/PROGRESS.md`「Phase G30」を参照
+（このリポジトリの慣例どおり、GUI の実装詳細は gui 側に書く）。
+
+### ゲート（詳細は gui/docs/PROGRESS.md Phase G30）
+
+`pnpm lint` / `pnpm typecheck` / `pnpm test`（904 passed、Phase G29 の 893 から +11）/ `pnpm build` /
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ）/ `pnpm mobile-audit`
+（**exit 0、違反 0 件、21 route 全て 200**）すべて exit 0。
+
+### 未解決事項
+
+- 実機（iOS Safari / Android Chrome、VoiceOver/TalkBack を含む）での目視・操作確認は今回も未実施
+  （ADR-0009 P-34。認証・ネットワークが使えるサンドボックスではないため）。タップ展開・`aria-expanded`
+  の読み上げは実機で確認するとよい。
+- 詳細は gui/docs/PROGRESS.md「Phase G30」の未解決事項・提案を参照（`formatDuration` が時間・日の単位を
+  持たない件など）。

@@ -37,6 +37,8 @@ import type {
   TimelineItem,
 } from "~/celeris/types";
 import { CodeViewer } from "~/components/CodeViewer";
+/* ADR-0048 D2・フェーズ 74: worker_progress の折り畳みの中身は Console と同じ行を再利用する。 */
+import { ReplyStepRow } from "~/components/ConsoleBlockItem";
 import {
   ErrorFlash,
   RetryFlash,
@@ -103,7 +105,14 @@ import {
   timelineKindLabel,
 } from "~/lib/labels";
 import { milestoneTitle } from "~/lib/project-index";
+import { relativeTimeLabel } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
+import {
+  groupTimelineWorkerProgress,
+  type TimelineWorkerProgressItem,
+  timelineProgressGroupSummary,
+  workerProgressStep,
+} from "~/lib/task-timeline";
 import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/tasks.$id";
@@ -171,6 +180,11 @@ export interface TaskDetailData {
   timeline: Timeline;
   /** ADR-0044 D2: `GET /tasks/{id}/comments`（古い順）。タブの件数と、コメント欄の見出しに使う。 */
   comments: CommentList;
+  /**
+   * ADR-0055 D2 ラウンド 6（フェーズ 74）: タイムラインの相対時刻表示（`relativeTimeLabel`。
+   * `~/routes/approvals.tsx` の `fetchedAt` と同じ作り）の基準時刻。loader が読み込んだ時刻。
+   */
+  fetchedAt: string;
   /** ADR-0044 D1: 編集フォームの「担当」プルダウンの選択肢（`GET /org`。落ちても画面は出す）。 */
   org: OrgNode[];
   /** ADR-0044 D1: 編集フォームの「途中目標」プルダウン（そのタスクの案件のものだけ）。 */
@@ -285,6 +299,7 @@ export async function loadTaskDetail(client: CelerisClient, taskId: string, requ
     artifacts,
     timeline,
     comments,
+    fetchedAt: new Date().toISOString(),
     org: org?.items ?? [],
     milestones: project?.milestones ?? [],
     genres: (config?.genres ?? []).map((g) => g.id),
@@ -357,6 +372,7 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
     artifacts,
     timeline,
     comments,
+    fetchedAt,
     org,
     milestones,
     genres,
@@ -546,11 +562,19 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
           submitting={submitting}
           retryFetcher={retryFetcher}
           retrying={retrying}
+          fetchedAt={fetchedAt}
         />
       )}
 
       {tab === "timeline" && (
-        <TimelineTab taskId={task.id} detail={detail} timeline={timeline} comments={comments} events={events} />
+        <TimelineTab
+          taskId={task.id}
+          detail={detail}
+          timeline={timeline}
+          comments={comments}
+          events={events}
+          fetchedAt={fetchedAt}
+        />
       )}
 
       {tab === "changes" && (
@@ -698,6 +722,7 @@ function OverviewTab({
   submitting,
   retryFetcher,
   retrying,
+  fetchedAt,
 }: {
   detail: TaskDetail;
   artifactCount: number;
@@ -708,6 +733,7 @@ function OverviewTab({
   submitting: boolean;
   retryFetcher: ReturnType<typeof useFetcher<RetryOutcome>>;
   retrying: boolean;
+  fetchedAt: string;
 }) {
   const { task } = detail;
   return (
@@ -913,9 +939,15 @@ function OverviewTab({
                           {run.account ?? "-"}
                         </td>
                         <td className={tdClass}>{run.model}</td>
-                        <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}>{run.started_at}</td>
-                        <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}>
-                          {run.finished_at ?? "-"}
+                        {/* フェーズ 74（ADR-0055 D2 ラウンド 6）: 生の ISO は表の幅も取るので相対表示に揃える。 */}
+                        <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")} title={run.started_at}>
+                          {relativeTimeLabel(run.started_at, fetchedAt)}
+                        </td>
+                        <td
+                          className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}
+                          title={run.finished_at ?? undefined}
+                        >
+                          {run.finished_at ? relativeTimeLabel(run.finished_at, fetchedAt) : "-"}
                         </td>
                         <td className={tdClass}>
                           {run.outcome ? (
@@ -1641,12 +1673,14 @@ function TimelineTab({
   timeline,
   comments,
   events,
+  fetchedAt,
 }: {
   taskId: string;
   detail: TaskDetail;
   timeline: Timeline;
   comments: CommentList;
   events: EventsPage;
+  fetchedAt: string;
 }) {
   const [searchParams] = useSearchParams();
   const selectedTypes = new Set(searchParams.getAll("types"));
@@ -1673,9 +1707,22 @@ function TimelineTab({
             <EmptyState icon="activity" title="まだ何も起きていません。" />
           ) : (
             <ol className="space-y-2" data-testid="timeline-list">
-              {timeline.items.map((item) => (
-                <TimelineRow key={timelineItemKey(item)} taskId={taskId} item={item} />
-              ))}
+              {groupTimelineWorkerProgress(timeline.items).map((display) =>
+                display.kind === "progress_group" ? (
+                  <TimelineProgressGroupRow
+                    key={`progress-${display.items[0].seq}`}
+                    items={display.items}
+                    fetchedAt={fetchedAt}
+                  />
+                ) : (
+                  <TimelineRow
+                    key={timelineItemKey(display.item)}
+                    taskId={taskId}
+                    item={display.item}
+                    fetchedAt={fetchedAt}
+                  />
+                ),
+              )}
             </ol>
           )}
 
@@ -1820,7 +1867,7 @@ function timelineItemKey(item: TimelineItem): string {
 }
 
 /** タイムラインの 1 件（ADR-0044 D5）。`kind` ごとに出し分ける（知らない `kind` は無視する）。 */
-function TimelineRow({ taskId, item }: { taskId: string; item: TimelineItem }) {
+function TimelineRow({ taskId, item, fetchedAt }: { taskId: string; item: TimelineItem; fetchedAt: string }) {
   return (
     <li
       data-testid="timeline-item"
@@ -1828,12 +1875,63 @@ function TimelineRow({ taskId, item }: { taskId: string; item: TimelineItem }) {
       className="rounded-lg border border-border px-3 py-2 text-sm"
     >
       <p className="flex flex-wrap items-center gap-2">
-        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
-        <span className="text-sm text-fg-subtle lg:text-xs">{item.at}</span>
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+            フェーズ 74（ADR-0055 D2 ラウンド 6）: 生の ISO のままだと 393px には長すぎるので、他画面
+            （`/approvals` 等）と同じ `relativeTimeLabel` に揃え、絶対時刻は `title` に残す。 */}
+        <span className="text-sm text-fg-subtle lg:text-xs" title={item.at}>
+          {relativeTimeLabel(item.at, fetchedAt)}
+        </span>
         <Badge tone={TIMELINE_TONE[item.kind] ?? "neutral"}>{timelineKindLabel(item.kind)}</Badge>
         {item.kind === "event" && <Mono>{item.event.type}</Mono>}
       </p>
       <TimelineBody taskId={taskId} item={item} />
+    </li>
+  );
+}
+
+/**
+ * `worker_progress` イベントが連続した区間 1 つ（ADR-0048 D2、フェーズ 74）。既定は折り畳み
+ * （`aria-expanded` を持つ `button`。44px のタップ領域）で、見出しは「件数 ・ 最後の kind ・ 最後の時刻」。
+ * 開くと Console の `ReplyStepRow` と同じ行（`~/lib/task-timeline.ts::workerProgressStep` で
+ * `ConsoleReplyStep` の形に写す）が並び、両画面の見た目が揃う。
+ */
+function TimelineProgressGroupRow({ items, fetchedAt }: { items: TimelineWorkerProgressItem[]; fetchedAt: string }) {
+  const [open, setOpen] = useState(false);
+  const last = items[items.length - 1];
+  return (
+    <li
+      data-testid="timeline-progress-group"
+      data-progress-count={items.length}
+      className="rounded-lg border border-border px-3 py-2 text-sm"
+    >
+      {/* 通常の TimelineRow の見出し（時刻・kind バッジ・event type）とそろえる（ADR-0055 D1-3: 状態は
+          1 語のバッジ + 色。ここでは `kind` = "event" のバッジ、`worker_progress` は他の event 行と
+          同じ `Mono` 表示にする）。 */}
+      <p className="flex flex-wrap items-center gap-2">
+        <span className="text-sm text-fg-subtle lg:text-xs" title={last.at}>
+          {relativeTimeLabel(last.at, fetchedAt)}
+        </span>
+        <Badge tone={TIMELINE_TONE.event ?? "neutral"}>{timelineKindLabel("event")}</Badge>
+        <Mono>worker_progress</Mono>
+      </p>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        data-testid="timeline-progress-group-toggle"
+        className="mt-1.5 flex min-h-11 w-full items-center gap-2 text-left"
+      >
+        <Icon name={open ? "chevronDown" : "chevronRight"} className="size-3.5 shrink-0 text-fg-subtle" />
+        {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+        <span className="min-w-0 flex-1 text-sm text-fg-subtle lg:text-xs">{timelineProgressGroupSummary(items)}</span>
+      </button>
+      {open && (
+        <div className="mt-2 space-y-1 border-t border-border pt-2" data-testid="timeline-progress-group-detail">
+          {items.map((item) => (
+            <ReplyStepRow key={item.seq} step={workerProgressStep(item.event)} />
+          ))}
+        </div>
+      )}
     </li>
   );
 }

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ArtifactView, OrgNode, ProjectTaskView, WorkspaceSpec } from "~/celeris/types";
 import {
-  artifactRelativeTime,
   buildProjectArtifactRows,
   isSourcesArtifact,
   parseSourcesJson,
@@ -191,8 +190,5 @@ describe("buildProjectArtifactRows", () => {
   });
 });
 
-describe("artifactRelativeTime", () => {
-  it("`n 前` の形（~/lib/reports.ts::relativeTimeLabel と同じ作り）", () => {
-    expect(artifactRelativeTime("2026-09-17T00:00:00Z", "2026-09-17T00:01:00Z")).toBe("1m0s 前");
-  });
-});
+// フェーズ 74（ADR-0055 D2 ラウンド 6）: `artifactRelativeTime` は `~/lib/reports.ts::relativeTimeLabel` と
+// 実装が重複していたので削除し、`relativeTimeLabel` に一本化した（テストは test/unit/reports.test.ts）。

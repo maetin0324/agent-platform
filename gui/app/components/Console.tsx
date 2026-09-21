@@ -37,7 +37,7 @@ import { EmptyState, SectionTitle } from "./ui/misc";
  * `~/hooks/useConsoleStream.ts` が `console.block` を 1 件ずつ足す（D1「Console は…block ごとに積み増す」）。
  */
 export function Console({ data }: { data: ConsoleData }) {
-  const { scope, org, projects } = data;
+  const { scope, org, projects, fetchedAt } = data;
   const parsedScope = parseScope(scope);
 
   // ブロックの一覧はこのコンポーネントのローカル state。scope が変わったとき（新しい画面）だけ
@@ -87,7 +87,7 @@ export function Console({ data }: { data: ConsoleData }) {
       <div className="grid gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
         <ScopePicker parsedScope={parsedScope} org={org} projects={projects} />
         <div className="min-w-0 space-y-3">
-          <BlockStream blocks={blocks} org={org} projects={projects} onReply={handleReply} />
+          <BlockStream blocks={blocks} org={org} projects={projects} fetchedAt={fetchedAt} onReply={handleReply} />
           {/* フェーズ 71（ADR-0055 D2）: モバイルは入力欄を下部固定タブの上に `position: fixed` する
               （`ConsoleInput` 自身が `lg:static` で戻る）。フローから抜けた分の高さを、この spacer で
               本文側にあらかじめ確保しておく（無いと固定入力欄が直前のブロックに重なる）。
@@ -344,11 +344,13 @@ function BlockStream({
   blocks,
   org,
   projects,
+  fetchedAt,
   onReply,
 }: {
   blocks: ConsoleBlock[];
   org: readonly OrgNode[];
   projects: readonly Project[];
+  fetchedAt: string;
   onReply: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -398,7 +400,14 @@ function BlockStream({
           </EmptyState>
         ) : (
           blocks.map((b) => (
-            <ConsoleBlockItem key={b.cursor} block={b} org={org} projects={projects} onReplyToConversation={onReply} />
+            <ConsoleBlockItem
+              key={b.cursor}
+              block={b}
+              org={org}
+              projects={projects}
+              fetchedAt={fetchedAt}
+              onReplyToConversation={onReply}
+            />
           ))
         )}
       </div>
