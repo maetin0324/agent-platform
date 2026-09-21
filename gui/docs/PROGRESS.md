@@ -5827,3 +5827,133 @@ HTMLInputElement]"` という壊れた文字列に化け、**構造が同じ 2 �
   複数の画面パターン）ので、他の画面でも同じ誤検知が将来起きうる。
 - **P-G38-3**: `/inbox` を ADR-0055 D1 の監査対象に含めるかどうかを ADR レベルで判断してほしい（含めるなら、
   カードの `Card` コンポーネント化・承認/却下の主操作の扱いも次のラウンドで検討する）。
+
+## Phase G39 — スマホ UX ラウンド 12: 監査スクリプトの堅牢化と /inbox の追加（ADR-0055、celeris Phase 87。2026-09-21）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。Phase G38 の提案 P-G38-2・P-G38-3 を人が採用したのを受けて、
+`gui/scripts/mobile-audit.mjs` 自身の堅牢化と、監査対象からこぼれていた `/inbox` の追加をやった。
+
+### 1. P-G38-2: `cssPathRef` の `node.id` を `node.getAttribute("id")` に
+
+`gui/scripts/mobile-audit.mjs::cssPathRef`（要素の識別に使う CSS パス風の署名を組む関数）が、祖先を辿る途中で
+`node.id`（`Element.id` という **IDL 属性**）を読んでいた。`<form>` が `<input type="hidden" name="id"
+value={...} />` のような「name/id が `"id"` の named form control」を持つと、HTML の named-property 機構
+（named getter）により `form.id` は文字列ではなく**その control 要素自身**を返す（ブラウザの仕様上の挙動。
+content 属性の `id` が付いていなくても起きる）。`part += "#" + node.id` はこれを暗黙の文字列変換で
+`"[object HTMLInputElement]"` に化けさせ、**構造が同じ複数のフォーム**（例: `/clusters` の複数の接続フォーム）
+では同じ壊れた文字列に collapse する。その結果、本来ここで打ち切らずに祖先を辿り続けていれば区別できたはずの
+違い（親要素内での位置など）を握りつぶして 2 つの要素の署名が衝突し、`focus-order` 検査が「同じ要素から
+フォーカスが動いていない（罠）」と誤検知していた（Phase G38 で実際に踏み、`gpu2` フィクスチャを
+`auth: "manual"`（フォームを持たない形）にして衝突を避けていた）。
+
+`node.getAttribute("id")` は content 属性を直接読むだけで named-property の影響を受けないので、これに変えて
+修正した（`cssPathRef` 自身のコメントに Phase 87 の説明を追記）。**回帰検査**として、`scripts/lib/celeris-
+fixture.mjs` の `gpu2` フィクスチャを Phase G38 の回避前（`auth: "publickey"`）に戻し、`pegasus`（`auth: "totp"`）
+と構造が同じ「接続」フォームを再び 2 つ並べた。修正後の `pnpm mobile-audit` が `focus-order` の誤検知を含め
+0 件で通ることを実行して確認した（ユニットテストではなく、実際の Playwright 監査そのものを回帰検査にした。
+`mobile-audit.mjs` は 1 つのファイルの中で Node 側と `page.evaluate` へ `toString()` で送るブラウザ側の 2 つの
+実行環境を混ぜており（`tsconfig.node.json` が型検査からも除外している。ADR-0055 コメント参照）、`cssPathRef` を
+素の Node の単体テストとして `import` すると、この行为が呼ぶ `window`/`document`/`Element` に依存しない形へ
+書き直すか jsdom 相当を新規依存として足す必要があり、CLAUDE.md の「新しい依存を足さない」制約と衝突するため
+見送った。代わりに次の 2 点で「単に import しただけでは重い処理が走らない」堅牢化はした:
+- `cssPathRef` を `export` した（将来ユニットテストが要るときに `toString()` 経由の再構築なしで直接呼べる。
+  `Function.prototype.toString()` は `export` キーワードを含まないので、`page.evaluate` への注入は無変更）。
+- ファイル末尾を `node scripts/mobile-audit.mjs` として直接実行されたときだけ `main()`（実 Chromium 起動・
+  偽の celeris・`pnpm build` を伴う）を呼ぶ module-execution guard に変え、`OUT_DIR`（既存スクリーンショットの
+  削除）の初期化もトップレベルから `main()` の中に移した。これにより、この先 `cssPathRef` などの純関数を
+  vitest から `import` しても、それだけで重い監査本体が走ってしまう事故は起きない。
+
+### 2. P-G38-3: `/inbox` を機械検査対象に
+
+- **route 一覧**: `scripts/lib/celeris-fixture.mjs::buildRoutes`（`mobile-audit.mjs`/`e2e-check.mjs` が共有）に
+  `{ route: "inbox", path: "/inbox" }` を足した（人の指示どおり、ADR は書き換えていない）。監査対象が
+  25 → **26 route**（× light/dark）。
+- **fixture のバグ修正**: `GET /inbox` の fixture が `Inbox` 型（`docs/celeris-api-v1.md` §3.2、
+  `app/celeris/types.ts::Inbox`）と違う形（`{ approvals: 0, attention: 0, by_status: {}, drafts: 0,
+  questions: 0 }`。`counts` が無く、配列であるべきフィールドが数だった）を返していた。`/inbox` が監査対象に
+  無かったため気づかれずに残っていた潜在バグで、実際にこの画面を開くと `app/routes/inbox.tsx` の
+  `isEmpty`（`inbox.counts.approvals` を読む）が `inbox.counts is undefined` で例外落ちしていたはず。承認待ち
+  1 件・質問 1 件を持つ、型どおりの `Inbox` に直した（`counts: { approvals: 1, questions: 1, drafts: 0,
+  attention: 0, by_status: {} }`）。これで `/inbox` の承認・質問カードが実際に描画されるようになった
+  （受け入れ条件「fixture に承認 1 件・質問 1 件を作ってカードを描画させる」）。
+- **`e2e-check.mjs`**: `/inbox` の構造チェックを足した（`accounts`/`knowledge-skills` と同じパターン）。
+  `approvals-section`/`questions-section` の存在は mock・staging 共通で見る。`approval-item`/`question-item`
+  が 1 件以上あることは mock モードだけで見る（staging はスナップショット次第で 0 件のこともあるため）。
+- **見つけて直した違反（1 回目の `pnpm mobile-audit` で 16 件）**:
+  - `tap-target` ×4（light/dark 各 2）: `approval-title`/`question-title` の `<Link>` がテキストだけの `<a>` で
+    高さ 20px しかなく 44×44 未満だった。`app/routes/board.tsx` のカード見出しリンクと同じ
+    `flex min-h-11 items-center` を付けて自分の箱を広げた（`app/routes/inbox.tsx` の `ApprovalRow`/
+    `QuestionRow`）。
+  - `font-size` ×12（light/dark 各 6）: `~/components/ui/misc.tsx::StatCard` のラベル・hint と、
+    `approval-requested-at`/`question-asked-at` の `<time>` がどちらも `text-xs`（12px）固定だった。
+    `~/components/ui/badge.tsx::Badge` と同じ「モバイルは `text-sm`、デスクトップは `lg:text-xs`」の
+    パターンに直した（`StatCard` は `/daemon` でも使われているので副次的にそちらの潜在バグも直った）。
+  - 修正後は `pnpm mobile-audit` が 26 route × light/dark で **0 件**。
+
+### 3. 監査レポートの証跡強化（受け入れ条件 3）
+
+- JSON レポート（`test/mobile-audit/report.json`）に `git_sha`（`git rev-parse --short=12 HEAD`。取れなければ
+  `"unknown"`）と、`routes[]` の各エントリに `duration_ms`（そのルート・scheme のページ訪問に掛かった時間）を
+  足した。
+- 標準エラー出力の末尾に 1 行の要約を追加: `routes=<N> schemes=2 violations=<N> perf_worst=<route> <kb>KB`
+  （`perf_worst` は light scheme の js+css 転送量が最大のルート）。既存の `by_rule`/`by_scheme` の JSON 出力・
+  `formatPerfTable` は変えていない。
+- `pnpm mobile-audit` の終了コードの意味（違反 0 件なら 0、それ以外は 1）・`MOBILE_AUDIT_SKIP_BUILD` 等の
+  既存の環境変数は無変更。
+
+### テスト（新規・変更）
+
+新しいユニットテストは足していない（上記「1.」の理由により、`cssPathRef` は実際の `pnpm mobile-audit` の
+実行そのものを回帰検査にした）。`app/routes/inbox.tsx`/`~/components/ui/misc.tsx` の変更は見た目（クラス名）
+だけで、`test/unit/inbox.loader.test.ts`/`test/unit/inbox.action.test.ts` が検査するデータの形・action の
+挙動には触れていないため、既存テストは無変更のまま通る。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（celeris の API 契約は変えていない） |
+| lint | `pnpm lint`（`biome check .`） | exit 0。`Checked 243 files … No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 65 passed (65) / Tests 1004 passed (1004)**（Phase G38 と同数。新規テストは追加していない） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は変化なし |
+| mobile-audit（1 回目、`/inbox` 追加直後） | `pnpm mobile-audit` | exit 1。**16 件**（`tap-target` 4、`font-size` 12）、全て `/inbox` |
+| mobile-audit（修正後） | `pnpm mobile-audit` | **exit 0**。`{"ok": true, "total": 0, "by_rule": {}, "by_scheme": {"light": 0, "dark": 0}, "git_sha": "aac4cbcdbe8b"}`。末尾の要約: `routes=26 schemes=2 violations=0 perf_worst=task-overview 544.8KB`（26 route × light/dark。`focus-order` の誤検知（`gpu2`/`pegasus` の衝突）が再発していないことも確認済み） |
+| e2e:mock | `pnpm e2e:mock` | **`{"ok": true, "mode": "mock", "failures": []}`**（`inbox` の `approvals-section`/`questions-section`/`approval-item`/`question-item` の検査を含む） |
+
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` はこの Phase の
+スコープ外（実行していない。Phase 80/82/83/84/86 と同じ扱い）。
+
+### 変更したファイル
+
+- `scripts/mobile-audit.mjs`（`cssPathRef` の `getAttribute("id")` 化・`export`、`git_sha`/`duration_ms`/
+  1 行要約、module-execution guard、`OUT_DIR` 初期化を `main()` の中に移動）
+- `scripts/lib/celeris-fixture.mjs`（`buildRoutes` に `/inbox` を追加、`GET /inbox` fixture を型どおりの
+  `Inbox` に、`gpu2` を `auth: "publickey"` に復元）
+- `scripts/e2e-check.mjs`（`/inbox` の構造チェックを追加）
+- `app/routes/inbox.tsx`（`approval-title`/`question-title` の `<Link>` に `flex min-h-11 items-center`、
+  対応する `<time>` を `text-sm ... lg:text-xs` に）
+- `app/components/ui/misc.tsx`（`StatCard` のラベル・hint を `text-sm ... lg:text-xs` に）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34。このサンドボックスに本物の celeris・本物のブラウザ・外向きネットワークが無い）。
+- **`/inbox` の他の題材が未監査のまま**: `draft-group`（受け入れ待ちの draft）・`attention-item`（注意）・
+  `approval-parent-title`（承認の親タスク）・`question-approval-link`（`approval_id` がある質問）は今回の
+  fixture では 0 件/非表示のままで、機械検査を実際には通っていない。いずれも `approval-title`/`question-title`
+  と同じ「テキストだけの `<a className="hover:underline">`」構造なので、同じ 44×44 未満のタップ領域不足を
+  将来 fixture を拡張したときに踏む可能性が高い（次ラウンドの候補。今回は「今回の Phase だけをやる」
+  （CLAUDE.md）に従い、実際に監査が検出した違反だけを直した）。
+- **`cssPathRef` はユニットテストしていない**: 上記「1.」のとおり、jsdom 相当の新規依存を足さずに素の Node で
+  DOM 依存の純関数をテストする土台が無いため、`pnpm mobile-audit` の実行そのものを回帰検査にした。`export`
+  と module-execution guard は追加したので、将来 jsdom 相当が使える状況になれば直接テストできる。
+- Phase G38 の未解決事項（`releaseVerifyCheckGroups` の粒度、`tierResolutionReason` の「cooldown」判定の近似、
+  `e2e/g7.spec.ts` の `"down"` 更新が実 celeris で未確認など）は変化なし。
+
+### 提案
+
+- **P-G39-1**: `/inbox` の `draft-group`/`attention-item`/`approval-parent-title`/`question-approval-link` を
+  fixture に足して監査対象にし、上記の未解決事項にある潜在的なタップ領域不足を先回りして直す（次ラウンド）。
+- **P-G39-2**: `cssPathRef`（および `isNotVisible` 等の DOM 依存の純関数群）を単体テストしたくなったら、
+  jsdom 相当の軽量 DOM 実装を devDependency に足すかどうかを判断する（`package.json` の版固定・
+  「新しい依存を足すときは理由を書く」の運用に従う）。

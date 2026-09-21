@@ -291,6 +291,21 @@ async function main() {
             const skillsPage = await page.locator('[data-testid="knowledge-skills"]').count();
             if (skillsPage === 0) failures.push("knowledge-skills: [data-testid=knowledge-skills] is not rendered");
           }
+          // Phase 87（P-G38-3）: `/inbox` を検査対象に加えた。承認待ち・質問の節と、それぞれ最低 1 件の
+          // カード（fixture が用意する）が描画されることを確かめる（mock モードだけ。staging では
+          // スナップショットの中身次第で 0 件のこともあるため、節の有無だけ見る）。
+          if (route === "inbox") {
+            const approvalsSection = await page.locator('[data-testid="approvals-section"]').count();
+            const questionsSection = await page.locator('[data-testid="questions-section"]').count();
+            if (approvalsSection === 0) failures.push("inbox: [data-testid=approvals-section] is not rendered");
+            if (questionsSection === 0) failures.push("inbox: [data-testid=questions-section] is not rendered");
+            if (mode === "mock") {
+              const approvalItems = await page.locator('[data-testid="approval-item"]').count();
+              const questionItems = await page.locator('[data-testid="question-item"]').count();
+              if (approvalItems === 0) failures.push("inbox: no [data-testid=approval-item] rendered (mock fixture)");
+              if (questionItems === 0) failures.push("inbox: no [data-testid=question-item] rendered (mock fixture)");
+            }
+          }
         }
 
         if (consoleErrors.length > 0) {

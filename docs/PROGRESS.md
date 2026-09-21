@@ -12987,3 +12987,57 @@ GUI のみ（`crates/` 無変更。`gui/CLAUDE.md`「GUI から celeris に入�
 - 本番 = Phase 65〜86。人に残っている作業: pegasus の TOTP 接続と bnode150 の vLLM 確認、`install-units.sh --remove-qwen-tunnel`、
   `~/.local/celeris/workspaces`（193 GB）と `releases/.cargo-target-pre-celeris`（41 GB）の整理、ChatGPT の Secure MCP tunnel を 18201 に、
   Claude Code の MCP 登録（`~/.config/celeris/secrets/mcp-token-claude-code`）。
+
+## Phase 87 — スマホ UX ラウンド 12（監査スクリプトの堅牢化と /inbox の追加。ADR-0055。2026-09-21）
+
+GUI のみ（`crates/`・`docs/DESIGN.md`・`docs/SPEC.md`・ADR は無変更）。Phase 86 の提案 P-G38-2 / P-G38-3 を受けて、
+機械検査（`gui/scripts/mobile-audit.mjs`）自体の堅牢化と、監査対象からこぼれていた `/inbox` の追加をやった。詳細・
+証跡は `gui/docs/PROGRESS.md`「Phase G39」を参照（このリポジトリの慣例どおり、GUI の実装詳細は gui 側に書く）。要点:
+
+1. **P-G38-2（`cssPathRef` の堅牢化）**: `gui/scripts/mobile-audit.mjs::cssPathRef` が要素識別に使っていた
+   `node.id`（IDL 属性）を `node.getAttribute("id")`（content 属性）に変えた。`<input type="hidden" name="id">`
+   を持つ `<form>` では named-form-control の shadowing で `form.id` が文字列ではなく要素自身を返し、構造が同じ
+   複数のフォームの署名が衝突して `focus-order` を誤検知していた（Phase 86 で実際に踏み、`gpu2` フィクスチャを
+   `auth: "manual"` にして回避していた）。今回この回避を外し、`gpu2` を元の `auth: "publickey"` に戻して
+   `pegasus` と構造が同じ接続フォームを再び 2 つ並べ、これを回帰検査にした（`pnpm mobile-audit` が 0 件のまま
+   通ることで、cssPathRef の修正が実際に機能していることを確認）。
+2. **P-G38-3（`/inbox` を監査対象に）**: `gui/scripts/lib/celeris-fixture.mjs::buildRoutes`（`mobile-audit.mjs` と
+   `e2e-check.mjs` が共有）に `/inbox` を追加した。合わせて、この画面が使う `GET /inbox` の fixture が
+   `Inbox`（`docs/celeris-api-v1.md` §3.2）の形と違う（`counts` が無く、配列であるべき `approvals`/`questions` 等が
+   数だった）ことが判明し、修正した。承認待ち・質問を 1 件ずつ持つ、型どおりの `Inbox` にしたことでカードが
+   実際に描画されるようになった。`e2e-check.mjs` にも `/inbox` の構造チェック（`approvals-section`/
+   `questions-section` の存在、mock モードでは `approval-item`/`question-item` が 1 件以上）を足した。
+   監査で見つかった違反（`/inbox` の StatCard ラベル・時刻表示の 12px 未満、承認/質問タイトルのリンクが
+   44×44 未満）は D2 の規律どおり直した（`gui/app/components/ui/misc.tsx::StatCard`、`gui/app/routes/inbox.tsx`）。
+   route 数は 25 → 26。
+3. **監査レポートの証跡強化**: JSON レポート（`gui/test/mobile-audit/report.json`）に `git_sha`（現在の HEAD の
+   短い sha）とルートごとの `duration_ms` を足し、標準エラー出力の末尾に 1 行の要約
+   （`routes=N schemes=2 violations=N perf_worst=<route> <kb>KB`）を追加した。`pnpm mobile-audit` の終了コードの
+   意味（違反 0 なら 0、それ以外は 1）は変えていない。
+4. **監査スクリプトの module-execution guard**: `mobile-audit.mjs` の末尾を「このファイルが `node
+   scripts/mobile-audit.mjs` として直接実行されたときだけ `main()` を呼ぶ」ガードに変え、`OUT_DIR` の
+   初期化（既存スクリーンショットの削除）も `main()` の中に移した。単に `import` しただけで実 Chromium・
+   偽の celeris・`pnpm build` を伴う重い監査が走ってしまう事故を防ぐ（今回は新しいユニットテストは足していないが、
+   将来 `cssPathRef` 等を直接テストしたくなったときのための土台。`cssPathRef` 自体も `export` した）。
+
+### ゲート（証拠コマンドと出力の要点。詳細は gui/docs/PROGRESS.md Phase G39）
+
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ）/ `pnpm lint`（exit 0、243 files、fix 無し）/
+`pnpm typecheck`（exit 0）/ `pnpm test`（exit 0、**Test Files 65 passed / Tests 1004 passed**、Phase 86 から件数
+不変）/ `pnpm build`（exit 0、既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は変化なし）/ `pnpm mobile-audit`
+（1 回目は `/inbox` 追加直後に **16 件の違反**（tap-target 4・font-size 12）で落ち、上記の D2 修正後は
+**exit 0、`{"ok":true,"total":0}`、`routes=26 schemes=2 violations=0 perf_worst=task-overview 544.8KB`**）/
+`pnpm e2e:mock`（**`{"ok": true, "mode": "mock", "failures": []}`**）すべて exit 0。
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` はこの Phase の
+スコープ外（実行していない。Phase 80/82/83/84/86 と同じ扱い）。
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34。サンドボックスに外向きネットワークが無い）。
+- `/inbox` の他の題材（`draft-group`・`attention-item`・`approval-parent-title`・`question-approval-link` の
+  各タイトルリンク）は今回のフィクスチャでは 0 件のまま描画されず、機械検査を通っていない。`approval-title`/
+  `question-title` と同じ「テキストだけの `<a>`」構造なので、同じタップ領域不足を将来のフィクスチャ拡張で
+  踏む可能性が高い（次ラウンドの候補）。
+- `tierResolutionReason`・`releaseVerifyCheckGroups` 等、Phase 86 の未解決事項は変化なし
+  （`gui/docs/PROGRESS.md` Phase G38 参照）。
+- 本番 = Phase 65〜86。実装中: Phase 87（このワークトリーク。GUI のみ）。

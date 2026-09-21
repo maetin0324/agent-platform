@@ -55,22 +55,29 @@ const PERF_BUDGET = {
   lcpMs: 2500,
 };
 
-fs.mkdirSync(OUT_DIR, { recursive: true });
-for (const name of fs.readdirSync(OUT_DIR)) fs.rmSync(path.join(OUT_DIR, name), { force: true });
-
 // ---------------------------------------------------------------------------
 // D1 の検査本体。ページ内で評価する純関数は `page.evaluate` にそのまま渡す（DOM が要るので Node 側では書けない）。
 // ---------------------------------------------------------------------------
 
-function cssPathRef(el) {
+// Phase 87（P-G38-2）: 要素の識別に `node.id`（IDL 属性）を使わず、`node.getAttribute("id")`（content
+// 属性を直接読む）を使う。`<form>` が `<input type="hidden" name="id">` のような「name/id が "id" の
+// named form control」を持つと、HTML の named-property 機構（named getter）により `form.id` が文字列では
+// なくその control 要素自身を返す（ブラウザの仕様上の挙動）。`part += "#" + node.id` はこれを
+// `"[object HTMLInputElement]"` に化けさせ、**構造が同じ 2 つのフォーム**（例: `/clusters` の複数の接続
+// フォーム）で同じ壊れた文字列に collapse し、cssPathRef が本来ここで打ち切らずに祖先を辿り続けていれば
+// 区別できたはずの違い（親要素内での位置など）を握りつぶして衝突する（Phase 86 で実際に踏んだ
+// `focus-order` の誤検知。`docs/PROGRESS.md` Phase 86 / `gui/docs/PROGRESS.md` Phase G38 参照）。
+// `getAttribute("id")` は content 属性をそのまま読むだけなので、この named-property の影も受けない。
+export function cssPathRef(el) {
   if (!(el instanceof Element)) return "";
   const parts = [];
   let node = el;
   let depth = 0;
   while (node && node.nodeType === 1 && depth < 6) {
     let part = node.tagName.toLowerCase();
-    if (node.id) {
-      part += `#${node.id}`;
+    const idAttr = node.getAttribute("id");
+    if (idAttr) {
+      part += `#${idAttr}`;
       parts.unshift(part);
       break;
     }
@@ -731,7 +738,22 @@ function formatPerfTable(records) {
   return lines.join("\n");
 }
 
+/**
+ * 現在の HEAD の短い sha（Phase 87、監査レポートの証跡強化）。celeris 本体の運用（`celeris@<sha12>`
+ * ユニット名）と同じ桁数に合わせる。取れなければ（`.git` が無い配布物など）レポートを壊さず `"unknown"`。
+ */
+function gitShortSha() {
+  const res = spawnSync("git", ["rev-parse", "--short=12", "HEAD"], { cwd: GUI_DIR, encoding: "utf8" });
+  if (res.status !== 0) return "unknown";
+  return res.stdout.trim() || "unknown";
+}
+
 async function main() {
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+  for (const name of fs.readdirSync(OUT_DIR)) fs.rmSync(path.join(OUT_DIR, name), { force: true });
+
+  const gitSha = gitShortSha();
+
   const skipBuild = process.env.MOBILE_AUDIT_SKIP_BUILD === "1";
   if (!skipBuild) {
     const build = spawnSync("pnpm", ["build"], { cwd: GUI_DIR, stdio: "inherit" });
@@ -819,6 +841,8 @@ async function main() {
     // 反映される（`app/app.css` の `@media (prefers-color-scheme: dark)` がトークンを切り替える作り）。
     for (const { route, path: routePath } of ROUTES) {
       for (const scheme of /** @type {const} */ (["light", "dark"])) {
+        // Phase 87（監査レポートの証跡強化）: どのルートが監査の実行時間を食っているかを見えるようにする。
+        const routeStartedAt = Date.now();
         const page = await context.newPage();
         await page.emulateMedia({ colorScheme: scheme });
         const pageErrors = [];
@@ -906,7 +930,7 @@ async function main() {
         const shotName = scheme === "dark" ? `${route}.dark.png` : `${route}.png`;
         const shotPath = path.join(OUT_DIR, shotName);
         await page.screenshot({ path: shotPath, fullPage: true }).catch(() => {});
-        routeReports.push({ route, path: routePath, scheme, status });
+        routeReports.push({ route, path: routePath, scheme, status, duration_ms: Date.now() - routeStartedAt });
         await page.close();
       }
     }
@@ -921,6 +945,9 @@ async function main() {
     JSON.stringify(
       {
         generated_at: new Date().toISOString(),
+        // Phase 87（監査レポートの証跡強化）: どの HEAD に対する監査結果かをレポート自身に残す
+        // （`docs/PROGRESS.md`/`gui/docs/PROGRESS.md` に貼るときにコミットとの対応が一目で分かるように）。
+        git_sha: gitSha,
         routes: routeReports,
         violations: allViolations,
         perf: perfRecords,
@@ -937,6 +964,13 @@ async function main() {
     byRule[v.rule] = (byRule[v.rule] ?? 0) + 1;
     if (v.scheme) byScheme[v.scheme] = (byScheme[v.scheme] ?? 0) + 1;
   }
+  // Phase 87: 性能予算表の中で最も重い（js+css 転送量が最大の）ルートを 1 つ拾い、一行まとめに出す
+  // （`perf` は light scheme だけで計るので、ここも light の合計で比べる）。
+  let perfWorst = null;
+  for (const r of perfRecords) {
+    const totalKb = (r.js_bytes + r.css_bytes) / 1024;
+    if (!perfWorst || totalKb > perfWorst.totalKb) perfWorst = { route: r.route, totalKb };
+  }
   // `gui/biome.json` は `console.log` を禁止している（`error`/`warn` だけ許可）ので `console.error` で出す。
   console.error(formatPerfTable(perfRecords));
   console.error(
@@ -946,13 +980,27 @@ async function main() {
         total: allViolations.length,
         by_rule: byRule,
         by_scheme: byScheme,
+        git_sha: gitSha,
         report: REPORT_PATH,
       },
       null,
       2,
     ),
   );
+  // Phase 87（監査スクリプトの堅牢化）: JSON を読まなくても目で追える 1 行の要約。
+  console.error(
+    `routes=${ROUTES.length} schemes=2 violations=${allViolations.length} ` +
+      `perf_worst=${perfWorst?.route ?? "-"} ${perfWorst ? perfWorst.totalKb.toFixed(1) : "0.0"}KB`,
+  );
   process.exit(allViolations.length === 0 ? 0 : 1);
 }
 
-await main();
+// Phase 87（監査スクリプトの堅牢化）: `pnpm mobile-audit`（`node scripts/mobile-audit.mjs`）として直接
+// 実行されたときだけ `main()`（実 Chromium の起動・偽の celeris・`pnpm build` を伴う重い処理）を走らせる。
+// この module-execution guard が無いと、`cssPathRef` を単体テストから `import` するだけで `main()` まで
+// 実行されてしまい（トップレベル await）、ユニットテストのはずが毎回フル監査を走らせる重い・遅い・
+// ブラウザ依存のテストになってしまう。
+const isMainModule = process.argv[1] != null && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMainModule) {
+  await main();
+}

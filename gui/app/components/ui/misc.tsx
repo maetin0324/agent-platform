@@ -174,7 +174,9 @@ export function StatCard({
       {...props}
     >
       <div className="flex items-center justify-between gap-2">
-        <div className="text-xs font-medium text-fg-muted">{label}</div>
+        {/* ADR-0055 D1-4: 本文 14px 以上。モバイルは text-sm、デスクトップは lg: で元の text-xs のまま
+            （`~/components/ui/badge.tsx::Badge` と同じパターン。Phase 87、`/inbox` を監査対象にして発見）。 */}
+        <div className="text-sm font-medium text-fg-muted lg:text-xs">{label}</div>
         {icon && (
           <span className={cn("grid size-7 place-items-center rounded-lg", TONE_ICON_WRAP[tone])}>
             <Icon name={icon} className="size-3.5" strokeWidth={2.2} />
@@ -182,7 +184,7 @@ export function StatCard({
         )}
       </div>
       <div className="mt-2 text-2xl font-bold tabular-nums tracking-tight text-fg">{value}</div>
-      {hint && <div className="mt-1 text-xs text-fg-subtle">{hint}</div>}
+      {hint && <div className="mt-1 text-sm text-fg-subtle lg:text-xs">{hint}</div>}
     </div>
   );
 }

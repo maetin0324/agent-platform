@@ -241,13 +241,17 @@ function ApprovalRow({ item, fetchedAt }: { item: ApprovalItem; fetchedAt: strin
         className="flex flex-wrap items-baseline justify-between gap-2 font-semibold text-fg"
         data-testid="approval-title"
       >
-        <Link to={`/tasks/${item.approval.id}`} className="hover:underline">
+        {/* ADR-0055 D1-2: タップ領域 44x44（Phase 87、`/inbox` を監査対象にして発見。テキストだけの
+            アンカーは行の高さのままだと低すぎるので、`~/routes/board.tsx` のカード見出しリンクと同じ
+            `flex min-h-11 items-center` で自分の箱を広げる）。 */}
+        <Link to={`/tasks/${item.approval.id}`} className="flex min-h-11 items-center hover:underline">
           {item.approval.title}
         </Link>
+        {/* ADR-0055 D1-4: 本文 14px 以上（モバイルは text-sm、デスクトップは lg:text-xs）。 */}
         <time
           dateTime={item.requested_at}
           title={item.requested_at}
-          className="text-xs font-normal text-fg-subtle"
+          className="text-sm font-normal text-fg-subtle lg:text-xs"
           data-testid="approval-requested-at"
         >
           {relativeTimeLabel(item.requested_at, fetchedAt)}
@@ -337,14 +341,15 @@ function QuestionRow({ item, fetchedAt }: { item: QuestionItem; fetchedAt: strin
       className="rounded-lg border border-border bg-surface p-4 text-sm shadow-xs transition-shadow hover:shadow-sm"
     >
       <p className="flex flex-wrap items-baseline justify-between gap-2 font-semibold text-fg">
-        <Link to={`/tasks/${item.task.id}`} className="hover:underline">
+        {/* ADR-0055 D1-2/D1-4（Phase 87、`/inbox` を監査対象にして発見）: approval-title と同じ修正。 */}
+        <Link to={`/tasks/${item.task.id}`} className="flex min-h-11 items-center hover:underline">
           {item.task.title}
         </Link>
         {item.asked_at && (
           <time
             dateTime={item.asked_at}
             title={item.asked_at}
-            className="text-xs font-normal text-fg-subtle"
+            className="text-sm font-normal text-fg-subtle lg:text-xs"
             data-testid="question-asked-at"
           >
             {relativeTimeLabel(item.asked_at, fetchedAt)}

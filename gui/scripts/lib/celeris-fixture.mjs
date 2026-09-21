@@ -44,6 +44,9 @@ export function buildRoutes({
     { route: "projects", path: "/projects" },
     { route: "board", path: "/board" },
     { route: "approvals", path: "/approvals" },
+    // Phase 87（P-G38-3）: `/inbox`（裏方の受信箱）を ADR-0055 D1 の機械検査対象に加えた（Phase 86 の
+    // 提案 P-G38-3 を受けての人の指示。`docs/PROGRESS.md` Phase 87 参照）。
+    { route: "inbox", path: "/inbox" },
     { route: "reports", path: "/reports" },
     { route: "releases", path: "/releases" },
     { route: "knowledge", path: "/knowledge" },
@@ -279,10 +282,13 @@ export async function setupMockCeleris() {
           ],
         },
         // Phase 86（ADR-0055 ラウンド 11）: tunnel_login_needed を伴わない、ただの切断
-        // （"down" の 1 語バッジ）も監査対象にする。`auth: "manual"` にする（`focus-order` の検査は
-        // 深さ 6 までの CSS パスで要素を照合するため、"pegasus" と同じ `auth != "manual"` にして
-        // 同じ形の「接続」フォームをもう 1 つ並べると、2 つの操作可能なボタンの署名が衝突して
-        // 誤検知の trap になる。実際に踏んで確認済み）。
+        // （"down" の 1 語バッジ）も監査対象にする。
+        // Phase 87（P-G38-2）: `auth: "manual"` にしていた回避（"pegasus" と同じ `auth != "manual"` にすると
+        // `focus-order` の検査が「2 つの接続フォームの CSS パス署名が衝突した」と誤検知していた）を元に戻した。
+        // 誤検知の原因は `mobile-audit.mjs::cssPathRef` が要素識別に `node.id`（IDL 属性。named-form-control の
+        // shadowing で `<input type="hidden" name="id">` を持つ `<form>` では文字列ではなく要素自身を返す）を
+        // 使っていたことで、`node.getAttribute("id")` に直したことで直った（このファイルの `auth: "publickey"`
+        // が、構造が同じ 2 つの接続フォーム（"pegasus" と "gpu2"）を意図的に並べる回帰検査の役目を果たす）。
         {
           id: "gpu2",
           host: "gpu2.internal",
@@ -292,7 +298,7 @@ export async function setupMockCeleris() {
           has_setup: false,
           rsync_excludes: [],
           sync: "rsync",
-          auth: "manual",
+          auth: "publickey",
           connected: false,
           tunnel_login_needed: false,
         },
@@ -496,8 +502,54 @@ export async function setupMockCeleris() {
   );
 
   mock.on("GET", "/api/v1/daemon", (_req, res) => sendJson(res, 200, { now: "2026-09-21T00:00:00Z", snapshot: null }));
+  // Phase 87（P-G38-3）: 以前はここが `Inbox`（`docs/celeris-api-v1.md` §3.2）の形と違う平らなオブジェクトを
+  // 返していた（`counts` が無く、`approvals`/`questions`/`drafts`/`attention` は配列ではなく数だった）。
+  // `/inbox` が ADR-0055 D1 の監査対象に無かったため気づかれずに残っていた（`app/routes/inbox.tsx` の
+  // `isEmpty` が `inbox.counts.approvals` を読むので、実際にこの画面を開くと `inbox.counts` が `undefined`
+  // になり例外で落ちていたはずのバグ）。承認待ち・質問を 1 件ずつ持つ、型どおりの `Inbox` にした
+  // （受け入れ条件「カードが描画される状態を fixture に作る」）。
   mock.on("GET", "/api/v1/inbox", (_req, res) =>
-    sendJson(res, 200, { approvals: 0, attention: 0, by_status: {}, drafts: 0, questions: 0 }),
+    sendJson(res, 200, {
+      approvals: [
+        {
+          approval: {
+            actions: ["approve", "reject"],
+            id: "01INBOXAPPROVAL000000001",
+            kind: "approval",
+            status: "reviewing",
+            title: "本番のクラスタに接続してよいですか",
+          },
+          artifacts: [],
+          criterion_idx: 0,
+          criterion_text: "pegasus への接続を許可する",
+          evidence: [],
+          last_run: null,
+          other_verdicts: [],
+          parent: null,
+          previous_decisions: [],
+          requested_at: "2026-09-20T23:40:00Z",
+        },
+      ],
+      attention: [],
+      counts: { approvals: 1, attention: 0, by_status: {}, drafts: 0, questions: 1 },
+      drafts: [],
+      questions: [
+        {
+          approval_id: null,
+          asked_at: "2026-09-20T23:30:00Z",
+          previous: [],
+          question: "この案件のスコープに含めてよいですか",
+          run_id: null,
+          task: {
+            actions: ["answer"],
+            id: "01INBOXQUESTION00000001",
+            kind: "execute",
+            status: "blocked",
+            title: "関連研究のサーベイ範囲を決める",
+          },
+        },
+      ],
+    }),
   );
 
   const mcpHumanBlock = {
