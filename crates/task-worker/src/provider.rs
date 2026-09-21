@@ -155,6 +155,26 @@ pub fn looks_like_resume_rejection(text: &str) -> bool {
     RESUME_REJECTION_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// ADR-0054 Phase 67b 追記: Claude Code CLI 2.1.278 は `--session-id`/`--resume` に渡す id が
+/// **UUID**（`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`、16 進数 32 桁 + ハイフン 4 個）でなければ拒否する
+/// （`Error: Invalid session ID. Must be a valid UUID.` / `--resume requires a valid session ID or
+/// session title ... is not a UUID`）。Phase 67 は celeris 側で `ulid::Ulid::new().to_string()`
+/// （`01M323X6TJQSFEP0MKXABWVY78` のような ULID）を渡していたため、本番のすべての CoS 対話・部門長
+/// レビュー run が失敗した（2026-09-21 13:53 UTC 観測）。
+///
+/// 形式だけを見る決定的な判定（`-` の位置と 16 進数であることだけを見る。version/variant ビットの
+/// 厳密な検査はしない — celeris が発行する id は Phase 67b で UUID v4 だが、アダプタ（Claude Code 自身）
+/// が別の版の UUID を返す可能性を将来にわたって閉じないため）。大文字・小文字は問わない
+/// （Claude Code 自身が返す id の大文字小文字は未確認）。
+pub fn is_valid_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -345,5 +365,29 @@ ImportError: cannot import name 'Image' from 'PIL' (unknown location)
         }
         assert!(!looks_like_resume_rejection("wall clock exceeded"));
         assert!(!looks_like_resume_rejection(""));
+    }
+
+    /// Phase 67b: `--session-id`/`--resume` に渡してよい id かどうか。
+    #[test]
+    fn valid_uuid_accepts_hyphenated_hex_ignoring_case() {
+        assert!(is_valid_uuid("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(is_valid_uuid("550E8400-E29B-41D4-A716-446655440000"));
+        // version/variant の厳密な検査はしない（形式だけ見る）。
+        assert!(is_valid_uuid("00000000-0000-0000-0000-000000000000"));
+    }
+
+    /// Phase 67b の本番事故: ULID はハイフンの位置も長さも UUID と違うので弾く。
+    #[test]
+    fn valid_uuid_rejects_a_ulid_and_other_non_uuid_shapes() {
+        assert!(!is_valid_uuid("01M323X6TJQSFEP0MKXABWVY78"));
+        assert!(!is_valid_uuid("01ARZ3NDEKTSV4RRFFQ69G5FAV"));
+        assert!(!is_valid_uuid(""));
+        assert!(!is_valid_uuid("not-a-uuid-at-all"));
+        // 長さは合っているがハイフンの位置がずれている。
+        assert!(!is_valid_uuid("550e8400e29b-41d4-a716-446655440000"));
+        // 長さが 1 文字短い。
+        assert!(!is_valid_uuid("550e8400-e29b-41d4-a716-44665544000"));
+        // 16 進数でない文字を含む。
+        assert!(!is_valid_uuid("550e8400-e29b-41d4-a716-44665544000g"));
     }
 }

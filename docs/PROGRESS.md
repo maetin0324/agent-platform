@@ -10958,3 +10958,126 @@ D1 の核心）、テストの追加、ドキュメントの追記を行った�
 - 影響: **本番の CoS 対話と、claude-code で走る部門長のレビュー run が、修正が入るまで全部失敗する**（in-flight 0 のため今のところ被害はこの 2 タスク）。
   → **Phase 67b** を Sonnet で即時起動（UUID v4 の発行、非 UUID の既存行を自動で retire、アダプタ境界での検証、resume 拒否時の retire）。
   rollback（5d3414a）は schema 23 → 22 の DB 復元が要るので採らない。
+## Phase 67b — Claude Code のセッション id は UUID でなければならない（2026-09-21）
+
+### 観測（本番障害）
+
+2026-09-21 13:53 UTC、release `6de40cb829e3`（Phase 67 の本番反映直後）、Claude Code CLI 2.1.278。CoS
+との最初の対話 run が `--session-id 01M323X6TJQSFEP0MKXABWVY78` で `claude` を spawn し、
+`Error: Invalid session ID. Must be a valid UUID.` で exit 1。`node_sessions` の該当行
+（`cos` / `conversation` / `claude-code` / `claude_max_lab`、`turns=1`）が retire されずに残り続けたため、
+以降のすべての run が同じ壊れた id を `--resume` しようとし、`--resume requires a valid session ID or
+session title when used with --print … Provided value "01M323X6TJQSFEP0MKXABWVY78" is not a UUID and
+does not match any session title.` で失敗し続けた。**claude-code アダプタで走る CoS の対話・部門長の
+レビュー run がすべて失敗する**状態だった。
+
+### 根本原因
+
+Phase 67 の `Dispatcher::resolve_node_session`（`crates/task-dispatch/src/dispatcher.rs`）は、
+celeris が前もって固定する `claude-code` の `--session-id` を `ulid::Ulid::new().to_string()`
+（ULID、Crockford Base32 の 26 文字、例 `01M323X6TJQSFEP0MKXABWVY78`）で発行していた。Claude Code CLI
+2.1.278 は `--session-id`/`--resume` に UUID（`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）しか受け付けない。
+Phase 67 のテストは `claude` 本体の代わりにシェルスタブを spawn していたため、渡す id が **どんな文字列
+でも通ってしまい**、この不一致はテストで一度も検出されなかった（`crates/task-worker/src/claude_code.rs`
+のテストは引数をログに記録するだけで中身の形式を検査していなかった。`fake` アダプタは
+`SUPPORTED_ADAPTERS` に入っていないのでセッション自体が付かない）。
+
+追加で見つかった配線漏れ: `EventSink::session_resume_failed`（resume 拒否をその場で retire する。
+ADR-0054 D1 の設計）は CoS 対話 run の `StoreSink` には実装されていたが、**部門長のレビュー run の
+`ReviewerSink` には実装されていなかった**（`EventSink` の既定 no-op のまま）。Lead セッション
+（部門長のレビュー・切り分け run）は resume が拒否されても一切 retire されず、同じ壊れた id で
+`--resume` を再試行し続ける経路が残っていた。
+
+### 変更
+
+1. **id の発行を UUID に変更**: `crates/task-dispatch/src/sessions.rs::new_session_id(adapter_id)`
+   （純粋関数）。`claude-code` は `ulid::Ulid::new()` の 128 bit をそのまま使い、RFC 4122 の
+   version/variant ビットだけ上書きして UUID v4 として組み立てる（`uuid` crate は `Cargo.lock` に無いので
+   新規依存は増やしていない）。`codex`/`acp` は Phase 67 のまま変更なし（celeris は id を先取りせず、
+   アダプタが run の途中で確定させる）。
+2. **自己修復**: `crates/task-dispatch/src/sessions.rs::decide` に
+   `session_id_is_valid_for_adapter(adapter_id, &active.session_id)` の検査を追加し、`claude-code` の
+   現役セッションの `session_id` が UUID でなければ `FreshReason::InvalidSessionId` として扱い、既存の
+   Fresh 経路（retire → 新規作成）に乗せた。`Dispatcher::resolve_node_session` は retire 時に
+   `tracing::warn!` でログを残す。**データマイグレーションは選ばず自己修復のみ**にした: 自己修復は
+   `resolve_node_session` を呼ぶたびに効くので、起動時に 1 回だけ走る migration より確実（本番 DB の
+   内容を事前に見なくても、次に CoS と話した・次にそのレビューが走った瞬間に直る）と判断したため。
+3. **境界検査**: `crates/task-worker/src/claude_code.rs` が `--session-id`/`--resume` を組み立てる直前に
+   `crate::provider::is_valid_uuid`（新規、`crates/task-worker/src/provider.rs`）で検査し、不正なら
+   spawn せず `AdapterError::Other`（原因を含む文面）で拒否する。将来の回帰がテストのスタブでは検出
+   されずに本番でだけ壊れる、という今回と同じ失敗を再発させないための最後の砦。
+4. **失敗経路の配線漏れを修正**: `ReviewerSink`（`crates/task-dispatch/src/dispatcher.rs`）に
+   `session_key: Option<(String, SessionKind, Option<ProjectId>)>` を足し、`session_established`/
+   `session_resume_failed` を `StoreSink` と同じ実装で追加。`Dispatcher::pick_reviewer` が
+   `(department_id, SessionKind::Lead, None)` を渡す。
+
+### 受け入れ条件ごとの結果
+
+1. **id の発行を分離した純粋関数にする**: `crate::sessions::new_session_id`。
+   `cargo test -p task-dispatch --lib sessions::` → **15 passed**（`new_session_id_mints_a_uuid_only_for_claude_code` /
+   `new_session_id_is_not_constant` ほか）。
+2. **本番の壊れた行を自己修復**: `crate::sessions::decide` の `InvalidSessionId` 分岐 +
+   `Dispatcher::resolve_node_session`。テスト:
+   `sessions::tests::a_claude_code_session_with_a_non_uuid_id_self_heals`（純粋関数レベル）、
+   `dispatcher::tests::resolve_node_session_self_heals_a_non_uuid_claude_code_session_id`
+   （store レベル。本番と同じ壊れた行を直接作り、retire → UUID の新規セッションに置き換わることを検証）。
+   データマイグレーション（`0024_*`）は作っていない（上記「変更」2 の理由）。
+3. **境界での検査**: `crates/task-worker/src/claude_code.rs`。
+   `claude_code::tests::a_non_uuid_resume_id_is_refused_without_spawning` /
+   `a_non_uuid_fresh_session_id_is_refused_without_spawning`（spawn しなかったこと＝`args.log` が
+   存在しないことまで検査）。既存の ULID 風 id（`01ARZ3NDEKTSV4RRFFQ69G5FAV`）を使っていたテストは
+   すべて UUID（`550e8400-e29b-41d4-a716-446655440000`）に差し替えた。
+   `cargo test -p task-worker --lib claude_code::` → **50 passed**。
+   `cargo test -p task-worker --lib provider::` → **13 passed**
+   （`valid_uuid_accepts_hyphenated_hex_ignoring_case` / `valid_uuid_rejects_a_ulid_and_other_non_uuid_shapes`）。
+4. **resume 拒否の失敗経路**: `ReviewerSink` の配線漏れを発見・修正。テスト
+   `dispatcher::tests::a_rejected_lead_session_resume_retires_it_and_the_next_review_starts_fresh`
+   （fake アダプタが 2 本目の Reviewer run で `session_resume_failed` を報告 → その場で retire →
+   3 本目の Reviewer run が新しいセッション（別の id、`resume=false`）で走ることを 1 本のテストで
+   直列に検証）。CoS 側（`StoreSink`）は Phase 67 で既に実装済みだったので変更なし。
+5. **ゲート**:
+   - `cargo test --workspace --no-fail-fast` → **exit 0、1683 passed / 0 failed**（全 67 バイナリ、
+     `grep -c "test result: FAILED"` = 0）。
+   - `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0、警告 0**。
+   - `unwrap()`: 今回の diff（`crates/task-dispatch/src/dispatcher.rs`, `sessions.rs`,
+     `crates/task-worker/src/claude_code.rs`, `provider.rs`）で追加した `unwrap()` はすべて
+     `#[cfg(test)] mod tests` の中（テストコード・テスト用 fake アダプタ）のみで、非テストコードに
+     `unwrap()` は増えていない（`awk` でファイルごとに `#[cfg(test)]` 以降の行番号を切り分けて確認）。
+   - ディスパッチャ・ストアに LLM 呼び出しを入れていない（`is_valid_uuid`/`new_session_id`/
+     `session_id_is_valid_for_adapter`/`decide` はすべて同期の純粋関数、ネットワークに出ない）。
+6. **ドキュメント**: ADR-0054 に「Phase 67b 追記」節、このセクション。
+
+### 変更したファイル
+
+- `crates/task-dispatch/src/sessions.rs`（`new_session_id` / `session_id_is_valid_for_adapter` /
+  `random_uuid_v4` / `FreshReason::InvalidSessionId` / テスト）
+- `crates/task-dispatch/src/dispatcher.rs`（`resolve_node_session` が `new_session_id` を呼ぶ・
+  `InvalidSessionId` の warn ログ、`ReviewerSink` の `session_key`/`session_established`/
+  `session_resume_failed`、`pick_reviewer` の配線、テスト 3 本）
+- `crates/task-worker/src/provider.rs`（`is_valid_uuid` とテスト）
+- `crates/task-worker/src/claude_code.rs`（spawn 前の境界検査、既存テストの id を UUID に置換、
+  新規テスト 2 本）
+- `docs/adr/0054-stateful-sessions-and-streaming-chat.md`（Phase 67b 追記）
+
+### 本番で確認すること（未実施。ADR-0009 P-34。実機の資格情報・ネットワークが必要）
+
+1. 通常の `release.sh` → `verify.sh` → `promote.sh` でこの修正をデプロイする（schema は変わらない。
+   migration を追加していないため `SCHEMA_VERSION` は Phase 67 の 23 のまま）。
+2. 本番の `node_sessions` に残っている壊れた行（`cos` / `conversation` / `claude-code` /
+   `session_id` が ULID）は、デプロイ後 CoS に最初に話しかけた瞬間に自己修復されるはずである
+   （`resolve_node_session` が `InvalidSessionId` で retire → 新規 UUID セッション）。事前に手動で
+   `node_sessions` を触る必要は無い。
+3. CoS に 2 回続けて指示を送り、以下を確認する:
+   - 1 回目: `runs/<id>/request.json` の `context.session.session_id` が UUID
+     （`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`）であること。`context.session.resume` が `false`
+     であること。claude-code アダプタの実プロセスに `--session-id <uuid>` が渡っていること
+     （プロセス起動ログか `ps` で確認）。run が exit 0 で終わること（`Invalid session ID` エラーが
+     出ないこと）。
+   - 2 回目: `context.session.resume` が `true`、`session_id` が 1 回目と同じ UUID であること。
+     `--resume <uuid>` が渡っていること。run が exit 0 で終わること（`is not a UUID` エラーが出ないこと）。
+   - `sqlite3 celeris.sqlite3 "select node_id, kind, adapter, session_id, turns, retired_at from
+     node_sessions where node_id='cos'"` で、有効な行が 1 本、`session_id` が UUID、`turns=2` であること
+     （壊れた旧行があれば `retired_at` が立っていること）。
+4. 部門長のレビュー run（`Check::Reviewer` を持つタスクで担当が engineering/research/operations 配下）
+   でも同様に `node_sessions` の `kind='lead'` 行が UUID の `session_id` を持ち、`turns` が増えることを
+   確認する。

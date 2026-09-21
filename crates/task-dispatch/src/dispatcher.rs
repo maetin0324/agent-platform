@@ -938,6 +938,12 @@ struct ReviewerSink {
     /// （呼び出し側があらかじめアダプタで解決して渡す。ADR-0025 D1）。
     account: Option<String>,
     account_book: Option<Arc<StdMutex<AccountBook>>>,
+    /// ADR-0054 D1 / Phase 67b 追記: この Reviewer run が部門長の継続セッション（`kind = lead`）の
+    /// 対象なら `(department_id, Lead, None)`。`session_established`/`session_resume_failed` がこれを
+    /// 使って `node_sessions` を書く。部署の無い（従来の独立）Reviewer run では `None`（両方 no-op）。
+    /// Phase 67 の実装では**この配線が抜けていて**、Lead セッションの resume 拒否が一切 retire
+    /// されなかった（ADR-0054 D1「失敗も同じ経路で作り直す」が Lead セッションには効いていなかった）。
+    session_key: Option<(String, task_core::SessionKind, Option<ProjectId>)>,
 }
 
 impl EventSink for ReviewerSink {
@@ -964,6 +970,43 @@ impl EventSink for ReviewerSink {
         book.record_observation(account, obs, ObservationSource::Run);
         if let Err(e) = book.save() {
             tracing::warn!(task_id = %self.task_id, %account, error = %e, "failed to save account book after reviewer rate_limit observation");
+        }
+    }
+
+    /// ADR-0054 D1 / Phase 67b 追記: `StoreSink::session_established` と同じ（`node_sessions` の
+    /// `session_id` を上書きする）。`session_key` が無ければ no-op。
+    fn session_established(&self, session_id: &str) {
+        let Some((node_id, kind, project_id)) = &self.session_key else {
+            return;
+        };
+        if let Err(e) = self
+            .store
+            .node_session_set_id(node_id, *kind, *project_id, session_id)
+        {
+            tracing::warn!(task_id = %self.task_id, error = %e, "failed to record the established lead session id");
+        }
+    }
+
+    /// ADR-0054 D1 / Phase 67b 追記: `StoreSink::session_resume_failed` と同じ（resume が拒否されたら
+    /// この場で retire し、次の `resolve_node_session` が新しい Lead セッションを作る）。Phase 67 では
+    /// この配線が抜けていて、部門長のレビュー run の resume 拒否が retire されずに残り続けた
+    /// （本番で ULID の session_id が retire されないまま resume され続けた一因）。`session_key` が
+    /// 無ければ no-op。
+    fn session_resume_failed(&self, reason: &str) {
+        let Some((node_id, kind, project_id)) = &self.session_key else {
+            return;
+        };
+        match self
+            .store
+            .node_session_retire(node_id, *kind, *project_id, OffsetDateTime::now_utc())
+        {
+            Ok(true) => {
+                tracing::warn!(task_id = %self.task_id, node_id, %reason, "lead session resume rejected; session retired");
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(task_id = %self.task_id, error = %e, "failed to retire the lead session after a rejected resume");
+            }
         }
     }
 }
@@ -4088,16 +4131,29 @@ impl Dispatcher {
                 ))
             }
             crate::sessions::SessionAction::Fresh(reason) => {
-                if active.is_some() {
+                if let Some(stale) = &active {
+                    // ADR-0054 Phase 67b 追記: 本番の自己修復（P-67b-1）。`claude-code` の
+                    // `session_id` が UUID でない行（Phase 67 が ULID を渡していた事故）を retire する
+                    // ときは、次の障害調査のためにも必ずログへ残す。
+                    if matches!(reason, crate::sessions::FreshReason::InvalidSessionId) {
+                        tracing::warn!(
+                            node_id,
+                            kind = kind.as_str(),
+                            adapter = adapter_id,
+                            old_session_id = %stale.session_id,
+                            "node_sessions.session_id はこのアダプタでは使えない形式（claude-code は UUID が必要）。\
+                             retire して新しいセッションを作る（ADR-0054 Phase 67b）"
+                        );
+                    }
                     self.store.node_session_retire(node_id, kind, project_id, now)?;
                 }
                 // claude-code は celeris が id を前もって決める（`--session-id`）。codex / acp は
                 // アダプタが run の途中で初めて確定させるので、確定するまでは空文字（ADR-0054 D1）。
-                let session_id = if adapter_id == "claude-code" {
-                    ulid::Ulid::new().to_string()
-                } else {
-                    String::new()
-                };
+                // Phase 67b: id の発行は `crate::sessions::new_session_id`（純粋関数、テスト対象）に
+                // 切り出した。Phase 67 まで使っていた `ulid::Ulid::new().to_string()`（ULID）は Claude
+                // Code CLI 2.1.278 が `--session-id`/`--resume` に要求する UUID 形式ではなく、本番の
+                // すべての CoS 対話・部門長レビュー run を壊した（2026-09-21 観測）。
+                let session_id = crate::sessions::new_session_id(adapter_id);
                 let new_session = NodeSession::new(
                     node_id,
                     kind,
@@ -4975,6 +5031,12 @@ impl Dispatcher {
         let account = selected_account.as_ref().map(|(_, id)| id.clone());
         let account_adapter = selected_account.as_ref().map(|(a, _)| *a);
         let review_run_id = ulid::Ulid::new().to_string();
+        // ADR-0054 D1 / Phase 67b 追記: 部署があれば、この run の `session_established`/
+        // `session_resume_failed` を Lead セッション（`kind = lead`）に配線する（Phase 67 で抜けていた
+        // 配線。下の `resolve_node_session` と同じ `(department, Lead, None)` のキー）。
+        let session_key = department
+            .clone()
+            .map(|dept_id| (dept_id, task_core::SessionKind::Lead, None));
         let sink = ReviewerSink {
             store: self.store.clone(),
             task_id: task.id,
@@ -4982,6 +5044,7 @@ impl Dispatcher {
             review_run_id: review_run_id.clone(),
             account: account.clone(),
             account_book: account_adapter.and_then(|a| self.account_book(a)),
+            session_key,
         };
         // ADR-0054 D1（Phase 67）: 部署の根ノード（engineering/research/operations）は
         // レビュー・切り分け run を継続セッション（`kind = lead`）で走らせる（ADR-0051）。部署が無い
@@ -7418,6 +7481,156 @@ mod tests {
         );
     }
 
+    /// ADR-0054 D1 / Phase 67b 追記: `resume` を頼まれた Reviewer run では `session_resume_failed` を
+    /// 報告する（実機の「resume が拒否された」を模す fake アダプタ）。それ以外の run は通常どおり
+    /// `review.json` を書いて完了する。
+    struct ResumeRejectingReviewAdapter {
+        review_json: String,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for ResumeRejectingReviewAdapter {
+        fn id(&self) -> &str {
+            "claude-code"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            std::fs::create_dir_all(&req.artifacts_dir).unwrap();
+            let resuming = req.context.session.as_ref().is_some_and(|s| s.resume);
+            if resuming {
+                // 実機の crash 分類（`provider::looks_like_resume_rejection`）と同じ経路: resume を
+                // 拒否されたら run の成否に関わらず報告する（ADR-0054 D1「失敗も同じ経路で作り直す」）。
+                sink.session_resume_failed("simulated: no conversation found for session");
+            }
+            std::fs::write(req.artifacts_dir.join("review.json"), &self.review_json).unwrap();
+            Ok(RunOutcome {
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// ADR-0054 D1 / Phase 67b 追記: resume が拒否されたら（`EventSink::session_resume_failed`）、
+    /// その場で Lead セッションを retire し、次の Reviewer run は新しいセッション（別の id、
+    /// `resume=false`）を作る（「失敗も同じ経路で作り直す」）。Phase 67 の実装は `ReviewerSink` に
+    /// この配線が無く、部門長のレビュー run では resume 拒否が一切 retire されなかった（この場合の
+    /// 本番の症状は「同じ壊れた session_id で `--resume` を延々と再試行する」）。
+    #[tokio::test]
+    async fn a_rejected_lead_session_resume_retires_it_and_the_next_review_starts_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let policy = StaticPolicy::new(
+            vec![ProviderSpec {
+                id: "p1".into(),
+                adapter: "claude-code".into(),
+                tiers: vec![Tier::Frontier, Tier::Standard, Tier::Cheap],
+                concurrency: 2,
+                model: "m".into(),
+            }],
+            Duration::from_secs(1),
+        );
+        let adapter = Arc::new(ResumeRejectingReviewAdapter {
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"ok"}]}"#.into(),
+        });
+        let mut adapters: HashMap<ProviderId, Arc<dyn WorkerAdapter>> = HashMap::new();
+        adapters.insert("p1".into(), adapter);
+        let mut d = Dispatcher::new(
+            store.clone(),
+            Box::new(policy),
+            HashMap::from([("p1".to_string(), "m".to_string())]),
+            adapters,
+            std::collections::HashSet::new(),
+            DispatchConfig {
+                delivery: Default::default(),
+                max_concurrency: 2,
+                lease_grace: Duration::from_secs(60),
+                idle_timeout: Duration::from_secs(5),
+                kill_grace: Duration::from_millis(100),
+                review_timeout: Duration::from_secs(5),
+                workspace_root: PathBuf::from("/nonexistent"),
+                plan_auto_accept: false,
+                retry_backoff_base: Duration::ZERO,
+                retry_backoff_max: Duration::ZERO,
+                reviewer_hint: crate::review::reviewer_hint(),
+                clusters: HashMap::new(),
+                cluster_cooldown: Duration::from_secs(1),
+                max_requeues: 5,
+                roles: Vec::new(),
+                genres: Vec::new(),
+                delegation: DelegationLimits::default(),
+                accounts: None,
+                memory_dir: None,
+                worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
+                releases_dir: None,
+                containers: ContainersRuntimeConfig::default(),
+                knowledge: KnowledgeRuntimeConfig::default(),
+                session_rollover_tokens: 400_000,
+            },
+        );
+
+        // 1 本目: `coding-poc` の Reviewer run。新規セッション（resume していないので拒否は起きない）。
+        let mut first = new_task(dir.path(), Check::Reviewer, 0);
+        first.assignee = Some("coding-poc".into());
+        store.insert(&first).unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(first.id).unwrap().unwrap().status, Status::Done);
+        let after_first = store
+            .node_session_active("coding", SessionKind::Lead, None)
+            .unwrap()
+            .expect("a lead session exists after the first review");
+        let first_id = after_first.session_id.clone();
+
+        // 2 本目: 同じ部署 → resume を頼まれる → アダプタが resume 拒否を報告する。
+        let mut second = new_task(dir.path(), Check::Reviewer, 0);
+        second.assignee = Some("coding-poc".into());
+        store.insert(&second).unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(second.id).unwrap().unwrap().status, Status::Done);
+
+        // resume 拒否はその場で retire する（次の `resolve_node_session` を待たない。ADR-0054 D1）。
+        assert_eq!(
+            store
+                .node_session_active("coding", SessionKind::Lead, None)
+                .unwrap(),
+            None,
+            "a rejected resume retires the session immediately"
+        );
+
+        // 3 本目: 次の run は新しいセッション（別の id、resume=false）を作る。
+        let mut third = new_task(dir.path(), Check::Reviewer, 0);
+        third.assignee = Some("coding-poc".into());
+        store.insert(&third).unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(third.id).unwrap().unwrap().status, Status::Done);
+
+        let after_third = store
+            .node_session_active("coding", SessionKind::Lead, None)
+            .unwrap()
+            .expect("the next run starts a fresh lead session");
+        assert_ne!(
+            after_third.session_id, first_id,
+            "a fresh session gets a new id"
+        );
+        assert_eq!(
+            after_third.turns, 1,
+            "a fresh session starts at 0 turns, then this run touches it once"
+        );
+    }
+
     /// ADR-0054 D1（Phase 67）: `resolve_node_session` の店じまい（store の読み書き側）。純粋な判断は
     /// `crate::sessions::decide` で別途テスト済みなので、ここでは実際に `node_sessions` を作る・続ける・
     /// rollover で作り直す・アカウント変更で作り直す、の 4 つが store に正しく反映されることを見る。
@@ -7519,6 +7732,72 @@ mod tests {
             .unwrap();
         assert_eq!(after_account_change.session_id, fourth.session_id);
         assert_eq!(after_account_change.account_id.as_deref(), Some("acct-b"));
+    }
+
+    /// ADR-0054 Phase 67b 追記: 本番事故の再現と自己修復。`node_sessions` に Phase 67 が残した
+    /// ULID の `session_id`（`--session-id`/`--resume` を Claude Code CLI 2.1.278 に拒否される）を持つ
+    /// `claude-code` の行が既にあっても、`resolve_node_session` はそれを resume させず、retire した上で
+    /// UUID の新しいセッションを作る。
+    #[tokio::test]
+    async fn resolve_node_session_self_heals_a_non_uuid_claude_code_session_id() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let d = dispatcher(
+            store.clone(),
+            Arc::new(FileAdapter {
+                plan_json: String::new(),
+                review_json: String::new(),
+                delay: Duration::ZERO,
+            }),
+            1,
+        );
+        let now = OffsetDateTime::now_utc();
+
+        // 本番で観測された壊れた行を直接作る（Phase 67 が `ulid::Ulid::new().to_string()` を
+        // `--session-id` に渡していた事故。2026-09-21 13:53 UTC 観測、`turns=1`）。
+        let broken = NodeSession::new(
+            "cos",
+            SessionKind::Conversation,
+            None,
+            "claude-code",
+            Some("claude_max_lab".to_string()),
+            "01M323X6TJQSFEP0MKXABWVY78",
+            now,
+        );
+        store.node_session_create(&broken).unwrap();
+        store
+            .node_session_touch("cos", SessionKind::Conversation, None, 10, now)
+            .unwrap();
+
+        let (fresh, _summary) = d
+            .resolve_node_session(
+                "cos",
+                SessionKind::Conversation,
+                None,
+                "claude-code",
+                Some("claude_max_lab"),
+                now,
+            )
+            .unwrap();
+        let fresh = fresh.unwrap();
+        assert!(
+            !fresh.resume,
+            "an invalid stored session id must never be resumed"
+        );
+        assert_ne!(fresh.session_id, "01M323X6TJQSFEP0MKXABWVY78");
+        assert!(
+            task_worker::provider::is_valid_uuid(&fresh.session_id),
+            "{}",
+            fresh.session_id
+        );
+
+        // 壊れた行は retire され、新しい（0 turns の）行に置き換わっている。
+        let after = store
+            .node_session_active("cos", SessionKind::Conversation, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.session_id, fresh.session_id);
+        assert_eq!(after.turns, 0, "a fresh session starts at 0 turns");
+        assert_eq!(after.account_id.as_deref(), Some("claude_max_lab"));
     }
 
     /// ADR-0008 D2: `Check::Human` はディスパッチャが `Approval` 子タスクを生成して待つ。承認前は
