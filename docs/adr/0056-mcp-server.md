@@ -291,3 +291,41 @@ Celeris の入口は今まで GUI（Console）と `celerisctl` だけだった�
 `docs/PROGRESS.md` の「Phase 79」節に手順を書いた（`skills_put` で 1 つ置く、`org_mount_skill` で
 engineering に mount する、coding のタスクを 1 件流して `request.json` と作業場所を見る）。認証・
 ネットワークが使える環境の人（またはエージェント）が実行し、結果を同節に追記すること。
+
+## Phase 81 追記（2026-09-21。P-79 の未解決事項: unmount 後の stale な skills ファイルの掃除）
+
+Phase 79 の「未解決事項」節が指摘していたとおり、`deliver_claude_code` は「今回 mount されている
+skill のディレクトリを上書きする」だけで、**前回 mount されていて今回は外れた skill のディレクトリを
+消す処理が無かった**（`.claude/skills/<外れた name>/` が run を重ねるたびに残り続ける）。これを
+塞いだ。
+
+- **決めたこと**: 提案節が挙げていた 2 案（`RunContext` に前回の skills 一覧を足す / 作業場所に
+  管理用メタファイルを残す）のうち、後者を採った。`<cwd>/.celeris/skills.json` に、前回
+  `deliver_claude_code` が書いた skill 名の一覧（`Vec<String>` の JSON 配列）を残す
+  （`crates/task-worker/src/skills.rs::{read_skills_marker, write_skills_marker}`）。
+  `RunContext`（`request.json` に残る）を肥大させたくない（P-79-a と同じ理由）のと、マーカーは
+  `claude-code` のアダプタ固有の実装詳細（`.claude/skills/` というファイルシステム上の状態を
+  差分で洗い替えるための帳簿）であって、ディスパッチャが運ぶ「何を届けたか」の記録
+  （`RunContext.skills`）とは別物と判断したため。
+- **削除の規則**: 次回の `deliver_claude_code` 呼び出し時、マーカーにある名前のうち**今回の
+  `skills` に無いもの**だけを `.claude/skills/<name>/` ごと削除する。マーカーに**無い**
+  ディレクトリ（人が手で置いた・別の仕組みが置いた skill）には一切触れない（Phase 79 の
+  `deliver_claude_code_only_touches_its_own_skill_directories` の原則をそのまま踏襲）。
+  `skills` が空の run でも、マーカーに記録が残っていれば掃除だけは行う（不要になった
+  `.claude/skills/` を空にしてからマーカーも空にする）。前回の記録が無く今回も空なら、
+  従来どおり何もしない（`.claude` すら作らない）。
+- **`codex` は変更していない**: `AGENTS.md` の `<!-- celeris:skills:start -->` 〜
+  `<!-- celeris:skills:end -->` の節は `rewrite_agents_md` が run ごとに**丸ごと**書き直す
+  設計（Phase 79 の P-79-d）なので、外れた skill は次の run で自動的に節から消える。stale な
+  節が残る問題はそもそも無かった（マーカーは `claude-code` にだけ要る）。
+- **テスト**（`crates/task-worker/src/skills.rs`）:
+  `deliver_claude_code_removes_unmounted_directories_but_keeps_user_authored_ones`
+  （mount A+B → マーカーに両方 → mount A だけ → B のディレクトリが消え、マーカーに無い C は残る）、
+  `deliver_claude_code_removes_all_previously_mounted_when_skills_becomes_empty`
+  （mount A+B → skills が空になる → A・B とも消え、マーカーも空になる。C は残る）、
+  `deliver_agents_md_shrinks_the_section_when_a_skill_is_unmounted`（mount A+B → mount A だけで
+  節から `### b` が消えることを、既存の `rewrite_agents_md_*` の純粋関数レベルのテストとは別に、
+  `deliver_agents_md` を実際に呼ぶ統合的なテストとして確認）。
+- **やっていないこと**: マーカーファイル自体（`.celeris/skills.json`）を消すタイミング
+  （タスクの worktree/workspace 自体が削除されるときの掃除は既存の worktree 削除処理に任せる。
+  マーカー単体を消す専用の経路は無い）。

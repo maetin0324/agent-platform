@@ -3224,6 +3224,138 @@ target = "bnode150:18000"
         );
     }
 
+    // ---- ADR-0053 Phase 66b の未解決事項 / Phase 81: `try_auto_connect_cluster`（`auth =
+    // "publickey"`、`dispatch_ready` の中から呼ぶ）も同じ形で async ワーカーから退避させたことの回帰
+    // テスト ----
+
+    /// `a_totp_cluster_with_a_forward_does_not_panic_the_first_tick_phase_66b` と同じ配線
+    /// （`build_dispatcher`、`#[tokio::test(flavor = "multi_thread")]`、実物と同じ形（ネストした
+    /// current_thread ランタイム + `block_on`）の偽の `cluster_connector`）だが、`auth = "publickey"`
+    /// のクラスタに ready なタスクを 1 件置き、`dispatch_ready` から `try_auto_connect_cluster` を
+    /// 実際に通す（66b の時点では「本番に publickey クラスタが無いので未検証」として scope 外に
+    /// されていた経路）。
+    ///
+    /// 偽の `cluster_connector` は `Err` を返す: 成功させると `SshWorkspace::prepare` が実際の
+    /// ssh/rsync を試みてテストが外部ネットワークに出てしまうため（CLAUDE.md の禁止事項）。自動接続が
+    /// 失敗する経路でも、`try_auto_connect_cluster` 自身が tokio の文脈を持たない OS スレッドの中から
+    /// 呼ばれることと、tick がパニックしないことは変わらず検証できる。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_publickey_cluster_with_a_ready_task_does_not_panic_the_first_tick_phase_81() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        std::fs::create_dir_all(dir.path().join("ws")).unwrap_or_else(|e| panic!("ws: {e}"));
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+db = "celeris.sqlite3"
+workspace_root = "ws"
+
+[[providers]]
+id = "x"
+adapter = "fake"
+
+[[clusters]]
+id = "auto"
+host = "celeris-no-such-host-for-tests-auto-phase81"
+auth = "publickey"
+"#,
+        )
+        .unwrap_or_else(|e| panic!("config: {e}"));
+        let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
+        let store = SqliteStore::open(&config.db).unwrap_or_else(|e| panic!("open store: {e}"));
+        let now = OffsetDateTime::now_utc();
+        let task = task_core::Task {
+            repos: Vec::new(),
+            id: task_core::TaskId::new(),
+            parent_id: None,
+            kind: task_core::TaskKind::Execute,
+            title: "phase 81 publickey auto-connect".into(),
+            objective: "no-op".into(),
+            acceptance: vec![task_core::Criterion {
+                text: "ok".into(),
+                check: task_core::Check::Command {
+                    cmd: "true".into(),
+                    expect_exit: 0,
+                },
+            }],
+            inputs: vec![],
+            depends_on: vec![],
+            status: task_core::Status::Ready,
+            priority: 0,
+            worker_hint: task_core::WorkerHint {
+                tier: task_core::Tier::Standard,
+                adapter: None,
+            },
+            workspace: task_core::WorkspaceSpec::Remote {
+                cluster: "auto".into(),
+                path: PathBuf::from("/remote/project"),
+            },
+            budget: task_core::Budget {
+                max_turns: 3,
+                max_wall_secs: 30,
+                max_retries: 0,
+            },
+            attempts: 0,
+            lease: None,
+            created_at: now,
+            updated_at: now,
+            role: None,
+            genre: None,
+            aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
+            conversation: None,
+            skills: Vec::new(),
+            mode: task_core::TaskMode::default(),
+            labels: Vec::new(),
+            category: Default::default(),
+        };
+        store.insert(&task).unwrap_or_else(|e| panic!("insert: {e}"));
+
+        let masters: ClusterMasters = Default::default();
+        let mut dispatcher = build_dispatcher(&config, masters)
+            .unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
+
+        let connector_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connector_calls_hook = connector_calls.clone();
+        dispatcher.set_cluster_connector(Arc::new(move |_cluster_id: &str, _host: &str| {
+            connector_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Phase 81 の契約: `try_auto_connect_cluster` も `run_cluster_hooks_off_async` 経由で
+            // 呼ばれ、ここに来た時点で呼び出し元はすでに tokio の文脈を持たない OS スレッドへ
+            // 逃がしているはず（さもなければこのテストの意味が無い）。
+            assert!(
+                tokio::runtime::Handle::try_current().is_err(),
+                "the cluster connector hook must run off any tokio runtime context (Phase 81)"
+            );
+            // 実物の `cluster_connector`（本ファイルの上のほう）と同じ形: ネストした current_thread
+            // ランタイムを作って `block_on` する。修正前ならこの形は「Cannot start a runtime from
+            // within a runtime」で panic した経路。実 ssh は起こさない。
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap_or_else(|e| panic!("nested runtime: {e}"));
+            rt.block_on(async { Err::<(), String>("test: no real ssh".to_string()) })
+        }));
+        dispatcher.set_accepting_new_work(true);
+
+        // celeris の tick ループがしているのと同じこと: マルチスレッド tokio ランタイムの中から、
+        // 同期の `dispatcher.tick()` を直接呼ぶ。退避していなければここで panic した。
+        let report = dispatcher.tick();
+        assert!(
+            report.is_ok(),
+            "the first tick must complete without panicking: {report:?}"
+        );
+        assert_eq!(
+            connector_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the publickey cluster must reach the cluster connector exactly once (ADR-0032 D3)"
+        );
+        // 自動接続が失敗したので cooldown に落ち、この tick では dispatch されない（実
+        // ssh/rsync には一切触れていない）。
+        assert_eq!(report.unwrap().dispatched, 0);
+    }
+
     #[test]
     fn explicit_credential_reference_missing_blocks_instead_of_using_inherited_auth() {
         let cfg: Config = toml::from_str(

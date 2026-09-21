@@ -12251,3 +12251,81 @@ dispatcher.rs` に `Dispatcher::skills_context`（担当ノードの実効 profi
 - 本番 = ADR-0053 / 0054 / 0055（ラウンド 1〜9）/ 0056（Phase 78・79・80）すべて。
 - 実機確認（ADR-0056 §3 Phase 79）: MCP 経由で `skills_put celeris-commit-style` → `org_mount_skill engineering` → coding タスク 1 件を起こして
   `request.json` の `context.skills` と作業場所の `.claude/skills/` を見る（結果は次節）。
+
+## Phase 81 — unmount 後の skills の掃除と publickey 自動接続の退避（2026-09-21）
+
+前の Phase の「未解決事項」に残っていた 2 件の小さな leftover を塞いだ（新機能は追加していない）。
+1 は ADR-0056（Phase 79 の未解決事項）、2 は ADR-0053（Phase 66b の未解決事項 5.）。詳しい設計判断は
+それぞれ「Phase 81 追記」節に書いた。
+
+### 1. unmount 後の stale な skills ファイルの掃除（ADR-0056 D3）
+
+**条件**: mount A+B → `<workspace>/.claude/skills/` のマーカー（`.celeris/skills.json`）に両方の
+skill 名が載る。次に mount A だけにすると、B のディレクトリが消え、マーカーに一度も載っていない
+（celeris が書いていない）ユーザー作成の C は残る。`codex` の `AGENTS.md` の節も同様に縮む。
+
+- **実装**: `crates/task-worker/src/skills.rs`。`deliver_claude_code` の先頭で
+  `<cwd>/.celeris/skills.json`（前回書いた skill 名の `Vec<String>`）を読み、そこにあって今回
+  `skills` に無い名前だけ `.claude/skills/<name>/` を `remove_dir_all` する（マーカーに無い名前は
+  一切触れない）。届け終わったら現在の名前でマーカーを書き直す。`skills` が空でも、マーカーに
+  記録が残っていれば掃除だけ行い、マーカーも空にする。前回の記録が無く今回も空なら何もしない
+  （`.claude` すら作らない。Phase 79 までの挙動と同じ）。`codex` は `rewrite_agents_md` が節を
+  run ごとに丸ごと書き直す設計のため元から stale な節は残らず、変更していない。
+- **実行したコマンド**: `cargo test -p task-worker --lib skills::`
+- **出力の要点**: exit 0、**18 passed / 0 failed**（既存 15 本 + 新規 3 本:
+  `deliver_claude_code_removes_unmounted_directories_but_keeps_user_authored_ones`、
+  `deliver_claude_code_removes_all_previously_mounted_when_skills_becomes_empty`、
+  `deliver_agents_md_shrinks_the_section_when_a_skill_is_unmounted`）。
+
+### 2. publickey 自動接続を async ワーカーから退避（ADR-0053 D3 / Phase 66b の未解決事項 5.）
+
+**条件**: `try_auto_connect_cluster`（`auth = "publickey"`、`dispatch_ready` の中から呼ばれる）が
+`refresh_cluster_liveness`/`refresh_cluster_tunnels` と同じ `run_cluster_hooks_off_async`（本物の
+OS スレッドへ逃がし、マルチスレッド・ランタイム上でだけ `block_in_place` で包む）を経由して
+`cluster_connector` を呼ぶ。既存テスト green のまま。`crates/celeris` に、`a_totp_cluster_with_a_
+forward_does_not_panic_the_first_tick_phase_66b` と同じ配線の publickey 版の回帰テストを追加し、
+偽の connector が `Handle::try_current().is_err()` を assert する。
+
+- **実装**:
+  - `crates/task-dispatch/src/dispatcher.rs`: `run_cluster_hooks_off_async` を
+    `FnOnce() + Send`（戻り値 `()`）から `FnOnce() -> T + Send, T: Send`（戻り値を呼び出し元に
+    返す）へ一般化。`try_auto_connect_cluster` は `cluster_connector` の呼び出しをこの関数に包んで
+    実行する形に変更（`Arc` をクローンしてクロージャへ move）。
+  - `crates/celeris/src/lib.rs` の `cluster_connector` の防御的ガード（Phase 66b、
+    `Handle::try_current().is_ok()` なら `Err` を返す）は変更していない（保険として残す）。
+- **実行したコマンド**:
+  - `cargo test -p task-dispatch --lib publickey` → exit 0、**2 passed / 0 failed**
+    （`publickey_cluster_auto_connects_and_dispatch_continues_on_success`、
+    `publickey_cluster_auto_connect_failure_gets_a_distinguishable_reason`。どちらも無変更で green）。
+  - `cargo test -p celeris --lib phase_81` → exit 0、**1 passed / 0 failed**
+    （新設 `a_publickey_cluster_with_a_ready_task_does_not_panic_the_first_tick_phase_81`。
+    `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]` の中から `dispatcher.tick()` を
+    直接呼び、`auth = "publickey"` + ready task で `try_auto_connect_cluster` を実際に通す。偽の
+    `cluster_connector` は実物と同じ形〈ネストした `current_thread` ランタイム + `block_on`〉で
+    `Handle::try_current().is_err()` を assert してから `Err` を返す〈成功させると
+    `SshWorkspace::prepare` が実 ssh/rsync を試み外部ネットワークに出てしまうため、意図的に失敗
+    パスにした〉。`dispatched == 0`・`connector_calls == 1` を確認）。
+  - `cargo test -p celeris --lib phase_66b` → exit 0、**1 passed / 0 failed**（既存の totp 版の
+    回帰テストも無変更で green のまま）。
+
+### ゲート（証拠コマンドと結果）
+
+- `cargo test --workspace --no-fail-fast` → **exit 0。全バイナリ `test result: ok`
+  （`test result: FAILED` 0 件）。合計 1778 passed / 0 failed**（Phase 79/80 の 1774 から +4:
+  `task-worker` の skills 新規 3 本 + `celeris` の Phase 81 回帰テスト 1 本）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0、警告・エラーとも 0 件**
+  （`grep -c "^warning\|^error"` で確認）。
+- `unwrap()`: 追加した非テストコード（`skills.rs` の `read_skills_marker`/`write_skills_marker`/
+  `deliver_claude_code`、`dispatcher.rs` の `run_cluster_hooks_off_async`/`try_auto_connect_cluster`）
+  には無い（`unwrap_or_default`/`?`/`match` のみ）。`git diff` で確認した `unwrap()` の新規箇所は
+  すべて `#[cfg(test)] mod tests` 内（テストのセットアップ・アサーション）。
+- ディスパッチャ・ストアに LLM 呼び出しを入れていない（今回の変更はファイル I/O とスレッド退避のみ）。
+- production paths（`systemctl`・本番ポート・実 ssh/CLI・資格情報）には一切触れていない。
+
+### 未解決事項
+
+- なし（このワークトリークのスコープでは、指定された 2 件の leftover を両方塞いだ）。
+
+### 提案
+
+- なし。
