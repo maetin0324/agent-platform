@@ -12927,3 +12927,7 @@ ADR-0053 D3)`（`connector_calls == 0`）で失敗した。1 日中 green だっ
   GUI typecheck / lint exit 0、`pnpm test` 983 passed、`pnpm mobile-audit` 違反 0。`release.sh` → `939914839dcc`（schema 24）。
   `verify.sh` `ok=true live_ok=true` → `promote.sh` **mode=live**（22:03:47→50）。
 - 実機（配備 2 分後の観測は次行）。
+  実測（配備 2 分後、22:06 UTC）: 新デーモンで `forward added` **0 回**、`slow tick phases` **0 行**（配備前は 5 分で 37 回・毎 tick 6 秒）。
+  ただしこの時点で pegasus の ssh master は落ちており（`GET /clusters`: `tunnel_login_needed: true`、`listener: false`、
+  `last_error: "the cluster ssh master is not connected"`）、「listener あり・target 不健全 → 再追加しない」の経路は master が戻ったときに
+  改めて確認する。tick が伸びなくなったこと自体は確認できた。
