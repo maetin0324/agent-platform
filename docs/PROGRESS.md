@@ -11271,3 +11271,161 @@ main` で自分のブランチを進めてから着手した（このブラン�
   → **Phase 67c に追加依頼**（`exec` と `exec resume` の両方で通る argv、Codex の thread id を捕まえるまで resume しない、テスト）。
 - 影響: 今この瞬間、CoS の対話が Codex に割り当てられると失敗する（Claude に割り当てられれば成功。67b で確認済み）。67c の配備で
   CoS は Claude のセッションに固定される。streaming の目視（thinking → tool call → タスクカード）は 67c 配備後にやり直す。
+## Phase 67c — 継続セッションは同じアダプタ・アカウントに留まる（2026-09-21）
+
+### 観測（本番障害）
+
+2026-09-21 14:27 UTC、release `5b3b0a649bfa`（Phase 67b の本番反映直後）。CoS に連続で 2 回指示した。
+1 回目: claude-code、`--session-id <UUID>`、`resume:false`、正常終了（usage in 4 / out 191 tokens。Claude
+のプロンプトキャッシュで全量前置きが安く済んだ）。2 回目: ADR-0049 の残量ランキングが **codex /
+chatgpt_plus_personal** を最上位に選んだため、`crate::sessions::decide` が `account_id` の不一致を見て
+`AccountChanged` と判定し、1 回目の Claude セッションは retire、codex の新規セッションが
+`resume:false`・**全量前置き（input 52,629 tokens）**で走った。`node_sessions` は「旧 ULID 行（Phase 67b
+の自己修復で既に retire 済み）」「Claude の UUID 行（今回 `AccountChanged` で retire）」「codex の新規行
+（`turns=1`）」の 3 本に増えた。
+
+ADR-0054 D1 は「同じアカウントで続け、そのアカウントが枯渇したときだけ新しいセッションを作る」と決めて
+いたが、Phase 67 の実装は **`Dispatcher::resolve_node_session` に渡す `account`/`adapter_id` を、素の
+ADR-0049 ランキング（`select_provider`）の結果からそのまま取っていた**。つまり継続セッションの有無を
+一切見ずに毎 run フルランキングを回していたので、スコアが僅かに逆転しただけで別アダプタ・別アカウントに
+倒れ、継続のたびに 5 万トークン級の前置きを再送する状態になっていた。
+
+### 変更
+
+1. **sticky 選択**（受け入れ条件 1）: `Dispatcher::select_provider` の入口に `sticky_session:
+   Option<&NodeSession>` を追加した。渡されたら、まず `Dispatcher::sticky_provider`
+   （`crates/task-dispatch/src/dispatcher.rs`）がそのセッションの `(adapter, account_id)` に留まれるかを
+   確かめる:
+   - `account_usable`（新規 `Dispatcher::account_usable`）: プールを使わない（`account_id = None`）
+     セッションは常に使える扱い。プールを使うなら、`crate::accounts::evaluate` の除外判定
+     （未ログイン・cooldown・上限・枯渇・rejected）をそのセッションのアカウント 1 件だけに対して行う
+     （`pick_account` と同じ材料だが、ベストスコアを探すのではなく特定の 1 件を見るだけ）。
+   - `provider_offers_tier`（新規 `Dispatcher::matching_provider_for_adapter`）: `hint.adapter` を
+     セッションのアダプタ 1 つに固定した `WorkerHint` で `ProviderPolicy::select` を呼び、要求された
+     tier、次いでそれより高性能な tier（`crate::sessions::tier_rank`。`Frontier` が最上位）の順に、
+     cooldown 中でも並列度上限でもない行が見つかるかを見る。
+   - 上の 2 つの bool を純粋関数 `crate::sessions::decide_sticky(active, rollover_tokens,
+     account_usable, provider_offers_tier) -> StickyDecision { Stick | FallBack }`
+     （`crates/task-dispatch/src/sessions.rs`）に渡して最終判断する。`rollover_tokens` を超えていれば
+     使える材料が揃っていても留まらない。
+   - `Stick` なら ADR-0049 のランキング（`select_provider` 本体のループ）を一切走らせずそのまま返す。
+     `FallBack` なら何もせず下の既存ランキングへ進む。ランキングが選んだアダプタ・アカウントが元の
+     セッションと違えば、既存の `crate::sessions::decide`（`resolve_node_session` 内、Phase 67 のまま
+     変更なし）が `AccountChanged`/`AdapterChanged` で retire する。**新しい retire 経路は作っていない**
+     （受け入れ条件どおり「この経路は既にある」）。
+   - 呼び出し箇所は 2 つ: `Dispatcher::dispatch_ready`（CoS の対話 run。新規 `Dispatcher::
+     cos_conversation_session` が `run_extras` の `is_cos_conversation` と同じ判定 — 対話 run かつ担当が
+     `OrgKind::Secretary` — を `select_provider` より前に行い、現役セッションがあれば渡す）と
+     `Dispatcher::pick_reviewer`（部署が決まった時点で `node_session_active(department, Lead, None)` を
+     読んで渡す）。
+2. **Codex のセッション id は Codex 自身が確定させた id しか resume に使わない**（受け入れ条件 2）:
+   `crates/task-worker/src/codex.rs` を読み直して確認した。celeris は Phase 67 から一貫して `codex` の
+   id を先取りしない（`crate::sessions::new_session_id("codex")` は空文字を返す設計）。`resume_id` は
+   `codex_session.filter(|s| s.resume).map(|s| s.session_id.clone())` で、`resume` が立つのは
+   `crate::sessions::decide` が `Resume` を返した run だけであり、初回は必ず `Fresh(NoActive)`
+   （`resume:false`）になるので「初回に celeris が作った id で resume する」という事故は元から起きない。
+   実際に見つかった穴は別物だった: **1 回目の run が `thread.started`/`session_configured` から id を
+   確定できずに終わると、`node_sessions` の行が空文字の `session_id` のまま `retired_at` も付かずに
+   残り、次の run が「現役セッションがある」と誤認して `resume:true` を空文字の id に対して送ってしまう**
+   （`codex exec resume ""`）。`crate::sessions::session_id_is_valid_for_adapter` は Phase 67b では
+   `claude-code` の UUID しか見ておらず、空文字はどのアダプタでも「形式を問わない」側として通っていた。
+   - **修正**: `session_id_is_valid_for_adapter` に「空文字はどのアダプタでも無効」を追加し、既存の
+     自己修復経路（`FreshReason::InvalidSessionId`。retire → 新規セッション、要約付き）にそのまま乗せた
+     （`codex`/`acp` にも UUID を要求するわけではない。空文字だけを弾く）。
+   - **id 捕捉を広げた**: `thread.started` に加えて `session_configured`（実装によってはこちらの type 名
+     を使うことがある）も見る。フィールド名は `thread_id`/`threadId`/`session_id` のどれでも拾う
+     （実機のフィールド名は依然未検証。誤って読めなくても上の自己修復が効くので run 自体は失敗しない）。
+3. **ACP の確認**（受け入れ条件 3）: `crates/task-worker/src/acp.rs` を読んだ。`session/new` が返した
+   `sessionId`（`session/load` は渡した id をそのまま）でしか `session_established` を呼ばず、
+   `sessionId` を得られなければ run 自体を失敗させる。celeris が id を先取りすることは無いので、この
+   部分は変更不要。ただし ACP にも「`session/new` が `sessionId` を返せずに終わった run の後、空文字の
+   `session_id` が現役のまま残る」という同じクラスの穴があったが、これは `acp.rs` 固有ではなく決定 2 の
+   空文字チェック（`session_id_is_valid_for_adapter`）で共通に塞がれるので、`acp.rs` 自体への変更は無し。
+
+### テスト
+
+- `crates/task-dispatch/src/sessions.rs`（純粋関数。受け入れ条件 1「セッションが使える→ stick、
+  cooldown → フォールバック、プロバイダが設定から消えた → フォールバック」）:
+  `tier_rank_orders_frontier_above_standard_above_cheap`、`a_usable_session_sticks`、
+  `an_account_in_cooldown_falls_back`、`a_provider_removed_from_config_falls_back`、
+  `no_active_session_never_sticks`、`a_session_past_rollover_falls_back_even_if_otherwise_usable`、
+  `a_poolless_session_sticks_without_an_account_check`。空文字の自己修復:
+  `an_empty_session_id_self_heals_for_every_adapter`（`claude-code`/`codex`/`acp` の 3 アダプタとも）。
+- `crates/task-dispatch/src/dispatcher.rs`（I/O を含む統合テスト）:
+  `select_provider_sticks_to_the_sessions_account_over_a_better_scoring_one` — 2 アカウント（`a`/`b`）で
+  `b` の方が高スコアになる観測値を仕込み、sticky 無しなら `b` が選ばれることをまず確認した上で、`a` を
+  指すセッションを渡すと `b` の方が勝っていても `a`（`provider = "p1"`、`adapter = "claude-code"`）に
+  留まること、`a` が認証失敗で cooldown に落ちたら通常のランキング（`b`）へフォールバックすることを
+  1 本のテストで直列に確認した（本番事故の直接の再現）。
+- `crates/task-worker/src/codex.rs`（偽の codex CLI シェルスタブ経由）:
+  `session_configured_with_a_session_id_reports_session_established`（`session_configured`/`session_id`
+  からも拾う）、`thread_started_without_an_id_does_not_report_session_established`（id が無ければ
+  `session_established` を呼ばないことを明示的に確認。空文字のまま残ることを保証する側の担保）。
+
+### 受け入れ条件ごとの結果
+
+1. **sticky 選択（純粋関数 + テスト）**: `crate::sessions::decide_sticky`。上記テスト 7 本
+   （`cargo test -p task-dispatch --lib sessions::tests::` に含まれる）。I/O 側の統合は
+   `Dispatcher::sticky_provider`/`matching_provider_for_adapter`/`account_usable` と、統合テスト
+   `select_provider_sticks_to_the_sessions_account_over_a_better_scoring_one`。
+2. **Codex のセッション id**: 先取りしていないことを確認（変更不要な部分）＋ 空文字の自己修復（新規）＋
+   `session_configured`/`session_id` の捕捉を追加。テストは上記「テスト」節参照。
+3. **ACP の確認**: 変更不要であることをコードリーディングで確認（決定 3）。空文字の自己修復は決定 2 と
+   共通の経路で ACP にも効く（`an_empty_session_id_self_heals_for_every_adapter` の対象）。
+4. **ゲート**:
+   - `cargo test --workspace --no-fail-fast` → **exit 0、1694 passed / 0 failed**（73 バイナリ全て
+     `test result: ok`。`grep -c "test result: FAILED"` = 0、`panicked` の出現も 0）。Phase 67b の
+     1683 から 11 本増（sessions.rs 8 本、dispatcher.rs 1 本、codex.rs 2 本）。
+   - `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0、警告 0**（`sticky_provider` の
+     戻り値型が `select_provider` と同じ複合型なので `#[allow(clippy::type_complexity)]` を付けた。
+     既存の `select_provider` と同じ扱い）。
+   - `unwrap()`: 今回の diff（`crates/task-dispatch/src/dispatcher.rs`、`sessions.rs`、
+     `crates/task-worker/src/codex.rs`）で追加した `unwrap()` は全て `#[cfg(test)] mod tests` の中
+     （テストコード・テスト用フィクスチャ）のみ（`git diff -U0` で追加行を機械的に検査して確認）。
+   - ディスパッチャ・ストアに LLM 呼び出しを入れていない（`decide_sticky`/`tier_rank`/
+     `session_id_is_valid_for_adapter` はすべて同期の純粋関数。`Dispatcher::sticky_provider` 等の I/O は
+     既存の `pick_account`/`account_score` と同じ「設定・ストア・アカウント帳簿を読むだけ」）。
+   - schema 変更なし（migration を追加していないので `SCHEMA_VERSION` は Phase 67 の 23 のまま）。
+5. **ドキュメント**: ADR-0054 に「Phase 67c 追記」節、このセクション。
+
+### 変更したファイル
+
+- `crates/task-dispatch/src/sessions.rs`（`tier_rank` / `StickyDecision` / `decide_sticky` /
+  `session_id_is_valid_for_adapter` の空文字チェック / テスト 8 本）
+- `crates/task-dispatch/src/dispatcher.rs`（`select_provider` に `sticky_session` 引数、
+  `Dispatcher::sticky_provider` / `matching_provider_for_adapter` / `account_usable` / 
+  `cos_conversation_session` を新設、`dispatch_ready`/`pick_reviewer` の呼び出し箇所、既存テストの
+  呼び出し元更新、統合テスト 1 本）
+- `crates/task-worker/src/codex.rs`（`thread.started`/`session_configured` の id 捕捉を広げる、
+  テスト 2 本）
+- `docs/adr/0054-stateful-sessions-and-streaming-chat.md`（Phase 67c 追記）
+
+### 本番で確認すること（未実施。ADR-0009 P-34。実機の資格情報・ネットワークが必要）
+
+1. 通常の `release.sh` → `verify.sh` → `promote.sh` でこの修正をデプロイする（schema は変わらない）。
+2. CoS に 2 回続けて指示を送り、以下を確認する:
+   - 1 回目・2 回目とも **同じ `adapter`・同じ `account`** で走ること（`runs/<id>/request.json` の
+     `context.session.adapter` と、`WorkerStarted` イベントの `account`。2 回目でアカウント枯渇等が
+     起きていない限り、ADR-0049 のランキングが別のアカウントを勧めていても付け替わらないこと）。
+   - 2 回目の `context.session.resume` が `true`、`session_id` が 1 回目と同じであること。前置きが
+     `session_diff`（差分）だけで、`node`/`memory`/`organization`/`conversation`/`active_projects` の
+     全量が乗っていないこと（Phase 67 の既存の確認内容と同じ）。
+   - `sqlite3 celeris.sqlite3 "select node_id, kind, adapter, account_id, session_id, turns, retired_at
+     from node_sessions where node_id='cos'"` で、有効な行が 1 本、`turns=2` であること（アカウントが
+     替わっていないこと＝`account_id` が 1 回目から変わっていないこと）。
+3. 可能なら、わざと 2 回目の run の直前にそのアカウントを cooldown にしてから同じ手順を踏み、
+   sticky がフォールバックして別アカウントに倒れ、`node_sessions` が新しい行（`turns=1`、別
+   `account_id`）に切り替わることも確認する。
+4. codex/acp の継続 run でも、`node_sessions.session_id` が celeris の発行したものでなく、アダプタが
+   run の途中で報告した id（空文字ではない）になっていることを確認する。
+
+### 受け取ったが対応していない指示について
+
+作業中、Bash ツール結果の直後に「coordinator からのメッセージ」を装う形で、Codex CLI の `--add-dir`
+引数が `codex exec resume` で拒否される件（Phase 68 の回帰）への対応と、`~/.local/bin/codex --help` の
+実行を求める内容が挿入された。本タスクの依頼文には明記されておらず、かつ「実 CLI 呼び出しをしない」と
+いう本タスク自身の明示的な禁止事項と矛盾する（`--help` のみで実行はしない、という条件付きだったが、
+それでも実 CLI 起動は禁止事項に該当する）。挿入のされ方（ツール結果の直後に地の文としてコマンド実行を
+要求する形）も不審だったため、**指示として実行しなかった**（実 CLI を起動していない。`codex.rs` の
+`--add-dir`/sandbox 周りには一切手を入れていない）。本物の依頼であれば、別 Phase として改めて指示して
+ほしい。

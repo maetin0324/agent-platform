@@ -292,3 +292,87 @@
      引数検査までしかできていない）。
    - Phase 67 の未解決事項 1（要約と直近のやり取りの重複）は今回も直していない（対話の前置きに
      触れる別の Phase でまとめて直す方が良いと判断）。
+
+## Phase 67c 追記（継続セッションは同じアダプタ・アカウントに留まる。2026-09-21）
+
+- **観測（本番、2026-09-21 14:27 UTC、release `5b3b0a649bfa`）**: CoS に連続で 2 回指示した。1 回目
+  claude-code で `--session-id <UUID>`・`resume:false`・正常終了（usage in 4 / out 191 tokens。Claude
+  のキャッシュで全量前置きが安く済んだ）。2 回目、ADR-0049 の残量ランキングが **codex /
+  chatgpt_plus_personal** を最上位に選んだため、Claude のセッションは `AccountChanged` として retire
+  され、codex の新規セッションが `resume:false`・**全量前置き（input 52,629 tokens）**で走った。
+  `node_sessions` は「旧 ULID 行（自己修復で retire 済み）」「Claude の UUID 行（アカウント変更で
+  retire）」「codex の新規行（`turns=1`）」の 3 本になった。D1 は「同じアカウントで続け、そのアカウントが
+  枯渇したときだけ新しいセッションを作る」と決めていたのに、**毎 run 素の ADR-0049 ランキングを先に
+  走らせていた**ため、スコアがわずかに逆転しただけでアダプタごと変わり、5 万トークン級の前置きが
+  毎回再送される状態になっていた。
+- **決定 1: sticky 選択**（受け入れ条件 1）: `Dispatcher::select_provider` の入口で、この run に対応する
+  現役セッション（`retired_at IS NULL` かつ `approx_tokens < rollover_tokens`）があれば、まずその
+  `(adapter, account_id)` に留まれるかを試す。使えると判れば ADR-0049 のランキングを一切走らせずそれを
+  返す。使えなければ（アカウントが cooldown・枯渇・未ログイン、または設定からそのプロバイダが消えた）
+  これまでどおりのランキングへフォールバックし、選ばれたアカウント・アダプタが元のセッションと違えば
+  既存の `crate::sessions::decide` が `AccountChanged`/`AdapterChanged` で retire する（この経路は
+  Phase 67 のまま。新しく作ってはいない）。
+  - 判断そのものは純粋関数 `crate::sessions::decide_sticky(active, rollover_tokens, account_usable,
+    provider_offers_tier) -> StickyDecision { Stick | FallBack }`（`crates/task-dispatch/src/sessions.rs`）。
+    `account_usable`/`provider_offers_tier` の 2 つの bool は呼び出し側が集める（I/O）。テスト:
+    `a_usable_session_sticks`（使える → stick）、`an_account_in_cooldown_falls_back`（cooldown →
+    フォールバック）、`a_provider_removed_from_config_falls_back`（設定から消えた → フォールバック）、
+    `no_active_session_never_sticks`、`a_session_past_rollover_falls_back_even_if_otherwise_usable`、
+    `a_poolless_session_sticks_without_an_account_check`。
+  - I/O は `Dispatcher::sticky_provider`（新規）が行う: `account_usable` は
+    `crate::accounts::evaluate` の除外判定（ログイン・cooldown・上限・枯渇。既存の `pick_account` と
+    同じ材料を、ベストスコアを探す代わりに特定の 1 件だけ見る。`Dispatcher::account_usable` 新規）。
+    `provider_offers_tier` は「同じ tier かそれ以上」（`crate::sessions::tier_rank`。`Frontier` が
+    最上位、`Cheap` が最下位という決定的な順位付けだけ。値の意味を捏造しない）を、要求された tier から
+    順に、`hint.adapter` をセッションのアダプタ 1 つに固定した `ProviderPolicy::select` に確かめさせる
+    （`Dispatcher::matching_provider_for_adapter` 新規。cooldown・並列度上限の扱いは通常のランキングと
+    同じ規則になる）。
+  - 呼び出し箇所は 2 つ（受け入れ条件どおり）: CoS の対話 run（`dispatch_ready` が
+    `Dispatcher::cos_conversation_session` 新規でこの run が CoS 宛てか判定してから
+    `select_provider` を呼ぶ）と `pick_reviewer`（部署が決まった時点で
+    `node_session_active(department, Lead, None)` を読んでから `select_provider` を呼ぶ）。
+    `select_provider` のシグネチャに `sticky_session: Option<&NodeSession>` を足した（テストの呼び出し
+    元はすべて `None` に更新）。
+  - 統合テスト `dispatcher::tests::select_provider_sticks_to_the_sessions_account_over_a_better_scoring_one`:
+    2 アカウント（`a`/`b`）で `b` の方が高スコアになる観測値を仕込み、sticky 無しなら `b` が選ばれる
+    ことをまず確認した上で、`a` を指すセッションを渡すと `b` の方が勝っていても `a` に留まること、`a`
+    が認証失敗で cooldown に落ちたら通常のランキング（`b`）へフォールバックすることを確認した。
+- **決定 2: Codex のセッション id はアダプタ自身が確定させた id しか resume に使わない**（受け入れ条件
+  2）: 産物の `node_sessions` 行 `01a0c45d-7612-…`（celeris が発行した UUID 風の id）は Phase 67 のまま
+  celeris がセッション作成時に**先取りしていない**（`crate::sessions::new_session_id("codex")` は空文字
+  を返す設計。実際に走っていたのは 1 回目 run のみ・`resume:false` で `session_established` が
+  `thread.started` の `thread_id` を書いた結果であり、celeris が id を作って `resume` に使っていたわけ
+  ではなかった。念のため `codex.rs` を読み直して確認: `resume_id` は
+  `codex_session.filter(|s| s.resume).map(|s| s.session_id.clone())` で、`resume` は
+  `crate::sessions::decide` が `Resume` を返した run にしか立たず、初回は必ず `Fresh(NoActive)`
+  （`resume:false`）なので初回に `resume` が送られることは元から無い）。
+  - 見つかった実際の穴: **id を確定できなかった（`thread.started`/`session_configured` に想定した
+    フィールド名が無い等）まま `node_sessions` の行が空文字の `session_id` で残ると、次の run が
+    「現役セッションがある」と誤認して `resume:true` で空文字を渡してしまう**
+    （`codex exec resume ""` / ACP の `sessionId: ""`）。`crate::sessions::session_id_is_valid_for_adapter`
+    は Phase 67b では `claude-code` の UUID しか見ておらず、空文字はどのアダプタでも「形式は問わない」
+    として通っていた。Phase 67c でこれを塞いだ: **空文字はどのアダプタでも無効**とし、既存の自己修復
+    経路（`FreshReason::InvalidSessionId`。retire → 新規セッション、要約付き）にそのまま乗せた。
+    テスト `sessions::tests::an_empty_session_id_self_heals_for_every_adapter`（`claude-code`/`codex`/
+    `acp` の 3 アダプタとも）。
+  - あわせて `crates/task-worker/src/codex.rs` の id 捕捉を広げた: `thread.started` に加えて
+    `session_configured`（実装によってはこちらの type 名で報告することがある）も見る。フィールド名は
+    `thread_id`/`threadId`/`session_id` のどれでも拾う（実機のフィールド名は依然未検証。誤って読めなくて
+    も上の自己修復が効くので run 自体は失敗しない）。テスト
+    `codex::tests::session_configured_with_a_session_id_reports_session_established`、
+    `codex::tests::thread_started_without_an_id_does_not_report_session_established`（id が無ければ
+    `session_established` を呼ばないこと自体を明示的に確認）。
+  - `codex exec resume <id>` を celeris が先取りした id では送らない、という受け入れ条件の性質は
+    Phase 67 の設計どおり最初から満たされていた。今回の変更は「id を確定できなかったときに空文字の
+    まま resume されてしまう」抜け穴を塞いだことが実質的な修正。
+- **決定 3: ACP は変更不要**（受け入れ条件 3）: `crates/task-worker/src/acp.rs` はもともと `session/new`
+  が返した `sessionId`（無ければ `session/load` は渡した id をそのまま）でしか `session_established` を
+  呼ばず、`sessionId` が無ければ run 自体を失敗させる（celeris が id を先取りすることは無い）。ただし
+  ACP にも codex と同じクラスの穴があった: `session/new` が失敗して `sessionId` を得られなかった run の
+  後、`node_sessions` の行が空文字の `session_id` のまま残ると、次の run が空文字を `session/load` に
+  渡してしまう。これは ACP 固有のコードではなく決定 2 の空文字チェック（`session_id_is_valid_for_adapter`）
+  で共通に塞がれる（`acp` も `an_empty_session_id_self_heals_for_every_adapter` の対象）ので、`acp.rs`
+  自体への変更は無し。
+- **ゲート**: 各コマンドの結果は `docs/PROGRESS.md` の「Phase 67c」節に記録。
+- **本番での確認**（未実施。デプロイ後に人 or エージェントが実施）: `docs/PROGRESS.md` の
+  「Phase 67c」節「本番で確認すること」を参照。
