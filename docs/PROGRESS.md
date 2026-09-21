@@ -9814,3 +9814,30 @@ D1（到達性の検査）/ D2（cheap の汎用ハーネスへのフォール�
   `refresh_cluster_liveness` と同じく tick とは別の周期に移すのが筋（提案）。
 - `celerisctl knowledge rerun` は GUI からは触れない（管理 API を足していない）。GUI から
   やり直したいという要望が出たら `POST /knowledge/runs/{task_id}/rerun` を足す（提案）。
+
+### 実機の証跡（2026-09-21 07:19–07:37 UTC。本番 `680a97ca4b89`、schema 21）
+
+- 昇格: `promote.sh 680a97ca4b89` は停止→起動（schema 20→21）。API 停止から起動まで約 4 秒。
+  `status.sh`: `health.release = 680a97ca4b89`、`role = active`、`schema_version = 21`、GUI も同じ release。
+- Qwen トンネルは落ちたまま（`celeris-qwen-tunnel.service` failed。pegasus の ssh master が GUI の TOTP 待ち）。
+  つまり ADR-0052 §3 の 5.「トンネルが落ちた状態で」の条件で確認できた。
+- **失敗していた 4 件 ＋ 配備直前に終端した 1 件 = 5 件が、配備後 17 分で全部 `done`**
+  （`SELECT task_id, state, retried_at IS NOT NULL, via FROM knowledge_runs`）:
+
+  | task | via | candidates | ingested | inbox |
+  |---|---|---|---|---|
+  | …GF5J4P | fallback:claude-code | 1 | 1 | 0 |
+  | …FWY8PD | fallback:claude-code | 2 | 1 | 1 |
+  | …92GHAX | fallback:codex | 1 | 1 | 0 |
+  | …ZC4PXW | fallback:claude-code | 0 | 0 | 0 |
+  | …8CHFJN | fallback:codex | 1 | 0 | 1 |
+
+  `retried_at` は 5 件とも非 NULL（一度だけのやり直しがストアで守られている）。供給元は ADR-0049 の残量比較で
+  Claude Code と Codex に分かれた。
+- KB（`~/.local/share/celeris/knowledge`）の git log に `knowledge: create projects/agent-platform/{mobile-gui-investigation,
+  mobile-gui-improvements,release-promotion-results}.md` と `_inbox/20260921T073619Z-celeris-upgrade.md` /
+  `_inbox/20260921T073637Z-candidate.md` の 5 commit。候補は KB か `_inbox` に入った（受け入れ条件 5 を満たす）。
+- 上限を 120 turns / 7200 s に上げて作り直した「リリース画面の upgrade 結果表示」タスク
+  `01M31A08NHYACPBB757Y8CHFJN` は 06:56 UTC に `done`（前回は 40 turns で `max_turns`）。
+- 残件: 失敗した古い unit `celeris@44447197fcaf.service` が failed のまま残っている（`install-units.sh --remove-old`
+  の対象。人が戻ったら片付ける）。`~/.local/celeris/releases/.cargo-target-pre-celeris`（41 GB）の削除は人の判断。
