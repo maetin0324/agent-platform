@@ -9896,3 +9896,14 @@ celeris 本体（Rust）には触っていない。作業は全て `gui/` 側（
 - `pnpm lint` exit 0 / `pnpm typecheck` exit 0 / `pnpm test` exit 0（**855 passed**、新規
   `test/unit/format.test.ts` 6 件を含む）/ `pnpm build` exit 0（client・server とも）。
 - `pnpm mobile-audit` exit 1（違反 294 件が残っているため。仕様どおりの非 0）。
+
+### Phase 69 の本番反映（2026-09-21 08:01–08:02 UTC。ライブ切替）
+
+- main `0b50710` = Phase 69 の merge（`9459892`）＋ merge 後の import 順の修正。Rust は無変更（schema 21 のまま）。
+- `release.sh main` → `0b50710cd3dc`（7 ゲート exit 0。`changes.json`: base=680a97ca4b89、commits=4、files=20、sensitive=0）。
+- `verify.sh 0b50710cd3dc`: check 1–6 すべて true（counts-match、main GETs、staging GUI、N-1 compat、smoke 5.11 s）。`ok=true live_ok=true`。
+- `promote.sh 0b50710cd3dc`: **mode=live**。`celeris@0b50710cd3dc` 起動 2 秒で `role=active`、GUI 切替、旧 `680a97ca4b89` は
+  drain して退出（`status.sh` の `daemon_instances` は新 1 本のみ）。API の停止なし。DB バックアップ
+  `backups/20260921-080202-pre-0b50710cd3dc.sqlite3`（8.5 MB）。
+- 切替後: `health.release=0b50710cd3dc role=active schema_version=21`、GUI `release=0b50710cd3dc`。1 分 load 3.51。
+- 並行して Phase 70（ADR-0055 ラウンド 2: 下部固定タブ、tap-target 94 / font-size 200 の削減）を Sonnet で起動。Phase 65（LLM proxy）は実装中。
