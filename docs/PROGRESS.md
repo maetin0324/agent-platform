@@ -9670,3 +9670,58 @@ Codex自動承認レビューとSoftware Engineeringの読み取り専用Pegasus
   - `node scripts/check-upgrade.mjs` を再実行: `{"ok":true,"results":[{"scenario":"success","requests":18},{"scenario":"failure","requests":18}]}`。証跡は `/tmp/celeris-upgrade-gui-Zy9P3L/`（success-01/02, failure-01/02 の各PNG）。成功シナリオで現行ハッシュが `aaaaaaaaaaaa` → `cccccccccccc` に更新され「upgrade が完了しました」が表示、失敗シナリオでハッシュ不変＋赤いバナー「upgrade に失敗しました」を目視確認。
   - 元のチェックアウト（`/home/rmaeda/workspace/agent-platform`）や本番サービスへの変更・デプロイは行っていない。`git status` はクリーン。
 - 未解決事項: 前節と同じ（Nothing 2a実機・本番promoteは人が行う）。
+
+## Phase 69 — スマホ UX の機械検査と最初のラウンド（ADR-0055。2026-09-21）
+
+celeris 本体（Rust）には触っていない。作業は全て `gui/` 側（詳細は `gui/docs/PROGRESS.md` の
+`## Phase G23`）。ここには受け入れ条件（Phase 69: `mobile-audit.mjs` と `pnpm mobile-audit`、初回レポート、
+横はみ出しが 0 になるまで。状態バッジの 1 語化）に対する結果だけをまとめる。
+
+- **`gui/scripts/mobile-audit.mjs` / `pnpm mobile-audit`**: Playwright Chromium（393×851、
+  `deviceScaleFactor 2.75`、Nothing Phone 2a の Chrome UA）で、mock celeris（`node:http` + 実在の
+  `gui/test/mock-celeris/fixtures.ts`）と `pnpm build` 済みの GUI をどちらも 127.0.0.1 の空きポートに
+  立てて ADR-0055 D1 の全画面（20 route）を検査する。1 件でも違反があれば非 0 で終わる。
+  `gui/test/mobile-audit/report.json` と各画面のスクリーンショット（gitignore 済み）を残す。
+- **本番・運用中の celeris（ポート 7710/7700、`~/.config/celeris`、`~/.local/celeris`）には一切触れていない**
+  （空きポートの偽 celeris のみ）。
+
+### 違反数（before/after）
+
+| rule | 初回 | 最初のラウンド後 |
+| --- | --- | --- |
+| 横はみ出し（overflow） | 38 | **0**（受け入れ条件どおり） |
+| 状態バッジ 1 語化（status-badge） | 0 | **0**（`labels.ts` の状態ラベルは元から 1 語。`data-status-badge` の印を実物に付け、検査に「歯」を持たせた） |
+| タップ領域 44×44（tap-target） | 279 | 94（-66%） |
+| 文字 14px 以上（font-size） | 457 | 200（-56%） |
+| 合計 | 736 | 294 |
+
+### 何を変えたか（優先順位: 横はみ出し → 状態バッジ → タップ領域 → 文字。1 画面ずつではなく、
+多くの画面で共有している部品を直すと 1 回の変更で何十件も減ったため、共有部品を先に潰した）
+
+- 横はみ出し（38 → 0）: `gui/app/components/ui/card.tsx` の `CardHeader.actions`（バッジの並び）が
+  折り返さず、`/releases` のバッジ 4 個が 393px を突き破っていた。モバイルは折り返し、デスクトップは
+  従来どおり（`lg:` で戻す）。
+- 状態バッジ: `gui/app/components/ui/badge.tsx` の `StatusBadge` と、案件・途中目標のバッジに
+  `data-status-badge` を付けた。加えて `gui/app/components/task-changes.tsx` の「デプロイの状態」
+  カード見出し（celeris の `state` ごとの説明文そのものを見出しにしていた）を 1 語バッジ + `title` +
+  本文の 1 行に分けた（ADR の元の人の指摘「done/running 以外の詳細な説明」に最も近い実物だった）。
+- タップ領域・文字は、`gui/app/components/ui/button.tsx`（`Button` の高さ）・
+  `gui/app/components/ui/form.ts`（`inputClass`/`selectClass`/`chipLabelClass`/`hintClass`）・
+  `gui/app/root.tsx`（footer・ナビ見出し・接続ピル・ロゴリンク）・`gui/app/components/ui/misc.tsx`
+  （`DataItem`）・`gui/app/components/HelpLink.tsx` の共有部品を、モバイルは基準を満たす大きさ、
+  `lg:` でデスクトップは元の大きさに戻す形で直した。
+
+### 何が残っているか
+
+- タップ領域 94 件・文字 200 件は個々の画面に分散していて、共有部品の一括修正では取り切れない
+  （文中の生のテキストリンクの当たり判定など）。ADR-0055 D3 が「やることが無くなりにくいので最後に
+  回し続ける」と明記しているとおり、0 にはしていない（次のラウンド以降で 1 画面ずつ潰す）。
+- D2 が求める「下部固定のタブ（Console / ボード / 案件 / 認可 / その他）」は今回入れていない
+  （今のモバイルナビは上部 sticky。固定要素の検査は通っている＝内容を隠していないが、D2 の具体的な
+  形とは違う）。
+
+### 証跡（GUI 側、コマンドと出力の要点）
+
+- `pnpm lint` exit 0 / `pnpm typecheck` exit 0 / `pnpm test` exit 0（**855 passed**、新規
+  `test/unit/format.test.ts` 6 件を含む）/ `pnpm build` exit 0（client・server とも）。
+- `pnpm mobile-audit` exit 1（違反 294 件が残っているため。仕様どおりの非 0）。

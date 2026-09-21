@@ -200,7 +200,8 @@ export function DataItem({
 }) {
   return (
     <div className={cn("min-w-0", wide && "sm:col-span-2", className)}>
-      <dt className="text-xs font-medium text-fg-subtle">{label}</dt>
+      {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは元の text-xs のまま。 */}
+      <dt className="text-sm font-medium text-fg-subtle lg:text-xs">{label}</dt>
       <dd className="mt-1 break-words text-sm text-fg">{children}</dd>
     </div>
   );

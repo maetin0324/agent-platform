@@ -165,7 +165,9 @@ export default function App({ loaderData }: Route.ComponentProps) {
           </div>
         </main>
         <footer
-          className="mx-auto w-full max-w-6xl border-t border-border px-4 py-5 text-xs text-fg-subtle sm:px-6 lg:px-10"
+          // ADR-0055 D1-4: 本文 14px 以上。デスクトップの見た目は変えず（`lg:` で元の `text-xs` に戻す）、
+          // モバイルだけ `text-sm` に上げる。
+          className="mx-auto w-full max-w-6xl border-t border-border px-4 py-5 text-sm text-fg-subtle sm:px-6 lg:px-10 lg:text-xs"
           data-testid="footer"
         >
           <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -311,7 +313,8 @@ function Sidebar({
     >
       <div className="flex h-full flex-wrap items-center lg:flex-col lg:flex-nowrap lg:items-stretch lg:px-3 lg:py-5">
         <div className="order-1 px-4 pt-3 lg:order-none lg:px-2 lg:pt-0">
-          <a href="/" className="group flex items-center gap-2.5 rounded-lg no-underline">
+          {/* ADR-0055 D1-2: タップ領域 44×44 以上。 */}
+          <a href="/" className="group flex min-h-11 items-center gap-2.5 rounded-lg no-underline">
             <span className="grid size-8 place-items-center rounded-lg bg-linear-to-br from-primary via-primary to-teal text-white shadow-md ring-1 ring-white/20 transition-transform group-hover:scale-105 dark:text-bg">
               <Icon name="zap" className="size-4" strokeWidth={2.2} />
             </span>
@@ -368,7 +371,8 @@ function Sidebar({
         >
           {NAV_GROUPS.map((group) => (
             <div key={group.label} className="block">
-              <p className="px-3 pb-1.5 text-[0.7rem] font-semibold uppercase tracking-wider text-fg-subtle">
+              {/* ADR-0055 D1-4: モバイルは text-sm（14px）、デスクトップは元の見出しの大きさのまま。 */}
+              <p className="px-3 pb-1.5 text-sm font-semibold uppercase tracking-wider text-fg-subtle lg:text-[0.7rem]">
                 {group.label}
               </p>
               <ul className="grid grid-cols-2 gap-1 lg:flex lg:flex-col lg:gap-0.5">
@@ -469,7 +473,8 @@ function ConnectionPill({
   return (
     <div
       className={cn(
-        "flex items-center gap-2 rounded-lg border border-border bg-surface-2/60 px-3 py-2 text-xs text-fg-muted",
+        // ADR-0055 D1-4: モバイルは text-sm、デスクトップは元の text-xs のまま。
+        "flex items-center gap-2 rounded-lg border border-border bg-surface-2/60 px-3 py-2 text-sm text-fg-muted lg:text-xs",
         className,
       )}
     >

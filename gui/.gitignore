@@ -4,6 +4,7 @@ build/
 dist/
 test-results/
 playwright-report/
+test/mobile-audit/
 .react-router/
 *.tsbuildinfo
 .env

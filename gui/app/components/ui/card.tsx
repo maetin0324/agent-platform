@@ -32,7 +32,9 @@ export function CardHeader({
   className?: string;
 }) {
   return (
-    <div className={cn("flex items-start gap-3 border-b border-border px-5 py-4", className)}>
+    // `flex-wrap`（幅は常に流体。ADR-0055 D2）: 狙いは横はみ出しを起こさないこと。`actions` は狙って
+    // `w-full` にしているので、収まらないときだけ見出しの下の行に折り返す（`sm` 以上は従来どおり 1 行）。
+    <div className={cn("flex flex-wrap items-start gap-3 border-b border-border px-5 py-4", className)}>
       {icon && (
         <span className={cn("mt-0.5 grid size-8 place-items-center rounded-lg", TONE_ICON_WRAP[tone])}>
           <Icon name={icon} className="size-4" />
@@ -42,7 +44,7 @@ export function CardHeader({
         <div className="text-[0.95rem] font-semibold leading-6 text-fg">{title}</div>
         {description && <div className="mt-0.5 text-sm text-fg-muted">{description}</div>}
       </div>
-      {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
+      {actions && <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">{actions}</div>}
     </div>
   );
 }

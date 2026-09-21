@@ -49,6 +49,38 @@ import {
  * 判断はすべて celeris 側（ADR-0043 D5）: 409「main が編集中」も、PR を作れるか（`origin` / `gh`）も、
  * 衝突して「衝突の解消: …」タスクができたことも、celeris が返した値と文言をそのまま出す。
  */
+/**
+ * デプロイの進み（`ChangesView.delivery.state`、ADR-0051/0052）の 1 語バッジ（ADR-0055 D1-3）。
+ * 詳しい言い換えは `DELIVERY_STATE_DESCRIPTION`（バッジの `title` と、カードの本文の行に出す。D2:
+ * 「状態はバッジ 1 語 + 色。理由・詳細は行の下か開閉に」）。
+ */
+const DELIVERY_STATE_LABEL: Record<string, string> = {
+  reviewing: "レビュー中",
+  merge_queued: "待機中",
+  merging: "取込中",
+  preparing: "検証中",
+  ready: "準備完了",
+  blocked: "要確認",
+};
+
+const DELIVERY_STATE_DESCRIPTION: Record<string, string> = {
+  reviewing: "部署内レビュー・マージ判定中",
+  merge_queued: "レビュー合格・取り込み待ち",
+  merging: "取り込み中",
+  preparing: "リリース検証中",
+  ready: "デプロイ準備完了",
+  blocked: "取り込み・リリース準備の確認が必要",
+};
+
+const DELIVERY_STATE_TONE: Record<string, "info" | "neutral" | "primary" | "success" | "warning"> = {
+  reviewing: "info",
+  merge_queued: "neutral",
+  merging: "primary",
+  preparing: "info",
+  ready: "success",
+  blocked: "warning",
+};
+
 export interface TaskChangesProps {
   taskId: string;
   changes: ChangesView;
@@ -77,18 +109,23 @@ export function TaskChanges({ taskId, changes, diff, diffError, diffRepo, diffPa
         <Card data-testid="delivery-status">
           <CardHeader
             icon="gitBranch"
-            title={
-              {
-                reviewing: "部署内レビュー・マージ判定中",
-                merge_queued: "レビュー合格・取り込み待ち",
-                merging: "取り込み中",
-                preparing: "リリース検証中",
-                ready: "デプロイ準備完了",
-                blocked: "取り込み・リリース準備の確認が必要",
-              }[changes.delivery.state]
+            title="デプロイの状態"
+            actions={
+              <Badge
+                tone={DELIVERY_STATE_TONE[changes.delivery.state]}
+                data-status-badge="delivery"
+                data-testid="delivery-state-badge"
+                title={DELIVERY_STATE_DESCRIPTION[changes.delivery.state]}
+              >
+                {DELIVERY_STATE_LABEL[changes.delivery.state]}
+              </Badge>
             }
           />
           <CardBody className="space-y-3">
+            {/* ADR-0055 D1-3 / D2: バッジは 1 語のまま、詳しい言い換えはここ（行の下）に置く。 */}
+            <p className="text-sm font-medium text-fg" data-testid="delivery-state-description">
+              {DELIVERY_STATE_DESCRIPTION[changes.delivery.state]}
+            </p>
             <p className="text-sm break-words">{changes.delivery.detail}</p>
             <p className="text-xs text-fg-muted">実装 → 部署内レビュー・マージ判定 → マージ → 検証 → 人がデプロイ</p>
             <p className="text-sm">レビュー担当: {changes.delivery.department}</p>

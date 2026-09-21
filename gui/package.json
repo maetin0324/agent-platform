@@ -18,7 +18,8 @@
     "test": "vitest run",
     "e2e": "playwright test",
     "gen:types": "node scripts/gen-types.mjs",
-    "release": "bash scripts/release.sh"
+    "release": "bash scripts/release.sh",
+    "mobile-audit": "node scripts/mobile-audit.mjs"
   },
   "dependencies": {
     "@codemirror/lang-json": "6.0.2",

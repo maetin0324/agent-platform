@@ -76,6 +76,7 @@ import type { Tone } from "~/components/ui/tone";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { isValidLabel, MAX_LABELS, PRIORITY_LABELS } from "~/lib/board";
 import { defaultPromotePath, docsHref, isMarkdownName } from "~/lib/docs";
+import { shortId } from "~/lib/format";
 import {
   ASSIGNED_WHY_LABEL,
   assignedScoreLabel,
@@ -883,7 +884,9 @@ function OverviewTab({
                   <tbody>
                     {detail.runs.map((run) => (
                       <tr key={run.run_id} data-testid="run-row" className={trHoverClass}>
-                        <td className={cn(tdClass, "font-mono text-xs")}>{run.run_id}</td>
+                        <td className={cn(tdClass, "font-mono text-xs break-all")} title={run.run_id}>
+                          {shortId(run.run_id)}
+                        </td>
                         <td className={tdClass}>
                           <RoleLabel role={run.role} />
                         </td>

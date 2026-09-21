@@ -3557,3 +3557,118 @@ GUI 側はこの celeris の変更に**追従しただけ**で、新しい画面
 - ADR-0051のdeliveryを変更タブに表示し、部署内レビューから検証済みリリースへの導線と処理中の再検証を追加。CoSの技術レビュー段階は設けない。
 - API拡張はRust側の正本・生成schema/typesを更新し同期。既存のデプロイ管理APIを使い、ブラウザへAPIトークンは渡さない。
 - lint/typecheck/test（839件）/build成功。`node scripts/check-delivery.mjs` で12状態・幅の表示とデプロイ画面への導線を確認（外部ネットワーク・本番POSTなし）。
+
+## Phase G23 — スマホ UX の機械検査 mobile-audit と最初のラウンド（ADR-0055。2026-09-21）
+
+Phase 69 / ADR-0055 D1（機械検査）と D2（最初のラウンド）。`gui/scripts/mobile-audit.mjs` と
+`pnpm mobile-audit` を新規に作り、ADR-0055 D1 が挙げた全画面（20 route、タスクの 5 タブを含む）を
+Playwright Chromium（393×851、`deviceScaleFactor 2.75`、Nothing Phone 2a の Chrome UA）で開いて
+D1 の 1〜6 を検査し、`test/mobile-audit/report.json` + スクリーンショット（gitignore 済み）に残す。
+
+### 監査の作り
+
+- **`gui/scripts/check-delivery.mjs`（リポジトリ根）の手口を再利用**: `pnpm build` した `server.js` を
+  空きポートで `spawn`、偽の celeris を `node:http` で立てて `CELERIS_API_URL` に向け、Playwright で
+  操作する。実 celeris は起動しない・外部ネットワークに出ない。
+- **`test/mock-celeris/server.ts` の `startMockCeleris` はそのまま使えなかった**: `./fixtures`
+  （拡張子なし）の相対 import が vite/vitest の TS 解決の下でしか解決できず、Node 24 の組み込み型剥がし
+  （拡張子の補完をしない）では `ERR_MODULE_NOT_FOUND` になる。`fixtures.ts` 自身は celeris の型を
+  **type-only** import しているだけなので、そちらは `check-delivery.mjs` と同じ手口で直接 import できる
+  （`await import(".../fixtures.ts")`）。ルーティングは `mobile-audit.mjs` の中に素の `node:http` で
+  書き直した（`gui/CLAUDE.md` の「GUI から celeris に入る依存は作らない」は変えていない。celeris の型は
+  読むだけで、Rust には触っていない）。
+- **`gui/tsconfig.node.json` に `"exclude": ["scripts/mobile-audit.mjs"]` を足した**。この 1 ファイルは
+  Node（このプロジェクトの `lib: ["ES2023"]`）と、`page.evaluate` へ `toString()` で送るブラウザの関数
+  （`document` / `window` / `getComputedStyle` / `Element` が要る）の 2 つの実行環境を意図的に混ぜている
+  ので、DOM の lib を足すより対象外にする方が素直と判断した。
+- D1 の 6 項目をそれぞれ純関数（`checkOverflow` 等）で実装し、`toString()` を組み立てて
+  `context.addInitScript` で毎ページに注入する（`page.evaluate(fn)` は `fn` 単体しか送れないため）。
+- **横はみ出し（D1-1）と表（D1-6）の両立**: `overflow-x: auto/scroll` な祖先を持つ要素は横はみ出しの
+  対象から外す（D1 本文の「1 と両立」の読み方。表を `overflow-x-auto` の箱に入れる、という D1-6 の狙いが
+  D1-1 の「1 件でもあれば落とす」と矛盾しないようにするための、意図した除外）。
+- **タップ領域（D1-2）の checkbox/radio**: `~/components/ui/form.ts` の `chipLabelClass` のように
+  `<label>` で包んで大きく押せるようにする作りが既にあるので、`<input>` 自身ではなく包んでいる
+  `<label>` の大きさで判定する（`<input>` 単体が小さいこと自体は違反にしない）。
+- **状態バッジ（D1-3）**は `data-status-badge` を付けた要素だけを見る（`~/components/ui/badge.tsx` の
+  `StatusBadge` と、`projects.tsx` / `projects.$id.tsx` の案件・途中目標バッジに付けた）。
+- **文字（D1-4）**は `font-mono`（id / sha / パス）を除外し、直接テキストを持つ末端要素だけを見る。
+
+### 直した内容（優先順位: 横はみ出し → 状態バッジ → タップ領域 → 文字）
+
+1. **横はみ出し（38 → 0）**: `~/components/ui/card.tsx` の `CardHeader` の `actions`（バッジの並び）が
+   `shrink-0` で折り返さず、`/releases` の 4 つ並ぶバッジ（位置・gate・検証・sensitive）が 393px を
+   突き破っていた。`actions` を `w-full flex-wrap`（`sm:` 以上は `w-auto shrink-0` で従来どおり）にした。
+2. **状態バッジの 1 語化**: 調べた結果、`~/lib/labels.ts` の `taskStatusLabel` / `projectStatusLabel` /
+   `milestoneStatusLabel` は元から 1 語（例: 進行中・完了・一時停止）だった。機械検査に「歯」を持たせる
+   ため `data-status-badge` を実際のバッジ要素に付けて回った（違反 0 のまま、今後の回帰を検査できるように
+   した）。加えて、ADR の元の人の指摘（「done/running 以外の詳細な説明」）に最も近い実物だった
+   `~/components/task-changes.tsx` の「デプロイの状態」カードの見出し（celeris が返す `state` ごとに
+   「部署内レビュー・マージ判定中」等の**説明文そのもの**を見出しにしていた）を、1 語バッジ
+   （レビュー中・待機中・取込中・検証中・準備完了・要確認）+ `title` 属性の全文 + 本文の 1 行に分けた
+   （D2「状態はバッジ 1 語 + 色。理由・詳細は行の下か開閉に」）。
+3. **タップ領域（279 → 94）**: 44×44 未満が広い範囲に散っていたのは、共有部品の高さが軒並み 44px
+   未満だったため（1 箇所直すと何十件も減る）:
+   - `~/components/ui/button.tsx` の `SIZES`（`xs`/`sm`/`md`）を、モバイルはすべて `h-11`、
+     `lg:` でデスクトップは元の `h-7`/`h-8`/`h-10` に戻すようにした。
+   - `~/components/ui/form.ts` の `inputClass`/`selectClass`（`h-9` → `h-11 lg:h-9`）、
+     `chipLabelClass`（checkbox/radio を包むチップ。`min-h-11 lg:min-h-0` を足した）。
+   - `~/root.tsx` のロゴ `<a>`（`min-h-11` を足した）と `~/components/HelpLink.tsx`
+     （見出し横の「?」リンク。`size-6` → `size-11 lg:size-6`）。
+   - `~/routes/help.tsx` の目次（同じ行に並ぶチップのリンク群）は D1-2 の例外そのものなので
+     `data-touch-ok` を付けた（44px に拡げるのではなく、意図的な例外として扱った）。
+4. **文字（457 → 200）**: 12px（`text-xs`）・11.2px（`text-[0.7rem]`）が広い範囲に散っていたのも
+   共有部品由来だったので、モバイルは `text-sm`、`lg:` でデスクトップは元のサイズに戻す形で直した:
+   `~/root.tsx` の footer（`celeris_version` 等の `dt` ラベル）・ナビの見出し（業務/裏方/ヘルプ）・
+   `ConnectionPill`、`~/components/ui/misc.tsx` の `DataItem` の `dt`、`~/components/ui/form.ts` の
+   `hintClass`（80 箇所で使われている）。
+
+### 新しい純関数と単体テスト
+
+- `~/lib/format.ts`（新規）: `shortId(id, tailLength=8)`（長い id/sha を末尾で省略。ADR-0055 D2）、
+  `truncateLabel(text, maxLength=40)`（長い見出しを省略）。どちらも celeris への値は変えない表示専用。
+  `~/routes/tasks.$id.tsx` の run 一覧の `run_id` 列に適用（`font-mono text-xs break-all` + `title`）。
+- `test/unit/format.test.ts`（新規、6 件）。
+
+### 証跡
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| lint | `pnpm lint` | exit 0。`Checked 222 files in ~90ms. No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（`mobile-audit.mjs` は `tsconfig.node.json` から意図的に除外。理由は上記） |
+| test | `pnpm test` | exit 0。**Test Files 60 passed (60) / Tests 855 passed (855)**（前回 839 + 新規 `format.test.ts` 6 件 + 既存の増分） |
+| build | `pnpm build` | exit 0（client / server とも） |
+| mobile-audit（初回。UI を直す前、mock のバグを直した直後） | `MOBILE_AUDIT_SKIP_BUILD=1 node scripts/mobile-audit.mjs` | exit 1。**736 件**（`overflow` 38 / `tap-target` 279 / `font-size` 457 / `status-badge` 0）。20 route 全て 200 応答 |
+| mobile-audit（最初のラウンド後） | `pnpm mobile-audit` | exit 1。**294 件**（`overflow` **0** / `status-badge` **0** / `tap-target` **94**（-68%） / `font-size` **200**（-56%））。20 route 全て 200 応答、`page-error` 0 |
+
+#### 違反数の推移（初回 → 最初のラウンド後。D3 の「ラウンドごとに 1 行」の記録）
+
+| rule | 初回 | 最初のラウンド後 | 減った理由（主なもの） |
+| --- | --- | --- | --- |
+| overflow | 38 | **0** | `~/components/ui/card.tsx` の `CardHeader.actions` を折り返しに（すべて `/releases`）|
+| status-badge | 0 | 0 | 元から労働の対象（`labels.ts`）は 1 語だった。`data-status-badge` を実物に付けて検査に「歯」を持たせただけ |
+| tap-target | 279 | 94 | `~/components/ui/button.tsx`（`SIZES`）・`~/components/ui/form.ts`（`inputClass`/`selectClass`/`chipLabelClass`/`hintClass`）・`~/root.tsx`（ロゴ `<a>`）・`~/components/HelpLink.tsx`・`help.tsx` 目次（`data-touch-ok`）と、checkbox/radio は包む `<label>` で判定するよう検査自体も直した |
+| font-size | 457 | 200 | `~/root.tsx`（footer の `dt` / ナビ見出し / `ConnectionPill`）・`~/components/ui/misc.tsx`（`DataItem` の `dt`）・`~/components/ui/form.ts`（`hintClass`）。いずれもモバイルは `text-sm`、`lg:` でデスクトップは元のサイズに戻す作り |
+
+（途中の値をコミットごとに記録してはいないので、行ごとの正確な増減の内訳はこの表の「主なもの」欄が言葉で示す以上には残していない。次のラウンド以降は 1 回直すたびに `pnpm mobile-audit` の数字をここに積む。）
+
+### 未解決事項（次のラウンドへ。ADR-0055 D3 は「やることが無くなりにくいので最後に回し続ける」と
+明記しているので、0 を最終形とはみなさない）
+
+- **U1: タップ領域の残り 94 件の多くは、文中の生のテキストリンク**（例: Console ブロックの「〜を見る」
+  リンク、`help.tsx` の本文中のリンク）。行の高さがそのまま当たり判定になっており、44px にするには
+  行間・パディングを個別に見直す必要がある（`data-touch-ok` を機械的に付けるのは筋が違うので避けた）。
+- **U2: 文字の残り 200 件は分散している**（最頻出は "1"/"0"/"-" のような値そのものが小さいフォントで
+  出る箇所や、案件題名の 2 次的な参照など）。共有部品側の大きな塊は今回の 3 箇所（footer・ナビ見出し・
+  `DataItem`/`hintClass`）でほぼ払底したので、残りは画面ごとに 1 つずつ見ていく必要がある。
+- **U3: 固定要素（D1-5）・表（D1-6）は今回 0 件のまま**（違反していない）だが、D2 が求める
+  「下部固定のタブ（Console / ボード / 案件 / 認可 / その他）」はまだ入れていない
+  （`~/root.tsx` のモバイル用ナビは今も**上部** sticky。固定要素チェックは通っているので機械検査上は
+  問題ないが、D2 の具体的な指示とは異なる。次のラウンドの候補）。
+- **U4: e2e（`pnpm e2e`）は未実行**（実 celeris が要る既存の理由のまま。`mobile-audit` は別の仕組み）。
+
+### 提案
+
+- **P-G23-1: D1-5（固定要素）の検査は「一番下までスクロールしてから」の 1 点しか見ていない。**
+  実際のスマホでは、キーボード表示時に `100dvh` の入力欄が動く挙動（ADR-0055 D2）まではカバーできない
+  （Playwright はソフトキーボードを再現できない）。次のラウンドで Console の入力欄を作り込むときは、
+  手元の実機での目視確認も添える方が安全（`docs/PROGRESS.md` の「LLM 呼び出しを伴う実機確認」と同じ扱い）。

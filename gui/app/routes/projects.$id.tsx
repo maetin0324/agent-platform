@@ -369,7 +369,7 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
         description="案件は組織の上から入り、分解されて下へ流れます。その依存関係が「仕事の木」です。"
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status">
+            <Badge tone={PROJECT_STATUS_TONE[project.status]} data-testid="project-status" data-status-badge="project">
               {projectStatusLabel(project.status)}
             </Badge>
             {/* ADR-0044 D6（Phase 55 / G19）: 一時停止・中止・アーカイブは題名の横でも分かるようにする
@@ -564,7 +564,11 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="font-mono text-xs text-fg-subtle">#{m.seq}</span>
                         <span className="font-medium">{m.title}</span>
-                        <Badge tone={MILESTONE_STATUS_TONE[m.status]} data-testid="milestone-status">
+                        <Badge
+                          tone={MILESTONE_STATUS_TONE[m.status]}
+                          data-testid="milestone-status"
+                          data-status-badge="milestone"
+                        >
                           {milestoneStatusLabel(m.status)}
                         </Badge>
                       </div>
