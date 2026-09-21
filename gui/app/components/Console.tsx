@@ -1,7 +1,7 @@
 import { type ChangeEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { useFetcher, useNavigate, useNavigation } from "react-router";
 import type { ConsoleInstructOutcome, ConsoleNewConversationOutcome } from "~/celeris/action-types";
-import type { ConsoleBlock, OrgNode, Project } from "~/celeris/types";
+import type { ConsoleBlock, McpClient, OrgNode, Project } from "~/celeris/types";
 import { useConsoleStream } from "~/hooks/useConsoleStream";
 import {
   appendConsoleBlock,
@@ -38,7 +38,7 @@ import { Skeleton } from "./ui/skeleton";
  * `~/hooks/useConsoleStream.ts` が `console.block` を 1 件ずつ足す（D1「Console は…block ごとに積み増す」）。
  */
 export function Console({ data }: { data: ConsoleData }) {
-  const { scope, org, projects, fetchedAt } = data;
+  const { scope, org, projects, mcpClients, fetchedAt } = data;
   const parsedScope = parseScope(scope);
 
   // ブロックの一覧はこのコンポーネントのローカル state。scope が変わったとき（新しい画面）だけ
@@ -103,6 +103,7 @@ export function Console({ data }: { data: ConsoleData }) {
             blocks={blocks}
             org={org}
             projects={projects}
+            mcpClients={mcpClients}
             fetchedAt={fetchedAt}
             onReply={handleReply}
             loading={isConsoleNavigationPending}
@@ -363,6 +364,7 @@ function BlockStream({
   blocks,
   org,
   projects,
+  mcpClients,
   fetchedAt,
   onReply,
   loading = false,
@@ -370,6 +372,7 @@ function BlockStream({
   blocks: ConsoleBlock[];
   org: readonly OrgNode[];
   projects: readonly Project[];
+  mcpClients: readonly McpClient[];
   fetchedAt: string;
   onReply: (block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) => void;
   /** Phase 77: 遷移が pending の間、中身をスケルトンに差し替える（枠の高さ・`data-testid` は変えない）。 */
@@ -430,6 +433,7 @@ function BlockStream({
               block={b}
               org={org}
               projects={projects}
+              mcpClients={mcpClients}
               fetchedAt={fetchedAt}
               onReplyToConversation={onReply}
             />

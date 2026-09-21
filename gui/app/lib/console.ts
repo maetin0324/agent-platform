@@ -5,6 +5,7 @@ import type {
   ConsoleTaskLine,
   EventRow,
   InstructBody,
+  McpClient,
   OrgNode,
   Project,
 } from "~/celeris/types";
@@ -22,6 +23,12 @@ export interface ConsoleData {
   page: ConsolePage;
   org: OrgNode[];
   projects: Project[];
+  /**
+   * ADR-0056 D2（Phase 78/80）: `GET /mcp/clients`（ベストエフォート。落ちても Console 自体は出す。
+   * `org` / `projects` と同じ扱い）。human ブロックの `author`（`mcp:<client_id>`）を
+   * 「外部（<client name>）」の帯にするための名前解決に使う（`~/lib/mcp.ts::resolveMcpAuthorLabel`）。
+   */
+  mcpClients: McpClient[];
   /**
    * ADR-0055 D2 ラウンド 6: 相対時刻表示（`relativeTimeLabel`）の基準時刻。loader が読み込んだ時刻
    * （`~/routes/approvals.tsx` 等の `fetchedAt` と同じ作り）。root の SSE が daemon tick ごとに
