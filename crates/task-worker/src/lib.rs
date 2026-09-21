@@ -29,6 +29,8 @@ mod progress;
 pub mod protocol;
 pub mod provider;
 pub mod result_report;
+/// ADR-0056 D3（Phase 79）: mount された skills を run にアダプタごとに届ける。
+pub mod skills;
 pub mod ssh;
 pub mod subprocess;
 /// ADR-0043 D2 / D4（Phase 52）: タスクの作業場所を複数のリポジトリで組む（worktree とリンク、`setup`）。

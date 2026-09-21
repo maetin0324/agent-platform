@@ -1436,6 +1436,13 @@
           },
           "type": "array"
         },
+        "skills": {
+          "description": "ADR-0056 D3: 担当ノードの実効 profile が継いだ `skills_mounts`（Phase 78）のうち、KB の\n`skills/<name>/` に実在するものだけ（本文は含まない。`path` の `SKILL.md` をアダプタが読む）。\n見つからない名前は run を落とさず、ディスパッチャが `status` の進行イベントを 1 行出して省く\n（このフィールドには乗らない）。届け方はアダプタごと（`claude-code` は `.claude/skills/<name>/`\nへコピー、`codex` は `AGENTS.md` の節、`acp` は前置きに埋め込む）。研究系アダプタ\n（paperqa / local-deep-research / langmem）は無視する。空なら省略され、前置き・作業場所は\nPhase 78 までと 1 バイトも変わらない。",
+          "items": {
+            "$ref": "#/$defs/SkillMount"
+          },
+          "type": "array"
+        },
         "standing_rules": {
           "description": "ADR-0033 D5: 「今後ずっと」の認可（永続の認可）。**Phase 26 が埋める。今は常に空**。",
           "items": {
@@ -1499,6 +1506,28 @@
         "adapter",
         "session_id",
         "resume"
+      ],
+      "type": "object"
+    },
+    "SkillMount": {
+      "description": "`context.skills[]`（ADR-0056 D3。Phase 79）: mount された skill 1 件。ディスパッチャが KB から\n決定的に解決する（存在確認と frontmatter の `description` を読むだけ。本文はアダプタが `path` から\n読む）。",
+      "properties": {
+        "description": {
+          "description": "`SKILL.md` の frontmatter の `description`（決まらなければ空文字列）。",
+          "type": "string"
+        },
+        "name": {
+          "description": "KB の `skills/<name>/` と同じ綴り。",
+          "type": "string"
+        },
+        "path": {
+          "description": "絶対パス。KB の `skills/<name>/`（`SKILL.md` と付属ファイルを含むディレクトリ）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "path"
       ],
       "type": "object"
     },

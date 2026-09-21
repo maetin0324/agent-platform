@@ -186,6 +186,11 @@ async fn run_codex(
     // ADR-0023 D2 / M1: この run で何を渡したかを残す（`request.json` は構造、`prompt.txt` は実際の文面）。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
+    // ADR-0056 D3（Phase 79）: mount された skills を `AGENTS.md` の節として書く（codex はこのファイルを
+    // 自動で読む。既存の内容は壊さない。run は落とさない）。
+    if let Err(e) = crate::skills::deliver_agents_md(req.cwd(), &req.context.skills).await {
+        warn!("run {run_id}: failed to update AGENTS.md with skills: {e}");
+    }
 
     // ADR-0054 D1（Phase 67）: `context.session` がこのアダプタ宛て（`adapter == "codex"`）で
     // `resume: true` のときだけ継続する。手段は `config.resume_mode` で決定的に選ぶ（実機 probe はしない）。
@@ -926,6 +931,47 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
             }
             other => panic!("expected done in result.json, got {other:?}"),
         }
+    }
+
+    /// ADR-0056 D3（Phase 79）: `context.skills` に乗った skill は、run 開始時に `AGENTS.md` の
+    /// `<!-- celeris:skills:start -->` 〜 `end` の節として作業場所に書かれる。既存の内容は保つ。
+    #[tokio::test]
+    async fn mounted_skills_are_written_into_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Notes\n\nBuild with cargo.\n").unwrap();
+        let kb = tempfile::tempdir().unwrap();
+        let skill_dir = kb.path().join("rust-review");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: rust-review\ndescription: d\n---\n\nレビューの手順\n",
+        )
+        .unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+echo '{"type":"turn.completed"}'
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.skills = vec![crate::protocol::SkillMount {
+            name: "rust-review".into(),
+            path: skill_dir.display().to_string(),
+            description: "d".into(),
+        }];
+        let sink = RecordingSink::default();
+        adapter
+            .run(req, "run-skills", default_limits(), &sink)
+            .await
+            .unwrap();
+        let agents_md = std::fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(agents_md.contains("# Notes"), "{agents_md}");
+        assert!(agents_md.contains("Build with cargo."), "{agents_md}");
+        assert!(agents_md.contains("## Skills（celeris）"), "{agents_md}");
+        assert!(agents_md.contains("### rust-review"), "{agents_md}");
+        assert!(agents_md.contains("レビューの手順"), "{agents_md}");
     }
 
     #[tokio::test]

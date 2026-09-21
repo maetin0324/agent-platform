@@ -822,7 +822,10 @@ async fn run_acp(
     let _ = tokio::fs::remove_file(&result_path).await;
     clear_delegate_file(&req.artifacts_dir).await;
 
-    let prompt = build_prompt(&req.task, &req.context, run_id, &artifacts_rel);
+    let mut prompt = build_prompt(&req.task, &req.context, run_id, &artifacts_rel);
+    // ADR-0056 D3（Phase 79）: mount された skills を前置きに直接埋め込む（acp にはファイルを自動で
+    // 読む契約が無いため。`skills` が空なら 1 バイトも変わらない）。
+    prompt.push_str(&crate::skills::preamble_section(&req.context.skills));
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
 
@@ -1516,6 +1519,48 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
             }
             other => panic!("expected done in result.json, got {other:?}"),
         }
+    }
+
+    /// ADR-0056 D3（Phase 79）: `context.skills` に乗った skill は、前置き（プロンプト文面）の末尾に
+    /// `## Skills（celeris）` 節として直接埋め込まれる（acp にはファイルを自動で読む契約が無いため）。
+    #[tokio::test]
+    async fn mounted_skills_are_embedded_in_the_preamble() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb = tempfile::tempdir().unwrap();
+        let skill_dir = kb.path().join("writing");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: writing\ndescription: d\n---\n\n文章の書き方\n",
+        )
+        .unwrap();
+        let config = stub_acp(
+            dir.path(),
+            &format!(
+                r#"{HANDSHAKE}
+read -r _prompt
+printf '%s' '{{"summary":"ok","evidence":[]}}' > artifacts/result.json
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
+"#
+            ),
+        );
+        let adapter = AcpAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.skills = vec![crate::protocol::SkillMount {
+            name: "writing".into(),
+            path: skill_dir.display().to_string(),
+            description: "d".into(),
+        }];
+        let sink = RecordingSink::default();
+        adapter
+            .run(req, "run-skills", default_limits(), &sink)
+            .await
+            .unwrap();
+        let prompt =
+            std::fs::read_to_string(dir.path().join("runs/run-skills/prompt.txt")).unwrap();
+        assert!(prompt.contains("## Skills（celeris）"), "{prompt}");
+        assert!(prompt.contains("### writing"), "{prompt}");
+        assert!(prompt.contains("文章の書き方"), "{prompt}");
     }
 
     /// ADR-0036 D1/D2: 共有 workspace のタスクは `.taskd/artifacts/<task_id>/result.json` を読む。

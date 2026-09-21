@@ -716,6 +716,12 @@ async fn run_claude_code(
     // ADR-0023 D2 / M1: この run で何を渡したかを残す（`request.json` は構造、`prompt.txt` は実際の文面）。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
+    // ADR-0056 D3（Phase 79）: mount された skills を `.claude/skills/<name>/` に写す（claude-code が
+    // 自動で読む形式。run が失敗しても打ち切らない。読み取れる限りは失敗しない見込み — 失敗すれば
+    // ワーカー起動前の警告としてログに残す）。
+    if let Err(e) = crate::skills::deliver_claude_code(req.cwd(), &req.context.skills).await {
+        warn!("run {run_id}: failed to deliver skills to .claude/skills: {e}");
+    }
 
     let mut command = Command::new(&config.command);
     command
@@ -1540,6 +1546,51 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
             }
             other => panic!("expected done in result.json, got {other:?}"),
         }
+    }
+
+    /// ADR-0056 D3（Phase 79）: `context.skills` に乗った skill は、run 開始時に
+    /// `.claude/skills/<name>/SKILL.md`（＋付属ファイル）として作業場所に写る。
+    #[tokio::test]
+    async fn mounted_skills_are_copied_into_dot_claude_skills() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb = tempfile::tempdir().unwrap();
+        let skill_dir = kb.path().join("rust-review");
+        std::fs::create_dir_all(skill_dir.join("refs")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: rust-review\ndescription: d\n---\n\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("refs/checklist.md"), "1. fmt\n").unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#,
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.skills = vec![crate::protocol::SkillMount {
+            name: "rust-review".into(),
+            path: skill_dir.display().to_string(),
+            description: "d".into(),
+        }];
+        let sink = RecordingSink::default();
+        adapter
+            .run(req, "run-skills", default_limits(), &sink)
+            .await
+            .unwrap();
+        let delivered = dir.path().join(".claude/skills/rust-review");
+        assert!(
+            std::fs::read_to_string(delivered.join("SKILL.md"))
+                .unwrap()
+                .contains("body")
+        );
+        assert_eq!(
+            std::fs::read_to_string(delivered.join("refs/checklist.md")).unwrap(),
+            "1. fmt\n"
+        );
     }
 
     /// ADR-0036 D1/D2/D3: 共有 workspace のタスクは `.taskd/artifacts/<task_id>/result.json` を読み書きし、

@@ -1506,6 +1506,14 @@ pub fn skills_put(
     Ok(format!("{SKILLS_ROOT_DIR}/{name}/{SKILL_FILE}"))
 }
 
+/// ADR-0056 D3（Phase 79）: `SKILL.md`（`skills_get` の `skill_md`）の frontmatter の `description`
+/// （無ければ空文字列）。ディスパッチャが `RunContext.skills[].description` を組むのに使う。
+pub fn skill_description(skill_md: &str) -> String {
+    skill_frontmatter(skill_md)
+        .and_then(|(fields, ..)| frontmatter_field(&fields, "description").map(str::to_string))
+        .unwrap_or_default()
+}
+
 /// ADR-0056 D2: `skills/` にある skill の一覧（`name` / frontmatter の `description`）。
 pub fn skills_list(root: &Path) -> Vec<SkillSummary> {
     let dir = root.join(SKILLS_ROOT_DIR);
