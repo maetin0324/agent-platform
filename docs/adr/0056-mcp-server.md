@@ -31,8 +31,22 @@ Celeris の入口は今まで GUI（Console）と `celerisctl` だけだった�
 - 認証は **クライアントごとの Bearer トークン**。`mcp_clients` 表（`id`、`name`、`token_hash`（SHA-256）、`scopes`（D4）、`created_at`、
   `last_used_at`、`revoked_at`）。発行と管理は `celerisctl mcp client add <name> [--scope …]`（トークンは **発行時に 1 度だけ表示**。
   DB にはハッシュのみ）、`celerisctl mcp client ls|revoke <id>`。値はログ・応答・PROGRESS に出さない。
-- `[mcp] auth = "token"`（既定）。`auth = "none"` は **listen が loopback のときだけ**許す（トンネル側が認証している前提。
-  loopback 以外で `none` は設定エラー）。`none` のときのクライアント id は `anonymous`、スコープは `[mcp] anonymous_scopes`（既定は read 系のみ）。
+- 口は **複数持てる**（`[[mcp.listeners]]`。最初の口だけなら `[mcp] listen` でもよい）。口ごとに `auth = "token"`（既定）か `"none"`。
+  **`none` は listen が loopback のときだけ**許し（loopback 以外は設定エラー）、しかも **`client = "<id>"` で名前付きクライアントに固定する**
+  （その口に来た要求はすべてそのクライアントとして扱う。スコープ・監査・流量制限は `mcp_clients` の行に従う。`celerisctl mcp client add <name>
+  --no-token` で「トークンを持たない客」を作る）。用途は **ChatGPT の Secure MCP tunnel**: トンネルの手元側エージェントが同じマシンから
+  `http://127.0.0.1:<port>/mcp` を叩き、**Bearer ヘッダを足す機能が無い**（2026-09-21 人の確認）ので、認証は「そのポートに届けるのは
+  トンネルだけ」という配置で担保する。例:
+
+  ```toml
+  [[mcp.listeners]]
+  listen = "127.0.0.1:18200"          # Claude Code / Codex / LAN の客（Tailscale 越し含む）。Bearer 必須
+  auth = "token"
+  [[mcp.listeners]]
+  listen = "127.0.0.1:18201"          # ChatGPT Secure MCP tunnel の手元側だけが叩く。認証なし・客は chatgpt に固定
+  auth = "none"
+  client = "chatgpt"
+  ```
 - CLI エージェント（Claude Code / Codex / opencode）向けに **`celerisctl mcp stdio --client <id>`**（stdio ↔ 手元の HTTP の橋。トークンは
   `--token-file` か環境変数）。中身は同じサーバー。
 - **OAuth 2.1 は採らない**（この ADR では）。必要になったら別 ADR（動的クライアント登録 + PKCE + 認可画面）。
@@ -92,6 +106,7 @@ Celeris の入口は今まで GUI（Console）と `celerisctl` だけだった�
 
 - スコープ: `knowledge:read`、`knowledge:propose`、`tasks:read`、`console:instruct`、`org:read`、`org:write`、`skills:read`、`skills:write`。
   `celerisctl mcp client add` の既定は **read 系 + `knowledge:propose` + `console:instruct`**（`org:write` / `skills:write` は明示）。
+  `--no-token` の客（`auth = "none"` の口に固定する客）も同じ規則。ChatGPT に skills を書かせたいなら `--scope skills:write` を明示する。
   スコープ外の tool は `tools/list` に**出さない**（呼ばれたら JSON-RPC の `-32601`）。
 - すべての `tools/call` を **`mcp_calls` 表**（`client_id`、`tool`、`ok`、`error_kind`、`latency_ms`、`at`）に残す（引数と結果の本文は残さない）。
   `console_instruct` は Console にも出るので二重には書かない。
