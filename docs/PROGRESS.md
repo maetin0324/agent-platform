@@ -10459,3 +10459,30 @@ clusters・llm-sources のモックを編集していたため、それらには
 (2) Milestone の「中止」を開閉に畳んだ変更は Project のアーカイブ（Phase 71）と同様デスクトップの
 見た目も変える判断で、人が「常に見せたい」と言うなら戻す、(3) `/releases` の検証バッジを 1 語化した
 ことで `ok_live`/`ok_stop_start` の区別がバッジの文字だけでは分からなくなった（色と詳細行に依存）。
+
+### Phase 66・71 の本番反映と、Codex の写像・release lock の実機（2026-09-21 12:13–12:40 UTC）
+
+- **時計の飛び**: 10:05 UTC ごろ→ 12:13 UTC にシステム時刻が約 2 時間進んだ（NTP の補正と思われる）。`flock -w` は単調時計なので
+  待ち時間の実測には影響しないが、ログの時刻の連続性はこの区間で崩れている。
+- **release lock の漏れ（実機で発生・修正）**: `cargo test` 中に起こされた `podman info`（container の runtime probe）が応答せず、
+  release.sh の lock fd を継いだまま PID 1 の子として残った（pid 2595048、09:19 起動）。次の `release.sh main` が 1800 秒待って
+  exit 75。手で lock を退けるのは auto mode に拒否された（Modify Shared Resources）ので、スクリプト側を直した:
+  (1) `run_step` と `pnpm install --prod` に `8>&- 9>&-`（子に lock fd を継がせない）、(2) `sd_lock_or_tempfail` が
+  「持ち主が selfdeploy のスクリプトでない」ロックを検出して `<file>.leaked-<日時>` に退け、新しい inode で取り直す
+  （自分自身とその子は持ち主に数えない。最初の版はコマンド置換のサブシェルを生きたスクリプトと誤認したので修正）。
+  実機: 12:31:23 `lock … is held only by processes that are not selfdeploy scripts` → `moved the leaked lock aside to
+  .lock-release.leaked-20260921T123123Z; taking a fresh lock` → ビルド続行。漏れた `podman info` は残っている（人が kill してよい）。
+- **Sonnet のセッション上限**（09:45 UTC、リセット 11:00 UTC）で Phase 66 / 72 のエージェントが停止。Phase 66 は worktree の
+  未コミット分を `wip:` として commit し、12:14 に同じエージェントを resume して完走。Phase 72 は作り直し。
+- main: `affecaa` = Phase 66 merge（+ Phase 71、lock 修正）。ゲート: cargo test **1627 passed / 0 failed**、clippy exit 0、
+  GUI typecheck/lint exit 0、`pnpm test` 877 passed、`pnpm gen:types` 差分なし、`pnpm mobile-audit` 違反 0。
+  `release.sh` → `affecaa68890`（schema 22）、`verify.sh` check 1–6 true `live_ok=true`、`promote.sh` **mode=live**（12:36:00→03、API 停止なし）。
+- main: `8a979f2` = Phase 72 merge（GUI のみ）。GUI ゲート exit 0、`pnpm test` 878 passed、audit 0。release は 12:36 に開始（次節で反映）。
+- **Codex の写像が有効になった**（`[llm_proxy.models.gpt]` は affecaa の起動で読まれた）: `gpt/cheap`（gpt-5.5）**200、3.8 s**、
+  `gpt/standard`（gpt-5.6-terra）200 だが **71 s**、`celeris/standard` → codex-oauth 200、55 s（Claude の standard が cooldown 中のため
+  Codex に倒れた。`GET /llm/sources.celeris_tiers` は 3 tier とも `codex-oauth`）。gpt-5.6-terra は「pong」1 語でも 1 分近くかかる
+  （reasoning が長い）ので、standard を gpt-5.5 にする方が実用的かもしれない（提案。Qwen が戻れば standard/cheap は Qwen）。
+- 本番設定に `[[clusters.forwards]] listen=127.0.0.1:18000 target=bnode150:18000`（pegasus）を追加（`config.toml.bak-20260921f`）。
+  `deny_unknown_fields` なので affecaa より前のバイナリは読めない → **8a979f2 の昇格で有効**にする（rollback 先が affecaa になってから）。
+  systemd の `celeris-qwen-tunnel.*` の撤去（`install-units.sh --remove-qwen-tunnel`）は systemctl を伴うので人が実行する。
+- PaperQA の動作確認タスクを作り直した（2 回目。celeris/standard が Codex で通るようになったため）。結果は次節。
