@@ -12045,3 +12045,23 @@ Phase 79）を実装した。詳細な決定・逸脱は `docs/adr/0056-mcp-serv
   変わりうる）。実機で通すエージェントに検証を依頼し、`docs/mcp.md` を確定させるとよい。
 - `[mcp] rate_limit_per_min` と `Mcp-Session-Id` のインメモリ状態を、将来 celeris が複数プロセスに
   分かれる構成になった場合はどうするか（今は単一プロセス前提）。
+
+### Phase 78 の本番反映と実機確認（2026-09-21 18:14–18:20 UTC。`f6286decb2a0`、schema 24、停止→起動）
+
+- main `f6286de` = Phase 78 merge。ゲート: cargo test **1753 passed / 0 failed**、clippy exit 0、`pnpm gen:types` 差分なし、GUI typecheck / lint exit 0、
+  `pnpm test` 925 passed、`pnpm mobile-audit` 違反 0。`release.sh` → `f6286decb2a0`（schema 24）。`verify.sh` check 1–4・6 true、
+  check 5 は想定どおり false（N-1 が schema 24 を読めない）→ `ok=true live_ok=false`。
+- `[mcp]` は `deny_unknown_fields` で旧バイナリが読めないので `config.toml.next`（現行 + `[mcp] rate_limit_per_min=60`、
+  `[[mcp.listeners]]` 127.0.0.1:18200 token / 127.0.0.1:18201 none client=chatgpt）を用意し、新バイナリで `--mode verify` 起動して
+  `mcp listening 127.0.0.1:18200 auth=Token` / `18201 auth=Fixed("chatgpt")` を確認してから、`promote.sh f6286decb2a0 --pre-start
+  hooks/swap-config-next.sh`（in-flight 0、blocked 0、1 分 load 1.77）。旧停止 2 秒 → バックアップ 14 MB → フック → 新 healthy（schema 24）。API 停止約 4 秒。
+- クライアント: `celerisctl mcp client add chatgpt --no-token --scope knowledge:read,knowledge:propose,tasks:read,console:instruct,org:read,org:write,skills:read,skills:write`
+  と `celerisctl mcp client add claude-code --scope …skills:write`（**トークンは `~/.config/celeris/secrets/mcp-token-claude-code` に 600 で保存。
+  どこにも表示していない。人が Claude Code の `claude mcp add --transport http` に使う**）。`mcp client ls` に 2 行。
+- 実機（18201、認証なし・客 chatgpt 固定）: `initialize` → `protocolVersion 2025-06-18`、`serverInfo celeris-mcp 0.1.0`、`Mcp-Session-Id` 発行。
+  `tools/list` → **18 tools**（knowledge 4 / tasks 2 / projects 2 / console 2 / org 5 / skills 3。chatgpt のスコープどおり）。
+  `knowledge_propose` 1 件 → **`_inbox/20260921T181736Z-mcp.md`**（738 ms）。`mcp_calls` に `chatgpt | knowledge_propose | ok`。
+  `console_instruct` → `console_reply`（CoS の返事）は次節。
+- 人がやること: ChatGPT の Secure MCP tunnel の手元側エージェントを `http://127.0.0.1:18201/mcp` に向ける（`docs/mcp.md` §2・§8）。
+  Claude Code は `claude mcp add --transport http celeris http://127.0.0.1:18200/mcp --header "Authorization: Bearer $(cat ~/.config/celeris/secrets/mcp-token-claude-code | tail -1)"`
+  の要領（ファイルの形式は `celerisctl mcp client add` の出力そのまま。`token:` 行の値）。
