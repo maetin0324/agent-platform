@@ -182,6 +182,12 @@ pub struct ApiV1Schema {
     /// Phase 78（ADR-0056 D4）: `GET /mcp/clients` と `GET /mcp/calls?client=`。
     pub mcp_clients: crate::mcp_admin::McpClientsView,
     pub mcp_calls: crate::mcp_admin::McpCallsView,
+    /// Phase 82（ADR-0056 D3 続き）: skills を GUI から見る・作る・mount する。
+    pub skill_list: crate::skills::SkillList,
+    pub skill_detail: crate::skills::SkillDetailView,
+    pub skill_put: crate::skills::SkillPutBody,
+    pub skill_put_result: crate::skills::SkillPutResult,
+    pub org_skill_mount: crate::skills::OrgSkillMountBody,
 }
 
 /// 生成したスキーマ（`serde_json::Value`）。

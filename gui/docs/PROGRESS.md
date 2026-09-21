@@ -5213,3 +5213,115 @@ MCP クライアント節は後続の GUI Phase」を実装した。Phase 66 の
   上限）を毎回取り直す作り。呼び出しの多い客が増えたら、`~/routes/reports.tsx` のページングのような
   「もっと見る」の分割を検討する余地がある（今回は Phase 78 の規模〈直近 100 件〉に見合う簡潔な実装を
   優先した）。
+
+## Phase G35 — skills を GUI から見る・作る・mount する（ADR-0056 D3 続き、celeris Phase 82。2026-09-21）
+
+celeris 側 Phase 82（`GET/PUT/DELETE /skills…`、`POST/DELETE /org/{id}/skills…`。§3.112〜3.117）に乗って
+GUI を実装した。`/knowledge` に skills タブ（別ルート `/knowledge/skills`）を足し、一覧・詳細・作成・更新・
+削除を行える。mount する先（どのノードに効かせるか）は ADR-0056 D3「mount が門」の設計どおり
+`/org` 画面の担当詳細に持たせた（skills 画面からは mount できない。読み取り専用で「mount しているノード」を
+見せるだけ）。
+
+### 1. `/knowledge/skills`: skill の一覧・閲覧・作成・更新・削除（受け入れ条件 2 前半）
+
+- `app/celeris/skills.ts`（`loadSkills`/`readSkillsQuery`。`~/celeris/knowledge.ts` と同じ「一覧 + 選んだ
+  1 件」の形）、`app/celeris/skills-admin.server.ts`（`putSkill`/`deleteSkill`/`mountSkill`/`unmountSkill`/
+  `readSkillPutBody`/`readSkillName`。`~/celeris/knowledge-admin.server.ts` と同じ規律 — GUI 側で検証せず
+  celeris の 422/409 の文言をそのまま出す）。
+- `app/routes/knowledge.skills.tsx`（新規ルート、`app/routes.ts` に登録）: 左にカード一覧
+  （`name`/`description`/`updated`/`mounted_by` のバッジ）、右に詳細（SKILL.md を `MarkdownViewer`
+  〈lazy、既存部品をそのまま使う〉で描画・付属ファイルの一覧・mount しているノードへのリンク・削除）
+  またはエディタ（`?create=1`/`?edit=1`。名前欄 + `skill_md` のテキストエリア）。
+  `app/routes/knowledge.tsx` に「skills」への導線を追加（`knowledge.inbox.tsx` と同じ兄弟ルートの形）。
+- 削除は mount されている間は celeris が 409 `skill_mounted` で断る。GUI はその文言をそのまま出し、
+  「先に組織画面で外してから」と案内するだけ（判定は celeris 側）。
+
+### 2. `/org` の担当詳細: 「mount された skills」節（own / inherited、mount / unmount。受け入れ条件 2 後半）
+
+- `app/routes/org.tsx::MountedSkillsSection`: そのノード自身の `profile.skills_mounts`（own）と、
+  `GET /org` が返す `effective_profiles[].skills_mounts`（継いだ後）の差分から `inherited`（親から継いだ
+  もの）を出す。own は unmount できる（`DELETE /org/{id}/skills/{skill}`）が、inherited は「継承」バッジ
+  だけを見せて操作は出さない（ADR-0056 D3「mount が門」を GUI 側でも守る — 親ノードで外すよう案内する）。
+  own/inherited の分割は `~/lib/skills.ts::splitMountedSkills`（純粋関数。`GET /org` の継承計算を GUI で
+  やり直しているわけではなく、celeris が返した 2 つの配列の差分を取るだけ）。
+  - mount の picker は `GET /skills`（`loadOrg` に追加。`[knowledge] root` 未設定で 409 になっても
+    `null` にして「mount された skills」節は own/inherited の表示だけに落とす — 画面は壊さない）。
+  - mount/unmount は `OrgOpOutcome` とは別の結果型 `OrgSkillMountOutcome`（`app/celeris/action-types.ts`）
+    を使う別の `useFetcher`（`key: "org-skills"`）。既存の作成・削除・profile 編集フォームの
+    `fetcher.data` を汚さないため。`action()` の `switch` に `skill_mount`/`skill_unmount` の 2 intent を
+    追加しただけで、既存の intent の挙動は 1 バイトも変えていない。
+
+### 3. `~/lib/skills.ts`（純粋関数。DOM を描画する unit テストが無い〈G10-U1〉ので、判断はここに集める）
+
+- `isValidSkillName`（celeris の `[a-z0-9-]{1,64}` と同じ規則）、`skillsHref`（画面の URL）、
+  `skillMarkdownTemplate`（新規作成フォームの雛形）、`parseSkillFrontMatter`/`skillMarkdownProblem`
+  （送る前に celeris の 422 を先に見せるだけ。判定の正本は celeris）、`splitMountedSkills`
+  （own/inherited）。
+- **P-G35-a（監査対応の追記）**: `skillMarkdownBody`/`splitSkillFrontMatter` を追加した。`SKILL.md` の
+  本文は `# <name>` の見出しから始まる慣習（`skillMarkdownTemplate` 自身もそう作る）があり、それを
+  そのまま `MarkdownViewer` に渡すと `react-markdown` が実際の `<h1>` を生成し、`PageHeader` の
+  `<h1>「skills」` と合わせて 1 画面に h1 が 2 つになって `pnpm mobile-audit` の `a11y-structure`
+  （ADR-0055 D1 拡張、Phase 76）に落ちた。`knowledge.tsx`（`prepareKnowledgeBody`）と同じ「表示のため
+  front matter を落とす」に加え、見出しレベルを 1 段落とす（`skillMarkdownBody`）ことで、SKILL.md が
+  何を書いていても「1 画面 1 つの h1」を保つ。
+
+### ゲート
+
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（celeris 側スキーマに
+`SkillList`/`SkillDetailView`/`SkillSummaryView`/`SkillPutBody`/`SkillPutResult`/`SkillFileBody`/
+`OrgSkillMountBody` が増えた分だけ。2 回連続で `gen:types` を実行し出力が同一であることを確認 =
+冪等）/ `pnpm typecheck` / `pnpm lint`（biome、`--write` の自動整形を適用）/ `pnpm test`
+（**965 passed**、Phase G34 の 940 から +25 = `test/unit/skills.test.ts` 新設）/ `pnpm build` すべて exit 0。
+
+`pnpm mobile-audit`:
+
+| 段階 | コマンド | 出力の要点 |
+|---|---|---|
+| 1 回目（新ルート追加後、監査対応の前） | `pnpm mobile-audit` | exit 1。**14 件**（`tap-target` 8・`font-size` 4・`a11y-structure` 2）。`org-detail`: mount 解除ボタンとリンクのタップ領域不足（`Button size="xs"` は `text-xs` が常時 12px、`select` に上書きした `h-8 text-xs` が `selectClass` 既定の `h-11 lg:h-9`/`text-sm` を潰していた）、own の skill 名リンクが `min-h-11` 無しで 20px 高。`knowledge-skill-detail`: mount 先バッジへのリンクとヒント文中リンクが 44×44 未満、SKILL.md 本文の `# rust-review` が `react-markdown` で実際の `<h1>` になり `PageHeader` の h1 と重複 |
+| 対応 | `app/routes/org.tsx`・`app/routes/knowledge.skills.tsx`・`app/lib/skills.ts` | 「外す」ボタンを `size="sm"`（`text-sm` 常時）に、picker の `select` は `selectClass` の上書きをやめて `max-w-xs` だけ足す、own の skill 名リンクに `flex min-h-11 items-center`、孤立リンク（mount 先バッジ・「組織へ」「skills へ」）に `touchLinkClass`（`~/components/ui/form.ts` の既存クラス）、SKILL.md の描画に `skillMarkdownBody`（P-G35-a）を通す |
+| 2 回目（対応後） | `pnpm mobile-audit` | **exit 0、violations 0 件**（`by_rule: {}`、`by_scheme: {"light": 0, "dark": 0}`）。23 route × light/dark + `perf`。新ルート `knowledge-skills`（412.6KB）・`knowledge-skill-detail`（412.6KB）とも予算（532KB）内、DOM ノード数・LCP も他ルートと同水準 |
+
+celeris 側のゲート（同じセッションで実装。詳細は `docs/PROGRESS.md`「Phase 82」）: `cargo test --workspace
+--no-fail-fast` **1780 passed / 0 failed**（exit 0）、`cargo clippy --workspace --all-targets -- -D
+warnings` exit 0。`crates/task-ops/src/knowledge.rs` に `set_skill_mount`/`skills_delete` を追加し、
+`crates/celeris-mcp/src/tools/org.rs::mount_common` を**同じ関数を呼ぶ**ようリファクタしたので、
+mount/unmount の挙動は GUI 経由でも MCP 経由でも同一（`docs/adr/0056-mcp-server.md`「Phase 82 追記」参照）。
+
+### 変更したファイル
+
+- `app/celeris/skills.ts`・`app/celeris/skills-admin.server.ts`（新規）
+- `app/celeris/action-types.ts`（`SkillOpOutcome`/`OrgSkillMountOutcome`）
+- `app/lib/skills.ts`（新規。純粋関数一式）
+- `app/routes/knowledge.skills.tsx`（新規）・`app/routes.ts`（登録）・`app/routes/knowledge.tsx`（導線）
+- `app/routes/org.tsx`（`OrgData.skills`、`loadOrg` に `GET /skills`、`action()` に `skill_mount`/
+  `skill_unmount`、`MountedSkillsSection` 新設、2 本目の `useFetcher`）
+- `test/mock-celeris/fixtures.ts`（`skillSummary`/`skillList`/`skillListEmpty`/`skillDetail`/
+  `skillPutResult`、`orgList()` の `coding` に `profile.skills_mounts` と `effective_profiles` を追加）
+- `test/mock-celeris/server.ts`（`serveSkills`/`serveOrgSkillMount`）
+- `test/unit/skills.test.ts`（新規、25 件）
+- `scripts/mobile-audit.mjs`（`knowledge-skills`/`knowledge-skill-detail` route、`GET /api/v1/skills`/
+  `GET /api/v1/skills/rust-review` のモック）
+
+### 未解決事項
+
+- **U-G35-1**: mount/unmount を GUI から実際に celeris（本物の `[knowledge] root` + 組織）に対して行い、
+  `GET /org` の `effective_profiles` が正しく更新されて見えることは未確認（ADR-0009 P-34。サンドボックス
+  に外向きネットワークも実物の celeris も無い）。`test/mock-celeris` と `scripts/mobile-audit.mjs` の
+  作り物のデータでのみ確認した。celeris 側 Phase 82 の実機確認（`docs/PROGRESS.md`「Phase 82」参照）と
+  合わせて行うとよい。
+- **U-G35-2**: skill の作成フォームは `files`（付属ファイル）の入力欄を GUI に出していない
+  （`readSkillPutBody`/`SkillPutBody.files` は実装済みだが、`SkillEditor` は `skill_md` だけの単純な
+  フォーム）。SKILL.md 本体だけで足りる運用を想定した最小実装で、付属ファイルが要る skill は今のところ
+  `skills_put`（MCP）か将来のフォーム拡張で足す前提。
+- **U-G35-3**: 「mount された skills」の picker は `own` に既にある skill 名だけを候補から外し、
+  `inherited`（親から継いでいるだけ）の skill 名はそのノードでの「明示的な own mount」として再度選べる
+  仕様のままにした（celeris 側が重複を弾かないので害は無いが、GUI からその状態を意図して作る導線は
+  用意していない）。
+
+### 提案
+
+- **P-G35-1**: U-G35-2 の付属ファイル入力は、使う場面が出てきたら `~/routes/org.tsx::ProfileEditForm`
+  の「知識（knowledge）」欄と同じ「固定数の空行 + 並行配列」パターンで足せる。
+- **P-G35-2**: `MountedSkillsSection` の picker は現状 `GET /skills` の全件を毎回渡すだけ（件数の上限は
+  celeris 側の `MAX_INDEX_ITEMS` 相当に準じる想定）。skill の数が増えたら検索欄を足すか、
+  `~/components/ui/form.ts` の `multiSelectClass` を使った複数選択に変えるとよい。

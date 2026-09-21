@@ -8,7 +8,7 @@ import {
   useFetcher,
   useSearchParams,
 } from "react-router";
-import type { OrgOpOutcome } from "~/celeris/action-types";
+import type { OrgOpOutcome, OrgSkillMountOutcome } from "~/celeris/action-types";
 import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
 import { CelerisError, type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
 import { formString } from "~/celeris/forms";
@@ -19,6 +19,7 @@ import {
   deleteOrgNode,
   patchOrgNode,
 } from "~/celeris/org-admin.server";
+import { mountSkill, unmountSkill } from "~/celeris/skills-admin.server";
 import type {
   ConfigView,
   EffectiveProfile,
@@ -30,12 +31,13 @@ import type {
   Profile,
   Project,
   ProjectList,
+  SkillList,
   StandingRule,
   StandingRuleList,
   TaskList,
   TaskSummary,
 } from "~/celeris/types";
-import { OrgActionFlash } from "~/components/Flash";
+import { ErrorFlash, OrgActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge, statusTone } from "~/components/ui/badge";
@@ -52,7 +54,7 @@ import {
   touchLinkClass,
 } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
-import { DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import { standingRuleTargetName } from "~/lib/approvals";
 import {
   harnessOptions,
@@ -70,6 +72,7 @@ import {
 } from "~/lib/labels";
 import { buildOrgTree, countWorkload, type OrgTreeNode, tasksByAssignee, type Workload } from "~/lib/org-tree";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
+import { splitMountedSkills } from "~/lib/skills";
 import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/org";
@@ -97,6 +100,12 @@ export interface OrgData {
   memory: MemoryView | null;
   /** `[memory]` が設定されていない（409 `memory_unavailable`）。 */
   memoryUnavailable: boolean;
+  /**
+   * skill を mount する先の選択肢（ADR-0056 D3 続き、§3.112。Phase 82 / G35）。`GET /skills`
+   * （`[knowledge] root` が無ければ 409 → `null`。読めなくても「mount された skills」節は
+   * own/inherited の表示だけはできるので、画面は壊さない）。
+   */
+  skills: SkillList | null;
 }
 
 export async function loadOrg(client: CelerisClient, request: Request): Promise<OrgData> {
@@ -105,7 +114,7 @@ export async function loadOrg(client: CelerisClient, request: Request): Promise<
   // 記憶の「この案件の引き出し」を見るための案件（`?project=`）。空文字は「選んでいない」。
   const projectParam = url.searchParams.get("project");
   const projectId = projectParam !== null && projectParam.length > 0 ? projectParam : null;
-  const [org, config, tasks, standingRules, projects, memoryResult] = await Promise.all([
+  const [org, config, tasks, standingRules, projects, memoryResult, skills] = await Promise.all([
     client.get<OrgList>("/org", { signal: request.signal }),
     client.get<ConfigView>("/config", { signal: request.signal }).catch(() => null),
     client.get<TaskList>("/tasks", { query: { limit: 500, order: "created_desc" }, signal: request.signal }),
@@ -129,6 +138,10 @@ export async function loadOrg(client: CelerisClient, request: Request): Promise<
             unavailable: e instanceof CelerisError && e.status === 409 && e.code === "memory_unavailable",
           }))
       : Promise.resolve({ memory: null, unavailable: false }),
+    // ADR-0056 D3 続き（Phase 82 / G35）: mount の picker の選択肢（`GET /skills`）。`[knowledge] root`
+    // が無い構成では 409 になるだけなので、その場合は「mount された skills」節を own/inherited の
+    // 表示だけにして壊さない。
+    client.get<SkillList>("/skills", { signal: request.signal }).catch(() => null),
   ]);
   const workload = Object.fromEntries(countWorkload(tasks.items));
   return {
@@ -140,6 +153,7 @@ export async function loadOrg(client: CelerisClient, request: Request): Promise<
     projects: projects.items,
     memory: memoryResult.memory,
     memoryUnavailable: memoryResult.unavailable,
+    skills,
   };
 }
 
@@ -157,14 +171,17 @@ export function meta(_: Route.MetaArgs) {
   return [{ title: "組織 - Celeris" }];
 }
 
-/** 追加・編集・削除（すべて管理系。ADR-0033 D1）。GUI 側では判断しない: フォームの `intent` を写すだけ。 */
+/**
+ * 追加・編集・削除（すべて管理系。ADR-0033 D1）と、skill の mount / unmount（ADR-0056 D3 続き、
+ * §3.116〜3.117。Phase 82 / G35）。GUI 側では判断しない: フォームの `intent` を写すだけ。
+ */
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
   const intent = form.get("intent");
   const client = getCelerisClient();
   const id = formString(form, "id") ?? "";
 
-  let outcome: OrgOpOutcome;
+  let outcome: OrgOpOutcome | OrgSkillMountOutcome;
   switch (intent) {
     case "org_create":
       outcome = await createOrgNode(client, buildOrgCreateInput(form), request.signal);
@@ -174,6 +191,12 @@ export async function action({ request }: Route.ActionArgs) {
       break;
     case "org_delete":
       outcome = await deleteOrgNode(client, id, request.signal);
+      break;
+    case "skill_mount":
+      outcome = await mountSkill(client, id, formString(form, "skill") ?? "", request.signal);
+      break;
+    case "skill_unmount":
+      outcome = await unmountSkill(client, id, formString(form, "skill") ?? "", request.signal);
       break;
     default:
       throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
@@ -196,6 +219,7 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
     projects,
     memory,
     memoryUnavailable,
+    skills,
   } = loaderData;
   const [searchParams] = useSearchParams();
   const selectedId = searchParams.get("selected");
@@ -210,6 +234,10 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
   const selected = selectedId ? (org.items.find((n) => n.id === selectedId) ?? null) : null;
   const fetcher = useFetcher<OrgOpOutcome>();
   const submitting = fetcher.state !== "idle";
+  // ADR-0056 D3 続き（Phase 82 / G35）: mount / unmount は名前空間が違う結果（`OrgSkillMountOutcome`）
+  // なので、他の編集フォーム（作成・削除・profile 編集）と `fetcher.data` を混ぜないよう別の fetcher にする。
+  const skillsFetcher = useFetcher<OrgSkillMountOutcome>({ key: "org-skills" });
+  const skillsSubmitting = skillsFetcher.state !== "idle";
 
   const nodeTasks = selected ? (workByAssignee[selected.id] ?? []) : [];
 
@@ -277,6 +305,9 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
                 memoryUnavailable={memoryUnavailable}
                 fetcher={fetcher}
                 submitting={submitting}
+                skills={skills}
+                skillsFetcher={skillsFetcher}
+                skillsSubmitting={skillsSubmitting}
               />
             ) : (
               <CardBody>
@@ -535,6 +566,9 @@ function OrgNodeDetail({
   memoryUnavailable,
   fetcher,
   submitting,
+  skills,
+  skillsFetcher,
+  skillsSubmitting,
 }: {
   node: OrgNode;
   org: OrgNode[];
@@ -551,6 +585,10 @@ function OrgNodeDetail({
   memoryUnavailable: boolean;
   fetcher: FetcherWithComponents<OrgOpOutcome>;
   submitting: boolean;
+  /** ADR-0056 D3 続き（Phase 82 / G35）: mount の picker の選択肢（`GET /skills`）。読めなければ `null`。 */
+  skills: SkillList | null;
+  skillsFetcher: FetcherWithComponents<OrgSkillMountOutcome>;
+  skillsSubmitting: boolean;
 }) {
   return (
     <div data-testid="org-node-detail">
@@ -734,6 +772,14 @@ function OrgNodeDetail({
           </Link>
         </div>
 
+        <MountedSkillsSection
+          node={node}
+          effectiveProfile={effectiveProfile}
+          skills={skills}
+          fetcher={skillsFetcher}
+          submitting={skillsSubmitting}
+        />
+
         <EffectiveProfileView profile={effectiveProfile} />
 
         <details className="group">
@@ -899,6 +945,151 @@ function knowledgeMountLine(m: {
   const parts = [m.scope, m.name, m.path].filter((p): p is string => Boolean(p));
   const head = parts.length > 0 ? `${knowledgeKindLabel(m.kind)}: ${parts.join(":")}` : knowledgeKindLabel(m.kind);
   return m.docs ? `${head}（docs: ${m.docs}）` : head;
+}
+
+/**
+ * ADR-0056 D3 続き（skills を GUI から見る・mount する。Phase 82 / G35）: そのノードが mount している
+ * skill（own = `node.profile.skills_mounts`）と、親から継いだもの（inherited = `effectiveProfile` に
+ * あって own に無いもの）を分けて見せる。own はここで外せる（`DELETE /org/{id}/skills/{skill}`）が、
+ * inherited はそのノードでは外せない（ADR-0056 D3「mount が門」。親のノードで外す）。picker は
+ * `GET /skills` の一覧から選ぶ（KB に実在するかは celeris 側で検査しない仕様だが、GUI は実在するものだけ
+ * 選ばせる）。own/inherited への分割そのものは `~/lib/skills.ts::splitMountedSkills`（純粋関数）。
+ */
+function MountedSkillsSection({
+  node,
+  effectiveProfile,
+  skills,
+  fetcher,
+  submitting,
+}: {
+  node: OrgNode;
+  effectiveProfile: EffectiveProfile | undefined;
+  skills: SkillList | null;
+  fetcher: FetcherWithComponents<OrgSkillMountOutcome>;
+  submitting: boolean;
+}) {
+  const own = node.profile?.skills_mounts ?? [];
+  const effective = effectiveProfile?.skills_mounts ?? [];
+  const { inherited } = splitMountedSkills(own, effective);
+  const items = skills?.items ?? [];
+  const descriptionOf = (name: string) => items.find((i) => i.name === name)?.description;
+  const options = items.filter((i) => !own.includes(i.name));
+
+  return (
+    <div data-testid="org-node-skills">
+      <p className={labelClass}>mount された skills</p>
+      {own.length === 0 && inherited.length === 0 ? (
+        <p className={cn(hintClass, "mt-1")} data-testid="org-node-skills-empty">
+          まだ mount していません。
+        </p>
+      ) : (
+        <ul className="mt-1.5 space-y-1.5" data-testid="org-node-skills-list">
+          {own.map((name) => (
+            <li
+              key={`own:${name}`}
+              className="flex flex-wrap items-center gap-2 text-sm"
+              data-testid="org-node-skill-own"
+            >
+              <Badge tone="teal">{name}</Badge>
+              <Link
+                to={`/knowledge/skills?name=${encodeURIComponent(name)}`}
+                className="flex min-h-11 min-w-0 flex-1 items-center truncate underline underline-offset-2"
+              >
+                {descriptionOf(name) || name}
+              </Link>
+              <fetcher.Form method="post">
+                <input type="hidden" name="intent" value="skill_unmount" />
+                <input type="hidden" name="id" value={node.id} />
+                <input type="hidden" name="skill" value={name} />
+                <Button
+                  type="submit"
+                  variant="ghost"
+                  size="sm"
+                  disabled={submitting}
+                  data-testid="org-node-skill-unmount"
+                >
+                  外す
+                </Button>
+              </fetcher.Form>
+            </li>
+          ))}
+          {inherited.map((name) => (
+            <li
+              key={`inherited:${name}`}
+              className="flex flex-wrap items-center gap-2 text-sm"
+              data-testid="org-node-skill-inherited"
+            >
+              <Badge tone="neutral">{name}</Badge>
+              <span
+                className="text-sm text-fg-subtle lg:text-xs"
+                title="親から継いだ mount（このノードでは外せません）"
+              >
+                継承
+              </span>
+              {descriptionOf(name) && (
+                <span className="min-w-0 flex-1 truncate text-fg-subtle">{descriptionOf(name)}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {skills === null ? (
+        <p className={cn(hintClass, "mt-2")} data-testid="org-node-skills-unavailable">
+          skill の一覧を読めませんでした（<Mono>[knowledge] root</Mono> が未設定かもしれません）。
+        </p>
+      ) : items.length === 0 ? (
+        <p className={cn(hintClass, "mt-2")} data-testid="org-node-skills-none">
+          まだ skill がありません（
+          <Link to="/knowledge/skills" className={cn(touchLinkClass, "underline underline-offset-2")}>
+            skills へ
+          </Link>
+          ）。
+        </p>
+      ) : (
+        <fetcher.Form method="post" className="mt-2 flex flex-wrap items-end gap-2">
+          <input type="hidden" name="intent" value="skill_mount" />
+          <input type="hidden" name="id" value={node.id} />
+          <select
+            name="skill"
+            aria-label="mount する skill"
+            required
+            defaultValue=""
+            className={cn(selectClass, "max-w-xs")}
+            data-testid="org-node-skill-select"
+          >
+            <option value="" disabled>
+              skill を選ぶ
+            </option>
+            {options.map((item) => (
+              <option key={item.name} value={item.name}>
+                {item.name}
+              </option>
+            ))}
+          </select>
+          <Button
+            type="submit"
+            variant="secondary"
+            size="xs"
+            disabled={submitting || options.length === 0}
+            data-testid="org-node-skill-mount-submit"
+          >
+            <Icon name="plus" />
+            mount
+          </Button>
+          {options.length === 0 && (
+            <span className="text-sm text-fg-subtle lg:text-xs">選べる skill はもうありません。</span>
+          )}
+        </fetcher.Form>
+      )}
+
+      {fetcher.data && !fetcher.data.ok && (
+        <div className="mt-2" data-testid="org-node-skills-error">
+          <ErrorFlash error={fetcher.data.error} />
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**

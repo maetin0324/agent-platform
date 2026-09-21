@@ -1,6 +1,12 @@
 # celeris HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-21 Phase 82（ADR-0056 D3 続き、skills を GUI から見る・作る・mount する）
+  — **追加のみ。v1 のまま**。エンドポイント 101〜106: `GET /skills`・`GET /skills/{name}`・
+  `PUT /skills/{name}`・`DELETE /skills/{name}`・`POST /org/{id}/skills`・
+  `DELETE /org/{id}/skills/{skill}`（§3.112〜3.117）。mount / unmount は celeris-mcp の
+  `org_mount_skill`/`org_unmount_skill` と**同じ** `task_ops::knowledge::set_skill_mount` を呼ぶので
+  挙動は同一。スキーマ・DB マイグレーションの変更は無い。
 - 改訂: 2026-09-21 Phase 78（ADR-0056 D1/D2/D4/D5、外部エージェントが Celeris を操作する MCP サーバー）
   — **追加のみ。v1 のまま**。エンドポイント 99〜100: `GET /mcp/clients` / `GET /mcp/calls?client=`
   （§3.110〜3.111。MCP クライアント表と呼び出しログの観測。トークンの値は出ない）。MCP サーバー本体
@@ -351,6 +357,12 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 93 | GET | `/knowledge/inbox` | `_inbox/` の候補（出典・取り込み先つき） | `KnowledgeInbox` | ファイル |
 | 94 | POST | `/knowledge/inbox/{id}/accept` | 候補を正本に取り込む（**管理系**） | 200 `KnowledgePageResult` | ファイル + コミット |
 | 95 | POST | `/knowledge/inbox/{id}/reject` | 候補を捨てる（**管理系**） | 200 `KnowledgeRejectResult` | ファイル + コミット |
+| 101 | GET | `/skills` | skill の一覧（name / description / updated / mounted_by。ADR-0056 D3 続き、Phase 82） | `SkillList` | KB `skills/` + org |
+| 102 | GET | `/skills/{name}` | `SKILL.md` 本文と付属ファイルの一覧 | `SkillDetailView` | KB `skills/<name>/` |
+| 103 | PUT | `/skills/{name}` | skill を作る・更新する（**管理系**） | 200 `SkillPutResult` | ファイル + コミット |
+| 104 | DELETE | `/skills/{name}` | skill を消す（mount されていれば 409 `skill_mounted`。**管理系**） | 204 | ファイル + コミット |
+| 105 | POST | `/org/{id}/skills` | ノードに skill を mount する（**管理系**） | 200 `OrgNode` | store |
+| 106 | DELETE | `/org/{id}/skills/{skill}` | ノードから skill を unmount する（**管理系**） | 200 `OrgNode` | store |
 
 ---
 
@@ -2536,6 +2548,78 @@ GUI の「新しい会話」ボタンの入口。**薄い**: ディスパッチ�
   `latency_ms` / `at`。**引数と結果の本文は残さない**（ADR-0056 D4）。`console_instruct` の呼び出しは
   Console（§3.98）にも出るので二重には書かない。
 - どちらも読み取り専用（トークンは必要。`GET /llm/sources` §3.108 と同じ規律）。
+
+### 3.112〜3.117 skills を GUI から見る・作る・mount する（ADR-0056 D3 続き、Phase 82。**101〜106**）
+
+Phase 78（ADR-0056 D3）が置いた KB の専用ディレクトリ `skills/<name>/SKILL.md`（Claude Code の skills 形式。
+frontmatter に `name` / `description` 必須）と `Profile.skills_mounts` を、MCP だけでなく GUI からも見て・
+作って・mount できるようにする。**MCP の `skills_put` / `org_mount_skill` / `org_unmount_skill` と同じ
+`task_ops::knowledge::{skills_put, set_skill_mount}` を呼ぶ**ので、挙動は MCP 経由でも GUI 経由でも同一。
+`skills`（能力タグ、§3.44）とは別物（名前が近いが役割が違う）。
+
+- KB（`[knowledge] root`）が未設定なら §3.101〜3.106 と同じ 409 `knowledge_unavailable`。ディレクトリは
+  あるが skill が 1 つも無ければ `initialized: true` かつ `items: []`
+- skill 名は `[a-z0-9-]{1,64}`。合わない名前は 422 `validation`
+- `mounted_by`（§3.112・3.113）は**継いだ後**（`EffectiveProfile.skills_mounts`）で判定する。親ノードで
+  mount すれば、その子ノードの id もここに現れる（GUI は継承を再計算しない。§3.44 と同じ規律）
+- skill が 1 つでもどこかのノードに mount されていれば §3.115 の `DELETE` は 409 `skill_mounted` で断る
+  （まず §3.117 で unmount してから消す）
+
+#### 3.112 `GET /skills` → 200 `SkillList`
+
+- `root`（絶対パス）・`initialized`
+- `items[]`: `name` / `description`（frontmatter）/ `updated`（`SKILL.md` の最後のコミット時刻、RFC 3339。
+  無ければ省略）/ `mounted_by[]`（mount している組織ノードの id、無ければ省略）
+
+```json
+{"root": "/home/u/knowledge", "initialized": true,
+ "items": [{"name": "rust-review", "description": "Rust のコードレビューの手順",
+            "updated": "2026-09-21T10:00:00Z", "mounted_by": ["coding"]}]}
+```
+
+#### 3.113 `GET /skills/{name}` → 200 `SkillDetailView`
+
+- `name` / `skill_md`（frontmatter を含む本文）/ `files[]`（同じディレクトリの付属ファイルの相対パス。
+  本文は運ばない ＝ `SKILL.md` 自身しか本文を持たない。ADR-0056 D3 P-79-a と同じ「索引だけ渡す」設計）/
+  `updated` / `mounted_by[]`
+- 無い skill は 404 `skill_not_found`
+
+#### 3.114 `PUT /skills/{name}` → 200 `SkillPutResult`（**管理系**）
+
+```json
+{"skill_md": "---\nname: rust-review\ndescription: …\n---\n\n# rust-review\n…",
+ "files": [{"path": "checklist.md", "content": "- fmt\n- clippy\n"}]}
+```
+
+- 作成・更新の両方（`skills/<name>/` が無ければ作る）。`skill_md` の frontmatter の `name` は URL の
+  `{name}` と一致していること、`description` は空でないこと（違反は 422 `validation`。
+  `task_ops::knowledge::SkillError` の文言をそのまま返す）
+- frontmatter に `source:` が無ければ `source: gui` を足す（MCP 経由は `mcp:<client_id>`。ADR-0056 D3）。
+  冪等（既に `source:` があれば触らない）
+- `files[]` は省略してよい（既定 `[]`）。パスは相対で `..` を含めない（違反は 422 `validation`）
+- 応答は `{"path": "skills/<name>/SKILL.md"}`
+
+#### 3.115 `DELETE /skills/{name}` → 204（**管理系**）
+
+- どこかの組織ノードに mount されていれば **409 `skill_mounted`**（`detail` に mount しているノード id
+  の一覧）。無い skill は 404 `skill_not_found`
+- `skills/<name>/` をまるごと消して 1 コミット
+
+#### 3.116 `POST /org/{id}/skills` → 200 `OrgNode`（**管理系**）
+
+```json
+{"skill": "rust-review"}
+```
+
+- そのノードの `profile.skills_mounts` に skill 名を足す（重複は足さない。冪等）。応答は更新後の
+  `OrgNode`（`PATCH /org/{id}` §3.44 と同じ形）
+- 知らないノードは 404 `org_node_not_found`。skill 名の形が不正なら 422 `validation`
+  （**KB に実在するかは検査しない** — ADR-0056 D3「mount が門」。まだ無い skill 名を先に mount しておける）
+
+#### 3.117 `DELETE /org/{id}/skills/{skill}` → 200 `OrgNode`（**管理系**）
+
+- そのノードの `profile.skills_mounts` から skill 名を外す（無くても 200。冪等）。応答は更新後の `OrgNode`
+- 知らないノードは 404 `org_node_not_found`
 
 ---
 

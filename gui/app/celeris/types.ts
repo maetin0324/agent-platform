@@ -710,6 +710,7 @@ export interface ApiV1Schema {
   org_create: OrgCreateBody;
   org_list: OrgList;
   org_patch: OrgPatchBody;
+  org_skill_mount: OrgSkillMountBody;
   problem: Problem;
   project_create: ProjectCreateBody;
   project_detail: ProjectDetail;
@@ -740,6 +741,10 @@ export interface ApiV1Schema {
   run_list: RunList;
   secret_put: SecretPutResult;
   secrets: SecretList;
+  skill_detail: SkillDetailView;
+  skill_list: SkillList;
+  skill_put: SkillPutBody;
+  skill_put_result: SkillPutResult;
   standing_rule_create: StandingRuleCreateBody;
   standing_rule_list: StandingRuleList;
   stream_daemon: DaemonSnapshot;
@@ -3569,6 +3574,12 @@ export interface OrgPatchBody {
   profile?: Profile | null;
 }
 /**
+ * `POST /org/{id}/skills` の本文。
+ */
+export interface OrgSkillMountBody {
+  skill: string;
+}
+/**
  * RFC 9457 の problem details（`application/problem+json`）。`extra` は `code` ごとの付加フィールド。
  */
 export interface Problem {
@@ -4374,6 +4385,78 @@ export interface SecretUse {
    * `"adapter" | "provider"`。
    */
   scope: string;
+}
+/**
+ * `GET /skills/{name}`。
+ */
+export interface SkillDetailView {
+  /**
+   * 同じディレクトリの付属ファイル（相対パス。`SKILL.md` 自身は含まない）。
+   */
+  files?: string[];
+  mounted_by?: string[];
+  name: string;
+  /**
+   * `SKILL.md` の中身（frontmatter を含む）。
+   */
+  skill_md: string;
+  updated?: string | null;
+}
+/**
+ * Phase 82（ADR-0056 D3 続き）: skills を GUI から見る・作る・mount する。
+ */
+export interface SkillList {
+  /**
+   * `celerisctl knowledge init` が済んでいるか。偽なら `items` は空。
+   */
+  initialized: boolean;
+  items: SkillSummaryView[];
+  /**
+   * KB の根（絶対パス）。
+   */
+  root: string;
+}
+/**
+ * `GET /skills` の 1 件。
+ */
+export interface SkillSummaryView {
+  description: string;
+  /**
+   * この skill を（継承も含め）mount している組織ノードの id。
+   */
+  mounted_by?: string[];
+  name: string;
+  /**
+   * 最後のコミットの時刻（RFC 3339。無ければ省略）。
+   */
+  updated?: string | null;
+}
+/**
+ * `PUT /skills/{name}` の本文。
+ */
+export interface SkillPutBody {
+  files?: SkillFileBody[];
+  /**
+   * `SKILL.md` の中身（frontmatter を含む。`name` / `description` 必須、`name` はこの URL の
+   * `{name}` と一致していること）。
+   */
+  skill_md: string;
+}
+/**
+ * `PUT /skills/{name}` の付属ファイル 1 件。
+ */
+export interface SkillFileBody {
+  content: string;
+  path: string;
+}
+/**
+ * `PUT /skills/{name}` の応答。
+ */
+export interface SkillPutResult {
+  /**
+   * `skills/<name>/SKILL.md`。
+   */
+  path: string;
 }
 /**
  * `POST /standing-rules` の要求本文。

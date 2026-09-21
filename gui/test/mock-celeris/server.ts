@@ -13,6 +13,9 @@ import type {
   Project,
   ProjectLifecycle,
   ProjectList,
+  SkillDetailView,
+  SkillList,
+  SkillPutResult,
   TaskComment,
   TaskList,
   TaskSummary,
@@ -32,6 +35,9 @@ import {
   milestoneLifecycle,
   project,
   projectLifecycle,
+  skillDetail,
+  skillList,
+  skillPutResult,
   taskComment,
   taskRef,
   taskSummary,
@@ -362,4 +368,62 @@ export function serveKnowledge(mock: MockCeleris, options: KnowledgeOptions = {}
       sendJson(res, 200, options.reject ?? knowledgeRejectResult({ id: candidate.id }));
     });
   }
+}
+
+/**
+ * skills（ADR-0056 D3 続き、docs/celeris-api-v1.md §3.112〜3.117。Phase 82 / G35）の 3 経路を
+ * まとめて登録する: `GET /skills`、`GET|PUT|DELETE /skills/{name}`。`list.items` の名前ごとに
+ * `GET /skills/{name}` を登録する（`serveKnowledge` の候補ごとの登録と同じ作り）。
+ */
+export interface SkillsOptions {
+  list?: SkillList;
+  /** `name` ごとの `GET /skills/{name}` 応答（無ければ `skillDetail({name})` を使う）。 */
+  details?: Record<string, SkillDetailView>;
+  /** `PUT /skills/{name}` の応答。 */
+  put?: SkillPutResult;
+  /** `DELETE /skills/{name}` を 409 `skill_mounted` で断らせたい名前の一覧。 */
+  mountedNames?: string[];
+}
+
+export function serveSkills(mock: MockCeleris, options: SkillsOptions = {}): void {
+  const list = options.list ?? skillList();
+  mock.on("GET", "/api/v1/skills", (_req, res) => {
+    sendJson(res, 200, list);
+  });
+  for (const item of list.items) {
+    const detail = options.details?.[item.name] ?? skillDetail({ name: item.name, mounted_by: item.mounted_by });
+    mock.on("GET", `/api/v1/skills/${item.name}`, (_req, res) => {
+      sendJson(res, 200, detail);
+    });
+    mock.on("PUT", `/api/v1/skills/${item.name}`, (_req, res) => {
+      sendJson(res, 200, options.put ?? skillPutResult({ path: `skills/${item.name}/SKILL.md` }));
+    });
+    mock.on("DELETE", `/api/v1/skills/${item.name}`, (_req, res) => {
+      if (options.mountedNames?.includes(item.name)) {
+        sendProblem(res, {
+          status: 409,
+          code: "skill_mounted",
+          detail: `skill ${JSON.stringify(item.name)} is mounted by: ${(item.mounted_by ?? []).join(", ")}`,
+        });
+        return;
+      }
+      res.writeHead(204, commonHeaders(fakeUlid()));
+      res.end();
+    });
+  }
+}
+
+/**
+ * `POST /org/{id}/skills` / `DELETE /org/{id}/skills/{skill}`（mount / unmount。ADR-0056 D3 続き、
+ * docs/celeris-api-v1.md §3.116〜3.117。Phase 82 / G35）。応答はどちらも `node`（celeris が返す
+ * 更新後の `OrgNode`）をそのまま返すだけ（実際に `profile.skills_mounts` を書き換えて返すのは
+ * celeris の仕事。ここは固定の応答を返すだけの偽物）。
+ */
+export function serveOrgSkillMount(mock: MockCeleris, id: string, skill: string, node: unknown): void {
+  mock.on("POST", `/api/v1/org/${id}/skills`, (_req, res) => {
+    sendJson(res, 200, node);
+  });
+  mock.on("DELETE", `/api/v1/org/${id}/skills/${skill}`, (_req, res) => {
+    sendJson(res, 200, node);
+  });
 }

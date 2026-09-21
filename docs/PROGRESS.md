@@ -12262,3 +12262,101 @@ dispatcher.rs` に `Dispatcher::skills_context`（担当ノードの実効 profi
 - = ADR-0056 §3 Phase 79 の実機項目（`skills_put` → `org_mount_skill` → coding タスクの `request.json` と作業場所）を確認。ADR-0056 の受け入れは
   Phase 78 / 79 とも実機でそろった。人側に残るのは ChatGPT / Claude Code の接続設定だけ。
 - 起動中: Phase 81（unmount 後の skills 掃除、publickey 自動接続の退避）。
+
+## Phase 82 — skills を GUI から見る・mount する（ADR-0056 D3 の続き。2026-09-21）
+
+Phase 78（ADR-0056 D2/D3。MCP tools の `skills_list`/`skills_get`/`skills_put`、`org_mount_skill`/
+`org_unmount_skill`）と Phase 79（run への届け方）に続き、同じ操作を **GUI からも**できるようにした:
+task-api に `GET /skills`・`GET /skills/{name}`・`PUT /skills/{name}`・`DELETE /skills/{name}`・
+`POST /org/{id}/skills`・`DELETE /org/{id}/skills/{skill}` を追加し、GUI 側（`gui/docs/PROGRESS.md`
+「Phase G35」）が `/knowledge/skills`（一覧・閲覧・作成・更新・削除）と `/org` の担当詳細
+（「mount された skills」節、own/inherited の表示、mount/unmount）を実装した。mount/unmount は
+celeris-mcp の `org_mount_skill`/`org_unmount_skill` と**同じ** `task_ops::knowledge::set_skill_mount`
+を呼ぶようリファクタしたので、MCP 経由でも GUI 経由でも挙動は同一（詳細・逸脱は
+`docs/adr/0056-mcp-server.md`「Phase 82 追記」を参照）。
+
+### 受け入れ条件ごとの証跡
+
+**1. `GET /skills`、`GET /skills/{name}`（読み取り。§3.112〜3.113）**
+- 実装: `crates/task-api/src/skills.rs::{list_skills, get_skill}`。`mounted_by` は
+  `task_core::resolve_profile` で継いだ後の `skills_mounts` から計算（`mounted_by_map`。全ノードぶん
+  1 回の `org_list()` で作る）。`updated` は `task_ops::knowledge::history` の最後のコミット時刻。
+- `cargo test -p task-api --test skills an_uninitialized_knowledge_base_lists_no_skills` →
+  **exit 0**（KB 未初期化でも `initialized: false` を返すだけで何も作らない）。
+- `cargo test -p task-api --test skills mounting_a_skill_on_a_node_shows_up_in_mounted_by_including_children`
+  → **exit 0**（`coding` に mount した skill が `coding` と、継いだ子 `coding-poc` の両方の
+  `mounted_by` に現れ、`secretary` には現れないことを確認）。
+
+**2. `PUT /skills/{name}`（作成・更新、管理系。§3.114）**
+- 実装: `task_ops::knowledge::skills_put`（celeris-mcp の `skills_put` ツールと**同じ関数**）を呼ぶ。
+  GUI 由来は `source: gui` を frontmatter に足す（MCP は `mcp:<client_id>`。ADR-0056 D3 追記 P-82-d）。
+- `cargo test -p task-api --test skills put_skill_creates_and_updates_and_requires_admin` → **exit 0**
+  （作成・更新・トークン無し 401・frontmatter の `name` 不一致で 422 `validation`・知らない skill は
+  404 `skill_not_found` を確認）。
+
+**3. `DELETE /skills/{name}`（削除、管理系。mount 中は拒否。§3.115）**
+- 実装: `task_ops::knowledge::skills_delete`（新設。`skills/<name>/` を `remove_dir_all` してから
+  `git add -A -- <path>` が削除を拾って 1 コミット）。task-api は削除前に `mounted_by_map` で
+  「継いだ後」も含めて mount されていないか確認し、されていれば 409 `skill_mounted`。
+- `cargo test -p task-ops --lib skills_delete_removes_the_directory_and_commits` → **exit 0**
+  （ディレクトリが消え、`skills_get`/`skills_list` から見えなくなり、2 回目は `Failed`）。
+- `mounting_a_skill_on_a_node_shows_up_in_mounted_by_including_children`（上と同じテスト）内で
+  mount 中は 409、unmount 後は 204 で消せることも確認。
+
+**4. `POST /org/{id}/skills`、`DELETE /org/{id}/skills/{skill}`（mount / unmount、管理系。§3.116〜3.117）**
+- 実装: どちらも `task_ops::knowledge::set_skill_mount`（新設。名前の検証 + push/retain）を呼ぶ。
+  celeris-mcp の `org_mount_skill`/`org_unmount_skill`（`crates/celeris-mcp/src/tools/org.rs`）を
+  **同じ関数を呼ぶようリファクタ**したので、挙動が MCP 経由と GUI 経由で食い違う心配が構造的に無い。
+- `cargo test -p task-ops --lib set_skill_mount_toggles_without_duplicates_and_validates_the_name` →
+  **exit 0**（重複を足さない、外すと消える、不正な名前は触らず `Err`）。
+- `cargo test -p task-api --test skills mount_validates_the_node_and_the_skill_name_and_requires_admin`
+  → **exit 0**（知らないノードは 404 `org_node_not_found`、不正な skill 名は 422 `validation`、
+  トークン無しは mount・unmount とも 401）。
+- `cargo test -p celeris-mcp` → **exit 0、29 passed**（Phase 78 のテストが無変更で通ることを確認 —
+  リファクタが `org_mount_skill`/`org_unmount_skill` の外部から見た挙動を変えていない証跡）。
+
+**5. スキーマ・ドキュメント**
+- `UPDATE_SCHEMA=1 cargo test -p task-api --lib` → **exit 0**。`docs/api/v1/api-v1.schema.json` に
+  `SkillList`/`SkillDetailView`/`SkillSummaryView`/`SkillPutBody`/`SkillPutResult`/`SkillFileBody`/
+  `OrgSkillMountBody` を追加。
+- `docs/gui/api.md` に §3.112〜3.117 とエンドポイント一覧（101〜106）を追記 →
+  `scripts/sync-gui-docs.sh` → `gui/docs/celeris-api-v1.md` に反映（差分ゼロで再実行できることを確認）。
+
+### ゲート
+
+- `cargo test --workspace --no-fail-fast` → **exit 0、1780 passed / 0 failed**（`crates/task-ops` に
+  2 件、`crates/task-api` に新規 `tests/skills.rs` 4 件を追加。他クレートは無変更で全通過）。
+- `cargo clippy --workspace --all-targets -- -D warnings` → **exit 0**（警告 0）。
+- GUI 一式（詳細は `gui/docs/PROGRESS.md`「Phase G35」）: `pnpm gen:types && git diff --exit-code
+  app/celeris/types.ts`（冪等を確認）/ `pnpm typecheck` / `pnpm lint` / `pnpm test`（**965 passed**、
+  Phase G34 の 940 から +25）/ `pnpm build` / `pnpm mobile-audit`（**exit 0、違反 0 件**。23 route ×
+  light/dark。1 回目は 14 件〈タップ領域・文字サイズ・SKILL.md 本文の見出しが `<h1>` と重複〉で、
+  修正後に 0 件）すべて exit 0。
+- `unwrap()`（テスト以外）: 新規コード（`crates/task-api/src/skills.rs`、
+  `crates/task-ops/src/knowledge.rs` の追加分、`crates/celeris-mcp/src/tools/org.rs` の変更分）に
+  無いことを確認済み。`dangerouslySetInnerHTML`: GUI の新規コードに無い（既存の `MarkdownViewer` を
+  そのまま使う。生 HTML は描かない）。
+
+### 未解決事項
+
+- GUI から実際に celeris（本物の `[knowledge] root` + 組織）に対して skill を作成・mount・unmount する
+  実機確認は未実施（ADR-0009 P-34。サンドボックスに外向きネットワークが無い）。手順:
+  1. GUI の `/knowledge/skills` で新しい skill を 1 つ作る（例: `name=gui-smoke-test`、frontmatter に
+     `description` を書く）。
+  2. `/org` で適当な部門（例 `coding`）を選び、「mount された skills」節の picker から
+     `gui-smoke-test` を選んで mount する。
+  3. `/knowledge/skills?name=gui-smoke-test` に戻り、`mounted_by` にその部門の id が出ることを確認する
+     （子ノードがあれば継いで見えることも）。
+  4. `/org` の担当詳細で「外す」→ `mounted_by` が空に戻ることを確認する。
+  5. `/knowledge/skills` の一覧からその skill を削除できることを確認する（mount 中は 409 で断られる
+     ことも合わせて）。
+  結果は本節に追記すること。
+- MCP tools に `skills_delete` 相当は無い（ADR-0056 D2 のまま。ADR 追記 P-82-b）。外部エージェントに
+  削除権限を渡すかどうかは別途判断が要る。
+- GUI の skill 作成フォームは付属ファイル（`files`）を入力できない（`gui/docs/PROGRESS.md`
+  「Phase G35」U-G35-2）。
+
+### 提案
+
+- MCP から skill を消したい運用が出てきたら、`skills:write` スコープに `skills_delete` ツールを足す
+  かどうかを別 ADR 追記で検討する（今回はスコープ外、D6「採らない」の精神を保つため足さなかった）。

@@ -6932,6 +6932,19 @@
       },
       "type": "object"
     },
+    "OrgSkillMountBody": {
+      "additionalProperties": false,
+      "description": "`POST /org/{id}/skills` の本文。",
+      "properties": {
+        "skill": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill"
+      ],
+      "type": "object"
+    },
     "Permissions": {
       "additionalProperties": false,
       "description": "ADR-0046 D1 / D8: そのノード以下で once / standing の対象になる操作の名前（親と和）。",
@@ -9360,6 +9373,147 @@
       ],
       "type": "object"
     },
+    "SkillDetailView": {
+      "description": "`GET /skills/{name}`。",
+      "properties": {
+        "files": {
+          "description": "同じディレクトリの付属ファイル（相対パス。`SKILL.md` 自身は含まない）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mounted_by": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "skill_md": {
+          "description": "`SKILL.md` の中身（frontmatter を含む）。",
+          "type": "string"
+        },
+        "updated": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "skill_md"
+      ],
+      "type": "object"
+    },
+    "SkillFileBody": {
+      "description": "`PUT /skills/{name}` の付属ファイル 1 件。",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    },
+    "SkillList": {
+      "description": "`GET /skills`。",
+      "properties": {
+        "initialized": {
+          "description": "`celerisctl knowledge init` が済んでいるか。偽なら `items` は空。",
+          "type": "boolean"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/SkillSummaryView"
+          },
+          "type": "array"
+        },
+        "root": {
+          "description": "KB の根（絶対パス）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "root",
+        "initialized",
+        "items"
+      ],
+      "type": "object"
+    },
+    "SkillPutBody": {
+      "additionalProperties": false,
+      "description": "`PUT /skills/{name}` の本文。",
+      "properties": {
+        "files": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SkillFileBody"
+          },
+          "type": "array"
+        },
+        "skill_md": {
+          "description": "`SKILL.md` の中身（frontmatter を含む。`name` / `description` 必須、`name` はこの URL の\n`{name}` と一致していること）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "skill_md"
+      ],
+      "type": "object"
+    },
+    "SkillPutResult": {
+      "description": "`PUT /skills/{name}` の応答。",
+      "properties": {
+        "path": {
+          "description": "`skills/<name>/SKILL.md`。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "SkillSummaryView": {
+      "description": "`GET /skills` の 1 件。",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "mounted_by": {
+          "description": "この skill を（継承も含め）mount している組織ノードの id。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "name": {
+          "type": "string"
+        },
+        "updated": {
+          "description": "最後のコミットの時刻（RFC 3339。無ければ省略）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "type": "object"
+    },
     "StandingRule": {
       "description": "永続の認可 1 行（`standing_rules` テーブル。ADR-0033 D5）。",
       "properties": {
@@ -11324,6 +11478,9 @@
     "org_patch": {
       "$ref": "#/$defs/OrgPatchBody"
     },
+    "org_skill_mount": {
+      "$ref": "#/$defs/OrgSkillMountBody"
+    },
     "problem": {
       "$ref": "#/$defs/Problem"
     },
@@ -11422,6 +11579,19 @@
     "secrets": {
       "$ref": "#/$defs/SecretList",
       "description": "Phase 20（ADR-0030）: GUI から預かる秘密（API キー等）。`GET /secrets` と `PUT /secrets/{id}` の応答。"
+    },
+    "skill_detail": {
+      "$ref": "#/$defs/SkillDetailView"
+    },
+    "skill_list": {
+      "$ref": "#/$defs/SkillList",
+      "description": "Phase 82（ADR-0056 D3 続き）: skills を GUI から見る・作る・mount する。"
+    },
+    "skill_put": {
+      "$ref": "#/$defs/SkillPutBody"
+    },
+    "skill_put_result": {
+      "$ref": "#/$defs/SkillPutResult"
     },
     "standing_rule_create": {
       "$ref": "#/$defs/StandingRuleCreateBody"
@@ -11586,7 +11756,12 @@
     "stream_reset",
     "llm_sources",
     "mcp_clients",
-    "mcp_calls"
+    "mcp_calls",
+    "skill_list",
+    "skill_detail",
+    "skill_put",
+    "skill_put_result",
+    "org_skill_mount"
   ],
   "title": "ApiV1Schema",
   "type": "object"
