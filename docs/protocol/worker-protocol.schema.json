@@ -1300,7 +1300,7 @@
           "type": "array"
         },
         "clusters": {
-          "description": "ADR-0059 D6（Phase 99）: **CoS の対話 run** にだけ渡す `[[clusters]]` の一覧（id・接続状態・\n実効の作業ディレクトリ）。CoS 以外の run・継続中の run では常に空。",
+          "description": "ADR-0059 D6（Phase 99）/ Phase 99b 追記: **CoS の対話 run** にだけ渡す `[[clusters]]` の一覧\n（id・接続状態・実効の作業ディレクトリ）。`recent_work` / `knowledge` / `profile` / `role` と\n同じく継続中の run でも毎回渡す（クラスタの登録・接続状態は差分でなく「いまの状態」）。CoS 以外\nの run では常に空。",
           "items": {
             "$ref": "#/$defs/ClusterContext"
           },

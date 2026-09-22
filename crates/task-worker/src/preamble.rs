@@ -1311,6 +1311,27 @@ mod tests {
             ..RunContext::default()
         };
         assert!(!render(&empty, "artifacts").contains("## クラスタ"));
+
+        // Phase 99b（ADR-0059 追記）: 継続中の run（`session_diff` あり = 他の全量節は落ちる）でも
+        // `context.clusters` が渡っていれば「クラスタ」節は描かれる（`render` は単一の経路で、差分専用
+        // の描画経路は無い。node/organization は継続中は `None`/空になる想定を模して確認する）。
+        let continuing = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Secretary),
+            session_diff: vec!["新しい人の発言: 続き".into()],
+            clusters: vec![crate::protocol::ClusterContext {
+                id: "pegasus".into(),
+                connected: true,
+                work_dir: Some("/work/NBB/rmaeda".into()),
+            }],
+            ..RunContext::default()
+        };
+        let out = render(&continuing, "artifacts");
+        assert!(out.contains("## クラスタ"), "{out}");
+        assert!(
+            out.contains("- `pegasus`（接続中） 作業ディレクトリ: `/work/NBB/rmaeda`"),
+            "{out}"
+        );
+        assert!(!out.contains("## 組織"), "継続中は組織の一覧を流し直さない: {out}");
     }
 
     /// ADR-0048 D3（Phase 60b）: CoS の対話にだけ「進行中の案件」の節と `actions` の説明が付く。

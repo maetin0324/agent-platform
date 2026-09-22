@@ -4340,10 +4340,12 @@ impl Dispatcher {
         } else {
             Vec::new()
         };
-        // ADR-0059 D6（Phase 99）: CoS が `create_task.workspace` を組む材料として、既知のクラスタと
-        // その実効 work_dir を渡す（未登録なら `work_dir: null` なので、CoS は `path` を省略すべきと
-        // 分かる。D4 の指示文と対）。
-        let clusters = if is_cos_conversation && !continuing {
+        // ADR-0059 D6（Phase 99）/ Phase 99b 追記: CoS が `create_task.workspace` を組む材料として、
+        // 既知のクラスタとその実効 work_dir を渡す（未登録なら `work_dir: null` なので、CoS は `path`
+        // を省略すべきと分かる。D4 の指示文と対）。`recent_work` / `knowledge` / `profile` / `role` と
+        // 同じく、継続中の run でも毎回渡す（1 回渡してもクラスタの登録・接続状態は変わりうる「いまの
+        // 状態」であり、`active_projects` のような「前回からの差分」で足りるものとは性質が違う）。
+        let clusters = if is_cos_conversation {
             self.cluster_context()
         } else {
             Vec::new()
@@ -13547,6 +13549,84 @@ mod tests {
             other.node.is_some(),
             "CoS 以外は継続の対象外なので brief は毎回渡す"
         );
+    }
+
+    /// Phase 99b（ADR-0059 追記、実機 2026-09-22 13:19 UTC タスク 01M34MACCEZ032A6YF8R4BMFM1）:
+    /// クラスタ一覧（`RunExtras::clusters`）は `recent_work` / `knowledge` / `profile` / `role` と同じ
+    /// 「いまの状態」なので、継続中（resume）の CoS 対話 run でも毎回渡す。Phase 99 まではフル
+    /// プリアンブルと同じ扱いで継続中は空になっており、CoS はセッションが rollover するまでクラスタと
+    /// 実効 work_dir を知れなかった。
+    #[test]
+    fn cluster_context_is_carried_into_continuing_cos_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_root = dir.path().join("workspaces");
+        std::fs::create_dir_all(&workspace_root).unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let to_secretary = task_ops::conversation::start(
+            store.as_ref(),
+            "secretary",
+            None,
+            "hi",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
+
+        let adapter = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
+        let mut d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
+        d.config.clusters.insert(
+            "pegasus".into(),
+            cluster_spec_with_auth("pegasus", "pegasus", "manual"),
+        );
+
+        // 1 本目（新規セッション）: 従来どおりクラスタ一覧を渡す。
+        let first = d
+            .run_extras(&to_secretary, None, None, "claude-code")
+            .unwrap();
+        assert!(!first.session.as_ref().unwrap().resume);
+        assert_eq!(first.clusters.len(), 1, "fresh session: クラスタ一覧を渡す");
+        assert_eq!(first.clusters[0].id, "pegasus");
+
+        // 2 本目（継続 = resume）: brief などの全量前置きは空になるが、クラスタ一覧は毎回渡す。
+        let second = d
+            .run_extras(&to_secretary, None, None, "claude-code")
+            .unwrap();
+        assert!(second.session.as_ref().unwrap().resume);
+        assert!(
+            second.node.is_none(),
+            "continuing session: brief は流し直さない（対比のための確認）"
+        );
+        assert_eq!(
+            second.clusters.len(),
+            1,
+            "continuing session でもクラスタ一覧は毎回渡す（Phase 99b）"
+        );
+        assert_eq!(second.clusters[0].id, "pegasus");
+
+        // CoS 以外への対話には（継続の有無に関わらず）クラスタ一覧を渡さない。
+        let to_survey = task_ops::conversation::start(
+            store.as_ref(),
+            "research-survey",
+            None,
+            "hi",
+            &[],
+            &[],
+            task_core::CONVERSATION_GENRE,
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap()
+        .task;
+        let other = d.run_extras(&to_survey, None, None, "claude-code").unwrap();
+        assert!(other.clusters.is_empty(), "CoS 以外の run では常に空");
     }
 
     /// Phase 43（ADR-0039 D3）: 案件が作業場所を決めていれば、その run の前置きに出す 1 行が `RunExtras` に

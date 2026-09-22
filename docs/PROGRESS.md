@@ -14162,6 +14162,72 @@ task-core` で再生成）。
 - `gui/scripts/lib/celeris-fixture.mjs` の `PUT /clusters/{id}/settings` は、偽 celeris のルーティングが
   パス完全一致（動的セグメント無し）なので、fixture が知っている 3 クラスタ id（gpu1/pegasus/gpu2）に
   対してだけ登録した。他の id を足す場合は同じパターンで 1 行増やす必要がある。
+## Phase 99b — 継続中の CoS セッションにもクラスタ一覧（作業ディレクトリ）を渡す（ADR-0059 追記、完了日 2026-09-22）
+
+celeris のみ（Rust）、小さな修正。本番（2026-09-22 13:19 UTC、対話タスク 01M34MACCEZ032A6YF8R4BMFM1）で、
+Phase 99 を昇格し `PUT /clusters/pegasus/settings` に `work_dir = /work/NBB/rmaeda` を登録した直後に
+CoS へ「pegasus で pegasusinfo を実行して」と頼んだところ、CoS は正しく `mode: "shared"` で
+`create_task` したが、返事で「pegasus クラスタの作業ディレクトリが未登録のため path は省略した」と
+言った。継続中（`continuing`）の対話 run だったため、`crates/task-dispatch/src/dispatcher.rs::run_extras`
+の `let clusters = if is_cos_conversation && !continuing { self.cluster_context() } else { Vec::new() };`
+が空を返していた。`recent_work` / `knowledge` / `profile` / `role` は継続中も毎回渡しているのに、
+クラスタ一覧（3 行程度の「いまの状態」）だけ `active_projects` と同じ「差分で足りる」扱いにしていたのが
+原因。
+
+### 条件と実装
+
+**条件**: 継続中の CoS 対話 run でも `RunExtras.clusters` / `RunContext.clusters` が空にならず、
+既知のクラスタと実効 work_dir を渡す。CoS 以外の run は従来どおり常に空のまま。
+
+**実装**:
+- `crates/task-dispatch/src/dispatcher.rs::run_extras`（4346 行付近）: `let clusters = if
+  is_cos_conversation { self.cluster_context() } else { Vec::new() };` に直した（`!continuing` を外す）。
+  コメントを「`active_projects` とは性質が違い、`recent_work`/`knowledge`/`profile`/`role` と同じく
+  継続中も毎回渡す」に更新。
+- `crates/task-worker/src/protocol.rs::RunContext.clusters` の doc コメント（「CoS 以外の run・継続中の
+  run では常に空」）を「CoS 以外の run では常に空」に修正（継続中も渡す旨を追記）。
+- `crates/task-worker/src/preamble.rs` の `render`/`clusters_section` は元々**単一の描画経路**（差分
+  専用の描画経路は無く、`context.clusters` が渡ればそのまま描く）だったため、コード変更は不要。
+  `session_diff` あり（継続中を模した）+ `clusters` 非空のケースを `clusters_section_shows_the_
+  effective_work_dir_or_that_it_is_unregistered` テストに追加して、この前提を明示的に確認した
+  （`## クラスタ` は出て `## 組織` は出ないことを確認）。
+
+### テスト（受け入れ条件 2）
+
+| 対象 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| 継続中（resume）の CoS 対話 run でもクラスタ一覧を渡す。CoS 以外は常に空のまま（新規テスト） | `cargo test -p task-dispatch --lib -- cluster_context_is_carried a_continuing_cos_session` | exit 0。**2 passed**（`cluster_context_is_carried_into_continuing_cos_sessions` 新規、既存の `a_continuing_cos_session_drops_the_full_preamble_and_a_fresh_one_keeps_it` は継続中でも `clusters` を主張していなかったため反転対象なし・引き続き green） |
+| `render`/`clusters_section` が `session_diff` ありでも `clusters` を描く（単一描画経路の確認） | `cargo test -p task-worker --lib preamble::` | exit 0。16 passed |
+
+既存テストの中に「継続中は `clusters` が空」と主張するものは無かった（Phase 99 のセッション継続テストは
+`node`/`organization`/`active_projects` だけを見ていた）ため、反転対象の既存テストは無し。新規テストを
+1 件追加した。
+
+### ゲート（受け入れ条件 4）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（全 `test result: ok`。passed 合計 **1824**、Phase 99 の 1823 + 新規 1） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| schema 差分 | `git status --porcelain` | `docs/api/**` に差分無し。`docs/protocol/worker-protocol.schema.json` のみ 1 行差分（`RunContext.clusters` の `description` フィールド。**型は変えていない**が、`RunContext.clusters` の doc コメントを直したため schemars がそれを description に埋め込んでいて再生成が必要だった。`UPDATE_SCHEMA=1 cargo test -p task-worker` で再生成し、上の `cargo test --workspace` を再実行して差分ゼロで通ることを確認済み） |
+
+### 変更したファイル
+
+- `crates/task-dispatch/src/dispatcher.rs`（`run_extras` の `clusters` 条件、コメント、新規テスト
+  `cluster_context_is_carried_into_continuing_cos_sessions`）
+- `crates/task-worker/src/protocol.rs`（`RunContext.clusters` の doc コメント修正）
+- `crates/task-worker/src/preamble.rs`（`clusters_section_shows_the_effective_work_dir_or_that_it_is_
+  unregistered` テストに継続中を模したケースを追加。実装コードの変更は無し）
+- `docs/protocol/worker-protocol.schema.json`（`RunContext.clusters` の `description` のみ再生成）
+- `docs/adr/0059-command-only-remote-workspace.md`（`## Phase 99b 追記（2026-09-22）` を追加）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34、CLAUDE.md）。本番での確認は親エージェントに委ねる: 継続中の CoS
+  セッション（resume）に対して「クラスタ画面で work_dir を登録済みのクラスタでコマンドを実行して」と
+  頼み、`request.json` の `context.clusters` が非空であること、CoS が work_dir を省略せず使うことを
+  確認する。
+- `gui/app/**` のクラスタ画面には触れていない（本 Phase の対象外、Phase 100 の範囲）。
 
 ### 提案
 

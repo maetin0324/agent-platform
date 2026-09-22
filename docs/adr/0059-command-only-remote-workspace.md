@@ -180,3 +180,15 @@ HPC クラスタではホーム（`~`）は作業用に使わないのが普通�
   `.taskd/artifacts/<task_id>/` は別の規約で対象外）。
 - `[[clusters]] work_dir`、`cluster_settings` テーブル（schema 25）、`GET /clusters` の `work_dir` /
   `work_dir_source`、`PUT /clusters/{id}/settings`。相対・省略 `path` は実効 `work_dir` から解決する。
+
+## Phase 99b 追記（2026-09-22）
+
+本番（2026-09-22 13:19 UTC、タスク 01M34MACCEZ032A6YF8R4BMFM1）で、`work_dir` を登録した直後に CoS へ
+コマンド実行だけの仕事を頼んだところ、継続中（resume）のセッションだったため `run_extras` の
+`is_cos_conversation && !continuing` の条件でクラスタ一覧が空になり、CoS はクラスタも work_dir も
+知れなかった。D6 の `clusters` は `active_projects`（前回からの**差分**で足りる）とは性質が違い、
+`recent_work` / `knowledge` / `profile` / `role` と同じ「いまの状態」（3 行程度で軽い）なので、
+継続中でも毎回渡すべきだった。`crates/task-dispatch/src/dispatcher.rs::run_extras` の条件を
+`is_cos_conversation` だけに直した（`!continuing` を外す）。`crates/task-worker/src/preamble.rs` の
+`render`/`clusters_section` はもともと単一の描画経路（差分専用の経路は無い）で、`context.clusters` が
+渡ればそのまま描かれることを確認した。
