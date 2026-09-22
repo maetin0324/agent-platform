@@ -13350,3 +13350,45 @@ bottom)` の構造を確かめる検査を新設した。詳細・証跡は `gui
   その 0.25 秒を待ってから測るようにした。完全に無くすには `.animate-fade-in` を fixed な要素の祖先に
   しないアーキテクチャ変更が要る）。
 - 本番 = Phase 65〜90。実装中: Phase 91（このワークトリー。GUI のみ）。
+
+## Phase 92 — スマホ UX ラウンド 16（Console 入力欄をレイアウトレベルへ。ADR-0057。2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。Phase 91（ADR-0055 ラウンド 15）で見つけた
+「`.animate-fade-in`（ページ遷移アニメーション）実行中の 0.25 秒だけ、Console 入力欄の位置がわずかに
+ずれうる」という残課題（P-G42-1）を、構造的に解消した: 入力欄（composer）を `~/root.tsx`（レイアウト
+レベル、`<Outlet/>` の外、`MobileTabBar` と同じ階層）へ移した。設計判断は `docs/adr/0057-console-
+composer-layout-level.md` に書いた（React Context による登録 API を採用。代替案として React Router
+の `handle` と実 DOM ポータルを検討し、いずれも見送った理由も記載）。詳細・証跡は
+`gui/docs/PROGRESS.md`「Phase G43」を参照（GUI の実装詳細は gui 側に書く、このリポジトリの慣例どおり）。
+要点:
+
+1. composer の実体（旧 `Console.tsx::ConsoleInput`）を `~/components/ConsoleComposer.tsx` に切り出し、
+   `variant="mobile"`（`~/root.tsx`、`<Outlet/>` の外）と `variant="desktop"`（`Console` の右カラム内、
+   `<Outlet/>` の中。デスクトップは `position: static` なので Chromium の containing-block バグの対象外
+   で、見た目は Phase 91 まで通り不変）の 2 か所からレンダーする。状態（org/projects/streaming/返信先）は
+   `~/components/ConsoleComposerContext.tsx`（React Context）で共有する。
+2. 実装の途中で、この構造修正が**副作用として既存の潜在バグを検出した**: footer が composer（高さ約
+   170px、`position: fixed`）の下に隠れうる問題（`fixed-overlay` 検査）。Phase 91 までは
+   `.animate-fade-in` の containing-block バグにより `load` 直後は composer がビューポート基準で測れて
+   おらず、この検査がたまたま素通りしていた。今回の構造修正でこの見せかけの合格が消え、本当の状態が
+   見えるようになったため、`~/root.tsx` に footer 用の spacer を足して直した（ADR-0057 D3）。
+3. `viewport-units` 検査（Phase 91 で「アニメーション終了を 400ms 待ってから測る」形にしていたもの）に
+   加えて、待ち無し（`load` 直後）の追加測定（`viewport-units-immediate`）を新設した。構造的に直った
+   ことを踏まえ、待たなくても 0 件になることを確認した（両方とも残す。将来また似た祖先アニメーションを
+   足したときの回帰検知のため）。
+4. **ゲート**: `pnpm install --frozen-lockfile`（既に最新）/ `pnpm lint`（exit 0、253 files）/
+   `pnpm typecheck`（exit 0）/ `pnpm test`（exit 0、**1030 passed**〈Phase 91 の 1019 から +11、
+   `test/unit/console-composer.test.ts` 新設〉）/ `pnpm build`（exit 0、既存の
+   `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件のみ）/ `pnpm gen:types && git diff --exit-code
+   app/celeris/types.ts`（差分ゼロ）/ `pnpm mobile-audit` ×2（**exit 0、`{"ok":true,"total":0}`、
+   `routes=26 schemes=2 violations=0`、実測 **89.92 秒 / 89.91 秒**。Phase 91 の 89.2 秒から新規測定分で
+   ほぼ変化なし、120 秒予算内）/ `pnpm e2e:mock`（**`{"ok":true,"mode":"mock","failures":[]}`**）すべて
+   exit 0。
+   `crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` は
+   このフェーズのスコープ外（実行していない。Phase 80/82/83/84/86/87/88/89/90/91 と同じ扱い）。
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34。ヘッドレス Chromium は `env(safe-area-inset-bottom)` を実機のように 0 より
+  大きい値へ解決しない）。
+- 本番 = Phase 65〜91。実装中: Phase 92（このワークトリー。GUI のみ）。

@@ -6449,4 +6449,166 @@ release ゲート換算の目安: `pnpm-mobile-audit` は Phase G41（79.9 秒�
   ページ遷移アニメーションの影響を構造的に受けなくなる。現状は `Console` コンポーネントの一部として
   各ルートの `<Outlet/>` 配下でレンダーされているため、この移動には「どのルートが Console を表示するか」
   をレイアウト側に伝える仕組み（context か prop）が要る、それなりの大きさの変更になる。次にこの画面の
-  構造を触る Phase があれば検討する。
+  構造を触る Phase があれば検討する。**→ Phase G43 で実施（ADR-0057）。**
+
+## Phase G43 — Console 入力欄をレイアウトレベルへ（ADR-0055 ラウンド 16、ADR-0057、P-G42-1。2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更、`docs/celeris-api-v1.md` 無変更。GUI だけの Phase）。P-G42-1 の
+実施: Console 入力欄（composer）を `~/root.tsx`（`<Outlet/>` の外、`MobileTabBar` と同じ階層）へ移し、
+Phase 91 で残った「`.animate-fade-in` 実行中の 0.25 秒だけ入力欄の位置がわずかにずれる」余地を構造的に
+無くした。設計判断は `docs/adr/0057-console-composer-layout-level.md`（GUI 側 ADR は 0003 からの慣例
+だが、ADR-0055/0056 に倣い、celeris 全体の ADR 番号列〈`../docs/adr/`〉に `0057` として置いた。GUI 専用
+ながら「入口が celeris 本体とどう繋がるか」を扱う ADR〈0048 Console、0054 セッション〉は Phase 65 以降
+一貫して celeris 側の番号列に置かれているため、それに揃えた）。
+
+### 1. 構造把握（受け入れ条件 1）
+
+- composer（入力欄本体）は `~/components/Console.tsx::ConsoleInput`（Phase 91 まで）にあり、`Console`
+  コンポーネント（`~/routes/home.tsx` の `/` と `~/routes/org.$id.tsx` の `/org/:id` の両方が使う共有
+  部品、ADR-0048 D4）の一部として、その 2 ルートの `<Outlet/>` 配下でレンダーされていた。
+- 送信（`POST /console/instruct`）は `useFetcher().submit()`（`~/components/Console.tsx` 内、暗黙の
+  action = 現在のルート）、状態は `hasStreamingReply(blocks)`（ADR-0054 D2 のキュー表示）・`replyTarget`
+  （ブロックの「返信」から `BlockStream` が設定）・org/projects（`@mention` 候補・「この案件の文脈で
+  話す」バッジ）。いずれも `Console` コンポーネントのローカル state/props だった。
+
+### 2. 設計判断（受け入れ条件 2、ADR-0057）
+
+- **採用**: React Context（`~/components/ConsoleComposerContext.tsx`）。`Console` が
+  `useRegisterConsoleComposer({org, projects, streaming})` で登録し、返信先は同じ Context の
+  `replyTarget`/`setReplyTarget` を通す。「このページで composer を出すか」「どの scope で送るか」は
+  celeris への問い合わせ不要の**純粋関数**（`~/lib/console-composer.ts`）に切り出し、`useLocation()` の
+  pathname/search だけで SSR でも同じ結果になるようにした（データ〈org/projects〉だけが Context 経由の
+  非同期登録）。
+- **見送った代替案 1（React Router の `handle`）**: 「このページは composer を出す」の判定だけなら
+  `useMatches()` で読めるが、composer が要るデータ（org/projects/streaming）まで運ぶには結局 loader 経由
+  かレイアウト側の再フェッチが要り、`Console` が既に持つデータをそのまま渡せる Context の方が単純。
+- **見送った代替案 2（`ReactDOM.createPortal`）**: ポータル**先**の DOM ノードが `<Outlet/>` の中にある
+  限り、`position: fixed` の containing block は結局そのノードの祖先（`.animate-fade-in`）に左右される
+  ため根本解決にならない。ポータル先を外に置くなら D1 と同じ配線を SSR 非対応な `ref`/`useEffect` 越しに
+  行うだけで複雑さが増す（SSR で `ref` が無く、初回描画で composer が出ない・位置がずれるフラッシュが
+  起きる）。
+
+### 3. 実装（受け入れ条件 3）
+
+- `~/components/ConsoleComposer.tsx`（新規。旧 `ConsoleInput` の中身）: `variant: "mobile" | "desktop"`
+  を受け、CSS クラスだけで表示を切り替える（`fixed inset-x-0 bottom-16 ... lg:hidden` / `hidden ...
+  lg:block`。既存の `Sidebar`/`MobileTopBar`、`NewConversationMenu` と同じ「両方レンダーし CSS で出し
+  分ける」慣習）。`text`/`mention` はインスタンスごとのローカル state、`replyTarget`/org/projects/
+  streaming は Context 経由。送信先の `action` は `useLocation().pathname` を明示で渡す（モバイル版は
+  ルートの外に居るため、既定の「最寄りのルートへ送る」に頼れない）。
+- `~/root.tsx`: `ConsoleComposerProvider` で認証済みレイアウトを包み、`<ConsoleComposer variant="mobile"
+  key={pathname} />` を `<Outlet/>` の外（`MobileTabBar` の直後）でレンダーする。`isConsoleComposerPathname
+  (pathname)` が false の画面では何もレンダーしない（composer 自身も同じ判定で早期 return する二重の
+  ガード）。`key={pathname}` で `/` ↔ `/org/:id` の遷移時に強制的に作り直し、入力中のテキストを破棄する
+  （`?scope=` だけの変化では pathname が変わらないので下書きは保たれる。受け入れ条件どおり）。
+- `~/components/Console.tsx`: `ConsoleInput` を削除し、`useRegisterConsoleComposer` で登録するだけに
+  なった。spacer（`console-input-spacer`）は残す（Console 自身の内容が固定 composer の下に隠れないよう
+  にするのはこの画面の責務のまま）。高さは Context の `mobileHeight`（composer 自身の `ResizeObserver`）
+  から読む。
+- キーボード表示・`env(safe-area-inset-bottom)` の扱い（`~/root.tsx` の `MobileTabBar` の
+  `paddingBottom: "env(safe-area-inset-bottom)"`、composer 自身は `bottom-16` でその上に乗る）は変更
+  していない（既存の挙動を維持）。
+
+### 4. 副作用として見つけた潜在バグ（`fixed-overlay`）
+
+構造修正の直後、`pnpm mobile-audit` が `home`/`org-node` の light/dark で **4 件**の `fixed-overlay`
+違反（`~/root.tsx` の footer の `schema_version` dd が、composer の下に隠れる）を新たに報告した。
+デバッグ用の使い捨てスクリプト（コミットには含めていない）で調べたところ、**Phase 91 以前の元のコード
+でも同じ条件（footer の dd 底 = 706px、composer 頂点 = 613px。706 > 613 で本来は重なっている）が実際には
+成立していた**が、`.animate-fade-in` の containing-block バグにより `load` 直後は composer が
+ビューポート基準で測れておらず（`fixed-overlay` の判定が「ビューポート下半分にある `position: fixed`
+要素」だけを bottomBar 候補にするため、ずれた composer〈`top` がビューポート上半分寄りになる〉が対象から
+外れ、タブバーだけを基準に「重ならない」と誤って合格していた）、**Phase 91 の監査ではこの潜在バグを
+検出できていなかった**（今回の構造修正でこの見せかけの合格が消え、本当の状態が見えるようになった）。
+
+直し方: `~/root.tsx` に `FooterComposerSpacer`（`data-testid="footer-composer-spacer"`、`lg:hidden`）を
+新設し、footer の直後（同じ `flex flex-col` 内）に composer の実測高さぶんの空白を足した（`console-input-
+spacer` と同じ実測値〈Context の `mobileHeight`〉を使う。まだ測れていなければ既定 208px
+〈`DEFAULT_MOBILE_COMPOSER_HEIGHT_PX`、`~/lib/console-composer.ts`。`console-input-spacer` の既定
+`h-52` と同じ値〉にフォールバック）。修正後、`pnpm mobile-audit --routes "home,org-node"` は
+`{"ok":true,"total":0}` に戻った。
+
+**`app/app.css` の `.animate-fade-in`/`@keyframes fade-in`（`transform`→`translate`、`fill-mode: both`→
+`backwards`。Phase 91）は戻していない**（受け入れ条件 4）: モバイル版 composer は `<Outlet/>` の外に出た
+ので当該バグの対象では無くなったが、デスクトップ版 composer や他画面の `position: fixed`/`absolute` な
+要素（モーダル・シート等）が今後 `<Outlet/>` 配下に増える可能性を考えると、`translate`/`backwards` に
+しておくこと自体に見た目のコストは無い（Phase 91 で確認済み）。戻す積極的な理由が無いので現状維持とした。
+
+### 5. 待ち無しの追加測定（受け入れ条件 5）
+
+`checkViewportUnits`（Phase 91 で「`.animate-fade-in` の 0.25 秒が収まるのを待ってから」呼ぶよう切り出した
+検査）と**同じ関数**を、`load` 直後・他のどの検査より前に呼ぶ追加測定（`viewport-units-immediate`）を
+`gui/scripts/mobile-audit.mjs` に新設した。構造的に直った以上、待たなくても 0 件になるはずだと確認する
+ためのもの。実際に確認した（デバッグ用の使い捨てスクリプトで `/`・`/org/cos` を待ち無しで 5 回ずつ開き、
+すべて 0 件）。既存の「400ms 待ってから」の版（`checkViewportUnitsSettled`）は**削らずに両方残した**
+（構造的に直った今は理屈の上では待ちは不要だが、将来また似た祖先アニメーションを足したときに「再生中
+だけ」壊れる再発を見逃さないための二重の網。対象画面が Console の 2 route だけなので実行時間への影響は
+軽い。実測で Phase 91 の 89.2 秒から 89.9〜90.0 秒、120 秒予算内）。
+
+### 6. テスト（受け入れ条件 6）
+
+このリポジトリには DOM を描画する unit テストが無い（G10-U1。`vitest.config.ts` は `environment: "node"`
+で jsdom 無し）ため、Phase 91 までと同じ慣例に従い、判断ロジックを純粋関数に切り出してテストした
+（DOM レンダリングのテストは追加していない。理由は上記）。`test/unit/console-composer.test.ts`（新規）:
+
+- `isConsoleComposerPathname`: `/`・`/org/:id`（1 セグメント）で true、`/org` 自体・`/org/:id` の下の
+  階層・Console 以外の画面（`/board`・`/projects`・`/tasks/:id`・`/inbox`・`/help` 等）で false
+  （受け入れ条件「composer が home と org-node で表示され、それ以外のルートでは表示されない」）。
+- `consoleComposerScopeForLocation`: `/` は既定で `null`（`scope` を送らない、Phase 91 までと同じ挙動）、
+  `?scope=project:<id>`/`node:<id>` があればそれ、`/org/:id` は `node:<id>`（URL エンコードされた id も
+  デコードする）、composer の対象外の画面では `null`。
+- `buildInstructBody`（既存の `~/lib/console.ts`）と組み合わせ、「`/org/coding-poc` で打つと
+  `node:coding-poc` 宛てになる」「返信先があれば画面の scope より優先される」ことを確認した
+  （受け入れ条件「送信が正しい node に飛ぶ」）。
+
+既存の `test/unit/console.test.ts`・`test/unit/home.route.test.ts` 等は無変更（`~/lib/console.ts` 自体は
+触っていない）。
+
+### 7. ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| install | `pnpm install --frozen-lockfile` | exit 0、`Already up to date`（新規依存無し） |
+| lint | `pnpm lint` | exit 0。`Checked 253 files … No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（`react-router typegen && tsc -b`、出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 68 passed (68) / Tests 1030 passed (1030)**（Phase G42 の
+  1019 から `test/unit/console-composer.test.ts` 新設分 +11） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は
+  変化なし |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ |
+| mobile-audit（1 回目） | `MOBILE_AUDIT_SKIP_BUILD=1 pnpm mobile-audit` | exit 0、
+  **`{"ok":true,"total":0,"by_rule":{},"by_scheme":{"light":0,"dark":0}}`**、`routes=26 schemes=2
+  violations=0`。実測 **89.92 秒** |
+| mobile-audit（2 回目） | 同上 | exit 0、同じ `{"ok":true,"total":0}`。実測 **89.91 秒** |
+| mobile-audit（fixed-overlay バグの再現、参考） | `--routes "home,org-node"` を `FooterComposerSpacer`
+  実装前に実行 | exit 1、**`{"total":4,"by_rule":{"fixed-overlay":4}}`**（詳細は上記「4.」） |
+| e2e:mock | `E2E_SKIP_BUILD=1 pnpm e2e:mock` | **`{"ok":true,"mode":"mock","failures":[]}`** |
+
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` は
+このフェーズのスコープ外（実行していない。Phase 80/82/83/84/86/87/88/G39/G40/G41/G42 と同じ扱い）。
+
+### 変更したファイル
+
+- `docs/adr/0057-console-composer-layout-level.md`（新規、GUI 側だが celeris 全体の ADR 番号列に置いた。
+  理由は本節冒頭）
+- `gui/app/components/ConsoleComposer.tsx`（新規。旧 `Console.tsx::ConsoleInput` の中身、`variant` 対応）
+- `gui/app/components/ConsoleComposerContext.tsx`（新規。登録 API と共有状態）
+- `gui/app/lib/console-composer.ts`（新規。純粋関数: `isConsoleComposerPathname`・
+  `consoleComposerScopeForLocation`・`DEFAULT_MOBILE_COMPOSER_HEIGHT_PX`）
+- `gui/app/components/Console.tsx`（`ConsoleInput` を削除、`useRegisterConsoleComposer` で登録するだけに）
+- `gui/app/root.tsx`（`ConsoleComposerProvider` で包み、`ConsoleComposer variant="mobile"` と
+  `FooterComposerSpacer` を追加）
+- `gui/scripts/mobile-audit.mjs`（`viewport-units-immediate` の追加測定を新設）
+- `gui/test/unit/console-composer.test.ts`（新規）
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。ヘッドレス Chromium は `env(safe-area-inset-bottom)` を実機のように 0 より
+  大きい値へ解決しないため、`viewport-units`/`viewport-units-immediate` 検査は「重ならない・ビューポート
+  内」という構造の健全性までしか確かめられない。実機（ホームインジケータの帯がある機種）で Console
+  画面を開き、入力欄が帯の上に正しく来ることを目視確認する必要がある。
+- 本番 = Phase 65〜91。実装中: Phase G43（このワークトリー。GUI のみ）。
+
+### 提案
+
+なし（P-G42-1 は本 Phase で実施済み）。
