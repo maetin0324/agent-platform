@@ -14411,3 +14411,20 @@ Remote Desktop Commander（RDC）経由で home-dev のシェルを叩けるよ�
 - なし（今回の指示の範囲で閉じた。RDC の専用ユーザー・sudoers・バイナリ配置の具体的な運用手順は
   親が決めることになっている — `scripts/rdc/celeris-chat` の先頭コメントと `docs/mcp.md` §8.1 に
   注意点だけ残した）。
+
+### Phase 101 の本番反映（2026-09-22、ライブ切替）と実機確認（ChatGPT / RDC 経路の celeris 側）
+
+- merge: `worktree-agent-adea5b7daaf9715da` → main `c2f5a10`（衝突なし）。運用スクリプト `scripts/rdc/setup-chatgpt-rdc.sh`（人が sudo で実行する。専用ユーザー chatgpt-rdc を作り、celerisctl のコピー・`celeris-chat`・トークンを配る。冪等）を `72936a6` で追加。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1834 / failed 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、`pnpm gen:types` 差分ゼロ、`pnpm typecheck` / `pnpm lint` exit 0、`pnpm test` 68 files / 1052 passed。push 済み。
+- 設定変更（人の判断 2026-09-22「18201 は外してもいい」）: `~/.config/celeris/config.toml` から `[[mcp.listeners]] 127.0.0.1:18201 auth="none" client="chatgpt"` を削除（バックアップ `config.toml.bak-20260922j`）。RDC の専用ユーザーが同居するホストでトークン無しの口を残さないため（ADR-0056 Phase 101 追記、docs/mcp.md §8）。
+- `release.sh main` → exit 0、`sha12=72936a6c37ed schema_version=25`、`changes.json: base=2d73ee6b1b1b commits=5 files=18 sensitive=0`。ゲート 10 段すべて exit 0（cargo-test 121.3s、cargo-clippy 51.8s、pnpm-mobile-audit 89.9s、pnpm-e2e-mock 9.5s）。
+- `verify.sh 72936a6c37ed` → exit 0、check 1〜4, 4b, 5（N-1 = 2d73ee6b1b1b）, 6（smoke 5.14s）すべて true、`ok=true live_ok=true`。
+- `promote.sh 72936a6c37ed` → mode=live、DB バックアップ 14M、新 celeris が 2 秒で active、GUI 切替 1 秒、`current -> releases/72936a6c37ed`。`GET /health` release=72936a6c37ed role=active schema_version=25。旧デーモンが抜けた後、`POST 127.0.0.1:18201/mcp` は connection refused、`18200` は 400（token 無しの素の POST）で応答 → 18201 は閉じた。
+- MCP client 発行: `celerisctl mcp client add chatgpt-rdc --scope knowledge:read,knowledge:propose,tasks:read,tasks:interact,console:instruct` → exit 0。トークンは表示せず `~/.config/celeris/secrets/mcp-token-chatgpt-rdc`（1 行、600）に保存。`mcp client ls` に 3 件（chatgpt / claude-code / chatgpt-rdc）。
+- **実機確認（Phase 101、rmaeda から `celerisctl mcp call` で。専用ユーザー側は人の sudo 待ち）**:
+  - `mcp call --list`（chatgpt-rdc のトークン）→ 12 ツール。scope どおり `task_comment` / `task_answer` は出るが `task_retry` / `task_cancel` / `task_approve` / `task_reject` は出ない。
+  - `tasks_list {"limit":3}` → 3 件。`task_comment {"id":"01M34MB6XEB3F68568A7A1FS9S", …}` → `comment.author = "mcp:chatgpt-rdc"`、`effect = "terminal"`（done のタスクへの記録）。DB の `task_comments` にも author `mcp:chatgpt-rdc` で残る。
+  - `task_retry` → `MCP エラー -32601: unknown tool "task_retry"`（scope 外のツールは存在しないものとして拒否。設計どおり）。
+  - `console_instruct`（「実行中のタスクは何件？タスクは作らず一言で」）→ `task_id` を返し、`console_reply {"wait_secs":60}` → 13 秒で `state: done`、返事「この対話 run には実行中タスク一覧を見る道具が無く、件数は答えられません。GUI のタスク画面で確認をお願いします」（タスクは作らず。CoS がタスク件数を自分で数えられない点は別件の観察）。
+  - 監査: `GET /mcp/calls?client=chatgpt-rdc` → 4 件（tasks_list / task_comment / console_instruct / console_reply、すべて ok=true、console_reply latency 13010ms）。
+- 残り（人が行う。auto mode の分類器が RDC 関連のシェル操作を「外部からの入口」として拒否したため）: `bash scripts/rdc/setup-chatgpt-rdc.sh ~/.config/celeris/secrets/mcp-token-chatgpt-rdc` → `sudo -iu chatgpt-rdc -- celeris-chat --list` → tmux 内で `npx @wonderwhy-er/desktop-commander@latest remote`（device verification）→ ChatGPT の Developer mode で `https://mcp.desktopcommander.app/mcp` を connector に。完了後、`GET /mcp/calls?client=chatgpt-rdc` に ChatGPT 発の呼び出しが並ぶことを確認して追記する。
+- 判断待ち: MCP client `chatgpt`（旧 18201 用、scope に org:write / skills:write）を revoke するか。
