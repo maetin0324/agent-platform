@@ -78,6 +78,19 @@ pub fn approve(
     note: Option<String>,
     expected: Option<Status>,
 ) -> Result<TransitionResult, OpsError> {
+    approve_as(store, id, "human", note, expected)
+}
+
+/// ADR-0056 Phase 101: `approve` と同じ判断・遷移だが、`Event::ApprovalDecided.by` を渡せる。
+/// MCP の `task_approve` は `mcp:<client_id>` を渡す。`approve`（GUI/HTTP の `POST
+/// /tasks/{id}/approve`）は `"human"` のまま（挙動を変えない）。
+pub fn approve_as(
+    store: &dyn TaskStore,
+    id: TaskId,
+    by: &str,
+    note: Option<String>,
+    expected: Option<Status>,
+) -> Result<TransitionResult, OpsError> {
     let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
     check_expected(task.status, expected)?;
 
@@ -87,7 +100,7 @@ pub fn approve(
         (
             Trigger::Approve,
             Some(Event::ApprovalDecided {
-                by: "human".to_string(),
+                by: by.to_string(),
                 approved: true,
                 note,
             }),
@@ -121,6 +134,19 @@ pub fn reject(
     note: Option<String>,
     expected: Option<Status>,
 ) -> Result<TransitionResult, OpsError> {
+    reject_as(store, id, "human", note, expected)
+}
+
+/// ADR-0056 Phase 101: `reject` と同じ判断・遷移だが、`Event::ApprovalDecided.by` を渡せる。
+/// MCP の `task_reject` は `mcp:<client_id>` を渡す。`reject`（GUI/HTTP の `POST
+/// /tasks/{id}/reject`）は `"human"` のまま（挙動を変えない）。
+pub fn reject_as(
+    store: &dyn TaskStore,
+    id: TaskId,
+    by: &str,
+    note: Option<String>,
+    expected: Option<Status>,
+) -> Result<TransitionResult, OpsError> {
     let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
     check_expected(task.status, expected)?;
 
@@ -131,7 +157,7 @@ pub fn reject(
             id,
             Trigger::Reject,
             Some(Event::ApprovalDecided {
-                by: "human".to_string(),
+                by: by.to_string(),
                 approved: false,
                 note,
             }),

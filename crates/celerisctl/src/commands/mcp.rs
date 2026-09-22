@@ -25,6 +25,10 @@ pub enum McpCommand {
     },
     /// stdio ↔ 手元の HTTP（`POST <base-url>/mcp`）の橋。**DB は開かない**。
     Stdio(StdioArgs),
+    /// ADR-0056 Phase 101: `initialize` → `tools/call`（または `--list` で `tools/list`）を 1 回
+    /// だけ行う。**DB は開かない**（`stdio` と同じ HTTP クライアントを再利用する）。
+    /// `scripts/rdc/celeris-chat` から呼ばれる想定（RDC 経由の ChatGPT 向け）。
+    Call(CallArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -64,6 +68,38 @@ pub struct StdioArgs {
     /// `auth = "none"` の口を橋渡しするだけなら、どちらも省略してよい。
     #[arg(long = "token-file")]
     pub token_file: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub struct CallArgs {
+    /// 呼ぶ道具の名前（`tools_list` 等。`--list` のときは省略できる）。
+    pub tool: Option<String>,
+    /// 道具への引数（JSON オブジェクトの文字列）。省略時は `{}`。
+    pub json_args: Option<String>,
+    /// `celeris` の MCP の口（既定は `[mcp] listen` の既定と同じ）。
+    #[arg(long = "base-url", default_value = "http://127.0.0.1:18200")]
+    pub base_url: String,
+    /// トークンの入ったファイル（1 行目を使う）。省略時は環境変数 `CELERIS_MCP_TOKEN`。
+    #[arg(long = "token-file")]
+    pub token_file: Option<PathBuf>,
+    /// `tool`/`json_args` の代わりに `tools/list` の名前と description を出す。
+    #[arg(long)]
+    pub list: bool,
+}
+
+/// `StdioArgs`/`CallArgs` 共通: `--token-file` の 1 行目、省略時は `CELERIS_MCP_TOKEN`。
+fn resolve_token(token_file: Option<&PathBuf>) -> Result<Option<String>, CliError> {
+    match token_file {
+        Some(path) => {
+            let mut raw = String::new();
+            std::fs::File::open(path)
+                .map_err(|e| CliError::msg(format!("{}: {e}", path.display())))?
+                .read_to_string(&mut raw)
+                .map_err(|e| CliError::msg(format!("{}: {e}", path.display())))?;
+            Ok(Some(raw.lines().next().unwrap_or_default().trim().to_string()))
+        }
+        None => Ok(std::env::var("CELERIS_MCP_TOKEN").ok()),
+    }
 }
 
 /// `mcp client …`（DB を直接開く。呼び出し側 = `main` がその前提で store を渡す）。
@@ -171,21 +207,43 @@ fn run_revoke(store: &SqliteStore, args: ClientRevokeArgs) -> Result<ExitCode, C
 
 /// `mcp stdio`（DB は開かない）。
 pub fn run_stdio(args: StdioArgs) -> Result<ExitCode, CliError> {
-    let token = match args.token_file {
-        Some(path) => {
-            let mut raw = String::new();
-            std::fs::File::open(&path)
-                .map_err(|e| CliError::msg(format!("{}: {e}", path.display())))?
-                .read_to_string(&mut raw)
-                .map_err(|e| CliError::msg(format!("{}: {e}", path.display())))?;
-            Some(raw.lines().next().unwrap_or_default().trim().to_string())
-        }
-        None => std::env::var("CELERIS_MCP_TOKEN").ok(),
-    };
+    let token = resolve_token(args.token_file.as_ref())?;
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     celeris_mcp::stdio::run(&args.base_url, token.as_deref(), stdin.lock(), stdout.lock())
         .map_err(CliError::msg)?;
     let _ = std::io::stdout().flush();
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `mcp call`（DB は開かない。ADR-0056 Phase 101）。引数不正は exit code 2、
+/// サーバー側のエラー（JSON-RPC error / HTTP 401 等 / 接続不可）は 1（`CliError` 経由で
+/// `main` が `eprintln!("error: {e}")` してから `ExitCode::FAILURE` = 1 を返す）。
+pub fn run_call(args: CallArgs) -> Result<ExitCode, CliError> {
+    let token = resolve_token(args.token_file.as_ref())?;
+
+    if args.list {
+        let tools = celeris_mcp::call::list_tools(&args.base_url, token.as_deref()).map_err(|e| CliError::msg(e.to_string()))?;
+        for t in tools {
+            outln!("{}\t{}", t.name, t.description);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let Some(tool) = args.tool else {
+        eprintln!("error: TOOL is required (or pass --list)");
+        return Ok(ExitCode::from(2));
+    };
+    let raw_args = args.json_args.as_deref().unwrap_or("{}");
+    let arguments: serde_json::Value = match serde_json::from_str(raw_args) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("error: JSON_ARGS is not valid JSON: {e}");
+            return Ok(ExitCode::from(2));
+        }
+    };
+    let out = celeris_mcp::call::call_tool(&args.base_url, token.as_deref(), &tool, arguments)
+        .map_err(|e| CliError::msg(e.to_string()))?;
+    outln!("{out}");
     Ok(ExitCode::SUCCESS)
 }

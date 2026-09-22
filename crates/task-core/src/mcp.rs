@@ -21,6 +21,12 @@ pub enum McpScope {
     KnowledgeRead,
     KnowledgePropose,
     TasksRead,
+    /// Phase 101: `task_comment` / `task_answer`（`POST /tasks/{id}/comments` / `/answer` と同じ）。
+    TasksInteract,
+    /// Phase 101: `task_retry` / `task_cancel`（`POST /tasks/{id}/retry` / `/cancel` と同じ）。
+    TasksControl,
+    /// Phase 101: `task_approve` / `task_reject`（`POST /tasks/{id}/approve` / `/reject` と同じ）。
+    TasksDecide,
     ConsoleInstruct,
     OrgRead,
     OrgWrite,
@@ -34,6 +40,9 @@ impl McpScope {
             McpScope::KnowledgeRead => "knowledge:read",
             McpScope::KnowledgePropose => "knowledge:propose",
             McpScope::TasksRead => "tasks:read",
+            McpScope::TasksInteract => "tasks:interact",
+            McpScope::TasksControl => "tasks:control",
+            McpScope::TasksDecide => "tasks:decide",
             McpScope::ConsoleInstruct => "console:instruct",
             McpScope::OrgRead => "org:read",
             McpScope::OrgWrite => "org:write",
@@ -47,6 +56,9 @@ impl McpScope {
             "knowledge:read" => Some(McpScope::KnowledgeRead),
             "knowledge:propose" => Some(McpScope::KnowledgePropose),
             "tasks:read" => Some(McpScope::TasksRead),
+            "tasks:interact" => Some(McpScope::TasksInteract),
+            "tasks:control" => Some(McpScope::TasksControl),
+            "tasks:decide" => Some(McpScope::TasksDecide),
             "console:instruct" => Some(McpScope::ConsoleInstruct),
             "org:read" => Some(McpScope::OrgRead),
             "org:write" => Some(McpScope::OrgWrite),
@@ -89,7 +101,8 @@ impl schemars::JsonSchema for McpScope {
         schemars::json_schema!({
             "type": "string",
             "enum": [
-                "knowledge:read", "knowledge:propose", "tasks:read", "console:instruct",
+                "knowledge:read", "knowledge:propose", "tasks:read",
+                "tasks:interact", "tasks:control", "tasks:decide", "console:instruct",
                 "org:read", "org:write", "skills:read", "skills:write",
             ],
         })
@@ -372,6 +385,9 @@ mod tests {
             McpScope::KnowledgeRead,
             McpScope::KnowledgePropose,
             McpScope::TasksRead,
+            McpScope::TasksInteract,
+            McpScope::TasksControl,
+            McpScope::TasksDecide,
             McpScope::ConsoleInstruct,
             McpScope::OrgRead,
             McpScope::OrgWrite,

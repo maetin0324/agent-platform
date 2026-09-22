@@ -158,10 +158,18 @@ fn main() -> ExitCode {
         };
     }
     // ADR-0056 D1: `mcp stdio` は DB を開かない（手元の HTTP に橋を架けるだけ）。
+    // Phase 101: `mcp call` も同じ（DB は開かない）。
     // `mcp client …` は `knowledge rerun` と同じ管理系（DB を直接開く）。
     if let Command::Mcp { command } = cli.command {
         return match command {
             McpCommand::Stdio(args) => match mcp::run_stdio(args) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            },
+            McpCommand::Call(args) => match mcp::run_call(args) {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!("error: {e}");
