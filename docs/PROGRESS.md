@@ -14083,3 +14083,13 @@ task-core` で再生成）。
 ### 提案
 
 - なし（今回の指示の範囲で閉じた）。
+
+### Phase 99 の本番反映（2026-09-22、停止→起動。schema 24 → 25）と実機確認
+
+- merge: `worktree-agent-a9a43f4f57f248aba` → main `8e47cbc`（衝突なし）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1823 / failed 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、`pnpm gen:types` 差分ゼロ（Phase 99 が types.ts を更新済み）、`pnpm typecheck` / `pnpm lint` exit 0、`pnpm test` 68 files / 1036 passed。push 済み。
+- `release.sh main` → exit 0、`sha12=8e47cbc3e883 schema_version=25`、`changes.json: base=495f6455c440 commits=3 files=45 sensitive=2`（`config/celeris.clusters.example.toml`、`migrations/0025_cluster_settings.sql`。どちらも意図した変更）。ゲート 10 段すべて exit 0（cargo-test 124.4s、cargo-build 45.7s、pnpm-mobile-audit 89.6s、pnpm-e2e-mock 9.3s）。
+- `verify.sh 8e47cbc3e883` → exit 0、check 1（migrate 24→25）〜4, 4b, 6 true、**check 5（N-1）false**: 旧 495f6455c440 は `db schema version 25 is newer than the 24 this binary supports`（`SchemaTooNew`、設計どおり）→ `ok=true live_ok=false`。
+- `promote.sh 8e47cbc3e883` → mode=**stop-start**（in-flight 0、1 分 load 0.93 を確認してから）。DB バックアップ 14M、停止→起動 6 秒で完了、`current -> releases/8e47cbc3e883`。`GET /health` release=8e47cbc3e883 role=active schema_version=25、GUI `/healthz` 同 release。副作用: pegasus の ssh master（デーモンの子プロセス）が停止で切れ、`connected=false` に戻った（TOTP が要るので人が GUI から再接続）。
+- 作業ディレクトリの登録（人の指示: pegasus / sirius の実体は `/work/NBB/rmaeda`、コードは `/work/NBB/rmaeda/workspace`）: `PUT /clusters/pegasus/settings` と `PUT /clusters/sirius/settings` に `{"work_dir":"/work/NBB/rmaeda"}` → 200。`GET /clusters` で両方 `work_dir=/work/NBB/rmaeda work_dir_source=settings`、fern03 は null。あわせて `~/.config/celeris/config.toml` の両クラスタに `work_dir = "/work/NBB/rmaeda"` を追記（バックアップ `config.toml.bak-20260922i`、tomllib で構文確認。celeris は設定の再読み込みを持たないので次回起動から。**注意**: Phase 99 より前のリリースへ戻すときはこの行を外す必要がある。`deny_unknown_fields`）。
+- **実機確認（CoS）**: `POST /console/instruct` で同じ依頼（対話タスク 01M34MACCEZ032A6YF8R4BMFM1、claude-code、継続セッション）。35 秒で done。返事:「前回の委譲は git worktree 作成に失敗した（path に ~ を指定したため）。今回はコマンド実行のみの仕事として mode:shared で再委譲した。pegasus クラスタの作業ディレクトリが未登録のため path は省略した — クラスタ画面で登録してもらえると次回から安定する。」`create_task` 1 件 → タスク 01M34MB6XEB3F68568A7A1FS9S（ready、cluster-hpc、`workspace = {"kind":"remote","cluster":"pegasus","path":"","mode":"shared"}`）。`path` 省略は実効 work_dir（DB: /work/NBB/rmaeda）で解決されるので、pegasus 再接続後にそこで worktree 無しに実行される見込み（親が観測して追記）。
+- **見つかった穴（Phase 99b で修正中）**: CoS は「作業ディレクトリが未登録」と言ったが実際は登録済み。run の `request.json` に `context.clusters` が無かった。`dispatcher.rs` の `clusters` が `is_cos_conversation && !continuing` で、継続セッションでは空になるため（`recent_work` などは継続中も渡している）。継続中も渡すよう修正する。
