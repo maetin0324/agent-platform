@@ -42,3 +42,14 @@
 - Phase 69: `mobile-audit.mjs` と `pnpm mobile-audit`、初回レポート、横はみ出しが 0 になるまで。状態バッジの 1 語化。
 - 以後のラウンド: 違反 0 を維持しつつ D2 の規律で画面を磨く（Console のチャット吹き出し、ボードのカード、タスク画面のタブ、案件画面）。
 - 実機: 人がスマホで見て気になった画面を Console から伝えれば、その画面が次のラウンドの先頭になる。
+
+## Phase 93 追記（2026-09-22）
+
+P-G38-3（Phase 86 の提案。「`/inbox` は D1 の監査対象に無い」）への回答: **`/inbox` を D1 の監査対象に含める**。
+理由: `/inbox` は承認・質問・下書き（draft）の受け入れ・注意事項への対応というスマホからの主操作が集まる
+裏方の画面で、ADR-0055 の目的（Nothing Phone で日常操作が完結する）の中心にある。この決定自体は Phase 87
+（`gui/docs/PROGRESS.md` Phase G39）で実装済み（`scripts/lib/celeris-fixture.mjs::buildRoutes` に
+`{ route: "inbox", path: "/inbox" }` を追加、25→26 route）で、Phase 88（G40）で fixture の `draft-group`/
+`attention-item`/`approval-parent-title`/`question-approval-link` も監査対象に加わっている。Phase 93 は
+この決定を ADR に明文化する（本文は書き換えない）とともに、`checkFocusOrder` の `focusableCount` を
+`isNotVisible` に揃える改善（P-G40-1）を実装した。監査対象は引き続き 26 route（× light/dark）。

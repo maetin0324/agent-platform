@@ -6612,3 +6612,105 @@ spacer` と同じ実測値〈Context の `mobileHeight`〉を使う。まだ測�
 ### 提案
 
 なし（P-G42-1 は本 Phase で実施済み）。
+
+## Phase G44 — `/inbox` を mobile-audit の対象に（監査精度の仕上げ。ADR-0055 ラウンド 17、P-G38-2/P-G38-3/P-G39-1/P-G40-1、celeris Phase 93。2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。指示書（celeris Phase 93）は「`/inbox` を
+mobile-audit の対象に加え、25→27 route にする」という前提だったが、着手前に現状を確認したところ、
+**この指示の主要部分は既に実装・本番反映済み**だった:
+
+- P-G38-3（`/inbox` を D1 の監査対象に）と、その際に見つけた `Inbox` 型 fixture のバグ修正・
+  `tap-target`/`font-size` 違反の修正は **Phase 87（G39）** で実装済み（25→26 route。指示書が言う
+  「27」ではなく「26」が正しい現在値。celeris Phase 93 の指示書はこの経緯を把握しないまま書かれた
+  ものと判断した）。
+- P-G38-2（`cssPathRef` の `node.id` → `node.getAttribute("id")`）も **Phase 87（G39）** で実装済み。
+- P-G39-1（`/inbox` の `draft-group`/`attention-item`/`approval-parent-title`/
+  `question-approval-link` を fixture に足し、それが晒すタップ領域不足を先回りで直す）は
+  **Phase 88（G40）** で実装済み。
+- `/inbox` のカードは `app/routes/inbox.tsx` の `ApprovalRow`/`QuestionRow`/`DraftGroupRow`/
+  `AttentionRow` が既に `rounded-lg border border-border bg-surface p-4 text-sm shadow-xs`
+  （`app/routes/board.tsx::BoardCard` の `li` と同じクラス）で統一済み。`~/components/ui/card.tsx`
+  の `Card`/`CardBody`/`CardHeader` は `board.tsx` 自身もカードの一覧（`<li>`）には使っておらず
+  セクション見出し（`<Card>`）専用なので、`BoardCard` と同じ「素の `<li>` + 共通クラス」の流儀に
+  揃っている現状が既存パターンと一致していると判断し、置き換えはしなかった（見た目・DOM 構造を
+  変える理由が無いのに変えると回帰リスクだけが増える）。
+
+上記はコード（`git log --oneline -- gui/scripts/lib/celeris-fixture.mjs gui/app/routes/inbox.tsx`）と
+`gui/docs/PROGRESS.md` Phase G39/G40 の記述で確認した。二重実装（同じ変更をもう一度加えて差分を
+汚す）を避け、CLAUDE.md「今回の Phase だけをやる」に従って、**未実施のまま残っていた 1 点だけ**を
+このフェーズで実施した。
+
+### 1. P-G40-1: `checkFocusOrder` の `focusableCount` を `isNotVisible` に揃える
+
+`scripts/mobile-audit.mjs::checkFocusOrder` 内の `focusableCount` 計算は、要素自身の
+`getComputedStyle().display`/`visibility` だけを見ており、`runChecks` の他の検査
+（`checkOverflow`・`checkPrimaryActionTap` 等）が使う `isNotVisible`（祖先の `display:none`/
+`visibility:hidden`・閉じた `<details>` の中身まで辿る）とは判定基準が揃っていなかった（Phase 88/G40
+の未解決事項・提案 P-G40-1 として記録済み）。`focusableCount` を、`addInitScript` で注入済みの
+`window.__isNotVisible`（`checkPrimaryActionTap` と同じ使い方）に揃えて数え直すよう修正した:
+
+```js
+const els = Array.from(document.querySelectorAll(selector)).filter((el) => {
+  if (window.__isNotVisible(el)) return false;
+  const rect = el.getBoundingClientRect();
+  return !(rect.width === 0 && rect.height === 0);
+});
+```
+
+（従来は `style.display === "none" || style.visibility === "hidden"` を要素自身にだけ適用していた。）
+
+**回帰検査**: 修正前後で `pnpm mobile-audit` を通算 2 回実行し、いずれも 26 route × light/dark で
+`violations=0` のまま変化しないことを確認した（`focusableCount` は予算計算にしか使わず、予算には
+Phase 88 で足した +12 の余裕があるため、より正確な〈小さい〉数え方に変えても `focus-order` の
+検出結果自体は変わらない）。増減が無かったので「本物か誤検知か」の切り分けは不要だった。
+
+### テスト（新規・変更）
+
+新しいユニットテストは足していない（Phase G39/G40 と同じ理由: `mobile-audit.mjs` は Node 側と
+`page.evaluate` へ注入するブラウザ側の 2 実行環境を 1 ファイルに混ぜており、`focusableCount` の
+フィルタは DOM 依存の無名クロージャなので、jsdom 相当の新規依存を足さない限り素の vitest からは
+検査できない。`pnpm mobile-audit` の実行そのものを回帰検査にした）。`docs/adr/0055-mobile-ux.md` へ
+「## Phase 93 追記」を追加した（本文は書き換えていない）。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| install | `pnpm install --frozen-lockfile` | exit 0（依存は変えていない。既存ロックのまま解決） |
+| lint | `pnpm lint`（`biome check .`） | exit 0。`Checked 253 files … No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（`react-router typegen && tsc -b`、出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 68 passed (68) / Tests 1030 passed (1030)**（Phase G43 と同数。新規テストは追加していない） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件のみ、変化なし |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ（celeris の API 契約は変えていない） |
+| mobile-audit（1 回目、`focusableCount` 修正後） | `pnpm mobile-audit` | exit 0。**`{"ok":true,"total":0,"by_rule":{},"by_scheme":{"light":0,"dark":0},"git_sha":"de0402e4f414"}`**。`routes=26 schemes=2 violations=0 perf_worst=project-detail 553.6KB`。実測 **93.32 秒** |
+| mobile-audit（2 回目） | `pnpm mobile-audit` | exit 0。同じ `{"ok":true,"total":0}`。実測 **93.22 秒**（いずれも単発 120 秒予算内。Phase G42/G43 の約 90 秒からわずかに増えたのは計測ノイズの範囲内） |
+| e2e:mock | `pnpm e2e:mock` | **`{"ok":true,"mode":"mock","failures":[]}`**（`inbox` の `approvals-section`/`questions-section`/`approval-item`/`question-item` 検査を含む。Phase G39 から既存） |
+
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` は
+このフェーズのスコープ外（実行していない。Phase 80/82/83/84/86/87/88/G39/G40/G41/G42/G43 と同じ扱い）。
+
+### 変更したファイル
+
+- `docs/adr/0055-mobile-ux.md`（末尾に `## Phase 93 追記` を追加。本文は書き換えていない）
+- `gui/scripts/mobile-audit.mjs`（`checkFocusOrder` の `focusableCount` を `window.__isNotVisible` に揃えた。P-G40-1）
+- `docs/PROGRESS.md`（`## Phase 93` を追加）
+- `gui/docs/PROGRESS.md`（本節）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34。このサンドボックスに本物の celeris・本物のブラウザ・外向きネットワークが無い）。
+- **指示書と現状の食い違い**: celeris Phase 93 の指示書は「`/inbox` が未監査（25→27 route）」という
+  前提だったが、実際には Phase 87/88（G39/G40）で既に監査対象化・fixture 拡張・タップ領域修正まで
+  完了しており、現在も 26 route のまま安定している。今回はこの食い違いを検出した上で、指示書が挙げた
+  4 件の提案のうち未実施だった P-G40-1 だけを実施した。celeris 側の Phase 台帳と GUI 側の
+  `gui/docs/PROGRESS.md` の対応関係（どの celeris Phase 番号がどの G-Phase に当たるか）を Phase を
+  起こす前に突き合わせる仕組みが無いと、今回のような重複指示が今後も起きうる（次ラウンドまたは
+  運用側の課題として記録）。
+- Phase G40 の未解決事項（Console 自体の実機での SSE 競合が未確認など）・P-G39-2（`cssPathRef` 等の
+  単体テスト化の是非）は変化なし。
+
+### 提案
+
+- **P-G44-1**: celeris 側で Phase を起こす前に `gui/docs/PROGRESS.md` の最新 G-Phase 節（および
+  「提案」節）を読んで、指示書の前提（route 数・fixture の状態など）が現状と一致しているかを確認する
+  運用にする（今回のような、既に完了した作業を前提にした指示のやり直しを防ぐ）。
