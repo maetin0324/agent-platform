@@ -14840,3 +14840,24 @@ before/after・測定値は `gui/docs/PROGRESS.md`「Phase G47」を参照。
   config.toml に対応する provider 行がある」の両方を満たす最初の候補だけを `WorkerHint.adapter` に
   採用する fallback 込みの配線を `task-ops::add` に足す（ADR-0061 D4 の引き継ぎ）。
 - P-104-4: `mini-swe-agent` アダプタを次点として実装する（`aider.rs` とほぼ同じパターンで書ける見込み）。
+
+### delivery-repair（同一 run の再レビューでの差し戻し対応。2026-09-22）
+
+取り込み・リリース検証で「実装の作業ツリーに未コミットの変更があります」として差し戻された。実体は
+`.celeris/skills.json`（`deliver_claude_code` が `<cwd>/.celeris/` に書く mount 済み skill 名の帳簿。
+ADR-0056 Phase 81 追記、`SYNC_ALWAYS_EXCLUDED` に `.celeris/` は既に入っている
+`crates/task-worker/src/ssh.rs:56`）が `.gitignore` に無く、このタスクの実装本体とは無関係な
+untracked ファイルとして毎回の worktree に残っていたこと。前回試行のレビューも「実装とは無関係」と
+明記していたが、delivery-repair のゲートは untracked の有無だけを機械的に見ているため、根本原因
+（`.gitignore` の漏れ）を直した。
+
+- **直したこと**: `.gitignore` に `.celeris/` を追加（コメント付き。他の「ハーネス固有の作業領域」
+  節 `.claude/*` と同じ扱い）。実装コード（`aider.rs`/`routing.rs`/`pricing.rs`/`config.rs`/`lib.rs`/
+  `dispatcher.rs`）は前回試行から無変更。
+- **実行したコマンド**: `git status --porcelain` → `.gitignore` 追加前は `.celeris/`（untracked）、
+  追加後は空（`M .gitignore` のみ、ステージ前）。
+- **実行したコマンド**: `cargo test --workspace` → exit 0、全 `test result: ok` で failed 0
+  （合計 1863 相当、Phase 104 本体のゲートと同じ green）。
+- **実行したコマンド**: `cargo clippy --workspace -- -D warnings` → exit 0、warning 0。
+- **コミット**: `.gitignore` の 1 行修正のみを別コミットとして追加（`git commit -m "phase 104:
+  delivery-repair — .celeris/ を .gitignore に追加（未コミット扱いの誤検出を修正）"`）。

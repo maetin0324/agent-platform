@@ -18,3 +18,10 @@ config/secrets/
 # `git add -A` がこれらを拾うと、他のエージェントの作業ツリーごとコミットしてしまう。
 .claude/*
 !.claude/agents/
+
+# `deliver_claude_code` が書くマーカーファイル（ADR-0056 Phase 81）。`<cwd>/.celeris/skills.json` に
+# 前回 mount した skill 名の一覧を残す帳簿で、ディスパッチャが運ぶ記録とは別物の実装詳細。
+# `SYNC_ALWAYS_EXCLUDED`（ADR-0059 D5, crates/task-worker/src/ssh.rs）でリモート同期からは
+# 既に除外済みだったが、.gitignore に無かったため各タスクの worktree で「未コミットの変更」として
+# 誤検出されていた（delivery-repair でこの1件が原因の差し戻しが発生）。
+.celeris/
