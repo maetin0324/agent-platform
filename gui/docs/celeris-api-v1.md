@@ -1,6 +1,11 @@
 # celeris HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-22 Phase 105（ADR-0060 D1 追記。本番の観測、2026-09-22 21:55 UTC）— **追加のみ。v1 のまま**。
+  `POST /releases/{sha12}/promote`（§3.67）が `promote.sh` を起こす手段が `setsid` から
+  `systemd-run --user --scope`（無ければ `setsid` にフォールバック）に変わった（celeris の unit の
+  drain が `promote.sh` を cgroup ごと巻き添えにして途中で殺していたため）。`GET /releases` の
+  `items[]` に `promote_stale` / `promote_last_line` を追加（§3.66）。DB マイグレーションは無い。
 - 改訂: 2026-09-22 Phase 99（ADR-0059、コマンド実行だけのオペレーションを worktree 無しでクラスタで動かす）
   — **追加のみ。v1 のまま**。`WorkspaceSpec::Remote` に任意の `mode`（`"worktree"` | `"shared"`、既定
   `"worktree"`）と省略可の `path` を追加（§3.46）。エンドポイント 107: `PUT /clusters/{id}/settings`
@@ -1740,6 +1745,8 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
       "is_previous": false,
       "promoting": false,             // promote.lock の pid がまだ生きている
       "promote_failed": null,         // promote_failed.json（直近の昇格の試みが失敗したときだけ）。§3.67 の後注
+      "promote_stale": false,         // Phase 105。pid 死亡・promoted.json 無し・log が「promoted」まで進んでいない
+      "promote_last_line": null,      // promote.log の最後の（空でない）行。無ければ null
       "problem": null                 // manifest/gate が読めなかったときだけ一行（普段は省略）
     }
   ]
@@ -1785,11 +1792,30 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
   `gate.failed_step` は**成功時は `null`**（`release.sh` が書く `gate.json` の `failed_step: ""` は
   celeris がトリムして空なら `None` に正規化してから運ぶ。Phase 97、P-94-1）。
 
+**Phase 105（ADR-0060 D1 追記）で増えた 2 つ**（本番の観測、2026-09-22 21:55 UTC。§3.67 も見よ）:
+
+- **`promote_stale`**: `promote.lock` の pid が死んでいて、`promoted.json` も無く、`promote.log` の
+  最後の行が `promote.sh` 成功時の一行（`sd_log "promoted $SHA12 (mode=$MODE)…"`）まで進んでいない
+  とき `true`。旧デーモンの drain が `promote.sh` を cgroup ごと巻き添えにした等、**途中で止まった
+  まま**を人が見分けるための材料。`promoting` が偽で `promote_failed` も無いのに一覧の見た目が
+  昇格前後で変わらない（`current` が古いまま）ときの手がかりになる。GUI 表示はこの Phase では作らない
+  （契約だけ。次の GUI Phase の対象）。
+- **`promote_last_line`**: `promote.log` の最後の（空でない）行。無ければ `null`。
+  `promote_stale` の根拠をそのまま見せるためのもの。
+
 #### 3.67 `POST /releases/{sha12}/promote` → 202 `ReleasePromoteAccepted`（**管理系: `token_file` 未設定でも 401**）
 
-要求本文は無し（`{}` でよい）。`promote.sh <sha12>` を **detached**（`setsid`、stdin は `/dev/null`、
-stdout/err は `<release>/promote.log`）で起こし、`promote.lock` に pid を書いてすぐ返す。
-**昇格の完了は待たない。**
+要求本文は無し（`{}` でよい）。`promote.sh <sha12>` を **detached**（既定 `systemd-run --user --scope`。
+`systemd-run` か `XDG_RUNTIME_DIR` が無い環境では `setsid` にフォールバック。ADR-0060 D1、Phase 105）、
+stdin は `/dev/null`、stdout/err は `<release>/promote.log` で起こし、`promote.lock` に pid を書いて
+すぐ返す。**昇格の完了は待たない。**
+
+以前は `setsid` で新しいセッションに切り離すだけだったが、それでも celeris の unit
+（`celeris@<sha12>`、`KillMode=control-group`）の cgroup には残るため、昇格の途中で旧デーモンが
+drain を終えて止まると `promote.sh` も cgroup ごと巻き添えで殺されていた（本番 2026-09-22 21:55 UTC
+の観測。ADR-0060 の ssh master と同じ原因）。`systemd-run --user --scope` は指定したコマンドを
+exec するだけなので `promote.lock` に書く pid は変わらない（そのまま `sh` の pid）が、cgroup だけが
+celeris の外の一時 scope に移り、旧デーモンの終了に巻き込まれなくなった。
 
 **どちらの `promote.sh` を起こすか**（ADR-0041 D4。Phase 50 で変わった）:
 **いま動いている版**のもの（`<releases_dir>/<current>/scripts/promote.sh`）を使う。昇格は「動いている

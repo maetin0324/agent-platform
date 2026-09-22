@@ -1056,6 +1056,15 @@ pub struct ReleaseItem {
     /// 赤いバナーで出す。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub promote_failed: Option<ReleasePromoteFailure>,
+    /// Phase 105（本番の観測、2026-09-22 21:55 UTC）: `promote.lock` の pid が死んでいるのに
+    /// `promoted.json` が無く、`promote.log` も `promote.sh` の成功時の一行まで進んでいない
+    /// （＝旧デーモンの drain が `promote.sh` を cgroup ごと巻き添えにした等で途中で止まった）。
+    /// GUI 表示は次の GUI Phase（この Phase では契約だけ）。
+    #[serde(default)]
+    pub promote_stale: bool,
+    /// `promote.log` の最後の（空でない）行。無ければ `null`。`promote_stale` の手がかり。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promote_last_line: Option<String>,
     /// `manifest.json` / `gate.json` が読めなかったときの一行（GUI が「壊れている」と出す）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub problem: Option<String>,

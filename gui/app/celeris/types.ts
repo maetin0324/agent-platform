@@ -306,6 +306,12 @@ export type Event =
       type: "artifact_produced";
     }
   | {
+      /**
+       * ADR-0061（Phase 104）: harness routing 基盤のメトリクス（wall time・retry 回数）。
+       * `WorkerStarted.adapter`/`model` と同じ `run_id` で突き合わせる。導入前のイベント・
+       * この run の起点時刻を持たない経路（無い）は `None`。
+       */
+      metrics?: RunMetrics | null;
       outcome: string;
       /**
        * ADR-0014 D1: `WorkerStarted.role` と同じ（`None` はワーカー run）。
@@ -2494,9 +2500,42 @@ export interface WorkerHint {
   tier: Tier;
 }
 /**
+ * ADR-0061（Phase 104）: `Event::WorkerFinished` に添える run 単位のメトリクス。
+ * harness・model・account は同じ `run_id` の `Event::WorkerStarted` に既にあるのでここには持たない
+ * （二重管理をしない）。success/failure は `WorkerFinished.outcome` の文字列を
+ * `task-api::stats::classify_outcome` が分類する既存の仕組みのままにする。
+ */
+export interface RunMetrics {
+  /**
+   * この run が始まった時点で、同じタスクが既に消費していた試行回数（`Task.attempts`）。
+   * 0 なら初回の試行。
+   */
+  retries: number;
+  /**
+   * dispatch してからこの run が終わるまでの壁時計時間（ミリ秒）。
+   */
+  wall_ms: number;
+}
+/**
  * DESIGN §5.3 の `usage`。取れない項目は省略可。
+ *
+ * ADR-0061（Phase 104）: harness routing 基盤で `cache_read_tokens` / `cache_creation_tokens` /
+ * `cost_usd` を追加した（追加のみ。既存の `input_tokens` / `output_tokens` の意味は変えない）。
+ * `Eq` は落とした（`cost_usd: Option<f64>` は `Eq` を持てない）。
  */
 export interface Usage {
+  /**
+   * prompt cache の作成（書き込み）トークン。
+   */
+  cache_creation_tokens?: number | null;
+  /**
+   * prompt cache の読み取りトークン（アダプタが取得できた場合のみ）。
+   */
+  cache_read_tokens?: number | null;
+  /**
+   * `task_core::pricing` の静的単価表から推定した USD（不明なモデル・トークン欠落は `None`）。
+   */
+  cost_usd?: number | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
 }
@@ -4155,6 +4194,17 @@ export interface ReleaseItem {
    * 赤いバナーで出す。
    */
   promote_failed?: ReleasePromoteFailure | null;
+  /**
+   * `promote.log` の最後の（空でない）行。無ければ `null`。`promote_stale` の手がかり。
+   */
+  promote_last_line?: string | null;
+  /**
+   * Phase 105（本番の観測、2026-09-22 21:55 UTC）: `promote.lock` の pid が死んでいるのに
+   * `promoted.json` が無く、`promote.log` も `promote.sh` の成功時の一行まで進んでいない
+   * （＝旧デーモンの drain が `promote.sh` を cgroup ごと巻き添えにした等で途中で止まった）。
+   * GUI 表示は次の GUI Phase（この Phase では契約だけ）。
+   */
+  promote_stale?: boolean;
   /**
    * ADR-0041 D3: `promoted.json` の `promoted_at`（`promote.sh` が昇格に成功したときだけ書く）。
    * 一度も昇格していないリリースは `null`。

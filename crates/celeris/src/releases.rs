@@ -39,6 +39,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::instance::pid_alive;
+use task_worker::detach::DetachLauncher;
 
 /// `git` を待つ上限。一覧の要求の中で走るので、詰まったら諦めて `null` を出す（ADR-0041 D3）。
 const GIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -443,16 +444,49 @@ fn read_release(
             failed_at: as_string(v.get("failed_at").cloned()).unwrap_or_default(),
             error: as_string(v.get("error").cloned()).unwrap_or_default(),
         }),
+        // Phase 105（本番の観測。2026-09-22 21:55 UTC）: `promote.sh` が `setsid` の子として
+        // celeris の cgroup に残ったまま、旧デーモンの drain が cgroup ごと巻き添えにして殺した。
+        // `promote.lock` の pid が死んでいるのに `promoted.json` が無く、`promote.log` も
+        // 「promoted」まで進んでいなければ、途中で殺された（＝止まったまま）と見なせる。
+        promote_stale: promote_stale(dir, promoted.is_some()),
+        promote_last_line: promote_last_line(dir),
         problem: (!problems.is_empty()).then(|| problems.join("; ")),
     }
+}
+
+/// `promote.lock` に書かれた pid（生死は問わない）。読めない・パースできなければ `None`。
+fn lock_pid(dir: &Path) -> Option<u32> {
+    let text = std::fs::read_to_string(dir.join("promote.lock")).ok()?;
+    text.trim().parse().ok()
 }
 
 /// `promote.lock` に書かれた pid が**まだ生きていれば** `Some(pid)`。消えていれば `None`
 /// （残骸のロックは昇格を塞がない。ADR-0040 D6）。
 fn promoting_pid(dir: &Path) -> Option<u32> {
-    let text = std::fs::read_to_string(dir.join("promote.lock")).ok()?;
-    let pid: u32 = text.trim().parse().ok()?;
-    pid_alive(pid).then_some(pid)
+    lock_pid(dir).filter(|&pid| pid_alive(pid))
+}
+
+/// `promote.log` の最後の（空でない）行。無ければ `None`。
+fn promote_last_line(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("promote.log")).ok()?;
+    text.lines().rev().find(|l| !l.trim().is_empty()).map(str::to_string)
+}
+
+/// Phase 105: 昇格が「途中で止まったまま」に見えるか。
+///
+/// `promote.lock` の pid がまだ生きている（走行中）、`promoted.json` がある（成功した）、
+/// そもそも一度も昇格を試みていない（lock が無い）、のどれでもなく、かつ `promote.log` の
+/// 最後の行が `promote.sh` の成功時の一行（`sd_log "promoted $SHA12 (mode=$MODE)..."`、
+/// `scripts/selfdeploy/promote.sh` 末尾）まで進んでいなければ、`setsid`/scope の子が
+/// 途中で殺された（本番 2026-09-22 21:55 UTC の観測）とみなす。
+fn promote_stale(dir: &Path, has_promoted_json: bool) -> bool {
+    let Some(pid) = lock_pid(dir) else {
+        return false;
+    };
+    if pid_alive(pid) || has_promoted_json {
+        return false;
+    }
+    !promote_last_line(dir).is_some_and(|l| l.contains("promoted"))
 }
 
 /// `sh -c` に渡す 1 語を単引用符で囲む。
@@ -460,18 +494,78 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// `promote.sh <sha12>` を detached（`setsid`、stdin は `/dev/null`、stdout/err は
-/// `<release>/promote.log`）で起こし、`promote.lock` に pid を書く。どの `promote.sh` かは
+/// Phase 105（ADR-0060 D1 追記）: `promote.sh` を起こす `(exec_program, exec_args)` を組み立てる。純関数。
+///
+/// - `Inline`: 従来どおり `setsid <script> <sha12>`。
+/// - `SystemdRun`: `<runner> --user --scope --quiet --unit celeris-promote-<sha12>-<短い乱数>
+///   --description "celeris promote <sha12>" -- sh -c '<script> <sha12>'`。celeris（`celeris@<sha12>`
+///   unit）の cgroup の外の scope で `sh -c '<script> <sha12>'` を exec する。`promote.lock` に
+///   書く pid は `--scope` が exec するのでそのまま `sh` の pid になる（`ClusterMaster` の master と
+///   同じ理屈。ADR-0060 D1 の `crate::detach`）。
+fn promote_exec_command(
+    launcher: &DetachLauncher,
+    script: &Path,
+    sha12: &str,
+) -> (String, Vec<String>) {
+    use task_worker::detach::{scope_unit_name, wrap_command};
+    match launcher {
+        DetachLauncher::Inline => (
+            "setsid".to_string(),
+            vec![script.to_string_lossy().into_owned(), sha12.to_string()],
+        ),
+        DetachLauncher::SystemdRun { .. } => {
+            // 末端の `sh -c` に渡す 1 語（この文字列自体、後段でもう一段 `sh_quote` されて
+            // 外側の起動用シェルの 1 引数になる。二重引用は正しい: 内側は `sh -c` が、
+            // 外側は `promote.sh` を起こす `sh -c` が、それぞれ解釈する）。
+            let inner = format!(
+                "{} {}",
+                sh_quote(&script.to_string_lossy()),
+                sh_quote(sha12)
+            );
+            let unit = scope_unit_name("celeris-promote", sha12);
+            let description = format!("celeris promote {sha12}");
+            wrap_command(
+                launcher,
+                "sh",
+                &["-c".to_string(), inner],
+                &unit,
+                &description,
+            )
+        }
+    }
+}
+
+/// `promote.sh <sha12>` を detached（既定は `systemd-run --user --scope`。無ければ `setsid` に
+/// フォールバック。ADR-0060 D1、Phase 105）、stdin は `/dev/null`、stdout/err は
+/// `<release>/promote.log` で起こし、`promote.lock` に pid を書く。どの `promote.sh` かは
 /// ADR-0041 D4: **`<current>/scripts/promote.sh`**（無ければ昇格先のもの）。
 ///
 /// **この関数を自動で呼ぶ経路は作らない**（ADR-0040 D5: 昇格は人が押す）。呼ぶのは
 /// `POST /releases/{sha12}/promote` だけで、そこは管理系（トークン必須）。
 ///
-/// 昇格は**この celeris 自身を drain させうる**（ADR-0040 D4）。だから `promote.sh` は celeris の
-/// 子プロセスとして待たず、`setsid` で新しいセッションに切り離して孤児にする（親が消えても走り続ける）。
+/// 昇格は**この celeris 自身を drain させうる**（ADR-0040 D4）。`promote.sh` は celeris の子として
+/// 待たない。以前は `setsid` で新しいセッションに切り離すだけだったが、それでも celeris の unit の
+/// cgroup には残るため、旧デーモンが drain で cgroup ごと止まると `promote.sh` も巻き添えで死んでいた
+/// （本番 2026-09-22 21:55 UTC の観測）。`systemd-run --user --scope` が使える環境では celeris の
+/// cgroup の外の scope に起こす（ADR-0060 D1 と同じ判断規則）。
 pub fn start_promote(
     root: &Path,
     sha12: &str,
+) -> Result<ReleasePromoteAccepted, ReleasePromoteError> {
+    let launcher = task_worker::detach::resolve_detach_launcher(
+        "auto",
+        task_worker::detach::systemd_run_on_path(),
+        task_worker::detach::xdg_runtime_dir_is_set(),
+    );
+    start_promote_with_launcher(root, sha12, &launcher)
+}
+
+/// [`start_promote`] の本体。`launcher` を注入できるのはテストのため
+/// （実行環境の `systemd-run`/`XDG_RUNTIME_DIR` の有無に左右されず、常に偽物で確かめる）。
+fn start_promote_with_launcher(
+    root: &Path,
+    sha12: &str,
+    launcher: &DetachLauncher,
 ) -> Result<ReleasePromoteAccepted, ReleasePromoteError> {
     if !valid_sha12(sha12) {
         return Err(ReleasePromoteError::NotFound);
@@ -542,13 +636,19 @@ pub fn start_promote(
 
     let log = dir.join("promote.log");
     let lock = dir.join("promote.lock");
-    // `setsid` で新しいセッションに切り離し、pid を lock に書いてから `sh` は抜ける。
-    // `$!` は `setsid` の pid で、`setsid` は（自分がプロセスグループの長でないので）その場で
-    // exec する＝そのまま `promote.sh` の pid になる。
+    // `exec_line` を新しいセッション（`setsid`）か celeris の cgroup の外の scope
+    // （`systemd-run --user --scope`）に切り離して背景で起こし、pid を lock に書いてから
+    // 外側の `sh` は抜ける。`$!` は `exec_line` の先頭プロセスの pid で、
+    // `setsid`/`systemd-run --scope` はどちらも（自分がプロセスグループの長でない／`--scope` が
+    // exec するので）その場で exec する＝そのまま `promote.sh`（を起こす `sh -c`）の pid になる。
+    let (exec_program, exec_args) = promote_exec_command(launcher, &script, sha12);
+    let exec_line = std::iter::once(exec_program)
+        .chain(exec_args)
+        .map(|s| sh_quote(&s))
+        .collect::<Vec<_>>()
+        .join(" ");
     let command = format!(
-        "setsid {script} {sha} </dev/null >>{log} 2>&1 & printf '%s\\n' \"$!\" >{lock}",
-        script = sh_quote(&script.to_string_lossy()),
-        sha = sh_quote(sha12),
+        "{exec_line} </dev/null >>{log} 2>&1 & printf '%s\\n' \"$!\" >{lock}",
         log = sh_quote(&log.to_string_lossy()),
         lock = sh_quote(&lock.to_string_lossy()),
     );
@@ -852,7 +952,11 @@ mod tests {
         .expect("write");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
 
-        let accepted = start_promote(&root, "abcdef123456").expect("202");
+        // `Inline` を明示して、この開発環境に `systemd-run`/`XDG_RUNTIME_DIR` があっても
+        // 本物の systemd-run を呼ばないようにする（実行は禁止。テストは常に偽物か `Inline`）。
+        let accepted =
+            start_promote_with_launcher(&root, "abcdef123456", &DetachLauncher::Inline)
+                .expect("202");
         assert_eq!(accepted.sha12, "abcdef123456");
         assert!(
             accepted.log.ends_with("abcdef123456/promote.log"),
@@ -924,8 +1028,11 @@ mod tests {
         ));
 
         // (2) 昇格先にだけある（current は Phase 48 以前）→ 昇格先のものを使う。
+        // `Inline` を明示（本物の systemd-run を呼ばない）。
         fake_script(&root, "bbbbbbbbbbbb", "target-script");
-        let accepted = start_promote(&root, "bbbbbbbbbbbb").expect("202");
+        let accepted =
+            start_promote_with_launcher(&root, "bbbbbbbbbbbb", &DetachLauncher::Inline)
+                .expect("202");
         assert_eq!(accepted.script_from, "target");
         let log = root.join("bbbbbbbbbbbb").join("promote.log");
         let mut logged = String::new();
@@ -943,7 +1050,9 @@ mod tests {
         std::fs::remove_file(root.join("bbbbbbbbbbbb").join("promote.lock")).expect("rm lock");
         std::fs::remove_file(&log).expect("rm log");
         fake_script(&root, "aaaaaaaaaaaa", "current-script");
-        let accepted = start_promote(&root, "bbbbbbbbbbbb").expect("202");
+        let accepted =
+            start_promote_with_launcher(&root, "bbbbbbbbbbbb", &DetachLauncher::Inline)
+                .expect("202");
         assert_eq!(accepted.script_from, "current");
         // ログは**昇格先**の promote.log（人が見る場所は変わらない）。
         assert!(
@@ -1080,7 +1189,7 @@ mod tests {
         .expect("write");
         fake_script(&root, "abcdef123456", "retry");
 
-        start_promote(&root, "abcdef123456").expect("202");
+        start_promote_with_launcher(&root, "abcdef123456", &DetachLauncher::Inline).expect("202");
 
         assert!(
             !root
@@ -1390,5 +1499,204 @@ mod tests {
         );
         // `repo` を渡さなければそもそも見ない。
         assert!(scan(&root, None).items.iter().all(|i| i.on_main.is_none()));
+    }
+
+    // ---- Phase 105（ADR-0060 D1 追記）: `promote.sh` を systemd-run --scope で起こす ----
+
+    /// `promote_exec_command` が組み立てる argv の形（純関数。プロセスは起こさない）。
+    #[test]
+    fn promote_exec_command_wraps_with_systemd_run() {
+        let script = Path::new("/releases/current/scripts/promote.sh");
+        let launcher = DetachLauncher::SystemdRun {
+            program: "systemd-run".to_string(),
+        };
+        let (program, args) = promote_exec_command(&launcher, script, "abcdef123456");
+        assert_eq!(program, "systemd-run");
+        assert_eq!(
+            &args[..3],
+            &["--user".to_string(), "--scope".to_string(), "--quiet".to_string()]
+        );
+        assert_eq!(args[3], "--unit");
+        assert!(
+            args[4].starts_with("celeris-promote-abcdef123456-"),
+            "{}",
+            args[4]
+        );
+        assert_eq!(args[5], "--description");
+        assert_eq!(args[6], "celeris promote abcdef123456");
+        assert_eq!(args[7], "--");
+        assert_eq!(args[8], "sh");
+        assert_eq!(args[9], "-c");
+        assert_eq!(
+            args[10],
+            "'/releases/current/scripts/promote.sh' 'abcdef123456'"
+        );
+    }
+
+    /// `Inline` は従来どおり（`setsid <script> <sha12>`）。
+    #[test]
+    fn promote_exec_command_inline_is_setsid() {
+        let script = Path::new("/releases/current/scripts/promote.sh");
+        let (program, args) = promote_exec_command(&DetachLauncher::Inline, script, "abcdef123456");
+        assert_eq!(program, "setsid");
+        assert_eq!(
+            args,
+            vec![
+                "/releases/current/scripts/promote.sh".to_string(),
+                "abcdef123456".to_string()
+            ]
+        );
+    }
+
+    /// 偽の `systemd-run`（`--` の後を `exec` するだけのスクリプト。`cluster_login.rs` の偽物と
+    /// 同じ流儀）を経由して、実際に `promote.sh` が detached で起こり、`promote.lock` に子の pid が
+    /// 書かれ、`promote.log` に出力が流れる。**本物の `systemd-run` は一切呼ばない**。
+    #[test]
+    fn promoting_via_fake_systemd_run_writes_the_lock_and_streams_the_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (dir, root) = env();
+        release(
+            &root,
+            "abcdef123456",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#),
+        );
+        fake_script(&root, "abcdef123456", "promote");
+
+        let fake_systemd_run = dir.path().join("systemd-run");
+        std::fs::write(
+            &fake_systemd_run,
+            "#!/bin/sh\n\
+             while [ $# -gt 0 ]; do\n  \
+               if [ \"$1\" = \"--\" ]; then\n    \
+                 shift\n    \
+                 exec \"$@\"\n  \
+               fi\n  \
+               shift\n\
+             done\n\
+             exit 1\n",
+        )
+        .expect("write fake systemd-run");
+        std::fs::set_permissions(&fake_systemd_run, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+
+        let launcher = DetachLauncher::SystemdRun {
+            program: fake_systemd_run.to_string_lossy().into_owned(),
+        };
+        let accepted = start_promote_with_launcher(&root, "abcdef123456", &launcher).expect("202");
+        assert_eq!(accepted.sha12, "abcdef123456");
+
+        let lock = root.join("abcdef123456").join("promote.lock");
+        let log = root.join("abcdef123456").join("promote.log");
+        let mut logged = String::new();
+        for _ in 0..100 {
+            logged = std::fs::read_to_string(&log).unwrap_or_default();
+            if logged.contains("promote abcdef123456") {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(logged.contains("promote abcdef123456"), "{logged:?}");
+        let pid: u32 = std::fs::read_to_string(&lock)
+            .expect("lock")
+            .trim()
+            .parse()
+            .expect("pid");
+        assert!(pid > 0);
+
+        // 走っている間は 409（二重に起こさない。launcher に依らず同じ判定）。
+        assert_eq!(
+            start_promote_with_launcher(&root, "abcdef123456", &launcher),
+            Err(ReleasePromoteError::AlreadyPromoting)
+        );
+    }
+
+    /// `promote_stale`: pid が死んでいて `promoted.json` も無く、`promote.log` が「promoted」まで
+    /// 進んでいなければ stale。
+    #[test]
+    fn promote_stale_when_lock_pid_is_dead_and_not_promoted() {
+        let (_dir, root) = env();
+        release(
+            &root,
+            "abcdef123456",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#),
+        );
+        let rdir = root.join("abcdef123456");
+        // 死んでいる（存在しない）pid。
+        std::fs::write(rdir.join("promote.lock"), "999999999\n").expect("lock");
+        std::fs::write(
+            rdir.join("promote.log"),
+            "2026-09-22T21:55:43Z [promote] systemctl --user start celeris@abcdef123456\n",
+        )
+        .expect("log");
+
+        let scanned = scan(&root, None);
+        let item = scanned
+            .items
+            .iter()
+            .find(|i| i.sha12 == "abcdef123456")
+            .expect("item");
+        assert!(item.promote_stale, "{item:?}");
+        assert_eq!(
+            item.promote_last_line.as_deref(),
+            Some("2026-09-22T21:55:43Z [promote] systemctl --user start celeris@abcdef123456")
+        );
+    }
+
+    /// `promoted.json` があれば、pid が死んでいても stale ではない（成功済み）。
+    #[test]
+    fn promote_not_stale_when_promoted_json_exists() {
+        let (_dir, root) = env();
+        release(
+            &root,
+            "abcdef123456",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#),
+        );
+        let rdir = root.join("abcdef123456");
+        std::fs::write(rdir.join("promote.lock"), "999999999\n").expect("lock");
+        std::fs::write(
+            rdir.join("promoted.json"),
+            r#"{"promoted_at":"2026-09-22T21:56:00Z","mode":"live","from":null}"#,
+        )
+        .expect("promoted.json");
+
+        let scanned = scan(&root, None);
+        let item = scanned
+            .items
+            .iter()
+            .find(|i| i.sha12 == "abcdef123456")
+            .expect("item");
+        assert!(!item.promote_stale, "{item:?}");
+    }
+
+    /// pid がまだ生きていれば（走行中）stale ではない。
+    #[test]
+    fn promote_not_stale_when_lock_pid_is_alive() {
+        let (_dir, root) = env();
+        release(
+            &root,
+            "abcdef123456",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true}"#),
+        );
+        let rdir = root.join("abcdef123456");
+        std::fs::write(rdir.join("promote.lock"), format!("{}\n", std::process::id()))
+            .expect("lock");
+
+        let scanned = scan(&root, None);
+        let item = scanned
+            .items
+            .iter()
+            .find(|i| i.sha12 == "abcdef123456")
+            .expect("item");
+        assert!(!item.promote_stale, "{item:?}");
+        assert!(item.promoting);
     }
 }

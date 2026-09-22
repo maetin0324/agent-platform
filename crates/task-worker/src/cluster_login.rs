@@ -225,100 +225,39 @@ impl std::error::Error for ClusterConnectError {}
 /// `[[clusters]] master_launcher` の値（`"auto"` / `"systemd-run"` / `"inline"`）から
 /// [`resolve_master_launcher`] が解決する。`"auto"` は環境（`systemd-run` が PATH にあるか、
 /// `XDG_RUNTIME_DIR` が設定されているか）で決まる。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MasterLauncher {
-    /// 従来どおり celeris の直接の子として起こす（celeris の cgroup の中に留まる）。
-    Inline,
-    /// `systemd-run --user --scope` で celeris の cgroup の外の一時 scope に起こす。
-    /// `program` は実行する `systemd-run`（本番は PATH 上の `"systemd-run"`。テストは偽物の絶対パス）。
-    SystemdRun { program: String },
-}
-
-impl MasterLauncher {
-    /// 本番で使う `SystemdRun`（PATH 上の `systemd-run` を使う）。
-    pub fn systemd_run() -> Self {
-        Self::SystemdRun {
-            program: "systemd-run".to_string(),
-        }
-    }
-}
+///
+/// Phase 105: 判断そのもの（[`resolve_master_launcher`]）と argv の組み立て
+/// （[`launch_master_command`]）は `crate::detach`（[`crate::detach::DetachLauncher`]）に共通化した。
+/// `MasterLauncher` はここでの呼び名を保つための型別名（挙動もテストも変えていない）。
+pub type MasterLauncher = crate::detach::DetachLauncher;
 
 /// `master_launcher` の設定値と環境から、実際に使う起こし方を決める（ADR-0060）。純関数。
-///
-/// - `"systemd-run"` / `"inline"`: そのまま使う（強制）。
-/// - それ以外（`"auto"`。`Config::validate` が他の値を弾いているので、想定外の値もここでは `auto` と
-///   同じに倒す）: `has_systemd_run && has_xdg_runtime_dir` のときだけ `SystemdRun`、それ以外は `Inline`。
+/// 実体は [`crate::detach::resolve_detach_launcher`]。
 pub fn resolve_master_launcher(
     configured: &str,
     has_systemd_run: bool,
     has_xdg_runtime_dir: bool,
 ) -> MasterLauncher {
-    match configured {
-        "systemd-run" => MasterLauncher::systemd_run(),
-        "inline" => MasterLauncher::Inline,
-        _ => {
-            if has_systemd_run && has_xdg_runtime_dir {
-                MasterLauncher::systemd_run()
-            } else {
-                MasterLauncher::Inline
-            }
-        }
-    }
+    crate::detach::resolve_detach_launcher(configured, has_systemd_run, has_xdg_runtime_dir)
 }
 
 /// `path_env`（`PATH` の値）に実行可能な `name` があるか（`which name` 相当）。
-pub fn path_has_executable(path_env: &str, name: &str) -> bool {
-    std::env::split_paths(path_env).any(|dir| {
-        let candidate = dir.join(name);
-        std::fs::metadata(&candidate)
-            .map(|m| m.is_file() && is_executable(&m))
-            .unwrap_or(false)
-    })
-}
-
-#[cfg(unix)]
-fn is_executable(meta: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    meta.permissions().mode() & 0o111 != 0
-}
+pub use crate::detach::path_has_executable;
 
 /// 実際のプロセス環境から `systemd-run` が `PATH` にあるか調べる（`resolve_master_launcher` の
 /// 呼び出し側が使う、非純粋な便利関数。判定そのものは [`resolve_master_launcher`] が純関数で持つ）。
-pub fn systemd_run_on_path() -> bool {
-    std::env::var_os("PATH")
-        .map(|p| path_has_executable(&p.to_string_lossy(), "systemd-run"))
-        .unwrap_or(false)
-}
+pub use crate::detach::systemd_run_on_path;
 
 /// 実際のプロセス環境から `XDG_RUNTIME_DIR` が（空でなく）設定されているか調べる。
-pub fn xdg_runtime_dir_is_set() -> bool {
-    std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|v| !v.is_empty())
-}
-
-/// `celeris-ssh-master-<cluster id>-<短い乱数>` の scope unit 名（ADR-0060）。systemd のユニット名として
-/// 安全な文字だけを残す（`cluster.id` は自由記述なので念のため）。
-fn systemd_scope_unit_name(cluster_id: &str) -> String {
-    let safe_id: String = cluster_id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let rand = task_core::TaskId::new().to_string();
-    let short = &rand[rand.len().saturating_sub(8)..];
-    format!("celeris-ssh-master-{safe_id}-{short}")
-}
+pub use crate::detach::xdg_runtime_dir_is_set;
 
 /// `launcher` に応じて、実際に spawn する `(program, args)` を組み立てる（ADR-0060）。純関数。
 ///
 /// `Inline` はそのまま。`SystemdRun` は
 /// `<program> --user --scope --quiet --unit celeris-ssh-master-<id>-<乱数> --description "celeris ssh
-/// master (<id>)" -- <program> <args...>` を組み立てる。`--scope` は指定したコマンドを exec するだけ
-/// なので、ssh は celeris の子プロセスのままで、cgroup だけが新しい scope に移る（環境変数は
+/// master (<id>)" -- <program> <args...>` を組み立てる（`crate::detach::wrap_command` と
+/// `crate::detach::scope_unit_name` に委譲。ADR-0060）。`--scope` は指定したコマンドを exec する
+/// だけなので、ssh は celeris の子プロセスのままで、cgroup だけが新しい scope に移る（環境変数は
 /// `Command::envs` で渡したものがそのまま届く。exec は環境を消さない）。
 fn launch_master_command(
     launcher: &MasterLauncher,
@@ -326,25 +265,9 @@ fn launch_master_command(
     args: &[String],
     cluster_id: &str,
 ) -> (String, Vec<String>) {
-    match launcher {
-        MasterLauncher::Inline => (program.to_string(), args.to_vec()),
-        MasterLauncher::SystemdRun { program: runner } => {
-            let unit = systemd_scope_unit_name(cluster_id);
-            let mut full = vec![
-                "--user".to_string(),
-                "--scope".to_string(),
-                "--quiet".to_string(),
-                "--unit".to_string(),
-                unit,
-                "--description".to_string(),
-                format!("celeris ssh master ({cluster_id})"),
-                "--".to_string(),
-                program.to_string(),
-            ];
-            full.extend(args.iter().cloned());
-            (runner.clone(), full)
-        }
-    }
+    let unit = crate::detach::scope_unit_name("celeris-ssh-master", cluster_id);
+    let description = format!("celeris ssh master ({cluster_id})");
+    crate::detach::wrap_command(launcher, program, args, &unit, &description)
 }
 
 /// 接続を開始する（ADR-0032 D2/D3/D4、ADR-0060）。
