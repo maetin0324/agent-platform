@@ -276,7 +276,13 @@ mod tests {
         let base = format!("http://127.0.0.1:{port}/v1");
         let outcome = probe_models(&base, PROBE_TIMEOUT, None);
         let reason = outcome.should_fall_back().expect("unreachable");
-        assert!(reason.contains("接続できない"), "{reason}");
+        // Phase 97b: 手放した直後の一時ポートを別のプロセス（並走するテストや GUI の偽 celeris）が
+        // 取ることがあり、その場合は「接続できない」ではなく接続後の reset で「応答を読めない」になる。
+        // どちらも到達不可（フォールバック対象）なので両方を受け入れる（release ゲートで 1 回起きた）。
+        assert!(
+            reason.contains("接続できない") || reason.contains("応答を読めない"),
+            "{reason}"
+        );
     }
 
     /// ADR-0052 D1: タイムアウト（受けるだけで何も返さないサーバ）。
