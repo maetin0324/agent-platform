@@ -2820,11 +2820,15 @@ impl Dispatcher {
         if parsed.is_empty() {
             return None;
         }
+        // Phase 98（ADR-0018）: `create_task.workspace` がクラスタを指すときに `[[clusters]]` へ照らして
+        // 検証するため、既知のクラスタ id を渡す。
+        let known_clusters: Vec<String> = self.config.clusters.keys().cloned().collect();
         match task_ops::actions::execute(
             self.store.as_ref(),
             &org,
             &self.config.roles,
             &self.config.genres,
+            &known_clusters,
             task,
             run_id,
             &parsed.valid,

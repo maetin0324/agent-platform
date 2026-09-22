@@ -491,8 +491,20 @@ fn build_execute_prompt(
     out.push_str(&assignee_instructions_for_delegation(context));
     out.push_str("## Instructions\n");
     out.push_str("Work in the current directory (it is a dedicated workspace for this task). ");
-    out.push_str(&delegation_instructions(artifacts));
-    out.push_str(&delegate_workspace_instruction(context));
+    // ADR-0054 D2 / Phase 98 追記: 対話 run（`conversation_addressee` が Some）は結果ファイルを書いて
+    // 返事だけをする（`preamble::conversation_instructions` の `actions` 経由でしか仕事を作れない）。
+    // 対話 run の一部（CoS）は read-only サンドボックスで `artifacts/delegate.json` を書けないため、
+    // 汎用の delegate.json 段落をここで出すと「委譲ファイルを作成できない」と誤って諦める
+    // （実機障害 2026-09-22 00:18 UTC、task 01M337NT3QT1FR1G6WHS9G6NDA）。対話でない run の文面は
+    // 1 バイトも変えない。
+    if context.conversation_addressee.is_some() {
+        out.push_str(
+            "この run は返事だけを書く。仕事は返事の `actions` で作る（ファイルは書けない）。\n",
+        );
+    } else {
+        out.push_str(&delegation_instructions(artifacts));
+        out.push_str(&delegate_workspace_instruction(context));
+    }
     out.push_str("When you are done:\n");
     out.push_str(&result_json_instructions(artifacts));
     out
@@ -1306,6 +1318,53 @@ mod tests {
         assert!(prompt.contains("attempt 1 of"));
     }
 
+    /// Phase 98（ADR-0054 D2、実機障害 2026-09-22）: 対話 run（`conversation_addressee` が Some）の
+    /// 前置きには `artifacts/delegate.json` の段落が出ず、代わりに「返事だけを書く」1 文が入る。
+    /// 対話でない run の前置きは Phase 97 までと 1 バイトも変わらない。
+    #[test]
+    fn conversation_runs_do_not_get_the_delegate_json_paragraph() {
+        let task = crate::protocol::tests::sample_task();
+        let ordinary = build_prompt(&task, &RunContext::default(), "run-ord", "artifacts");
+        assert!(ordinary.contains("artifacts/delegate.json"), "{ordinary}");
+        assert!(
+            !ordinary.contains("この run は返事だけを書く"),
+            "{ordinary}"
+        );
+
+        let secretary_context = RunContext {
+            conversation_addressee: Some(crate::protocol::ConversationAddressee::Secretary),
+            ..RunContext::default()
+        };
+        let secretary = build_prompt(&task, &secretary_context, "run-cos", "artifacts");
+        assert!(
+            !secretary.contains("artifacts/delegate.json"),
+            "{secretary}"
+        );
+        assert!(
+            secretary.contains(
+                "この run は返事だけを書く。仕事は返事の `actions` で作る（ファイルは書けない）。"
+            ),
+            "{secretary}"
+        );
+
+        let other_context = RunContext {
+            conversation_addressee: Some(crate::protocol::ConversationAddressee::Other),
+            ..RunContext::default()
+        };
+        let other = build_prompt(&task, &other_context, "run-other", "artifacts");
+        assert!(!other.contains("artifacts/delegate.json"), "{other}");
+        assert!(
+            other.contains("この run は返事だけを書く。仕事は返事の `actions` で作る（ファイルは書けない）。"),
+            "{other}"
+        );
+
+        // 対話でない run（Phase 97 までの構成）は前置きが 1 バイトも変わらない。
+        assert_eq!(
+            ordinary,
+            build_prompt(&task, &RunContext::default(), "run-ord", "artifacts")
+        );
+    }
+
     /// `context.answers`（ADR-0010 D3, P-10）は Execute/Plan プロンプトに反映される。
     #[test]
     fn build_prompt_includes_answers_from_human_for_execute_and_plan() {
@@ -2017,6 +2076,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             crate::protocol::OrgNodeContext {
                 harnesses: Vec::new(),
                 skills: Vec::new(),
+                tools: Vec::new(),
                 id: "research".into(),
                 name: "研究部".into(),
                 kind: task_core::OrgKind::Department,
@@ -2027,6 +2087,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             crate::protocol::OrgNodeContext {
                 harnesses: Vec::new(),
                 skills: Vec::new(),
+                tools: Vec::new(),
                 id: "research-survey".into(),
                 name: "関連研究調査課".into(),
                 kind: task_core::OrgKind::Section,

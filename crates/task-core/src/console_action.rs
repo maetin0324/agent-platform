@@ -8,12 +8,18 @@
 //! {"summary": "…", "actions": [
 //!   {"type": "create_task", "title": "…", "objective": "…", "acceptance": [...], "harness": "coding",
 //!    "skills": ["rust"], "mode": "prototype", "repos": ["agent-platform"], "project": "<id or null>",
-//!    "milestone": "<id or null>", "assignee": null},
+//!    "milestone": "<id or null>", "assignee": null,
+//!    "workspace": {"kind": "remote", "cluster": "<id>", "path": "<remote dir or ~>"}},
 //!   {"type": "propose_project", "title": "…", "request": "…", "repos": [...]},
 //!   {"type": "add_milestone", "project": "<id>", "title": "…", "description": "…"},
 //!   {"type": "ask_human", "text": "…"}
 //! ]}
 //! ```
+//!
+//! Phase 98（ADR-0018、実機障害 2026-09-22）: `create_task.workspace` は `WorkspaceSpec` そのもの
+//! （`{"kind":"local","path":"…"}` または `{"kind":"remote","cluster":"…","path":"…"}`）。CoS がクラスタ作業
+//! （pegasus / sirius / fern03 でのコマンド実行）を`cluster:<id>` を持つノードへ流すときに使う。実行側
+//! （`task_ops::actions::create_task_action`）が `cluster` を `[[clusters]]` に照らして検証する。
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -43,6 +49,13 @@ pub enum ConsoleAction {
         milestone: Option<String>,
         #[serde(default)]
         assignee: Option<String>,
+        /// Phase 98（ADR-0018）: クラスタで動く仕事を指すときの作業場所。`{"kind":"remote",
+        /// "cluster":"<id>","path":"<クラスタ側のパスか ~>"}` か `{"kind":"local","path":"…"}`。
+        /// `cluster` は `[[clusters]]` に存在すること（実行側が検証する）。`Box` は
+        /// `clippy::large_enum_variant`（`WorkspaceSpec` を直に持つと `CreateTask` だけ他の variant
+        /// より大きく膨らむ）を避けるためだけで、意味は変わらない。
+        #[serde(default)]
+        workspace: Option<Box<crate::model::WorkspaceSpec>>,
     },
     ProposeProject {
         title: String,

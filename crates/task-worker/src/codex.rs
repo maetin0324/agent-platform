@@ -160,48 +160,42 @@ enum TurnSignal {
     Failed { message: String },
 }
 
-async fn run_codex(
+/// 1 回の `codex exec` 起動（fresh でも resume でも）が読み取った生の観測結果。分類
+/// （`Terminal`/`ProviderFailure` への変換）は呼び出し側（`run_codex`）が行う。Phase 98（ADR-0054
+/// 追記）: この構造体に分けたのは、resume の RPC 失敗を**同じ run の中で** fresh 起動としてやり直す
+/// （`run_codex_once` をもう一度呼ぶ）ために、読み取りループを 1 回分だけの単位に切り出す必要があった
+/// ため。
+struct CodexAttempt {
+    exit_status: std::process::ExitStatus,
+    last_signal: Option<TurnSignal>,
+    last_error_message: Option<String>,
+    conversation_reply: Option<String>,
+    timeout_terminal: Option<Terminal>,
+    /// Phase 98: stdout に JSON Lines が 1 行でも来たか（パースの成否は問わない）。「イベントを
+    /// 一つも出さずに終わった」判定に使う。
+    saw_any_stdout_line: bool,
+}
+
+/// `codex exec`（または `codex exec resume <id>`）を 1 回起動し、終了まで読み切る（ADR-0008 D3）。
+/// `resume_id` が `Some` なら resume、`None` なら fresh（`--add-dir` 付き）。プロンプトは呼び出し側が
+/// 一度だけ組んで渡す（Phase 98 のリトライでも同じ文面を使う。ADR-0054 D1 のとおり fresh 側の前置きは
+/// 本来「差分でなく全量」だが、intra-run のやり直しでは前置きを組み直さない — 動くことを優先する）。
+#[allow(clippy::too_many_arguments)]
+async fn run_codex_once(
     config: &CodexConfig,
     req: &RunRequest,
     run_id: &str,
     limits: &RunLimits,
     sink: &dyn EventSink,
-) -> Result<RunOutcome, AdapterError> {
-    let run_dir = req.workspace.join("runs").join(run_id);
-    tokio::fs::create_dir_all(&run_dir).await?;
-    let stdout_log_path = run_dir.join("stdout.jsonl");
-    let stderr_log_path = run_dir.join("stderr.log");
+    prompt: &str,
+    resume_id: Option<&str>,
+    stdout_log_path: &std::path::Path,
+    stderr_log_path: &std::path::Path,
+) -> Result<CodexAttempt, AdapterError> {
     // `stderr_task` (below) moves a copy into its `async move` block; this one stays available for
     // the crash-classification read after the loop (ADR-0010 D5).
-    let stderr_log_path_for_task = stderr_log_path.clone();
-
-    // 前回の run（リトライ）が残した結果ファイルを、今回の run の結果と誤読しない（ADR-0006 D3 と同じ理由）。
-    // ADR-0036 D1/D2: 置き場はディスパッチャが決めた `artifacts_dir`（共有 workspace ではタスクごと）。
-    let artifacts_rel = req.artifacts_rel();
-    let result_path = req.artifact_path("result.json");
-    let _ = tokio::fs::remove_file(&result_path).await;
-    clear_delegate_file(&req.artifacts_dir).await;
-
-    let prompt = build_prompt(&req.task, &req.context, run_id, &artifacts_rel);
-    // ADR-0023 D2 / M1: この run で何を渡したかを残す（`request.json` は構造、`prompt.txt` は実際の文面）。
-    crate::subprocess::write_run_request(&run_dir, req, run_id).await;
-    crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
-    // ADR-0056 D3（Phase 79）: mount された skills を `AGENTS.md` の節として書く（codex はこのファイルを
-    // 自動で読む。既存の内容は壊さない。run は落とさない）。
-    if let Err(e) = crate::skills::deliver_agents_md(req.cwd(), &req.context.skills).await {
-        warn!("run {run_id}: failed to update AGENTS.md with skills: {e}");
-    }
-
-    // ADR-0054 D1（Phase 67）: `context.session` がこのアダプタ宛て（`adapter == "codex"`）で
-    // `resume: true` のときだけ継続する。手段は `config.resume_mode` で決定的に選ぶ（実機 probe はしない）。
-    let codex_session = req
-        .context
-        .session
-        .as_ref()
-        .filter(|s| s.adapter == CodexAdapter::ID);
-    let resume_id = codex_session
-        .filter(|s| s.resume)
-        .map(|s| s.session_id.clone());
+    let stderr_log_path_for_task = stderr_log_path.to_path_buf();
+    let resume_id = resume_id.map(|s| s.to_string());
 
     let mut command = Command::new(&config.command);
     // CoS and standalone task workspaces need not be Git repositories.
@@ -296,7 +290,7 @@ async fn run_codex(
         command.arg("--add-dir").arg(&req.artifacts_dir);
         command.args(&config.extra_args);
     }
-    command.arg(&prompt);
+    command.arg(prompt);
     command
         .envs(config.env.iter().cloned())
         .current_dir(req.cwd());
@@ -335,7 +329,7 @@ async fn run_codex(
         }
     });
 
-    let mut stdout_file = tokio::fs::File::create(&stdout_log_path).await?;
+    let mut stdout_file = tokio::fs::File::create(stdout_log_path).await?;
     let mut reader = BufReader::new(stdout);
 
     let start = Instant::now();
@@ -347,6 +341,8 @@ async fn run_codex(
     let mut last_error_message: Option<String> = None;
     let mut force_kill = false;
     let mut timeout_terminal: Option<Terminal> = None;
+    // Phase 98: 少なくとも 1 行の stdout（イベント）を見たか。
+    let mut saw_any_stdout_line = false;
 
     loop {
         let wall_elapsed = start.elapsed();
@@ -385,11 +381,13 @@ async fn run_codex(
             LineOutcome::TooLong => {
                 sink.heartbeat();
                 last_activity = Instant::now();
+                saw_any_stdout_line = true;
                 warn!("run {run_id}: discarding overlong line from codex stdout");
             }
             LineOutcome::Line(bytes) => {
                 sink.heartbeat();
                 last_activity = Instant::now();
+                saw_any_stdout_line = true;
                 stdout_file.write_all(&bytes).await?;
                 stdout_file.write_all(b"\n").await?;
                 let text = String::from_utf8_lossy(&bytes);
@@ -424,6 +422,122 @@ async fn run_codex(
         warn!("run {run_id}: stderr capture task failed: {e}");
     }
     stdout_file.flush().await?;
+
+    Ok(CodexAttempt {
+        exit_status,
+        last_signal,
+        last_error_message,
+        conversation_reply,
+        timeout_terminal,
+        saw_any_stdout_line,
+    })
+}
+
+async fn run_codex(
+    config: &CodexConfig,
+    req: &RunRequest,
+    run_id: &str,
+    limits: &RunLimits,
+    sink: &dyn EventSink,
+) -> Result<RunOutcome, AdapterError> {
+    let run_dir = req.workspace.join("runs").join(run_id);
+    tokio::fs::create_dir_all(&run_dir).await?;
+
+    // 前回の run（リトライ）が残した結果ファイルを、今回の run の結果と誤読しない（ADR-0006 D3 と同じ理由）。
+    // ADR-0036 D1/D2: 置き場はディスパッチャが決めた `artifacts_dir`（共有 workspace ではタスクごと）。
+    let artifacts_rel = req.artifacts_rel();
+    let result_path = req.artifact_path("result.json");
+    let _ = tokio::fs::remove_file(&result_path).await;
+    clear_delegate_file(&req.artifacts_dir).await;
+
+    let prompt = build_prompt(&req.task, &req.context, run_id, &artifacts_rel);
+    // ADR-0023 D2 / M1: この run で何を渡したかを残す（`request.json` は構造、`prompt.txt` は実際の文面）。
+    crate::subprocess::write_run_request(&run_dir, req, run_id).await;
+    crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
+    // ADR-0056 D3（Phase 79）: mount された skills を `AGENTS.md` の節として書く（codex はこのファイルを
+    // 自動で読む。既存の内容は壊さない。run は落とさない）。
+    if let Err(e) = crate::skills::deliver_agents_md(req.cwd(), &req.context.skills).await {
+        warn!("run {run_id}: failed to update AGENTS.md with skills: {e}");
+    }
+
+    // ADR-0054 D1（Phase 67）: `context.session` がこのアダプタ宛て（`adapter == "codex"`）で
+    // `resume: true` のときだけ継続する。手段は `config.resume_mode` で決定的に選ぶ（実機 probe はしない）。
+    let codex_session = req
+        .context
+        .session
+        .as_ref()
+        .filter(|s| s.adapter == CodexAdapter::ID);
+    let resume_id = codex_session
+        .filter(|s| s.resume)
+        .map(|s| s.session_id.clone());
+
+    let stdout_log_path = run_dir.join("stdout.jsonl");
+    let mut stderr_log_path = run_dir.join("stderr.log");
+    let mut attempt = run_codex_once(
+        config,
+        req,
+        run_id,
+        limits,
+        sink,
+        &prompt,
+        resume_id.as_deref(),
+        &stdout_log_path,
+        &stderr_log_path,
+    )
+    .await?;
+
+    // Phase 98（ADR-0054 追記。実機障害 2026-09-22 00:18 UTC、task 01M337NT3QT1FR1G6WHS9G6NDA）:
+    // `codex exec resume` が「イベントを一つも出さずに」非 0 で終わり、stderr に
+    // `thread/resume`/`-32601`/`resume` を含む失敗行があるなら、これは通常の resume 拒否
+    // （`looks_like_resume_rejection` が既に検出する `session not found` 等）ではなく、codex-cli 自身が
+    // `exec resume` の JSON-RPC を実装していない（`list_turns is not supported yet`）という、**同じ
+    // インストールでは毎回起きる**壊れ方。次 run を待たずに、**この run の中で** fresh セッション
+    // （resume 無しの通常の `codex exec`）として 1 回だけやり直す（claude-code 側の Phase 67b の
+    // 自己修復と同じ「壊れたら retire して仕切り直す」考え方を、run をまたがずに行うもの）。
+    let mut resume_id_for_classification = resume_id.clone();
+    if resume_id.is_some()
+        && !attempt.saw_any_stdout_line
+        && attempt.timeout_terminal.is_none()
+        && attempt.last_signal.is_none()
+        && !attempt.exit_status.success()
+    {
+        let tail = read_tail(&stderr_log_path, 4096).await;
+        let combined = format!(
+            "{} {tail}",
+            attempt.last_error_message.as_deref().unwrap_or("")
+        );
+        if crate::provider::looks_like_resume_rpc_failure(&combined) {
+            sink.session_resume_failed(&combined);
+            let retry_stdout_log_path = run_dir.join("stdout.resume_retry.jsonl");
+            let retry_stderr_log_path = run_dir.join("stderr.resume_retry.log");
+            let _ = tokio::fs::remove_file(&result_path).await;
+            clear_delegate_file(&req.artifacts_dir).await;
+            attempt = run_codex_once(
+                config,
+                req,
+                run_id,
+                limits,
+                sink,
+                &prompt,
+                None,
+                &retry_stdout_log_path,
+                &retry_stderr_log_path,
+            )
+            .await?;
+            stderr_log_path = retry_stderr_log_path;
+            resume_id_for_classification = None;
+        }
+    }
+
+    let CodexAttempt {
+        exit_status,
+        last_signal,
+        last_error_message,
+        conversation_reply,
+        timeout_terminal,
+        saw_any_stdout_line: _,
+    } = attempt;
+    let resume_id = resume_id_for_classification;
 
     let (terminal, provider_failure): (Terminal, Option<ProviderFailure>) = match (
         timeout_terminal,
@@ -2106,5 +2220,96 @@ printf '%s\n' '{"type":"turn.completed"}'
         let sink = RecordingSink::default();
         let _ = adapter.run(req, "run-8", default_limits(), &sink).await;
         assert!(sink.resume_failed.lock().unwrap().is_empty());
+    }
+
+    /// Phase 98（ADR-0054 追記。実機障害 2026-09-22 00:18 UTC、task 01M337NT3QT1FR1G6WHS9G6NDA）:
+    /// `codex exec resume` が**イベントを一つも出さずに** stderr に `list_turns is not supported yet
+    /// (code -32601)` を出して exit 1 したら、`session_resume_failed` を 1 回報告した上で、**同じ run の
+    /// 中で** resume 無しの fresh `codex exec` としてやり直し、run は done になる（stub は argv の
+    /// `$2` が `resume` かどうかで振る舞いを変える: resume 呼び出しは失敗を模し、resume 無しの呼び出しは
+    /// 正常な `thread.started`/`turn.completed` を出す）。
+    #[tokio::test]
+    async fn a_resume_rpc_failure_self_heals_within_the_same_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"if [ "$2" = "resume" ]; then
+  echo 'Error: thread/resume: thread/resume failed: list_turns is not supported yet (code -32601)' >&2
+  exit 1
+else
+  mkdir -p artifacts
+  echo '{"type":"thread.started","thread_id":"thread-fresh-1"}'
+  printf '%s' '{"summary":"done after fresh retry","evidence":[]}' > artifacts/result.json
+  echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":7}}'
+fi
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "01ARZ3".to_string(),
+            resume: true,
+        });
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-resume-heal", default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Done { summary, .. } => assert_eq!(summary, "done after fresh retry"),
+            other => panic!("expected done after self-heal, got {other:?}"),
+        }
+        let failed = sink.resume_failed.lock().unwrap();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(
+            failed[0].contains("thread/resume") || failed[0].contains("-32601"),
+            "{failed:?}"
+        );
+        // やり直しは resume していない（`thread.started` からの id）ので、新しい id だけが 1 回報告される。
+        let sessions = sink.sessions.lock().unwrap();
+        assert_eq!(sessions.as_slice(), ["thread-fresh-1".to_string()]);
+        // どちらの試行のログも残る（デバッグ用。1 回目は resume の argv、2 回目は fresh の argv）。
+        assert!(
+            dir.path()
+                .join("runs/run-resume-heal/stdout.jsonl")
+                .is_file()
+        );
+        assert!(
+            dir.path()
+                .join("runs/run-resume-heal/stdout.resume_retry.jsonl")
+                .is_file()
+        );
+    }
+
+    /// resume していない run は、この自己回復の対象にならない（同じ文言で失敗しても 1 回で終わる。
+    /// `session_resume_failed` も呼ばれない）。
+    #[tokio::test]
+    async fn a_non_resuming_run_is_unaffected_by_the_resume_rpc_self_heal() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"echo 'Error: thread/resume: thread/resume failed: list_turns is not supported yet (code -32601)' >&2
+exit 1
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-no-resume", default_limits(), &sink)
+            .await;
+        match outcome {
+            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
+        }
+        assert!(sink.resume_failed.lock().unwrap().is_empty());
+        assert!(sink.sessions.lock().unwrap().is_empty());
+        assert!(
+            !dir.path()
+                .join("runs/run-no-resume/stdout.resume_retry.jsonl")
+                .exists(),
+            "resume していない run はやり直さない"
+        );
     }
 }

@@ -13722,3 +13722,161 @@ GUI 側の仮説（「frontmatter の `tags` と LangMem/整理 run の付与タ
 - `verify.sh e0806ca2ff3f` → exit 0、check 1〜4, 4b, 5（N-1 = b8f600099790）, 6（smoke done in 5.07s）すべて true、`ok=true live_ok=true`。
 - `promote.sh e0806ca2ff3f` → mode=live、DB バックアップ 14M、新 celeris が 2 秒で active（5/5）、GUI 切替 1 秒、`current -> releases/e0806ca2ff3f`。
 - 実機確認（P-94-1 の受け入れ）: `GET /health` release=e0806ca2ff3f role=active schema_version=24。`GET /releases` の現行と直前の 2 件で `gate.failed_step` が `null`（Phase 94 時点は `""`）、`verify.checks` 7 件のまま。知識 inbox のタグ重複除去（P-G46-5）は保存時の処理なので、次に整理 run が候補を書いたときに効く。
+## Phase 98 — CoS はクラスタ作業を「ssh 禁止」で断らず組織に流す／codex の再開失敗を自己回復する（ADR-0054 追記。2026-09-22）
+
+celeris のみ（Rust）。本番（2026-09-22 00:18 UTC、task 01M337NT3QT1FR1G6WHS9G6NDA）で、人が CoS に
+「pegasus のログインノードで `pegasusinfo`, `rbudgetcheck` を実行して」と頼んだところ、codex の resume
+run が「イベントを一つも出さずに」exit 1（stderr 1 行だけ `Error: thread/resume: thread/resume failed:
+list_turns is not supported yet (code -32601)`）で落ち、続く読み取り専用の対話 run が「クラスタへの ssh
+が禁止され、ファイルも読み取り専用のため、委譲ファイルを作成できません」と返して終わった障害を直した。
+
+### A. CoS はクラスタ作業を「ssh 禁止」を理由に断らず、組織へ `create_task` で流す
+
+**条件 1**: 対話 run（`context.conversation_addressee` が `Some`）の前置きに `artifacts/delegate.json` の
+段落が出ず、代わりに「この run は返事だけを書く。仕事は返事の `actions` で作る（ファイルは書けない）」が
+入る。対話でない run の前置きは 1 バイトも変わらない。
+
+**実装**: `crates/task-worker/src/claude_code.rs::build_execute_prompt`（`claude-code`/`codex`/`acp` の
+3 アダプタが共有する `claude_code::build_prompt` の内部）で、`context.conversation_addressee.is_some()`
+のときだけ `delegation_instructions`/`delegate_workspace_instruction`（`artifacts/delegate.json` を書けと
+言う汎用の段落）を出さず、1 文に差し替えた。対話でない run の分岐は変更していない。
+
+**実行コマンドと出力の要点**:
+
+| コマンド | 出力の要点 |
+| --- | --- |
+| `cargo test -p task-worker --lib claude_code::conversation_runs_do_not_get_the_delegate_json_paragraph` | exit 0。1 passed。対話 run（Secretary/Other）に段落が出ないこと・新しい 1 文が入ること・対話でない run の文面がバイト同一であることを確認 |
+
+**条件 2**: 秘書（CoS）宛ての指示に「クラスタ作業は自分で実行せず `cluster:<id>` を持つノードへ
+`create_task` で流す。『ssh が禁止されている』『read-only』を理由に断らない。`workspace` に
+`{"kind":"remote","cluster":"<id>","path":"<作業ディレクトリか ~>"}` を入れる」規則が入る。
+`ConsoleAction::CreateTask` に `workspace`（`WorkspaceSpec`）を追加し、実行側が `cluster` を
+`[[clusters]]`（既知のクラスタ一覧）に照らして検証する（未知のクラスタは action 全体を検証で落とす）。
+
+**実装**:
+- `crates/task-worker/src/preamble.rs::conversation_instructions`（Secretary 分岐）にクラスタ作業の
+  規則を追加。`actions_instructions()` の `create_task` 例に `workspace` フィールドの書式を追記。
+- `crates/task-core/src/console_action.rs::ConsoleAction::CreateTask` に
+  `workspace: Option<Box<WorkspaceSpec>>` を追加（`Box` は `clippy::large_enum_variant` 回避のためだけ。
+  意味は変わらない）。
+- `crates/task-ops/src/actions.rs`: `execute`/`execute_one`/`create_task_action` に `known_clusters:
+  &[String]` を追加し、`workspace` が `WorkspaceSpec::Remote{cluster,..}` なら `known_clusters` に無い
+  `cluster` を拒否する（`FailedAction` として理由が残る。タスクは作られない）。`WorkspaceSpec::Local`/
+  `Remote` を `NewTaskSpec.workspace`/`cluster`（既存の `add.rs` の組み立て）へ変換する。
+- `crates/task-dispatch/src/dispatcher.rs::absorb_console_actions`: `self.config.clusters.keys()` から
+  `known_clusters` を組んで `task_ops::actions::execute` に渡す。
+- `crates/task-worker/src/protocol.rs::OrgNodeContext` に `tools: Vec<String>`
+  （`EffectiveProfile.tools` から。`with_profile` が埋める）を追加し、
+  `crates/task-worker/src/preamble.rs::organization_section`（CoS 宛ての「組織」一覧、ADR-0046 D6）が
+  各ノードの `tools`（`cluster:<id>` を含む）を 1 語ずつ添えるようにした。CoS が「どのノードに流せば
+  よいか」を前置きから判断できるようにする。`docs/protocol/worker-protocol.schema.json` を
+  `UPDATE_SCHEMA=1 cargo test -p task-worker` で再生成（`OrgNodeContext.tools` の追加のみ、7 行）。
+
+**テスト**:
+- `crates/task-worker/src/preamble.rs`: `secretary_instructions_tell_cos_to_route_cluster_work_via_create_task`
+  （新規則の文面・`workspace` の書式が入ること、CoS 以外の対話には出ないこと）、
+  `organization_section_shows_each_nodes_tools`（各ノードの `道具:` 行、道具が無いノードには出ないこと）。
+- `crates/task-ops/src/actions.rs`: `create_task_with_a_known_cluster_workspace_makes_a_remote_task`
+  （`workspace: {"kind":"remote","cluster":"pegasus","path":"~"}` から `WorkspaceSpec::Remote` のタスクが
+  作られる）、`create_task_with_an_unknown_cluster_is_rejected`（未知のクラスタは action 全体を拒否し、
+  タスクを作らない）。既存の 12 件は `execute`/`execute_one` のシグネチャ変更（`known_clusters` 引数の
+  追加）に合わせて呼び出しだけ直した（振る舞いは変えていない）。
+
+**実行コマンドと出力の要点**:
+
+| コマンド | 出力の要点 |
+| --- | --- |
+| `cargo test -p task-worker --lib preamble::` | exit 0。15 passed（新規 2 件を含む） |
+| `cargo test -p task-ops --lib actions::` | exit 0。14 passed（新規 2 件を含む） |
+
+### B. codex の resume 失敗（`exec resume` の RPC 未実装）を同じ run の中で自己回復
+
+**条件**: `context.session.resume == true` の run が**イベントを一つも出さずに**非 0 で終わり、stderr に
+`thread/resume`/`-32601`/`resume` を含む失敗行があるとき、`sink.session_resume_failed` を呼んだ上で、
+**同じ run の中で**新規セッション（resume 無し、`codex exec` の通常形）として 1 回だけやり直す。やり直しで
+`thread.started` が出れば新しい thread id が `sessions` に記録される。resume していない run・イベントが
+1 つでも出た resume run では何も変わらない。
+
+**実装**: `crates/task-worker/src/codex.rs::run_codex` を、1 回分の spawn + 読み取りループを
+`run_codex_once`（新規、`CodexAttempt` を返す）に切り出した上で、`run_codex` が最初の attempt の結果を
+見て「resume 済み・イベント 0（`saw_any_stdout_line == false`）・非 0 exit・タイムアウトでない」なら
+stderr の末尾を `provider::looks_like_resume_rpc_failure`（新規。`thread/resume`/`-32601`/`resume` の
+部分一致。既存の `looks_like_resume_rejection`〈「セッションが見つからない」系〉とは別パターン集合 —
+今回の壊れ方は「拒否」ではなく「このインストールの codex は `exec resume` の RPC 自体を実装していない」
+ため）で判定し、一致したら `sink.session_resume_failed` を呼んで `result.json`/delegate.json を再度
+クリアし、`resume_id = None` で `run_codex_once` をもう一度呼ぶ（`stdout.resume_retry.jsonl`/
+`stderr.resume_retry.log` に別ログとして残す。1 回目のログは上書きしない）。既存の分類ロジック
+（`(timeout_terminal, last_signal)` の match）はそのまま、やり直し後の `attempt`/`resume_id` を使う。
+
+**テスト**（`crates/task-worker/src/codex.rs`。stub codex の argv `$2` が `resume` かどうかで挙動を
+変えるスクリプトを使用）:
+- `a_resume_rpc_failure_self_heals_within_the_same_run`: resume 呼び出しは
+  `Error: thread/resume: thread/resume failed: list_turns is not supported yet (code -32601)` を
+  stderr に出して exit 1、resume 無しの呼び出しは `thread.started`（新 id）/`turn.completed` を出す。
+  run が `Terminal::Done` になり、`resume_failed` が 1 回、`sessions` に新しい id が 1 回だけ記録され、
+  両方の attempt のログファイルが残ることを確認。
+- `a_non_resuming_run_is_unaffected_by_the_resume_rpc_self_heal`: 同じ文言で失敗しても resume していない
+  run では 1 回で終わり、`resume_failed`/`sessions` とも空、リトライ用ログも作られないことを確認。
+- 既存 40 件（`a_rejected_resume_reports_session_resume_failed` を含む resume 拒否・argv ホワイトリスト
+  ・fresh/experimental_resume の各テスト）は変更なしで green のまま。
+
+**実行コマンドと出力の要点**:
+
+| コマンド | 出力の要点 |
+| --- | --- |
+| `cargo test -p task-worker --lib codex::` | exit 0。42 passed（新規 2 件を含む） |
+
+`docs/adr/0054-stateful-sessions-and-streaming-chat.md` に `## Phase 98 追記` を追加（本文は書き換えず、
+末尾に 8 行で自己回復の経緯と実装方針を記録）。
+
+### ゲート（証拠コマンドと出力の要点。A/B 共通）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（全 `test result: ok` 行の passed 合計 **1799**、failed 合計 0） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0。`ConsoleAction` の
+  `clippy::large_enum_variant` を `workspace` フィールドの `Box` 化で解消） |
+
+`crates/task-api/src/types.rs` は変更していない（`ConsoleAction` は task-api の型に出ていない）ため
+`UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::` は不要（`git status` で
+`docs/api/v1/api-v1.schema.json` に差分が無いことを確認）。`gui/app/**` にも触れていないため GUI 側の
+ゲート（`pnpm gen:types`/`typecheck`/`test`）はこの Phase のスコープ外。`crates/task-worker` の
+`docs/protocol/worker-protocol.schema.json`（`OrgNodeContext.tools` 追加）だけ
+`UPDATE_SCHEMA=1 cargo test -p task-worker` で再生成した（上記 A 参照）。
+
+### 変更したファイル
+
+- `crates/task-worker/src/claude_code.rs`（対話 run の delegate.json 段落の差し替え、テスト 1 件）
+- `crates/task-worker/src/preamble.rs`（秘書宛て指示にクラスタ規則、`actions_instructions` に `workspace`
+  例、`organization_section` に `tools` 表示、テスト 2 件）
+- `crates/task-worker/src/protocol.rs`（`OrgNodeContext.tools`）
+- `crates/task-core/src/console_action.rs`（`ConsoleAction::CreateTask.workspace`）
+- `crates/task-ops/src/actions.rs`（`known_clusters` 検証、テスト 2 件、既存呼び出しの引数追加）
+- `crates/task-dispatch/src/dispatcher.rs`（`absorb_console_actions` が `known_clusters` を渡す）
+- `crates/task-worker/src/codex.rs`（`run_codex_once` への分割、resume RPC 失敗の自己回復、テスト 2 件）
+- `crates/task-worker/src/provider.rs`（`looks_like_resume_rpc_failure`）
+- `docs/protocol/worker-protocol.schema.json`（`UPDATE_SCHEMA=1` で再生成）
+- `docs/adr/0054-stateful-sessions-and-streaming-chat.md`（`## Phase 98 追記`）
+- `docs/PROGRESS.md`（本節）
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが昇格後に行う）:
+  1. CoS に「pegasus のログインノードで `pegasusinfo` を実行して」のように依頼し、CoS が自分で断らず
+     `cluster-hpc`（または `cluster:<id>` を持つ他ノード）宛ての `create_task` を作ること
+     （`GET /tasks/<id>` の `workspace` が `{"kind":"remote","cluster":"pegasus",...}` になっていること）。
+  2. codex が CoS の対話セッションに割り当たった状態で resume run を起こし、`thread/resume ...
+     -32601` 相当の失敗が起きても run がその場で `done`（または通常の失敗）になり、次 run を待たずに
+     復旧すること（`runs/<id>/stderr.resume_retry.log` の有無で判別できる）。
+- B の自己回復は「イベントを一つも出さなかった」場合だけを対象にしている（本番で観測した形そのもの）。
+  部分的にイベントを出してから resume RPC が失敗するケースがもしあれば、今回の変更では自己回復せず
+  従来どおり次 run 待ちになる（意図的な保守的判断 — 途中まで進んだ run をやり直すと二重作業になりうる
+  ため）。
+- resume のやり直し（fresh 起動）は、resume 用に組まれた前置き（`context.session_diff` が「差分」の文面）
+  をそのまま使う（intra-run のやり直しでは前置きを組み直していない）。本来 fresh セッションには全量の
+  前置きを渡すはずだが、自己回復の目的（動くことを優先）に対しては実害が小さいと判断した。次に前置きの
+  重複・差分の扱いを見直す Phase があれば、そこで一緒に整理する候補（Phase 67 未解決事項 1 と同種）。
+
+### 提案
+
+- なし（今回の 2 件は指示書の範囲で閉じた）。

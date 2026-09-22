@@ -589,3 +589,22 @@ Options（全量）: -c/--config <key=value>, --last, --all, --enable <FEATURE>,
   celeris 側で追加していない限りそもそも argv に乗らない（同じクラスの障害の再発は原理的に防げている）。
   ただし `-c` の値（`sandbox_mode`・`experimental_resume`・`model`）が resume で本当に効くかどうかの
   実機確認は残っている（上記）。
+
+## Phase 98 追記（2026-09-22）
+
+本番（2026-09-22 00:18 UTC、task 01M337NT3QT1FR1G6WHS9G6NDA、codex-cli 0.155.1）: CoS の `resume:true`
+run が **イベントを一つも出さずに** exit 1、stderr は 1 行だけ `Error: thread/resume: thread/resume
+failed: list_turns is not supported yet (code -32601)`。この文言は `RESUME_REJECTION_PATTERNS`
+（「セッションが見つからない」系）のどれにも一致せず、`session_resume_failed` が呼ばれないまま
+`worker exited without a turn.completed/turn.failed message` の retryable エラーとして次 run に持ち越され
+ていた。原因は `session not found` 系の**拒否**ではなく、このインストールの codex-cli が `exec resume` の
+JSON-RPC メソッド（`thread/resume`）自体を実装していないこと（同じセッションでは何度リトライしても直らない）。
+
+`crates/task-worker/src/codex.rs::run_codex` を、1 回分の spawn+読み取りを `run_codex_once` に切り出した
+上で、resume 済みの run が「イベント 0・非 0 exit・stderr に `thread/resume`/`-32601`/`resume`」
+（`provider::looks_like_resume_rpc_failure`。`looks_like_resume_rejection` とは別パターン集合）に一致した
+ときだけ `sink.session_resume_failed` を呼び、**同じ run の中で** resume 無しの fresh `codex exec` として
+1 回だけやり直すように直した（1 回で直らなければ通常のエラー扱い。次の run を待たない分、CoS の対話が
+その場で復旧する）。stub codex によるテスト（`a_resume_rpc_failure_self_heals_within_the_same_run` /
+`a_non_resuming_run_is_unaffected_by_the_resume_rpc_self_heal`）で、resume 失敗 1 回・fresh セッション id
+の報告 1 回・resume していない run では何も変わらないことを確認した。実機確認は未実施（ADR-0009 P-34）。

@@ -967,6 +967,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "tools": {
+          "description": "ADR-0046 D8 / Phase 98: そのノードの**実効** tools（`cluster:<id>` を含む）。CoS の対話 run の\n「組織」一覧に添え、CoS が「どのノードにクラスタ作業を流せるか」を前置きから判断できるようにする\n（実機障害 2026-09-22: CoS が cluster-hpc の存在を知らず ssh 禁止を理由に断った）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [

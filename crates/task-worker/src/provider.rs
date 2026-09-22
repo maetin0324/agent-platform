@@ -155,6 +155,24 @@ pub fn looks_like_resume_rejection(text: &str) -> bool {
     RESUME_REJECTION_PATTERNS.iter().any(|p| lower.contains(p))
 }
 
+/// Phase 98（ADR-0054 追記。実機観測 2026-09-22 00:18 UTC、codex-cli 0.155.1）:
+/// `codex exec resume <id>` が「セッションが見つからない」（[`RESUME_REJECTION_PATTERNS`]）のではなく、
+/// **`exec resume` の JSON-RPC メソッド自体を実装していない**ことを示す文言。実機で観測した stderr
+/// そのまま: `Error: thread/resume: thread/resume failed: list_turns is not supported yet
+/// (code -32601)`。`RESUME_REJECTION_PATTERNS` とは別に扱う理由: こちらは「このセッションは resume
+/// できない」ではなく「このインストールの codex は resume を一切できない」ので、同じセッションで
+/// 何度リトライしても直らない（celeris 側は fresh セッションへ切り替えるしかない）。
+const RESUME_RPC_UNSUPPORTED_PATTERNS: &[&str] = &["thread/resume", "-32601", "resume"];
+
+/// `resume` を頼んだ run が、イベントを一つも出さずに終わったときの crash 分類（`codex.rs::run_codex`
+/// が呼ぶ）。[`RESUME_RPC_UNSUPPORTED_PATTERNS`] のどれかを含むか（大文字小文字を無視）。
+pub fn looks_like_resume_rpc_failure(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    RESUME_RPC_UNSUPPORTED_PATTERNS
+        .iter()
+        .any(|p| lower.contains(p))
+}
+
 /// ADR-0054 Phase 67b 追記: Claude Code CLI 2.1.278 は `--session-id`/`--resume` に渡す id が
 /// **UUID**（`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`、16 進数 32 桁 + ハイフン 4 個）でなければ拒否する
 /// （`Error: Invalid session ID. Must be a valid UUID.` / `--resume requires a valid session ID or
