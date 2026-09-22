@@ -13278,3 +13278,10 @@ Phase のスコープ外（実行していない。Phase 80/82/83/84/86/87/88/89
 - 表示タイムゾーンの設定は `localStorage`（この端末・このブラウザだけ）なので、別の端末・シークレット
   ウィンドウでは毎回「自動」に戻る（仕様どおり。celeris 側に永続化する要望が出たら別途検討）。
 - 本番 = Phase 65〜89。実装中: Phase 90（このワークトリー。GUI のみ）。
+
+### Phase 90 の本番反映（2026-09-22 00:5x UTC。`9192a0bd5401`、ライブ切替）
+
+- main `9192a0b` = Phase 90（`LocalTime` で SSR/CSR を決定的に、視聴者タイムゾーン設定、相対時刻の毎分更新）。GUI ゲート: typecheck / lint exit 0、
+  `pnpm test` 1019 passed。release ゲート 9 段: `pnpm-mobile-audit` exit 0（79.9 s）、`pnpm-e2e-mock` exit 0（9.5 s）。`release.sh` → `9192a0bd5401`（schema 24）。
+  `verify.sh` `ok=true live_ok=true` → `promote.sh` mode=live。本番 = Phase 65〜90。
+- 人（いまシカゴ）に効く変更: 時刻表示がブラウザのタイムゾーン（または「その他」シートの表示タイムゾーン設定）で出る。ISO は `title` に残る。
