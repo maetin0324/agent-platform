@@ -5,6 +5,7 @@ dist/
 test-results/
 playwright-report/
 test/mobile-audit/
+test/mobile-screenshots/
 test/e2e-check/
 .react-router/
 *.tsbuildinfo

@@ -68,7 +68,7 @@ import {
   touchLinkClass,
 } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
-import { Alert, DataItem, EmptyState, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { Alert, DataItem, EmptyState, PageHeader, PageToc, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
 import { WorkspaceFields } from "~/components/WorkspaceFields";
 import { WorkTree } from "~/components/WorkTree";
@@ -422,6 +422,26 @@ export default function ProjectDetailPage({ loaderData }: Route.ComponentProps) 
       )}
 
       <ProjectActionFlash outcome={fetcher.data} />
+
+      {/* Phase 95（ADR-0055 ラウンド 19、所見 P-project-detail、重さ「高」）: このページは性質の違う
+          9 節（依頼・作業場所・リポジトリ・PR と取り込み・途中目標・この方針で進める・仕事の木・報告・
+          成果物・文書）が縦に並ぶ、スマホでは 6 画面分を超える長い 1 ページ。`/help` と同じ「目次から
+          飛ぶ」パターン（`PageToc`）を足し、節そのもの（`SectionTitle` の id）には触れない。 */}
+      <PageToc
+        label="案件詳細の目次"
+        items={[
+          { id: "project-detail-heading", icon: "file", label: "依頼" },
+          { id: "project-workspace-heading", icon: "folder", label: "作業場所" },
+          { id: "project-repos-heading", icon: "database", label: "リポジトリ" },
+          { id: "project-integrations-heading", icon: "gitBranch", label: "PR と取り込み" },
+          { id: "milestones-heading", icon: "target", label: "途中目標" },
+          { id: "project-plan-heading", icon: "sparkles", label: "この方針で進める" },
+          { id: "work-tree-heading", icon: "gitBranch", label: "仕事の木" },
+          { id: "project-reports-heading", icon: "send", label: "報告" },
+          { id: "project-artifacts-heading", icon: "file", label: "成果物" },
+          { id: "project-docs-heading", icon: "book", label: DOCS_TAB_LABEL },
+        ]}
+      />
 
       <section aria-labelledby="project-detail-heading" className="space-y-4">
         <SectionTitle icon="file" id="project-detail-heading">

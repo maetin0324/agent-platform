@@ -731,8 +731,15 @@ function TaskTabs({
     // フェーズ 71（ADR-0055 D2 ラウンド 3）: タブは横スクロールするピル行（`overflow-x-auto`、折り返さない）。
     // 5 つのタブ名が並んでも 393px に収まらないことがあるため、切れた分はスクロールで見せる（D1-1/D1-6 の
     // 「overflow-x-auto の箱」と同じ扱い。`lg:` は元の折り返し行のまま）。
-    <nav aria-label="タスクの内訳" data-testid="task-tabs">
-      <ul className="-mx-4 flex gap-1 overflow-x-auto border-b border-border px-4 lg:mx-0 lg:flex-wrap lg:overflow-visible lg:px-0">
+    // Phase 95（目視点検の所見、重さ「高」）: 5 つ目の「成果物」が右端で文字の途中で切れているのに、
+    // 横にまだ続きがあると気付ける手がかりが無かった。右端に `pointer-events-none` のフェードを重ね、
+    // タップ領域・DOM 構造・スクロール自体は変えずに「まだ右にある」ことだけを示す（`lg:hidden`。
+    // デスクトップは折り返すのでフェード不要）。
+    // フェードの右端をスクロール箱の実際の右端（`-mx-4` で画面端まで伸びた見た目上の境界）に合わせるため、
+    // `relative` と `-mx-4`（bleed）は `nav` 側に置く（`ul` は `px-4` だけ残す）。`ul` にだけ `relative` を
+    // 付けると、bleed していない `nav` の内側 16px 分だけフェードがずれて中途半端な位置に出てしまう。
+    <nav aria-label="タスクの内訳" data-testid="task-tabs" className="relative -mx-4 lg:mx-0">
+      <ul className="flex gap-1 overflow-x-auto border-b border-border px-4 lg:flex-wrap lg:overflow-visible lg:px-0">
         {TASK_TABS.map((t) => {
           const params = new URLSearchParams(searchParams);
           params.set("tab", t);
@@ -764,6 +771,10 @@ function TaskTabs({
           );
         })}
       </ul>
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent lg:hidden"
+      />
     </nav>
   );
 }
@@ -899,7 +910,7 @@ function OverviewTab({
           />
           <CardBody>
             {detail.criteria.length === 0 ? (
-              <EmptyState icon="checkCircle" title="ありません。" />
+              <EmptyState icon="checkCircle" title="ありません。" compact />
             ) : (
               <ul className="space-y-3">
                 {detail.criteria.map((criterion) => (
@@ -957,7 +968,7 @@ function OverviewTab({
           />
           <CardBody className={detail.runs.length === 0 ? undefined : "p-0"}>
             {detail.runs.length === 0 ? (
-              <EmptyState icon="terminal" title="ありません。" />
+              <EmptyState icon="terminal" title="ありません。" compact />
             ) : (
               <div className="overflow-x-auto">
                 <table className={tableClass}>
@@ -1061,7 +1072,7 @@ function OverviewTab({
           />
           <CardBody>
             {detail.delegated.length === 0 ? (
-              <EmptyState icon="users" title="ありません。" />
+              <EmptyState icon="users" title="ありません。" compact />
             ) : (
               <ul className="space-y-3">
                 {detail.delegated.map((group) => (
@@ -1116,7 +1127,7 @@ function OverviewTab({
           />
           <CardBody>
             {detail.prior_review.length === 0 ? (
-              <EmptyState icon="rotate" title="ありません。" />
+              <EmptyState icon="rotate" title="ありません。" compact />
             ) : (
               <ul className="space-y-1.5">
                 {detail.prior_review.map((note) => (
@@ -1151,7 +1162,7 @@ function OverviewTab({
           />
           <CardBody className="space-y-3">
             {detail.answers.length === 0 ? (
-              <EmptyState icon="message" title="ありません。" />
+              <EmptyState icon="message" title="ありません。" compact />
             ) : (
               <ul className="space-y-1.5">
                 {detail.answers.map((note) => (
@@ -1190,7 +1201,7 @@ function OverviewTab({
             {/* フェーズ 71（ADR-0055 D2 ラウンド 3）: 操作は画面下の全幅ボタン（モバイルは縦積み、
                 `sm:` からは元どおり横並び）。 */}
             {detail.actions.length === 0 ? (
-              <EmptyState icon="ban" title="できる操作はありません。" />
+              <EmptyState icon="ban" title="できる操作はありません。" compact />
             ) : (
               <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:gap-4">
                 {detail.actions.includes("approve") && (

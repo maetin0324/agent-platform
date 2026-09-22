@@ -312,7 +312,7 @@ export default function OrgPage({ loaderData }: Route.ComponentProps) {
             ) : (
               <CardBody>
                 <EmptyState icon="user" title="担当を選んでください">
-                  左の組織の木から 1 人選ぶと、その担当の一言・抱えている仕事・話す導線が出ます。
+                  組織の木から 1 人選ぶと、その担当の一言・抱えている仕事・話す導線が出ます。
                 </EmptyState>
               </CardBody>
             )}

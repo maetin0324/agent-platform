@@ -36,7 +36,7 @@ import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { hintClass, inputClass, labelClass, selectClass, touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
-import { Alert, CopyButton, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
+import { Alert, CopyButton, DataItem, EmptyState, Mono, PageHeader, PageToc, SectionTitle } from "~/components/ui/misc";
 import { Skeleton } from "~/components/ui/skeleton";
 import { TONE_SOLID_BG, type Tone } from "~/components/ui/tone";
 import { shortId } from "~/lib/format";
@@ -285,6 +285,20 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
         の利用枠はありません。
       </p>
       <AccountActionFlash outcome={fetcher.data} />
+
+      {/* Phase 95（ADR-0055 ラウンド 19、所見、重さ「高」）: このページは
+          アカウント（Claude/Codex ごとに複数枚のカード）→ LLM source → MCP クライアント → API キー、と
+          性質の違う節が縦に並ぶ長い 1 ページ（実測で 4 画面分超）。`/help` と同じ「目次から飛ぶ」
+          パターン（`PageToc`）を、アカウント一覧より後ろの節（スクロールで埋もれやすい 3 節）にだけ足す。
+          既存の `id`（`llm-sources-heading` 等）や節の実装には触れない。 */}
+      <PageToc
+        label="アカウントの目次"
+        items={[
+          { id: "llm-sources-heading", icon: "server", label: "LLM source" },
+          { id: "mcp-clients-heading", icon: "network", label: "MCP クライアント" },
+          { id: "secrets-heading", icon: "lock", label: "API キー" },
+        ]}
+      />
 
       {(() => {
         const configured = configuredAdapters(accounts);

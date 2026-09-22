@@ -10,6 +10,7 @@ import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, Mono } from "~/components/ui/misc";
+import { shortId } from "~/lib/format";
 import { fileSizeLabel, repoKindLabel, treeEntryKindLabel } from "~/lib/labels";
 import { fileBody, isJsonPath, parentPath, pickTreeFileViewer, taskFilesHref, treeBreadcrumbs } from "~/lib/task-files";
 import { cn } from "~/lib/utils";
@@ -90,9 +91,17 @@ export function TaskFiles({ taskId, tree, file, fileError, filePath }: TaskFiles
             </nav>
           }
           description={
-            <span data-testid="task-files-repo-dir" className="break-all font-mono text-xs">
-              {tree.repos.find((r) => r.name === tree.repo)?.dir ?? ""}
-            </span>
+            // Phase 95（目視点検の所見、ADR-0055 D2「id・sha・パスは末尾省略、全文は title」）: ワークスペースの
+            // 絶対パスは長く（`/home/.../workspaces/<ULID>/repos/<name>` 等）、そのまま出すと `break-all` で
+            // 2 行以上に折り返され読みにくい。末尾だけ見せ、全文は `title`（長押し/ホバーで見える）に retain する。
+            (() => {
+              const dir = tree.repos.find((r) => r.name === tree.repo)?.dir ?? "";
+              return (
+                <span data-testid="task-files-repo-dir" className="break-all font-mono text-xs" title={dir}>
+                  {shortId(dir, 40)}
+                </span>
+              );
+            })()
           }
         />
         <CardBody className="space-y-2">

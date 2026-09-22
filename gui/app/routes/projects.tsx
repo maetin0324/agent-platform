@@ -282,7 +282,10 @@ export default function ProjectsPage({ loaderData }: Route.ComponentProps) {
             description="曖昧なままでかまいません。投げるとすぐ CoS が、理解の確認・大まかな方針・最初の途中目標を返します。"
           />
           <CardBody>
-            <p className={`${hintClass} mb-3`} data-testid="project-new-secretary-hint">
+            {/* Phase 95（目視点検の所見）: 文末の句点だけが行末に孤立して折り返されることがあった。
+                `text-pretty` は最後の行の改行位置をブラウザが調整して widow を避ける（misc.tsx::DataItem
+                と同じ理由）。 */}
+            <p className={`${hintClass} mb-3 text-pretty`} data-testid="project-new-secretary-hint">
               <Link to="/" className={cn(touchLinkClass, "underline underline-offset-2")}>
                 Console から CoS に話しかけても、「案件として」と伝えれば同じです
               </Link>

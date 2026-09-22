@@ -59,6 +59,35 @@ export function PageHeader({
   );
 }
 
+/**
+ * ページ内目次（`/help` の目次、Phase 65 以来）を共通化したもの（Phase 95、ADR-0055 ラウンド 19）。
+ * `project-detail`（案件詳細）・`accounts`（アカウント）のように、性質の異なる節がいくつも縦に並ぶ
+ * 長い 1 ページで、`#<id>` へジャンプする横並びのリンク行を出す（節の実装〈`SectionTitle` の `id`〉には
+ * 触れない。純粋に既存の見出し id へ飛ぶだけ）。
+ *
+ * ADR-0055 D1-2 の例外: 同じ行に並ぶ目次のリンク群なので `data-touch-ok`（個々のリンクの縦の高さが
+ * 44px に届かなくても、行全体としてタップに支障が無いため）。
+ */
+export function PageToc({ label, items }: { label: string; items: { id: string; icon: IconName; label: string }[] }) {
+  return (
+    <nav aria-label={label} className="rounded-xl border border-border bg-surface-2/50 p-3" data-touch-ok>
+      <ul className="flex flex-wrap gap-1.5 text-sm">
+        {items.map((item) => (
+          <li key={item.id}>
+            <a
+              href={`#${item.id}`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-1.5 font-medium text-fg-muted shadow-xs transition-colors hover:border-primary-border hover:bg-primary-soft hover:text-primary-soft-fg"
+            >
+              <Icon name={item.icon} className="size-3.5 text-fg-subtle" />
+              {item.label}
+            </a>
+          </li>
+        ))}
+      </ul>
+    </nav>
+  );
+}
+
 /** カードの外に置く節見出し（h2）。件数はピルで出す。 */
 export function SectionTitle({
   icon,
@@ -96,21 +125,34 @@ export function EmptyState({
   icon = "checkCircle",
   title,
   children,
+  compact = false,
   className,
   ...props
-}: HTMLAttributes<HTMLDivElement> & { icon?: IconName; title?: ReactNode }) {
+}: HTMLAttributes<HTMLDivElement> & { icon?: IconName; title?: ReactNode; compact?: boolean }) {
   return (
     <div
       className={cn(
-        "flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border-strong bg-surface/50 px-6 py-8 text-center",
+        "flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border-strong bg-surface/50 text-center",
+        // Phase 95（ADR-0055 ラウンド 19、所見）: タスク詳細の「概要」タブは、まだ何も起きていない
+        // タスクだと DEPENDENCIES/受け入れ条件/run 一覧/委譲/prior_review/answers/操作 の 6 枚が
+        // 連続してこの大きな空状態カードになり、ページのほとんどが空白になる（重さ「高」）。
+        // 呼び出し側が `compact` を選べるようにし、そういう「並んで出やすい・付随情報の無い」空状態
+        // では余白とアイコンを小さくする。既定（`compact=false`）は今までどおりの見た目（他の画面の
+        // 挙動は変えない）。
+        compact ? "px-4 py-4" : "px-6 py-8",
         className,
       )}
       {...props}
     >
-      <span className="grid size-10 place-items-center rounded-full bg-surface-2 text-fg-subtle ring-1 ring-border">
-        <Icon name={icon} className="size-5" />
+      <span
+        className={cn(
+          "grid place-items-center rounded-full bg-surface-2 text-fg-subtle ring-1 ring-border",
+          compact ? "size-7" : "size-10",
+        )}
+      >
+        <Icon name={icon} className={compact ? "size-3.5" : "size-5"} />
       </span>
-      {title && <div className="text-sm font-medium text-fg">{title}</div>}
+      {title && <div className={cn("font-medium text-fg", compact ? "text-sm" : "text-sm")}>{title}</div>}
       {children && <div className="max-w-md text-sm text-fg-muted">{children}</div>}
     </div>
   );
@@ -210,8 +252,12 @@ export function DataItem({
       {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは元の text-xs のまま。フェーズ 71: ラベルに
           API のフィールド名そのまま（`consecutive_reviewer_requeues` 等、区切りの無い長い 1 語）を渡す
           画面があり、2 列の狭い列幅では折り返せずに横はみ出しを起こしていた。`break-words` で単語の
-          途中でも折り返せるようにする（id/sha は別途 `font-mono break-all` で扱うのでここでは変えない）。 */}
-      <dt className="break-words text-sm font-medium text-fg-subtle lg:text-xs">{label}</dt>
+          途中でも折り返せるようにする（id/sha は別途 `font-mono break-all` で扱うのでここでは変えない）。
+          Phase 95（目視点検の所見、`/org?selected=...` の「抱えている仕事（未終了）」等）: 括弧付きの
+          日本語ラベルが最後の 1〜2 文字だけ孤立して折り返される（widow）ことがあった。`text-pretty`
+          （`text-wrap: pretty`）は最後の行の折り返し位置をブラウザが調整して widow を避ける仕様なので、
+          レイアウト崩れの心配なく足せる（DataItem を使う全画面に効く共通部品の変更）。 */}
+      <dt className="text-pretty break-words text-sm font-medium text-fg-subtle lg:text-xs">{label}</dt>
       <dd className="mt-1 break-words text-sm text-fg">{children}</dd>
     </div>
   );

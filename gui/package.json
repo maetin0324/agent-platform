@@ -21,7 +21,8 @@
     "e2e:staging": "E2E_REQUIRE_STAGING=1 node scripts/e2e-check.mjs",
     "gen:types": "node scripts/gen-types.mjs",
     "release": "bash scripts/release.sh",
-    "mobile-audit": "node scripts/mobile-audit.mjs"
+    "mobile-audit": "node scripts/mobile-audit.mjs",
+    "screenshots:mobile": "node scripts/mobile-screenshots.mjs"
   },
   "dependencies": {
     "@codemirror/lang-json": "6.0.2",

@@ -19,7 +19,7 @@ import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge, StatusBadge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
-import { Card, CardBody, CardHeader } from "~/components/ui/card";
+import { Card, CardBody } from "~/components/ui/card";
 import {
   checkboxClass,
   chipLabelClass,
@@ -193,180 +193,212 @@ export default function BoardPage({ loaderData }: Route.ComponentProps) {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader icon="filter" title="絞り込み" description="ここで選んだ条件はそのまま URL になります。" />
-        <CardBody>
-          <Form method="get" className="space-y-4" data-testid="board-filter-form">
-            <div className="flex flex-wrap items-end gap-3">
-              <div>
-                <label htmlFor="board-project" className={labelClass}>
-                  案件
-                </label>
-                <select
-                  id="board-project"
-                  name="project"
-                  defaultValue={filter.project ?? ""}
-                  data-testid="board-project"
-                  className={cn(selectClass, "mt-1.5 w-56")}
-                >
-                  <option value="">すべての案件</option>
-                  {projects.items.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.title}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label htmlFor="board-assignee" className={labelClass}>
-                  担当
-                </label>
-                <select
-                  id="board-assignee"
-                  name="assignee"
-                  defaultValue={filter.assignee ?? ""}
-                  data-testid="board-assignee"
-                  className={cn(selectClass, "mt-1.5 w-44")}
-                >
-                  <option value="">すべての担当</option>
-                  {org.map((node) => (
-                    <option key={node.id} value={node.id}>
-                      {node.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label htmlFor="board-milestone" className={labelClass}>
-                  途中目標
-                </label>
-                <select
-                  id="board-milestone"
-                  name="milestone"
-                  defaultValue={filter.milestone ?? ""}
-                  data-testid="board-milestone"
-                  className={cn(selectClass, "mt-1.5 w-52")}
-                >
-                  <option value="">すべての途中目標</option>
-                  {milestones
-                    .slice()
-                    .sort((a, b) => a.seq - b.seq)
-                    .map((m) => (
-                      <option key={m.id} value={m.id}>
-                        #{m.seq} {m.title}
+      {/* Phase 95（ADR-0055 ラウンド 19、所見）: 絞り込みフォームは項目数が多く、常に開いたままだと
+          スマホでは本題（下の状態ピル・タスク一覧）に辿り着く前にほぼ 1 画面分を占領してしまう。
+          `<details>` で折りたたみ、条件が 1 つも選ばれていないとき（`boardFilterIsEmpty`）は既定で
+          閉じる。既に絞り込み中なら開いたままにする（せっかく選んだ条件を見失わせない）。フォーム自体
+          の DOM・name 属性は変えていない（機能は落とさない）。 */}
+      <Card className="overflow-hidden">
+        <details
+          className="group"
+          data-testid="board-filter-details"
+          open={boardFilterIsEmpty(filter) ? undefined : true}
+        >
+          <summary className="flex cursor-pointer list-none flex-wrap items-start gap-3 border-b border-border px-5 py-4 marker:content-none [&::-webkit-details-marker]:hidden">
+            <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary-soft-fg">
+              <Icon name="filter" className="size-4" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="flex flex-wrap items-center gap-2 text-sm font-semibold text-fg">
+                絞り込み
+                {!boardFilterIsEmpty(filter) && (
+                  <Badge tone="primary" dot>
+                    適用中
+                  </Badge>
+                )}
+              </span>
+              <span className="mt-0.5 block text-sm text-fg-muted">
+                ここで選んだ条件はそのまま URL になります。タップで開閉します。
+              </span>
+            </span>
+            <Icon
+              name="chevronDown"
+              className="mt-1 size-4 shrink-0 text-fg-subtle transition-transform group-open:rotate-180"
+            />
+          </summary>
+          <CardBody>
+            <Form method="get" className="space-y-4" data-testid="board-filter-form">
+              <div className="flex flex-wrap items-end gap-3">
+                <div>
+                  <label htmlFor="board-project" className={labelClass}>
+                    案件
+                  </label>
+                  <select
+                    id="board-project"
+                    name="project"
+                    defaultValue={filter.project ?? ""}
+                    data-testid="board-project"
+                    className={cn(selectClass, "mt-1.5 w-56")}
+                  >
+                    <option value="">すべての案件</option>
+                    {projects.items.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.title}
                       </option>
                     ))}
-                </select>
-              </div>
-              <div>
-                <label htmlFor="board-label" className={labelClass}>
-                  ラベル
-                </label>
-                <input
-                  id="board-label"
-                  type="text"
-                  name="label"
-                  defaultValue={filter.labels[0] ?? ""}
-                  placeholder="例: pluvio"
-                  data-testid="board-label"
-                  className={cn(inputClass, "mt-1.5 w-40")}
-                />
-              </div>
-              <div>
-                <label htmlFor="board-q" className={labelClass}>
-                  検索
-                </label>
-                <input
-                  id="board-q"
-                  type="text"
-                  name="q"
-                  maxLength={200}
-                  defaultValue={filter.q ?? ""}
-                  placeholder="題名・目的・コメント"
-                  data-testid="board-q"
-                  className={cn(inputClass, "mt-1.5 w-56")}
-                />
-              </div>
-            </div>
-
-            <fieldset data-testid="board-category-filter">
-              <legend className={labelClass}>種類</legend>
-              <div className="mt-1.5 flex flex-wrap gap-2">
-                {TASK_CATEGORIES.map((c) => (
-                  <label key={c} className={chipLabelClass}>
-                    <input
-                      type="checkbox"
-                      name="category"
-                      value={c}
-                      defaultChecked={filter.categories.includes(c)}
-                      className={checkboxClass}
-                    />
-                    {taskCategoryLabel(c)}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="board-assignee" className={labelClass}>
+                    担当
                   </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset data-testid="board-priority-filter">
-              <legend className={labelClass}>優先度</legend>
-              <div className="mt-1.5 flex flex-wrap gap-2">
-                {PRIORITY_LABELS.map((p) => (
-                  <label key={p} className={chipLabelClass}>
-                    <input
-                      type="checkbox"
-                      name="priority"
-                      value={p}
-                      defaultChecked={filter.priorities.includes(p)}
-                      className={checkboxClass}
-                    />
-                    {priorityFullLabel(p)}
+                  <select
+                    id="board-assignee"
+                    name="assignee"
+                    defaultValue={filter.assignee ?? ""}
+                    data-testid="board-assignee"
+                    className={cn(selectClass, "mt-1.5 w-44")}
+                  >
+                    <option value="">すべての担当</option>
+                    {org.map((node) => (
+                      <option key={node.id} value={node.id}>
+                        {node.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="board-milestone" className={labelClass}>
+                    途中目標
                   </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset data-testid="board-tier-filter">
-              <legend className={labelClass}>レベル</legend>
-              <div className="mt-1.5 flex flex-wrap gap-2">
-                {TIERS.map((t) => (
-                  <label key={t} className={chipLabelClass}>
-                    <input
-                      type="checkbox"
-                      name="tier"
-                      value={t}
-                      defaultChecked={filter.tiers.includes(t)}
-                      className={checkboxClass}
-                    />
-                    {tierLabel(t)}
+                  <select
+                    id="board-milestone"
+                    name="milestone"
+                    defaultValue={filter.milestone ?? ""}
+                    data-testid="board-milestone"
+                    className={cn(selectClass, "mt-1.5 w-52")}
+                  >
+                    <option value="">すべての途中目標</option>
+                    {milestones
+                      .slice()
+                      .sort((a, b) => a.seq - b.seq)
+                      .map((m) => (
+                        <option key={m.id} value={m.id}>
+                          #{m.seq} {m.title}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <div>
+                  <label htmlFor="board-label" className={labelClass}>
+                    ラベル
                   </label>
-                ))}
+                  <input
+                    id="board-label"
+                    type="text"
+                    name="label"
+                    defaultValue={filter.labels[0] ?? ""}
+                    placeholder="例: pluvio"
+                    data-testid="board-label"
+                    className={cn(inputClass, "mt-1.5 w-40")}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="board-q" className={labelClass}>
+                    検索
+                  </label>
+                  <input
+                    id="board-q"
+                    type="text"
+                    name="q"
+                    maxLength={200}
+                    defaultValue={filter.q ?? ""}
+                    placeholder="題名・目的・コメント"
+                    data-testid="board-q"
+                    className={cn(inputClass, "mt-1.5 w-56")}
+                  />
+                </div>
               </div>
-            </fieldset>
 
-            <div className="flex flex-wrap items-center gap-2">
-              {/* 裏方のタスク（対話の返事・報告のまとめ・承認待ち・レビュー）は既定で隠す。
+              <fieldset data-testid="board-category-filter">
+                <legend className={labelClass}>種類</legend>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  {TASK_CATEGORIES.map((c) => (
+                    <label key={c} className={chipLabelClass}>
+                      <input
+                        type="checkbox"
+                        name="category"
+                        value={c}
+                        defaultChecked={filter.categories.includes(c)}
+                        className={checkboxClass}
+                      />
+                      {taskCategoryLabel(c)}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+
+              <fieldset data-testid="board-priority-filter">
+                <legend className={labelClass}>優先度</legend>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  {PRIORITY_LABELS.map((p) => (
+                    <label key={p} className={chipLabelClass}>
+                      <input
+                        type="checkbox"
+                        name="priority"
+                        value={p}
+                        defaultChecked={filter.priorities.includes(p)}
+                        className={checkboxClass}
+                      />
+                      {priorityFullLabel(p)}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+
+              <fieldset data-testid="board-tier-filter">
+                <legend className={labelClass}>レベル</legend>
+                <div className="mt-1.5 flex flex-wrap gap-2">
+                  {TIERS.map((t) => (
+                    <label key={t} className={chipLabelClass}>
+                      <input
+                        type="checkbox"
+                        name="tier"
+                        value={t}
+                        defaultChecked={filter.tiers.includes(t)}
+                        className={checkboxClass}
+                      />
+                      {tierLabel(t)}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/* 裏方のタスク（対話の返事・報告のまとめ・承認待ち・レビュー）は既定で隠す。
                   celeris には絞り込みが無いので、表示だけを `TaskSummary.support` で切り替える。 */}
-              <label className={chipLabelClass}>
-                <input
-                  type="checkbox"
-                  name="show_support"
-                  value="1"
-                  data-testid="board-show-support"
-                  defaultChecked={showSupport}
-                  className={checkboxClass}
-                />
-                裏方も表示
-              </label>
-              <Button type="submit" variant="primary" size="sm" data-testid="board-filter-submit">
-                <Icon name="filter" />
-                絞り込み
-              </Button>
-              <Link to="/board" className={cn(touchLinkClass, "text-sm text-fg-muted underline underline-offset-2")}>
-                条件を消す
-              </Link>
-            </div>
-          </Form>
-        </CardBody>
+                <label className={chipLabelClass}>
+                  <input
+                    type="checkbox"
+                    name="show_support"
+                    value="1"
+                    data-testid="board-show-support"
+                    defaultChecked={showSupport}
+                    className={checkboxClass}
+                  />
+                  裏方も表示
+                </label>
+                <Button type="submit" variant="primary" size="sm" data-testid="board-filter-submit">
+                  <Icon name="filter" />
+                  絞り込み
+                </Button>
+                <Link to="/board" className={cn(touchLinkClass, "text-sm text-fg-muted underline underline-offset-2")}>
+                  条件を消す
+                </Link>
+              </div>
+            </Form>
+          </CardBody>
+        </details>
       </Card>
 
       {truncated && (
