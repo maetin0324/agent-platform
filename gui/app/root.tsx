@@ -12,6 +12,8 @@ import {
   useRouteLoaderData,
 } from "react-router";
 import { authCheck, sessionContext } from "~/auth.server";
+import { ConsoleComposer } from "~/components/ConsoleComposer";
+import { ConsoleComposerProvider, useConsoleComposerContext } from "~/components/ConsoleComposerContext";
 import { NotificationsWatcher } from "~/components/NotificationsWatcher";
 import { TimeZonePreference } from "~/components/TimeZonePreference";
 import { Badge } from "~/components/ui/badge";
@@ -19,6 +21,7 @@ import { buttonClass } from "~/components/ui/button";
 import { Icon, type IconName } from "~/components/ui/Icon";
 import { Alert } from "~/components/ui/misc";
 import { approvalsPendingCount } from "~/lib/approvals";
+import { DEFAULT_MOBILE_COMPOSER_HEIGHT_PX, isConsoleComposerPathname } from "~/lib/console-composer";
 import { reportsBadgeTone } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
@@ -125,6 +128,7 @@ export default function App({ loaderData }: Route.ComponentProps) {
   const revalidator = useRevalidator();
   const disconnected = unavailable || health === null;
   const showBanner = disconnected || problem !== null;
+  const { pathname } = useLocation();
 
   // celeris 停止中は 5 秒ごとに root だけ再検証し、復旧したらバナーを消す（§6.5）
   useEffect(() => {
@@ -149,101 +153,137 @@ export default function App({ loaderData }: Route.ComponentProps) {
 
   const connected = !disconnected && problem === null;
   return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[16rem_1fr]">
-      {/* Phase 76（ADR-0055 D1 拡張、フォーカスの可視性）: キーボード・スクリーンリーダー利用者が
+    <ConsoleComposerProvider>
+      <div className="min-h-screen lg:grid lg:grid-cols-[16rem_1fr]">
+        {/* Phase 76（ADR-0055 D1 拡張、フォーカスの可視性）: キーボード・スクリーンリーダー利用者が
           ナビ（サイドバー / モバイル上部の帯）を毎回たどらずに本文へ飛べるようにする。既定は視覚的に隠し、
           フォーカスが当たったときだけ見せる（`sr-only focus:not-sr-only`。`focus-visible:` ではなく
           `focus:` にしているのは、Tab で来た人にだけ見えれば十分で、かつスクリーンリーダーの仮想カーソルが
           フォーカスを当てる操作も拾いたいため）。 */}
-      <a
-        href="#main-content"
-        // ADR-0055 D1-2 のタップ領域検査の対象外（`data-touch-ok`）: `sr-only` は未フォーカス時わざと
-        // 1×1 に潰す（フォーカスが当たったときだけ `focus:not-sr-only` で 44×44 を超える大きさに戻る）。
-        // タッチでは狙って押す対象ではなく、キーボード・スクリーンリーダー専用のリンクなので除外する。
-        data-touch-ok
-        className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-primary-fg focus:shadow-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
-      >
-        本文へ
-      </a>
-      <NotificationsWatcher reportsLive={reportsLive} />
-      <Sidebar
-        approvals={counts?.approvals ?? 0}
-        reportsLive={reportsLive}
-        approvalsPending={approvalsPending}
-        connected={connected}
-        celerisVersion={health?.celeris_version ?? null}
-        logoutEnabled={session.enabled}
-      />
-      {/* ADR-0055 D2（ラウンド 2）: モバイルはナビが下部固定タブなので、上には帯（ロゴ・接続状態）だけ置く。 */}
-      <MobileTopBar connected={connected} logoutEnabled={session.enabled} />
-      {/* 下部固定タブ（`h-16` + `env(safe-area-inset-bottom)`）に隠れないよう、本文側に余白を積む
+        <a
+          href="#main-content"
+          // ADR-0055 D1-2 のタップ領域検査の対象外（`data-touch-ok`）: `sr-only` は未フォーカス時わざと
+          // 1×1 に潰す（フォーカスが当たったときだけ `focus:not-sr-only` で 44×44 を超える大きさに戻る）。
+          // タッチでは狙って押す対象ではなく、キーボード・スクリーンリーダー専用のリンクなので除外する。
+          data-touch-ok
+          className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-primary-fg focus:shadow-lg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+        >
+          本文へ
+        </a>
+        <NotificationsWatcher reportsLive={reportsLive} />
+        <Sidebar
+          approvals={counts?.approvals ?? 0}
+          reportsLive={reportsLive}
+          approvalsPending={approvalsPending}
+          connected={connected}
+          celerisVersion={health?.celeris_version ?? null}
+          logoutEnabled={session.enabled}
+        />
+        {/* ADR-0055 D2（ラウンド 2）: モバイルはナビが下部固定タブなので、上には帯（ロゴ・接続状態）だけ置く。 */}
+        <MobileTopBar connected={connected} logoutEnabled={session.enabled} />
+        {/* 下部固定タブ（`h-16` + `env(safe-area-inset-bottom)`）に隠れないよう、本文側に余白を積む
           （ADR-0055 D1-5。数値は `pb-28`（112px） > タブ高さ 64px + 実機の safe-area の余裕）。 */}
-      <div className="flex min-w-0 flex-col pb-28 lg:pb-0">
-        <main
-          id="main-content"
-          tabIndex={-1}
-          className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-10"
-        >
-          {showBanner && <CelerisBanner celerisApiUrl={gui.celerisApiUrl} problem={problem} />}
-          <div className="animate-fade-in">
-            <Outlet />
-          </div>
-        </main>
-        <footer
-          // ADR-0055 D1-4: 本文 14px 以上。デスクトップの見た目は変えず（`lg:` で元の `text-xs` に戻す）、
-          // モバイルだけ `text-sm` に上げる。
-          className="mx-auto w-full max-w-6xl border-t border-border px-4 py-5 text-sm text-fg-subtle sm:px-6 lg:px-10 lg:text-xs"
-          data-testid="footer"
-        >
-          <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span className="font-medium text-fg-muted">Celeris {gui.version}</span>
+        <div className="flex min-w-0 flex-col pb-28 lg:pb-0">
+          <main
+            id="main-content"
+            tabIndex={-1}
+            className="mx-auto w-full max-w-6xl flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-10"
+          >
+            {showBanner && <CelerisBanner celerisApiUrl={gui.celerisApiUrl} problem={problem} />}
+            <div className="animate-fade-in">
+              <Outlet />
+            </div>
+          </main>
+          <footer
+            // ADR-0055 D1-4: 本文 14px 以上。デスクトップの見た目は変えず（`lg:` で元の `text-xs` に戻す）、
+            // モバイルだけ `text-sm` に上げる。
+            className="mx-auto w-full max-w-6xl border-t border-border px-4 py-5 text-sm text-fg-subtle sm:px-6 lg:px-10 lg:text-xs"
+            data-testid="footer"
+          >
+            <p className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <span className="font-medium text-fg-muted">Celeris {gui.version}</span>
+              {health && (
+                <>
+                  <span aria-hidden="true">·</span>celeris {health.celeris_version} · api_version {health.api_version} ·
+                  schema_version {health.schema_version}
+                </>
+              )}
+            </p>
             {health && (
-              <>
-                <span aria-hidden="true">·</span>celeris {health.celeris_version} · api_version {health.api_version} ·
-                schema_version {health.schema_version}
-              </>
+              <dl
+                className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 rounded-lg border border-border bg-surface/60 px-4 py-3 sm:grid-cols-4"
+                data-testid="health"
+              >
+                <div>
+                  <dt className="text-fg-subtle">celeris_version</dt>
+                  <dd className="font-mono text-fg-muted" data-testid="celeris_version">
+                    {health.celeris_version}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-fg-subtle">api_version</dt>
+                  <dd className="font-mono text-fg-muted" data-testid="api_version">
+                    {health.api_version}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-fg-subtle">schema_version</dt>
+                  <dd className="font-mono text-fg-muted" data-testid="schema_version">
+                    {health.schema_version}
+                  </dd>
+                </div>
+                <div>
+                  <dt className="text-fg-subtle">db.journal_mode</dt>
+                  <dd className="font-mono text-fg-muted" data-testid="journal_mode">
+                    {health.db.journal_mode}
+                    {health.db.journal_mode !== "wal" && (
+                      <Badge tone="warning" className="ml-2 font-sans">
+                        wal ではありません（設定不備）
+                      </Badge>
+                    )}
+                  </dd>
+                </div>
+              </dl>
             )}
-          </p>
-          {health && (
-            <dl
-              className="mt-3 grid grid-cols-2 gap-x-6 gap-y-2 rounded-lg border border-border bg-surface/60 px-4 py-3 sm:grid-cols-4"
-              data-testid="health"
-            >
-              <div>
-                <dt className="text-fg-subtle">celeris_version</dt>
-                <dd className="font-mono text-fg-muted" data-testid="celeris_version">
-                  {health.celeris_version}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-fg-subtle">api_version</dt>
-                <dd className="font-mono text-fg-muted" data-testid="api_version">
-                  {health.api_version}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-fg-subtle">schema_version</dt>
-                <dd className="font-mono text-fg-muted" data-testid="schema_version">
-                  {health.schema_version}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-fg-subtle">db.journal_mode</dt>
-                <dd className="font-mono text-fg-muted" data-testid="journal_mode">
-                  {health.db.journal_mode}
-                  {health.db.journal_mode !== "wal" && (
-                    <Badge tone="warning" className="ml-2 font-sans">
-                      wal ではありません（設定不備）
-                    </Badge>
-                  )}
-                </dd>
-              </div>
-            </dl>
-          )}
-        </footer>
+          </footer>
+          {/* ADR-0057（Phase 92、fixed-overlay 検査で見つけた既存の潜在バグの解消）: composer（モバイル、
+              `position: fixed`）は `footer` より下の階層にいるビューポート基準の固定要素なので、
+              footer 自身はこの spacer が無いと隠れうる（`pb-28`〈タブバー分だけの余白〉だけでは composer
+              の高さぶんが足りない）。ページ全体の高さが小さい画面〈短い Console〉でページ末尾まで
+              スクロールすると起きる。これまで検知できなかったのは、`.animate-fade-in` の containing-block
+              バグ（同 ADR）で `load` 直後は composer がビューポート基準で測れず、`mobile-audit.mjs` の
+              `fixed-overlay` 検査がたまたま素通りしていたため（今回の構造修正でこの見せかけの合格が消え、
+              本当の状態が見えるようになった）。`ConsoleComposer` と同じ実測値（`mobileHeight`）を使う。 */}
+          {isConsoleComposerPathname(pathname) && <FooterComposerSpacer />}
+        </div>
+        <MobileTabBar approvalsPending={approvalsPending} reportsLive={reportsLive} />
+        {/* ADR-0057（Phase 92）: モバイル版 composer。`<Outlet/>`（`.animate-fade-in` の中）の外、
+          `MobileTabBar` と同じ階層でレンダーする（ページ遷移アニメーションが `position: fixed` の
+          containing block を差し替える Chromium の挙動の影響を構造的に受けない。ADR-0055 ラウンド 15 の
+          `viewport-units` バグの根絶。詳細は ADR-0057）。`key={pathname}` は「ページを離れたら入力中の
+          テキストを破棄する」ため（`root` 自体は画面遷移で unmount しないので、これが無いと `/` ↔
+          `/org/:id` を行き来しても入力欄の下書きが残ってしまう。`?scope=` だけの変化では `pathname` は
+          変わらないので下書きは保たれる）。Console 以外の画面では `ConsoleComposer` 自身が何も描かない。 */}
+        {isConsoleComposerPathname(pathname) && <ConsoleComposer key={pathname} variant="mobile" />}
       </div>
-      <MobileTabBar approvalsPending={approvalsPending} reportsLive={reportsLive} />
-    </div>
+    </ConsoleComposerProvider>
+  );
+}
+
+/**
+ * ADR-0057（Phase 92）: footer が composer（モバイル、`position: fixed`）の下に隠れないための余白。
+ * `ConsoleComposerProvider` の内側（`App` の子）でなければ `useConsoleComposerContext` は使えないので、
+ * 呼び出し側（`App`）とは別のコンポーネントに分けている。
+ */
+function FooterComposerSpacer() {
+  const { mobileHeight } = useConsoleComposerContext();
+  return (
+    <div
+      aria-hidden="true"
+      data-testid="footer-composer-spacer"
+      className="lg:hidden"
+      style={{ height: mobileHeight ?? DEFAULT_MOBILE_COMPOSER_HEIGHT_PX }}
+    />
   );
 }
 

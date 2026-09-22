@@ -1276,6 +1276,17 @@ async function main() {
               detail: `GET ${routePath} -> ${status}`,
             });
           } else {
+            // Phase 92（ADR-0057）: Console composer をレイアウトレベル（`<Outlet/>` の外）へ移した後、
+            // `.animate-fade-in` の containing-block バグの影響を待たずに（`load` 直後、他のどの評価より
+            // 前に）確かめる追加測定。構造的に直っていれば、composer は最初から常にビューポート基準
+            // なので待ちが要らないはず（`checkViewportUnitsSettled`、下記、と同じ関数を使うが待たない）。
+            // Console が無い画面は `checkViewportUnits` 自身が早期に諦める（既存のガード。対象外は
+            // 0 件のまま何も足さない）ので、他の画面の実行時間への影響は無い。
+            const viewportUnitImmediateViolations = await page.evaluate(() => window.__checkViewportUnits());
+            for (const v of viewportUnitImmediateViolations) {
+              allViolations.push({ route, scheme, ...v, rule: "viewport-units-immediate" });
+            }
+
             // `runChecks`（D1-1〜D1-6、a11y-name/structure）は Phase 76 以来、`load` 直後の DOM をそのまま見る
             // 作り（他のラウンドの既存の挙動）。ここに `waitForPageIdle` を挟むと、`focus-order` とは無関係な
             // 別の画面（例: `/projects/:id` の `WorkTreeGraph`、`@xyflow/react` の dagre レイアウトが
@@ -1288,7 +1299,9 @@ async function main() {
 
             // Phase 91（受け入れ条件 3「ビューポート単位」）: `runChecks` の外（`.animate-fade-in` の
             // 0.25 秒アニメーションが収まるのを待ってから）で行う。両スキームで呼ぶ（Console がある画面
-            // だけ待つので軽い）。
+            // だけ待つので軽い）。Phase 92 で構造的に直った後も、待たない版（上記）に加えてこちらも残す
+            // （回帰の網を二重にする。待たない版だけだと、将来また `.animate-fade-in` に似た祖先を足した
+            // ときに「アニメーション再生中だけ」壊れる再発を見逃しうるため）。
             const viewportUnitViolations = await checkViewportUnitsSettled(page);
             for (const v of viewportUnitViolations) allViolations.push({ route, scheme, ...v });
 

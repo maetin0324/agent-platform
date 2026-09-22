@@ -1,20 +1,16 @@
-import { type ChangeEvent, type KeyboardEvent, useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useFetcher, useNavigate, useNavigation } from "react-router";
-import type { ConsoleInstructOutcome, ConsoleNewConversationOutcome } from "~/celeris/action-types";
+import type { ConsoleNewConversationOutcome } from "~/celeris/action-types";
 import type { ConsoleBlock, McpClient, OrgNode, Project } from "~/celeris/types";
+import { ConsoleComposer } from "~/components/ConsoleComposer";
+import { useConsoleComposerContext, useRegisterConsoleComposer } from "~/components/ConsoleComposerContext";
 import { useConsoleStream } from "~/hooks/useConsoleStream";
 import {
   appendConsoleBlock,
-  applyMention,
-  buildInstructBody,
   type ConsoleData,
   type ConsoleScopeKind,
   consoleWaitingCounts,
-  findMentionQuery,
   hasStreamingReply,
-  type InstructReplyTarget,
-  type MentionQuery,
-  matchMentionCandidates,
   parseScope,
   replyTargetForMessageBlock,
   scopeForProject,
@@ -22,11 +18,9 @@ import {
 } from "~/lib/console";
 import { cn } from "~/lib/utils";
 import { ConsoleBlockItem, orgNodeName, projectName } from "./ConsoleBlockItem";
-import { ErrorFlash } from "./Flash";
-import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card, CardBody } from "./ui/card";
-import { hintClass, labelClass, selectClass, textareaClass } from "./ui/form";
+import { hintClass, labelClass, selectClass } from "./ui/form";
 import { Icon } from "./ui/Icon";
 import { EmptyState, SectionTitle } from "./ui/misc";
 import { Skeleton } from "./ui/skeleton";
@@ -65,7 +59,13 @@ export function Console({ data }: { data: ConsoleData }) {
 
   const counts = consoleWaitingCounts(blocks);
   const streaming = hasStreamingReply(blocks);
-  const [replyTarget, setReplyTarget] = useState<InstructReplyTarget | null>(null);
+  // ADR-0057（Phase 92）: 入力欄（composer）は `~/root.tsx`（レイアウトレベル、`<Outlet/>` の外）に
+  // 移した。ここでは org/projects/streaming をその composer へ登録するだけ（`replyTarget` も composer 側の
+  // Context が持つ）。`registration` は値が変わったときだけ新しい参照になるよう `useMemo` する
+  // （`useRegisterConsoleComposer` のコメント参照。さもないと毎レンダー返信先が消える）。
+  const registration = useMemo(() => ({ org, projects, streaming }), [org, projects, streaming]);
+  useRegisterConsoleComposer(registration);
+  const { setReplyTarget } = useConsoleComposerContext();
   // Phase 77（ADR-0055 D3「体感速度」）: `/`・`/org/:id` の間を移動すると scope が変わり、loader が
   // 新しい Console データを取りに行く。その間は直前の画面のブロックがそのまま残るだけなので、この画面
   // （Console を持つ 2 つの経路のどちらか）への遷移が pending の間は `BlockStream` をスケルトンに差し替える。
@@ -73,10 +73,6 @@ export function Console({ data }: { data: ConsoleData }) {
   const isConsoleNavigationPending =
     navigation.state === "loading" &&
     (navigation.location?.pathname === "/" || (navigation.location?.pathname.startsWith("/org/") ?? false));
-  // フェーズ 72（ADR-0055 D2、U7 の解消）: spacer の高さは見積もり（`h-52` 固定）ではなく、
-  // `ConsoleInput` 自身の実高さを `ResizeObserver` で測って反映する。返信先バナーの表示・非表示で
-  // 高さが変わっても（`ResizeObserver` は border-box の変化を都度拾う）常に過不足なく確保できる。
-  const [inputHeight, setInputHeight] = useState<number | null>(null);
 
   function handleReply(block: Extract<ConsoleBlock, { kind: "human" | "reply" }>) {
     setReplyTarget(replyTargetForMessageBlock(block));
@@ -108,29 +104,32 @@ export function Console({ data }: { data: ConsoleData }) {
             onReply={handleReply}
             loading={isConsoleNavigationPending}
           />
-          {/* フェーズ 71（ADR-0055 D2）: モバイルは入力欄を下部固定タブの上に `position: fixed` する
-              （`ConsoleInput` 自身が `lg:static` で戻る）。フローから抜けた分の高さを、この spacer で
-              本文側にあらかじめ確保しておく（無いと固定入力欄が直前のブロックに重なる）。
-              フェーズ 72: 高さは `ConsoleInput` から届く実測値（`inputHeight`）。まだ測れていない
-              初回描画・SSR は見積もりの `h-52`（13rem）にフォールバックする。 */}
-          <div
-            aria-hidden="true"
-            data-testid="console-input-spacer"
-            className="h-52 lg:hidden"
-            style={inputHeight != null ? { height: inputHeight } : undefined}
-          />
-          <ConsoleInput
-            org={org}
-            projects={projects}
-            replyTarget={replyTarget}
-            onClearReply={() => setReplyTarget(null)}
-            defaultScope={parsedScope.kind === "all" ? null : scope}
-            onHeightChange={setInputHeight}
-            streaming={streaming}
-          />
+          {/* フェーズ 71（ADR-0055 D2）: モバイルは入力欄を下部固定タブの上に `position: fixed` する。
+              フローから抜けた分の高さを、この spacer で本文側にあらかじめ確保しておく（無いと固定入力欄が
+              直前のブロックに重なる）。フェーズ 72: 高さは composer から届く実測値。ADR-0057（Phase 92）:
+              composer 自体は `~/root.tsx` に移った（`ConsoleComposerContext` の `mobileHeight` 経由で届く）が、
+              spacer はここに残す（BlockStream の内容が固定 composer の下に隠れないようにするのはこの画面の
+              責務のため）。まだ測れていない初回描画・SSR は見積もりの `h-52`（13rem）にフォールバックする。 */}
+          <ConsoleInputSpacer />
+          {/* ADR-0057（Phase 92）: デスクトップだけここに composer を描く（`Console` パネルの右カラム内、
+              見た目は Phase 91 まで不変）。モバイル版は `~/root.tsx` が `<Outlet/>` の外で描く。 */}
+          <ConsoleComposer variant="desktop" />
         </div>
       </div>
     </div>
+  );
+}
+
+/** 上記コメント参照。`mobileHeight` は `ConsoleComposerContext`（composer 自身が `ResizeObserver` で測る）。 */
+function ConsoleInputSpacer() {
+  const { mobileHeight } = useConsoleComposerContext();
+  return (
+    <div
+      aria-hidden="true"
+      data-testid="console-input-spacer"
+      className="h-52 lg:hidden"
+      style={mobileHeight != null ? { height: mobileHeight } : undefined}
+    />
   );
 }
 
@@ -473,199 +472,6 @@ function ConsoleStreamSkeleton() {
           <Skeleton className="h-3.5 w-56 max-w-full" />
         </div>
       ))}
-    </div>
-  );
-}
-
-function ConsoleInput({
-  org,
-  projects,
-  replyTarget,
-  onClearReply,
-  defaultScope,
-  onHeightChange,
-  streaming,
-}: {
-  org: readonly OrgNode[];
-  projects: readonly Project[];
-  replyTarget: InstructReplyTarget | null;
-  onClearReply: () => void;
-  defaultScope: string | null;
-  /** フェーズ 72（U7）: この入力欄の実高さ（border-box）が変わるたびに呼ぶ。親の spacer を正確に保つ。 */
-  onHeightChange: (height: number) => void;
-  /** フェーズ 73: いま育っている返事があるか（ADR-0054 D2 のキュー。打ってもこの run が終わってから）。 */
-  streaming: boolean;
-}) {
-  const fetcher = useFetcher<ConsoleInstructOutcome>();
-  const [text, setText] = useState("");
-  const [mention, setMention] = useState<MentionQuery | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const submitting = fetcher.state !== "idle";
-  const handledMessageId = useRef<string | null>(null);
-
-  // フェーズ 72（U7）: 見積もりの `h-52` をやめ、`ConsoleInput` の実高さを都度測って親（spacer）へ渡す
-  // （返信先バナーの表示・非表示、文字入力での行数の変化にも追随する）。`ResizeObserver` が無い環境
-  // （テストの node 環境等）では何もしない（spacer は見積もりの `h-52` のまま）。
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver((entries) => {
-      const entry = entries[0];
-      if (!entry) return;
-      const height = entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
-      onHeightChange(height);
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [onHeightChange]);
-
-  useEffect(() => {
-    const outcome = fetcher.data;
-    if (outcome?.ok && outcome.accepted.message_id !== handledMessageId.current) {
-      handledMessageId.current = outcome.accepted.message_id;
-      setText("");
-      onClearReply();
-    }
-  }, [fetcher.data, onClearReply]);
-
-  function handleChange(e: ChangeEvent<HTMLTextAreaElement>) {
-    const value = e.target.value;
-    setText(value);
-    setMention(findMentionQuery(value, e.target.selectionStart ?? value.length));
-  }
-
-  function submit() {
-    if (!text.trim() || submitting) return;
-    const body = buildInstructBody(text, replyTarget, defaultScope);
-    fetcher.submit({ text: body.text, scope: body.scope ?? "" }, { method: "post" });
-  }
-
-  function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
-    // タッチ端末では Enter は改行。送信は明示ボタンから。
-    if (
-      e.key === "Enter" &&
-      !e.shiftKey &&
-      !mention &&
-      !window.matchMedia("(max-width: 1023px), (pointer: coarse)").matches
-    ) {
-      e.preventDefault();
-      submit();
-    }
-    if (e.key === "Escape" && mention) setMention(null);
-  }
-
-  function pickMention(nodeId: string) {
-    if (!mention) return;
-    const applied = applyMention(text, mention, nodeId);
-    setText(applied.text);
-    setMention(null);
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus();
-      textareaRef.current?.setSelectionRange(applied.cursor, applied.cursor);
-    });
-  }
-
-  const candidates = mention
-    ? matchMentionCandidates(
-        mention.query,
-        org.map((n) => ({ id: n.id, name: n.name })),
-      )
-    : [];
-  const error = fetcher.data && !fetcher.data.ok ? fetcher.data.error : undefined;
-
-  return (
-    <div
-      ref={rootRef}
-      data-testid="console-input"
-      // ADR-0055 D2「入力欄は画面下固定、キーボード表示時に隠れない」（フェーズ 71）。
-      // モバイルは下部固定タブ（`h-16` + `env(safe-area-inset-bottom)`。`~/root.tsx`）のすぐ上に
-      // `position: fixed` する（タブバー自身が safe-area を確保しているので、ここでは重ねない）。
-      // `lg:` でデスクトップは元の通常フロー（`static`）に戻す。
-      className="fixed inset-x-0 bottom-16 z-20 space-y-2 border-t border-border bg-surface/95 px-4 py-3 backdrop-blur-xl lg:static lg:inset-auto lg:border-0 lg:bg-transparent lg:px-0 lg:py-0 lg:backdrop-blur-none"
-    >
-      <ErrorFlash error={error} />
-      {/* ADR-0054 D3（Phase 68）: 「この案件の文脈で話す」— 案件の画面（`scope=project:<id>`）を見ながら
-          打つと、返信先を選んでいなくてもその案件に紐づいた CoS への発言になる（`buildInstructBody` の
-          規則 3）。返信先バナーが出ているときは規則 2 が勝つので、二重に出さない。 */}
-      {!replyTarget && defaultScope?.startsWith("project:") && (
-        <p className="flex items-center gap-2 text-xs text-fg-subtle" data-testid="console-scope-context">
-          <Badge tone="info">
-            この案件の文脈で話す: {projectName(defaultScope.slice("project:".length), projects) ?? "案件"}
-          </Badge>
-        </p>
-      )}
-      {replyTarget && (
-        <p className="flex items-center gap-2 text-xs text-fg-subtle" data-testid="console-reply-target">
-          <Badge tone="info">
-            返信先: {replyTarget.kind === "node" ? orgNodeName(replyTarget.nodeId, org) : "この案件の CoS"}
-          </Badge>
-          <button type="button" onClick={onClearReply} className="min-h-11 px-2 underline underline-offset-2">
-            やめる
-          </button>
-        </p>
-      )}
-      <div className="relative">
-        <textarea
-          ref={textareaRef}
-          rows={3}
-          value={text}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          aria-label="CoS へのメッセージ"
-          placeholder="CoS や @node-id に話しかける"
-          data-testid="console-text"
-          className={cn(textareaClass, "w-full text-base")}
-        />
-        {mention && candidates.length > 0 && (
-          <ul
-            data-testid="console-mention-list"
-            className="absolute bottom-full left-0 z-20 mb-1 w-64 overflow-hidden rounded-lg border border-border bg-surface shadow-md"
-          >
-            {candidates.map((c) => (
-              <li key={c.id}>
-                <button
-                  type="button"
-                  data-testid="console-mention-item"
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    pickMention(c.id);
-                  }}
-                  className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm hover:bg-surface-2"
-                >
-                  <span>{c.name}</span>
-                  <span className="text-xs text-fg-subtle">@{c.id}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        {/* ADR-0054 D2「入力欄は run 中も打てる（キューに入り、run が終わってから次の run になる）」の
-            見た目（フェーズ 73）。「送る」が押せることに変わりはない（無効化しない）— 次の run になる
-            だけなので、控えめな 1 行で伝えるだけにする。 */}
-        {streaming ? (
-          <p className="text-sm text-fg-subtle lg:text-xs" data-testid="console-queue-hint">
-            送信待ち（前の run が終わってから）
-          </p>
-        ) : (
-          <span />
-        )}
-        <Button
-          type="button"
-          variant="primary"
-          size="sm"
-          disabled={submitting || !text.trim()}
-          onClick={submit}
-          data-testid="console-send"
-          className="min-h-11 min-w-24"
-        >
-          <Icon name="send" />
-          送る
-        </Button>
-      </div>
     </div>
   );
 }
