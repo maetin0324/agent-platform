@@ -7,6 +7,12 @@
 //! - `auth = "publickey"`（`interactive = false`）: `BatchMode=yes` で鍵だけの接続を試みる。
 //! - `auth = "totp"`（`interactive = true`）: `SSH_ASKPASS` 経由でプロンプトと検証コードを GUI と中継する
 //!   （ADR-0032 D4）。コードはメモリと FIFO（カーネルのパイプバッファ）だけを通り、ディスクには残らない。
+//!
+//! ADR-0060: master は既定で `systemd-run --user --scope` を使って celeris（`celeris@<sha12>` unit）の
+//! cgroup の外の scope で起こす（[`MasterLauncher`]）。celeris の unit が `KillMode=control-group`（既定）で
+//! 止まっても、別 scope にいる master は巻き込まれない。接続が成立した後は celeris の終了・再起動で
+//! master を殺さない（[`ClusterMaster`] には Drop を持たせない。明示的な切断だけが [`ClusterMaster::kill`]
+//! を呼ぶ）。
 
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -26,7 +32,15 @@ use crate::subprocess::send_signal_to_group;
 /// `-O check` をポーリングする間隔（ADR-0032 §1「実機で確かめた事実」: `-O check` は即座に返る）。
 const CHECK_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
-/// celeris が保持する ssh master。Drop でプロセスグループごと落とす。
+/// celeris が保持する ssh master。
+///
+/// ADR-0060（Phase 103 の訂正）: 以前はここに `impl Drop` があり、`ClusterMaster` を落とすと
+/// プロセスグループごと SIGKILL していた。celeris の通常の終了（`SIGTERM` → `tick_loop` が
+/// `Ok(Exit::..)` を返す → `main()` から戻る）でもこの構造体はスタック巻き戻しで drop されるため、
+/// **celeris を再起動するたびに、繋がっていたはずの master まで道連れに殺していた**（本番の観測、
+/// `docs/PROGRESS.md` P-100-1）。今は**Drop で殺さない**（`child` は `kill_on_drop(false)` で spawn
+/// してあるので、ただ drop してもプロセスは生きたまま。reap は tokio のオーファンキューが後で行う）。
+/// 明示的な切断（`DELETE /clusters/{id}/connect`）だけが [`ClusterMaster::kill`] を呼ぶ。
 pub struct ClusterMaster {
     child: Child,
 }
@@ -39,9 +53,13 @@ impl std::fmt::Debug for ClusterMaster {
     }
 }
 
-impl Drop for ClusterMaster {
-    fn drop(&mut self) {
+impl ClusterMaster {
+    /// 明示的な切断でだけ呼ぶ（ADR-0032 D5 `DELETE /clusters/{id}/connect`）。`ssh -O exit` が
+    /// 効かなかったときの保険として、celeris が持っている子だけをプロセスグループごと落とす
+    /// （ADR-0060: 通常の Drop はもう殺さない。これは意図した切断のときだけの経路）。
+    pub async fn kill(mut self) {
         send_signal_to_group(&self.child, Signal::SIGKILL);
+        let _ = self.child.wait().await;
     }
 }
 
@@ -202,16 +220,148 @@ impl std::fmt::Display for ClusterConnectError {
 
 impl std::error::Error for ClusterConnectError {}
 
-/// 接続を開始する（ADR-0032 D2/D3/D4）。
+/// ADR-0060: master の起こし方。celeris（`celeris@<sha12>` unit）の cgroup の外で起こすかどうか。
+///
+/// `[[clusters]] master_launcher` の値（`"auto"` / `"systemd-run"` / `"inline"`）から
+/// [`resolve_master_launcher`] が解決する。`"auto"` は環境（`systemd-run` が PATH にあるか、
+/// `XDG_RUNTIME_DIR` が設定されているか）で決まる。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MasterLauncher {
+    /// 従来どおり celeris の直接の子として起こす（celeris の cgroup の中に留まる）。
+    Inline,
+    /// `systemd-run --user --scope` で celeris の cgroup の外の一時 scope に起こす。
+    /// `program` は実行する `systemd-run`（本番は PATH 上の `"systemd-run"`。テストは偽物の絶対パス）。
+    SystemdRun { program: String },
+}
+
+impl MasterLauncher {
+    /// 本番で使う `SystemdRun`（PATH 上の `systemd-run` を使う）。
+    pub fn systemd_run() -> Self {
+        Self::SystemdRun {
+            program: "systemd-run".to_string(),
+        }
+    }
+}
+
+/// `master_launcher` の設定値と環境から、実際に使う起こし方を決める（ADR-0060）。純関数。
+///
+/// - `"systemd-run"` / `"inline"`: そのまま使う（強制）。
+/// - それ以外（`"auto"`。`Config::validate` が他の値を弾いているので、想定外の値もここでは `auto` と
+///   同じに倒す）: `has_systemd_run && has_xdg_runtime_dir` のときだけ `SystemdRun`、それ以外は `Inline`。
+pub fn resolve_master_launcher(
+    configured: &str,
+    has_systemd_run: bool,
+    has_xdg_runtime_dir: bool,
+) -> MasterLauncher {
+    match configured {
+        "systemd-run" => MasterLauncher::systemd_run(),
+        "inline" => MasterLauncher::Inline,
+        _ => {
+            if has_systemd_run && has_xdg_runtime_dir {
+                MasterLauncher::systemd_run()
+            } else {
+                MasterLauncher::Inline
+            }
+        }
+    }
+}
+
+/// `path_env`（`PATH` の値）に実行可能な `name` があるか（`which name` 相当）。
+pub fn path_has_executable(path_env: &str, name: &str) -> bool {
+    std::env::split_paths(path_env).any(|dir| {
+        let candidate = dir.join(name);
+        std::fs::metadata(&candidate)
+            .map(|m| m.is_file() && is_executable(&m))
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(unix)]
+fn is_executable(meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode() & 0o111 != 0
+}
+
+/// 実際のプロセス環境から `systemd-run` が `PATH` にあるか調べる（`resolve_master_launcher` の
+/// 呼び出し側が使う、非純粋な便利関数。判定そのものは [`resolve_master_launcher`] が純関数で持つ）。
+pub fn systemd_run_on_path() -> bool {
+    std::env::var_os("PATH")
+        .map(|p| path_has_executable(&p.to_string_lossy(), "systemd-run"))
+        .unwrap_or(false)
+}
+
+/// 実際のプロセス環境から `XDG_RUNTIME_DIR` が（空でなく）設定されているか調べる。
+pub fn xdg_runtime_dir_is_set() -> bool {
+    std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|v| !v.is_empty())
+}
+
+/// `celeris-ssh-master-<cluster id>-<短い乱数>` の scope unit 名（ADR-0060）。systemd のユニット名として
+/// 安全な文字だけを残す（`cluster.id` は自由記述なので念のため）。
+fn systemd_scope_unit_name(cluster_id: &str) -> String {
+    let safe_id: String = cluster_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let rand = task_core::TaskId::new().to_string();
+    let short = &rand[rand.len().saturating_sub(8)..];
+    format!("celeris-ssh-master-{safe_id}-{short}")
+}
+
+/// `launcher` に応じて、実際に spawn する `(program, args)` を組み立てる（ADR-0060）。純関数。
+///
+/// `Inline` はそのまま。`SystemdRun` は
+/// `<program> --user --scope --quiet --unit celeris-ssh-master-<id>-<乱数> --description "celeris ssh
+/// master (<id>)" -- <program> <args...>` を組み立てる。`--scope` は指定したコマンドを exec するだけ
+/// なので、ssh は celeris の子プロセスのままで、cgroup だけが新しい scope に移る（環境変数は
+/// `Command::envs` で渡したものがそのまま届く。exec は環境を消さない）。
+fn launch_master_command(
+    launcher: &MasterLauncher,
+    program: &str,
+    args: &[String],
+    cluster_id: &str,
+) -> (String, Vec<String>) {
+    match launcher {
+        MasterLauncher::Inline => (program.to_string(), args.to_vec()),
+        MasterLauncher::SystemdRun { program: runner } => {
+            let unit = systemd_scope_unit_name(cluster_id);
+            let mut full = vec![
+                "--user".to_string(),
+                "--scope".to_string(),
+                "--quiet".to_string(),
+                "--unit".to_string(),
+                unit,
+                "--description".to_string(),
+                format!("celeris ssh master ({cluster_id})"),
+                "--".to_string(),
+                program.to_string(),
+            ];
+            full.extend(args.iter().cloned());
+            (runner.clone(), full)
+        }
+    }
+}
+
+/// 接続を開始する（ADR-0032 D2/D3/D4、ADR-0060）。
 ///
 /// 1. 既に人（または以前の celeris）が張った master が生きていれば、何もせず `Connected(None)`。
 /// 2. `interactive == false`（`auth = "publickey"`）: `BatchMode=yes` で `ssh -M -N` を張り、
 ///    `connect_timeout` 以内に `-O check` が通れば `Connected(Some(master))`。
 /// 3. `interactive == true`（`auth = "totp"`）: `SSH_ASKPASS` を使って `ssh -M -N` を張り、
 ///    プロンプトが出れば `NeedsCode`。`prompt_timeout` 内に出なければ、鍵だけで入れたか確かめる。
+///
+/// `cluster_id` は `SystemdRun` のときの scope unit 名にだけ使う。`launcher` は
+/// [`resolve_master_launcher`] で解決した値を渡す。
 pub async fn start_connect(
     ssh_command: &[String],
     host: &str,
+    cluster_id: &str,
+    launcher: &MasterLauncher,
     interactive: bool,
     prompt_timeout: Duration,
     connect_timeout: Duration,
@@ -220,9 +370,9 @@ pub async fn start_connect(
         return Ok(ClusterConnectStart::Connected(None));
     }
     if interactive {
-        start_totp(ssh_command, host, prompt_timeout).await
+        start_totp(ssh_command, host, cluster_id, launcher, prompt_timeout).await
     } else {
-        start_publickey(ssh_command, host, connect_timeout).await
+        start_publickey(ssh_command, host, cluster_id, launcher, connect_timeout).await
     }
 }
 
@@ -258,6 +408,8 @@ pub async fn disconnect(ssh_command: &[String], host: &str) -> Result<(), Cluste
 async fn start_publickey(
     ssh_command: &[String],
     host: &str,
+    cluster_id: &str,
+    launcher: &MasterLauncher,
     connect_timeout: Duration,
 ) -> Result<ClusterConnectStart, ClusterConnectError> {
     let (program, rest) = ssh_command
@@ -269,8 +421,9 @@ async fn start_publickey(
     args.push("-M".into());
     args.push("-N".into());
     args.push(host.to_string());
+    let (exec_program, exec_args) = launch_master_command(launcher, program, &args, cluster_id);
 
-    let (mut child, stderr_buf, err_task) = spawn_master(program, &args, &[])?;
+    let (mut child, stderr_buf, err_task) = spawn_master(&exec_program, &exec_args, &[])?;
     match poll_until_connected_or_timeout(ssh_command, host, &mut child, connect_timeout).await {
         PollOutcome::Connected => {
             // 接続できたので、stderr の中継タスクは master の寿命の間そのまま走らせておく
@@ -292,6 +445,8 @@ async fn start_publickey(
 async fn start_totp(
     ssh_command: &[String],
     host: &str,
+    cluster_id: &str,
+    launcher: &MasterLauncher,
     prompt_timeout: Duration,
 ) -> Result<ClusterConnectStart, ClusterConnectError> {
     let dir =
@@ -338,8 +493,9 @@ async fn start_totp(
             code_fifo.to_string_lossy().into_owned(),
         ),
     ];
+    let (exec_program, exec_args) = launch_master_command(launcher, program, &args, cluster_id);
 
-    let (child, stderr_buf, err_task) = match spawn_master(program, &args, &envs) {
+    let (child, stderr_buf, err_task) = match spawn_master(&exec_program, &exec_args, &envs) {
         Ok(v) => v,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&dir);
@@ -397,7 +553,13 @@ async fn start_totp(
 /// `spawn_master` の戻り値: 子プロセス・stderr の蓄積バッファ・それを汲み出すタスクのハンドル。
 type MasterSpawn = (Child, Arc<Mutex<Vec<u8>>>, JoinHandle<()>);
 
-/// `ssh -M -N` を起動し、stderr を非同期に汲み出す（`stdout` は使わないので捨てる）。
+/// `ssh -M -N`（または ADR-0060 の `systemd-run --user --scope -- ssh -M -N`）を起動し、stderr を
+/// 非同期に汲み出す（`stdout` は使わないので捨てる）。
+///
+/// ADR-0060: `kill_on_drop(false)`。以前は `true` にしていたが、`ClusterMaster`/`ClusterConnectSession`
+/// の側で必要なときは明示的に `send_signal_to_group` を呼んでいる（保留中の取り消し・明示的な切断）ので
+/// 冗長だった上、接続成立後に `Child` が何らかの理由で drop されただけで master を巻き込んで殺す
+/// 副作用があった。tokio はいずれにせよオーファンキューで reap するので、zombie は残らない。
 fn spawn_master(
     program: &str,
     args: &[String],
@@ -410,7 +572,7 @@ fn spawn_master(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .kill_on_drop(false);
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command
@@ -679,6 +841,8 @@ mod tests {
         let result = start_connect(
             &ssh,
             "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
             false,
             Duration::from_millis(200),
             Duration::from_secs(2),
@@ -706,6 +870,8 @@ mod tests {
         let result = start_connect(
             &ssh,
             "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
             false,
             Duration::from_millis(200),
             Duration::from_secs(5),
@@ -715,7 +881,19 @@ mod tests {
             Ok(ClusterConnectStart::Connected(Some(master))) => {
                 let pid = master.child.id();
                 drop(master);
+                // ADR-0060（Phase 103）: 接続が成立した後は、`ClusterMaster` を drop しても殺さない
+                // （celeris の終了・再起動で繋がっていた master を道連れにしないため）。ここでは
+                // 偽 ssh のプロセスがまだ生きていることを確かめてから、テストの後始末として直接 kill する。
                 if let Some(pid) = pid {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    assert!(
+                        Path::new(&format!("/proc/{pid}")).exists(),
+                        "connected master should survive a plain drop"
+                    );
+                    let _ = nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(pid as i32),
+                        Signal::SIGKILL,
+                    );
                     wait_until_process_gone(pid).await;
                 }
             }
@@ -733,6 +911,8 @@ mod tests {
         let result = start_connect(
             &ssh,
             "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
             false,
             Duration::from_millis(300),
             Duration::from_secs(5),
@@ -767,6 +947,8 @@ mod tests {
         let result = start_connect(
             &ssh,
             "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
@@ -827,6 +1009,8 @@ mod tests {
         let result = start_connect(
             &ssh,
             "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
@@ -860,6 +1044,8 @@ mod tests {
         let result = start_connect(
             &ssh,
             "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
@@ -890,6 +1076,8 @@ mod tests {
         let result = start_connect(
             &ssh,
             "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
@@ -923,6 +1111,8 @@ mod tests {
             let result = start_connect(
                 &ssh,
                 "cluster-host",
+                "c1",
+                &MasterLauncher::Inline,
                 true,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
@@ -957,6 +1147,8 @@ mod tests {
         let result = start_connect(
             &ssh,
             "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
@@ -986,6 +1178,8 @@ mod tests {
         let result = start_connect(
             &ssh,
             "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
             true,
             Duration::from_millis(300),
             Duration::from_secs(5),
@@ -1040,5 +1234,198 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    // ---- ADR-0060: master_launcher ----
+
+    // (a) systemd-run 指定で argv が組み立てどおりになる。
+    #[test]
+    fn launch_master_command_wraps_with_systemd_run() {
+        let launcher = MasterLauncher::SystemdRun {
+            program: "systemd-run".to_string(),
+        };
+        let args = vec!["-M".to_string(), "-N".to_string(), "pegasus".to_string()];
+        let (program, full_args) = launch_master_command(&launcher, "ssh", &args, "pegasus");
+        assert_eq!(program, "systemd-run");
+        assert_eq!(
+            &full_args[..3],
+            &["--user".to_string(), "--scope".to_string(), "--quiet".to_string()]
+        );
+        assert_eq!(full_args[3], "--unit");
+        assert!(
+            full_args[4].starts_with("celeris-ssh-master-pegasus-"),
+            "{}",
+            full_args[4]
+        );
+        assert_eq!(full_args[5], "--description");
+        assert_eq!(full_args[6], "celeris ssh master (pegasus)");
+        assert_eq!(full_args[7], "--");
+        assert_eq!(
+            &full_args[8..],
+            &[
+                "ssh".to_string(),
+                "-M".to_string(),
+                "-N".to_string(),
+                "pegasus".to_string()
+            ]
+        );
+    }
+
+    /// クラスタ id に systemd のユニット名として危険な文字が入っていても安全な文字に落とす。
+    #[test]
+    fn launch_master_command_sanitizes_the_cluster_id_in_the_unit_name() {
+        let launcher = MasterLauncher::systemd_run();
+        let (_, full_args) = launch_master_command(&launcher, "ssh", &[], "weird id/../x");
+        assert!(
+            full_args[4].starts_with("celeris-ssh-master-weird_id____x-"),
+            "{}",
+            full_args[4]
+        );
+    }
+
+    // (b) inline は従来と同じ argv のまま。
+    #[test]
+    fn launch_master_command_inline_is_unchanged() {
+        let args = vec!["-M".to_string(), "-N".to_string(), "pegasus".to_string()];
+        let (program, full_args) = launch_master_command(&MasterLauncher::Inline, "ssh", &args, "pegasus");
+        assert_eq!(program, "ssh");
+        assert_eq!(full_args, args);
+    }
+
+    // (c) auto の判定は「systemd-run が PATH にあり、かつ XDG_RUNTIME_DIR が設定されているとき」だけ。
+    #[test]
+    fn resolve_master_launcher_auto_needs_both_conditions() {
+        assert!(matches!(
+            resolve_master_launcher("auto", true, true),
+            MasterLauncher::SystemdRun { .. }
+        ));
+        assert!(matches!(
+            resolve_master_launcher("auto", false, true),
+            MasterLauncher::Inline
+        ));
+        assert!(matches!(
+            resolve_master_launcher("auto", true, false),
+            MasterLauncher::Inline
+        ));
+        assert!(matches!(
+            resolve_master_launcher("auto", false, false),
+            MasterLauncher::Inline
+        ));
+    }
+
+    #[test]
+    fn resolve_master_launcher_explicit_values_ignore_the_environment() {
+        assert!(matches!(
+            resolve_master_launcher("systemd-run", false, false),
+            MasterLauncher::SystemdRun { .. }
+        ));
+        assert!(matches!(
+            resolve_master_launcher("inline", true, true),
+            MasterLauncher::Inline
+        ));
+    }
+
+    #[test]
+    fn path_has_executable_finds_an_executable_file_in_one_of_the_path_dirs() {
+        let empty_dir = tempfile::tempdir().unwrap();
+        let bin_dir = tempfile::tempdir().unwrap();
+        let path_env = std::env::join_paths([empty_dir.path(), bin_dir.path()])
+            .unwrap()
+            .into_string()
+            .unwrap();
+        assert!(!path_has_executable(&path_env, "systemd-run"));
+
+        write_executable(&bin_dir.path().join("systemd-run"), "#!/bin/sh\nexit 0\n");
+        assert!(path_has_executable(&path_env, "systemd-run"));
+    }
+
+    #[test]
+    fn path_has_executable_ignores_non_executable_files() {
+        let bin_dir = tempfile::tempdir().unwrap();
+        std::fs::write(bin_dir.path().join("systemd-run"), "not executable").unwrap();
+        let path_env = bin_dir.path().to_string_lossy().into_owned();
+        assert!(!path_has_executable(&path_env, "systemd-run"));
+    }
+
+    /// (e) 偽 `systemd-run`（`--` の後を `exec` するだけ）を経由しても、`Command::envs` で渡した
+    /// `SSH_ASKPASS` 等の環境変数が末端の ssh まで届く（`--scope` は呼び出し元の環境を継ぐ、という
+    /// ADR-0060 の前提を実プロセスで確かめる）。
+    #[tokio::test]
+    async fn fake_systemd_run_execs_ssh_and_preserves_the_askpass_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let prompt = "(rmaeda@130.158.241.2) Verification code: ";
+        let ssh = fake_ssh(
+            dir.path(),
+            "ssh",
+            &askpass_script(state.path(), prompt, "123456"),
+        );
+        let fake_systemd_run = dir.path().join("systemd-run");
+        write_executable(
+            &fake_systemd_run,
+            "#!/bin/sh\n\
+             while [ $# -gt 0 ]; do\n  \
+               if [ \"$1\" = \"--\" ]; then\n    \
+                 shift\n    \
+                 exec \"$@\"\n  \
+               fi\n  \
+               shift\n\
+             done\n\
+             exit 1\n",
+        );
+        let launcher = MasterLauncher::SystemdRun {
+            program: fake_systemd_run.to_string_lossy().into_owned(),
+        };
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            "c1",
+            &launcher,
+            true,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let ClusterConnectStart::NeedsCode { session, .. } = result else {
+            panic!("expected NeedsCode");
+        };
+        let master = session.submit_code("123456", Duration::from_secs(5)).await;
+        match master {
+            Ok(_master) => {}
+            Err(e) => panic!(
+                "expected Ok(ClusterMaster) through the fake systemd-run wrapper, got {e:?}"
+            ),
+        }
+    }
+
+    /// 接続成立後は、明示的な `ClusterMaster::kill` を呼ばない限り master は生きたまま
+    /// （ADR-0060: 通常の Drop はもう殺さない）。`kill` を呼べば確実に落ちる。
+    #[tokio::test]
+    async fn cluster_master_kill_terminates_the_child_explicitly() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let ssh = fake_ssh(
+            dir.path(),
+            "ssh",
+            &delayed_success_script(state.path(), 100),
+        );
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
+            false,
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        let ClusterConnectStart::Connected(Some(master)) = result else {
+            panic!("expected Connected(Some(_))");
+        };
+        let pid = master.child.id().expect("pid");
+        master.kill().await;
+        wait_until_process_gone(pid).await;
     }
 }

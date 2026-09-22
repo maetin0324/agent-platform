@@ -181,3 +181,10 @@ GUI や taskd が使えないときの逃げ道として残す（`-f` で張っ�
    （コードは人間が用意するので、ここは人間と一緒に確認する）。
 7. `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / GUI の検査一式 /
    `scripts/sync-gui-docs.sh --check`。
+
+## Phase 103 追記（2026-09-22）
+
+D2 で「`ControlPersist` があると ssh は自分を切り離す」と訂正したが、切り離された master が
+`celeris@<sha12>` unit の cgroup に残ったままだったため、昇格のたびに systemd が道連れに殺していた
+（本番の観測）。master を celeris の cgroup の外（`systemd-run --user --scope`）で起こすようにし、
+`ClusterMaster` も接続成立後は Drop で殺さないようにした。詳細は ADR-0060。
