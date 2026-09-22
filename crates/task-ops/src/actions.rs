@@ -102,6 +102,7 @@ pub fn execute(
     org: &[OrgNode],
     roles: &[task_core::RoleSpec],
     genres: &[task_core::GenreSpec],
+    known_clusters: &[String],
     task: &Task,
     run_id: &str,
     valid: &[ConsoleAction],
@@ -133,7 +134,7 @@ pub fn execute(
                 acceptance.push("元の依頼と成果の範囲が整合していること。修正・実装を依頼された場合、調査報告や提案だけでは合格にせず、実際の変更と検証の証拠を確認する。人が明示的に調査だけを求めた場合はその範囲を守る。分割した中間成果を依頼全体の完了として扱わない。".into());
             }
         }
-        match execute_one(store, org, roles, genres, &action, now) {
+        match execute_one(store, org, roles, genres, known_clusters, &action, now) {
             Ok(executed) => outcome.executed.push(executed),
             Err(reason) => outcome.failed.push(FailedAction {
                 kind: action.kind().to_string(),
@@ -171,6 +172,7 @@ fn execute_one(
     org: &[OrgNode],
     roles: &[task_core::RoleSpec],
     genres: &[task_core::GenreSpec],
+    known_clusters: &[String],
     action: &ConsoleAction,
     now: OffsetDateTime,
 ) -> Result<ExecutedAction, String> {
@@ -187,9 +189,25 @@ fn execute_one(
             project,
             milestone,
             assignee,
+            workspace,
         } => create_task_action(
-            store, roles, genres, title, objective, acceptance, harness, skills, mode, repos,
-            project, milestone, assignee, *tier, now,
+            store,
+            roles,
+            genres,
+            known_clusters,
+            title,
+            objective,
+            acceptance,
+            harness,
+            skills,
+            mode,
+            repos,
+            project,
+            milestone,
+            assignee,
+            workspace,
+            *tier,
+            now,
         ),
         ConsoleAction::ProposeProject {
             title,
@@ -218,6 +236,7 @@ fn create_task_action(
     store: &dyn TaskStore,
     roles: &[task_core::RoleSpec],
     genres: &[task_core::GenreSpec],
+    known_clusters: &[String],
     title: &str,
     objective: &str,
     acceptance: &[String],
@@ -228,6 +247,7 @@ fn create_task_action(
     project: &Option<String>,
     milestone: &Option<String>,
     assignee: &Option<String>,
+    workspace: &Option<Box<WorkspaceSpec>>,
     tier: Option<task_core::Tier>,
     now: OffsetDateTime,
 ) -> Result<ExecutedAction, String> {
@@ -257,6 +277,25 @@ fn create_task_action(
         }
         _ => None,
     };
+    // Phase 98（ADR-0018）: `workspace` がクラスタを指すなら `[[clusters]]` に存在すること。
+    // 未知のクラスタは action 全体を検証で落とす（人に理由が見える。`FailedAction`）。
+    let (ws_path, ws_cluster) = match workspace.as_deref() {
+        Some(WorkspaceSpec::Remote { cluster, path }) => {
+            if !known_clusters.iter().any(|c| c == cluster) {
+                return Err(format!(
+                    "unknown cluster: {cluster:?}（設定済み: {}）",
+                    if known_clusters.is_empty() {
+                        "なし".to_string()
+                    } else {
+                        known_clusters.join(", ")
+                    }
+                ));
+            }
+            (Some(path.clone()), Some(cluster.clone()))
+        }
+        Some(WorkspaceSpec::Local { path, .. }) => (Some(path.clone()), None),
+        None => (None, None),
+    };
     let spec = NewTaskSpec {
         title: title.to_string(),
         objective: objective.to_string(),
@@ -280,8 +319,8 @@ fn create_task_action(
         project_id,
         milestone_id,
         assignee: assignee.clone(),
-        workspace: None,
-        cluster: None,
+        workspace: ws_path,
+        cluster: ws_cluster,
         adapter: None,
         repos: repos.to_vec(),
         labels: Vec::new(),
@@ -564,6 +603,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &task,
             "run-1",
             &parsed.0,
@@ -584,6 +624,76 @@ mod tests {
         assert!(outcome.executed[0].summary.contains("直す"));
     }
 
+    /// Phase 98（ADR-0018、実機障害 2026-09-22）: `create_task.workspace` が既知のクラスタを指す
+    /// `{"kind":"remote", ...}` なら `WorkspaceSpec::Remote` のタスクが作られる。
+    #[test]
+    fn create_task_with_a_known_cluster_workspace_makes_a_remote_task() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_engineering(&store);
+        let task = cos_task();
+        let parsed = parse(
+            r#"{"actions":[{"type":"create_task","title":"pegasusinfo を実行","objective":"実行して",
+               "acceptance":["結果が分かる"],"harness":"coding",
+               "workspace":{"kind":"remote","cluster":"pegasus","path":"~"}}]}"#,
+        );
+        let known_clusters = vec!["pegasus".to_string(), "sirius".to_string()];
+        let outcome = execute(
+            &store,
+            &[],
+            &[],
+            &[],
+            &known_clusters,
+            &task,
+            "run-cluster",
+            &parsed.0,
+            &parsed.1,
+            now(),
+        )
+        .unwrap()
+        .expect("not idempotent-skipped");
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        let created = outcome.executed[0].task_id.expect("task id");
+        let stored = store.get(created).unwrap().expect("task exists");
+        assert_eq!(
+            stored.workspace,
+            task_core::WorkspaceSpec::Remote {
+                cluster: "pegasus".to_string(),
+                path: "~".into(),
+            }
+        );
+    }
+
+    /// `[[clusters]]` に無いクラスタは action 全体を検証で落とす（タスクは作られず、理由が残る）。
+    #[test]
+    fn create_task_with_an_unknown_cluster_is_rejected() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_engineering(&store);
+        let task = cos_task();
+        let parsed = parse(
+            r#"{"actions":[{"type":"create_task","title":"t","objective":"o",
+               "acceptance":["ok"],"workspace":{"kind":"remote","cluster":"nowhere","path":"~"}}]}"#,
+        );
+        let known_clusters = vec!["pegasus".to_string()];
+        let outcome = execute(
+            &store,
+            &[],
+            &[],
+            &[],
+            &known_clusters,
+            &task,
+            "run-unknown-cluster",
+            &parsed.0,
+            &parsed.1,
+            now(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(outcome.executed.is_empty());
+        assert_eq!(outcome.failed.len(), 1);
+        assert!(outcome.failed[0].reason.contains("unknown cluster"), "{:?}", outcome.failed);
+        assert!(store.list(None).unwrap().is_empty(), "何も作らない");
+    }
+
     /// 実機 2026-09-21: CoS が tier と mode の両方に `standard` を書き、正しい create_task
     /// 全体が捨てられた。tier の common value は既定の production mode として受ける。
     #[test]
@@ -597,6 +707,7 @@ mod tests {
         );
         let outcome = execute(
             &store,
+            &[],
             &[],
             &[],
             &[],
@@ -625,6 +736,7 @@ mod tests {
         let parsed = parse(r#"{"actions":[{"type":"create_task","title":"t","objective":"o"}]}"#);
         let outcome = execute(
             &store,
+            &[],
             &[],
             &[],
             &[],
@@ -659,6 +771,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &task,
             "run-1",
             &parsed.0,
@@ -683,6 +796,7 @@ mod tests {
         );
         let outcome = execute(
             &store,
+            &[],
             &[],
             &[],
             &[],
@@ -716,6 +830,7 @@ mod tests {
         );
         let outcome = execute(
             &store,
+            &[],
             &[],
             &[],
             &[],
@@ -760,6 +875,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &task,
             "run-1",
             &parsed.0,
@@ -777,7 +893,7 @@ mod tests {
         let bad = parse(
             r#"{"actions":[{"type":"add_milestone","project":"01ZZZZZZZZZZZZZZZZZZZZZZZZ","title":"t"}]}"#,
         );
-        let outcome = execute(&store, &[], &[], &[], &task, "run-2", &bad.0, &bad.1, now())
+        let outcome = execute(&store, &[], &[], &[], &[], &task, "run-2", &bad.0, &bad.1, now())
             .unwrap()
             .unwrap();
         assert!(outcome.executed.is_empty());
@@ -792,6 +908,7 @@ mod tests {
         let parsed = parse(r#"{"actions":[{"type":"ask_human","text":"どちらがよいですか"}]}"#);
         let outcome = execute(
             &store,
+            &[],
             &[],
             &[],
             &[],
@@ -822,6 +939,7 @@ mod tests {
             &[],
             &[],
             &[],
+            &[],
             &task,
             "run-dup",
             &parsed.0,
@@ -835,6 +953,7 @@ mod tests {
 
         let second = execute(
             &store,
+            &[],
             &[],
             &[],
             &[],
@@ -861,6 +980,7 @@ mod tests {
         let parsed = parse(r#"{"actions":[{"type":"unknown_action"}]}"#);
         let outcome = execute(
             &store,
+            &[],
             &[],
             &[],
             &[],
@@ -935,6 +1055,7 @@ mod tests {
         );
         let outcome = execute(
             &store,
+            &[],
             &[],
             &[],
             &[],

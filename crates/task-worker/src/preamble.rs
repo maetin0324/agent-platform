@@ -406,6 +406,11 @@ pub fn organization_section(context: &RunContext) -> String {
         if !node.harnesses.is_empty() {
             out.push_str(&format!(" / harnesses: {}", node.harnesses.join(", ")));
         }
+        // Phase 98（ADR-0046 D8）: 道具（特に `cluster:<id>`）を 1 語ずつ添える。CoS がクラスタ作業を
+        // どのノードに `create_task` で流せばよいかを前置きから判断できるようにする。
+        if !node.tools.is_empty() {
+            out.push_str(&format!(" / 道具: {}", node.tools.join(", ")));
+        }
         out.push('\n');
     }
     out.push_str(
@@ -757,7 +762,15 @@ fn conversation_instructions(context: &RunContext) -> String {
                  調査だけを依頼された場合は調査まで。分割する場合も最終成果までの仕事と依存関係を残し、\
                  中間報告を依頼全体の完了と呼ばないでください。未完了なら不足と継続中の仕事を示してください。\
                  質問は実行に不可欠な情報の不足、依頼範囲の拡大、未許可の破壊的操作などの場合だけです。\
-                 既存の仕事と結果、承認済みの範囲を確認し、同じ調査や承認要求を繰り返さないでください。\n\n\
+                 既存の仕事と結果、承認済みの範囲を確認し、同じ調査や承認要求を繰り返さないでください。\
+                 クラスタ（pegasus / sirius / fern03 など）でコマンドを実行する・状態を見る・ジョブを流す\
+                 依頼は、自分で実行しないでください。『ssh が禁止されている』『read-only』を理由に断らないで\
+                 ください（ADR-0046 D8 のとおりこの対話 run 自身には道具が無いのが正常で、それは断る理由に\
+                 なりません）。`cluster:<id>` を tools に持つノードの仕事として `create_task` を書き、\
+                 `workspace` に `{{\"kind\":\"remote\",\"cluster\":\"<id>\",\"path\":\"<クラスタ側の作業\
+                 ディレクトリ>\"}}` を入れてください。path は案件の作業場所、無ければ人の依頼文にある場所、\
+                 それも無ければクラスタのホームを表す `~` を使い、返事で「〜として cluster-hpc に依頼した」\
+                 のように伝えてください。\n\n\
                  {}",
                 actions_instructions()
             )
@@ -783,7 +796,10 @@ fn actions_instructions() -> String {
      作ったり道具を使ったりはしません）。\n\
      - `{\"type\": \"create_task\", \"title\": \"…\", \"objective\": \"…\", \"acceptance\": [\"…\"], \
      \"harness\": \"coding\", \"skills\": [\"rust\"], \"mode\": \"prototype\", \"repos\": [], \
-     \"project\": \"<案件の id か null>\", \"milestone\": \"<途中目標の id か null>\", \"assignee\": null}`\n\
+     \"project\": \"<案件の id か null>\", \"milestone\": \"<途中目標の id か null>\", \"assignee\": null, \
+     \"workspace\": {\"kind\":\"remote\",\"cluster\":\"<id>\",\"path\":\"<作業ディレクトリか ~>\"}}`\
+     （`workspace` は省略可。クラスタでの仕事だけ入れる。\
+     ローカルなら `{\"kind\":\"local\",\"path\":\"…\"}`）\n\
      - `{\"type\": \"propose_project\", \"title\": \"…\", \"request\": \"…\", \"repos\": [\"/abs/path\"]}`\n\
      - `{\"type\": \"add_milestone\", \"project\": \"<案件の id>\", \"title\": \"…\", \"description\": \"…\"}`\n\
      - `{\"type\": \"ask_human\", \"text\": \"…\"}`\n\
@@ -1119,6 +1135,82 @@ mod tests {
 
         // 対話でない run（既定値の `None`）では何も足さない。
         assert_eq!(render(&RunContext::default(), "artifacts"), "");
+    }
+
+    /// Phase 98（ADR-0018、実機障害 2026-09-22）: CoS の対話にだけ「クラスタ作業は自分でやらず
+    /// `create_task` で組織に流す」規則が付き、「ssh 禁止・read-only」を理由に断らないよう明示する。
+    /// CoS 以外の対話・通常の run には出ない。
+    #[test]
+    fn secretary_instructions_tell_cos_to_route_cluster_work_via_create_task() {
+        let secretary = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Secretary),
+            ..RunContext::default()
+        };
+        let out = render(&secretary, "artifacts");
+        assert!(out.contains("自分で実行しないでください"), "{out}");
+        assert!(out.contains("『ssh が禁止されている』『read-only』を理由に断らないで"), "{out}");
+        assert!(out.contains("cluster:<id>"), "{out}");
+        assert!(
+            out.contains(r#""workspace": {"kind":"remote","cluster":"<id>","path":"<作業ディレクトリか ~>"}"#),
+            "{out}"
+        );
+
+        let other = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Other),
+            ..RunContext::default()
+        };
+        let out = render(&other, "artifacts");
+        assert!(!out.contains("cluster:<id>"), "{out}");
+
+        assert_eq!(render(&RunContext::default(), "artifacts"), "");
+    }
+
+    /// Phase 98（ADR-0046 D8）: CoS 宛ての「組織」一覧に、各ノードの tools（`cluster:<id>` を含む）が
+    /// 1 語ずつ添う。CoS がどのノードにクラスタ作業を流せばよいかを前置きから判断できるようにする。
+    #[test]
+    fn organization_section_shows_each_nodes_tools() {
+        let secretary = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Secretary),
+            organization: vec![
+                crate::protocol::OrgNodeContext {
+                    id: "cluster-hpc".into(),
+                    name: "Cluster & HPC Operations".into(),
+                    kind: task_core::OrgKind::Section,
+                    parent_id: Some("operations".into()),
+                    brief: String::new(),
+                    genre: None,
+                    skills: vec!["slurm".into()],
+                    harnesses: vec!["coding".into()],
+                    tools: vec![
+                        "cluster:pegasus".into(),
+                        "cluster:sirius".into(),
+                        "cluster:fern03".into(),
+                    ],
+                },
+                crate::protocol::OrgNodeContext {
+                    id: "cos".into(),
+                    name: "Chief of Staff".into(),
+                    kind: task_core::OrgKind::Secretary,
+                    parent_id: None,
+                    brief: String::new(),
+                    genre: None,
+                    skills: Vec::new(),
+                    harnesses: vec!["conversation".into()],
+                    tools: Vec::new(),
+                },
+            ],
+            ..RunContext::default()
+        };
+        let out = render(&secretary, "artifacts");
+        assert!(out.contains("## 組織"), "{out}");
+        assert!(
+            out.contains(
+                "- `cluster-hpc` Cluster & HPC Operations — skills: slurm / harnesses: coding / 道具: cluster:pegasus, cluster:sirius, cluster:fern03"
+            ),
+            "{out}"
+        );
+        // 道具が無いノードは「道具:」を出さない（従来どおり）。
+        assert!(out.contains("- `cos` Chief of Staff / harnesses: conversation\n"), "{out}");
     }
 
     /// ADR-0048 D3（Phase 60b）: CoS の対話にだけ「進行中の案件」の節と `actions` の説明が付く。

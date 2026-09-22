@@ -305,6 +305,11 @@ pub struct OrgNodeContext {
     /// ADR-0046 D3 / D6（Phase 59）: そのノードが受けられる**実効**ハーネスの id。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub harnesses: Vec<String>,
+    /// ADR-0046 D8 / Phase 98: そのノードの**実効** tools（`cluster:<id>` を含む）。CoS の対話 run の
+    /// 「組織」一覧に添え、CoS が「どのノードにクラスタ作業を流せるか」を前置きから判断できるようにする
+    /// （実機障害 2026-09-22: CoS が cluster-hpc の存在を知らず ssh 禁止を理由に断った）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
 }
 
 impl From<&task_core::OrgNode> for OrgNodeContext {
@@ -318,16 +323,19 @@ impl From<&task_core::OrgNode> for OrgNodeContext {
             genre: n.genre.clone(),
             skills: Vec::new(),
             harnesses: Vec::new(),
+            tools: Vec::new(),
         }
     }
 }
 
 impl OrgNodeContext {
-    /// ADR-0046 D6: 実効 profile（`task_core::profile::resolve`）から skills / harnesses を足した版。
+    /// ADR-0046 D6: 実効 profile（`task_core::profile::resolve`）から skills / harnesses / tools を
+    /// 足した版。
     pub fn with_profile(n: &task_core::OrgNode, effective: &task_core::EffectiveProfile) -> Self {
         Self {
             skills: effective.skills.clone(),
             harnesses: effective.harnesses_allowed.clone(),
+            tools: effective.tools.clone(),
             ..Self::from(n)
         }
     }
