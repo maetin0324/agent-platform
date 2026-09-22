@@ -1333,6 +1333,13 @@
         "sync": {
           "description": "`\"rsync\"` | `\"none\"`。",
           "type": "string"
+        },
+        "work_dir": {
+          "description": "ADR-0059 D6: 設定ファイルの `[[clusters]] work_dir`（DB の上書きは含まない。`GET /clusters` の\n`ClusterView.work_dir`/`work_dir_source` が実効値を持つ）。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1501,6 +1508,43 @@
       ],
       "type": "object"
     },
+    "ClusterSettingsPutBody": {
+      "additionalProperties": false,
+      "description": "`PUT /clusters/{id}/settings`（ADR-0059 D6）の要求本文。絶対パスか `~`/`~/…` だけ許す\n（それ以外・空文字は 422 `validation`）。`null`（省略）で DB の上書きを消す。",
+      "properties": {
+        "work_dir": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ClusterSettingsView": {
+      "description": "`PUT /clusters/{id}/settings` の応答。",
+      "properties": {
+        "cluster_id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        },
+        "work_dir": {
+          "description": "書いた後の DB 上書きの値（`null` なら上書きを消した = 設定ファイルの値に戻る）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cluster_id",
+        "updated_at"
+      ],
+      "type": "object"
+    },
     "ClusterView": {
       "description": "設定（`[[clusters]]`）とスナップショット（`ClusterLive`）を結合したもの。`env` の値は出さない。",
       "properties": {
@@ -1594,6 +1638,20 @@
           "default": false,
           "description": "ADR-0053 D3: 鍵認証を試しても ssh master が繋がらず、人の TOTP 入力が要る状態か。\nスナップショットが無ければ `false`。",
           "type": "boolean"
+        },
+        "work_dir": {
+          "description": "ADR-0059 D6: 実効の作業ディレクトリ（DB の上書き `cluster_settings` があればそれ、無ければ\n設定ファイルの `work_dir`）。どちらも無ければ `null`（`WorkspaceSpec::Remote.path` が相対・\n省略のタスクはこのクラスタでは失敗する）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "work_dir_source": {
+          "description": "ADR-0059 D6: `work_dir` の出どころ。`\"settings\"`（DB の上書き）/ `\"config\"`（設定ファイル）。\n`work_dir` が `null` なら `null`。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -4278,6 +4336,33 @@
             "reason"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0059 D3（Phase 99）: `mode` 省略のリモートタスクが worktree 準備で「git リポジトリでない」\n（exit 65）になり、`repos` が無い（コードを触らない仕事）ので `shared` として続行した。\n状態は変えない（`replay` は無視する）。この後 `task.workspace.mode` が `Some(Shared)` に\n書き戻る（`Event::Edited` は積まない。編集は人によるものではないため）。",
+          "properties": {
+            "cluster": {
+              "type": "string"
+            },
+            "path": {
+              "description": "クラスタ側の作業ディレクトリ（展開前の `path` の文字列表現）。",
+              "type": "string"
+            },
+            "reason": {
+              "description": "worktree 準備が失敗した理由（ssh.rs の stderr）。",
+              "type": "string"
+            },
+            "type": {
+              "const": "workspace_mode_downgraded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cluster",
+            "path",
+            "reason"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -6522,6 +6607,18 @@
             "string",
             "null"
           ]
+        },
+        "workspace_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "ADR-0059 D1: `cluster` を指定したときの `WorkspaceSpec::Remote.mode`。省略時は `Worktree`\n（従来どおりクラスタの `sync` 設定に従う）。`Local` タスク（`cluster` 無し）には関係ない。"
         }
       },
       "required": [
@@ -11368,14 +11465,26 @@
               "const": "remote",
               "type": "string"
             },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0059 D1: クラスタ側の同期方針。`Local.mode`（ADR-0041 D1）と語彙は同じ\n（`Worktree` | `Shared`）だが軸は別（作業ツリーの分離ではなく、同期そのものをするか）。\n省略時は JSON に出さない（Phase 98 までの `{\"kind\":\"remote\",\"cluster\":\"…\",\"path\":\"…\"}` と\n1 バイトも変わらない）。"
+            },
             "path": {
+              "default": "",
+              "description": "ADR-0059 D6: 省略可（`#[serde(default)]`）。省略・相対パスは実効クラスタ `work_dir`\nから解決する（celeris は解決しない。展開・解決はリモートスクリプト生成側で行う）。",
               "type": "string"
             }
           },
           "required": [
             "kind",
-            "cluster",
-            "path"
+            "cluster"
           ],
           "type": "object"
         }
@@ -11459,6 +11568,13 @@
     "cluster_connect_start": {
       "$ref": "#/$defs/ClusterConnectStart",
       "description": "ADR-0032 D5: `POST /clusters/{id}/connect` と `POST /clusters/{id}/connect/code` の応答。"
+    },
+    "cluster_settings": {
+      "$ref": "#/$defs/ClusterSettingsView"
+    },
+    "cluster_settings_put": {
+      "$ref": "#/$defs/ClusterSettingsPutBody",
+      "description": "ADR-0059 D6: `PUT /clusters/{id}/settings` の要求本文と応答。"
     },
     "clusters": {
       "$ref": "#/$defs/Clusters"
@@ -11813,6 +11929,8 @@
     "clusters",
     "cluster_connect_start",
     "cluster_connect_result",
+    "cluster_settings_put",
+    "cluster_settings",
     "secrets",
     "secret_put",
     "account_list",

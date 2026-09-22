@@ -725,7 +725,7 @@ pub fn task_detail(
     };
     // ADR-0019 D2: `sync = "worktree"` のクラスタなら、worktree のパスとブランチを出す（人が diff / commit する場所）。
     let worktree = match &task.workspace {
-        WorkspaceSpec::Remote { cluster, path } => ctx
+        WorkspaceSpec::Remote { cluster, path, .. } => ctx
             .clusters
             .get(cluster)
             .filter(|c| c.sync == "worktree")
@@ -1427,6 +1427,7 @@ mod tests {
         remote.workspace = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: PathBuf::from("/work/NBB/x/project"),
+            mode: None,
         };
         store.insert(&remote).expect("insert");
         let local = sample_task(TaskKind::Execute, Status::Ready);
@@ -1455,12 +1456,14 @@ mod tests {
         on_worktree.workspace = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: PathBuf::from("/work/NBB/x/benchfs"),
+            mode: None,
         };
         store.insert(&on_worktree).expect("insert");
         let mut on_rsync = sample_task(TaskKind::Execute, Status::Ready);
         on_rsync.workspace = WorkspaceSpec::Remote {
             cluster: "sirius".into(),
             path: PathBuf::from("/work/NBB/x/scratch"),
+            mode: None,
         };
         store.insert(&on_rsync).expect("insert");
 

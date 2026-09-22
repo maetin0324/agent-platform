@@ -112,7 +112,16 @@ pub enum WorkspaceSpec {
     },
     Remote {
         cluster: String,
+        /// ADR-0059 D6: 省略可（`#[serde(default)]`）。省略・相対パスは実効クラスタ `work_dir`
+        /// から解決する（celeris は解決しない。展開・解決はリモートスクリプト生成側で行う）。
+        #[serde(default)]
         path: PathBuf,
+        /// ADR-0059 D1: クラスタ側の同期方針。`Local.mode`（ADR-0041 D1）と語彙は同じ
+        /// （`Worktree` | `Shared`）だが軸は別（作業ツリーの分離ではなく、同期そのものをするか）。
+        /// 省略時は JSON に出さない（Phase 98 までの `{"kind":"remote","cluster":"…","path":"…"}` と
+        /// 1 バイトも変わらない）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mode: Option<WorkspaceMode>,
     },
 }
 
@@ -130,6 +139,15 @@ impl WorkspaceSpec {
         match self {
             WorkspaceSpec::Local { mode, .. } => mode.unwrap_or_default(),
             WorkspaceSpec::Remote { .. } => WorkspaceMode::Shared,
+        }
+    }
+
+    /// ADR-0059 D1: `Remote` の `mode`（省略時は `Worktree` = 従来どおりクラスタの `sync` に従う）。
+    /// `Local` には関係ないフィールドなので既定を返す（呼び出し側は `Remote` のときだけ意味を持つ）。
+    pub fn remote_mode(&self) -> WorkspaceMode {
+        match self {
+            WorkspaceSpec::Remote { mode, .. } => mode.unwrap_or_default(),
+            WorkspaceSpec::Local { .. } => WorkspaceMode::default(),
         }
     }
 
@@ -852,6 +870,17 @@ pub enum Event {
         /// 決め手（決定的な文面。LLM は使わない）。
         reason: String,
     },
+    /// ADR-0059 D3（Phase 99）: `mode` 省略のリモートタスクが worktree 準備で「git リポジトリでない」
+    /// （exit 65）になり、`repos` が無い（コードを触らない仕事）ので `shared` として続行した。
+    /// 状態は変えない（`replay` は無視する）。この後 `task.workspace.mode` が `Some(Shared)` に
+    /// 書き戻る（`Event::Edited` は積まない。編集は人によるものではないため）。
+    WorkspaceModeDowngraded {
+        cluster: String,
+        /// クラスタ側の作業ディレクトリ（展開前の `path` の文字列表現）。
+        path: String,
+        /// worktree 準備が失敗した理由（ssh.rs の stderr）。
+        reason: String,
+    },
 }
 
 impl Event {
@@ -1039,6 +1068,7 @@ mod tests {
         let remote = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: PathBuf::from("/work/x"),
+            mode: None,
         };
         assert_eq!(remote.local_mode(), WorkspaceMode::Shared);
 
@@ -1054,6 +1084,70 @@ mod tests {
                 path: PathBuf::from("/home/u/repo"),
                 mode: Some(WorkspaceMode::Shared)
             }
+        );
+    }
+
+    /// ADR-0059 D1（Phase 99）: `Remote` の `mode` も `Local` と同じ語彙で省略でき、省略したものは
+    /// Phase 98 までの JSON と 1 バイトも変わらない。
+    #[test]
+    fn the_remote_workspace_mode_defaults_to_worktree_and_stays_out_of_the_json_when_omitted() {
+        let plain: WorkspaceSpec = serde_json::from_str(
+            r#"{"kind":"remote","cluster":"pegasus","path":"/work/x"}"#,
+        )
+        .expect("parse");
+        assert_eq!(
+            plain,
+            WorkspaceSpec::Remote {
+                cluster: "pegasus".into(),
+                path: PathBuf::from("/work/x"),
+                mode: None,
+            }
+        );
+        assert_eq!(plain.remote_mode(), WorkspaceMode::Worktree, "既定は worktree");
+        assert_eq!(
+            serde_json::to_string(&plain).expect("json"),
+            r#"{"kind":"remote","cluster":"pegasus","path":"/work/x"}"#
+        );
+
+        let shared: WorkspaceSpec = serde_json::from_str(
+            r#"{"kind":"remote","cluster":"pegasus","path":"~","mode":"shared"}"#,
+        )
+        .expect("parse");
+        assert_eq!(
+            shared,
+            WorkspaceSpec::Remote {
+                cluster: "pegasus".into(),
+                path: PathBuf::from("~"),
+                mode: Some(WorkspaceMode::Shared),
+            }
+        );
+        assert_eq!(shared.remote_mode(), WorkspaceMode::Shared);
+        assert!(serde_json::to_string(&shared).expect("json").contains(r#""mode":"shared""#));
+
+        // ADR-0059 D6: `path` は省略可（省略すると空文字列。celeris が実効 `work_dir` から解決する）。
+        let no_path: WorkspaceSpec =
+            serde_json::from_str(r#"{"kind":"remote","cluster":"pegasus"}"#).expect("parse");
+        assert_eq!(
+            no_path,
+            WorkspaceSpec::Remote {
+                cluster: "pegasus".into(),
+                path: PathBuf::new(),
+                mode: None,
+            }
+        );
+
+        // 知らない値は受け付けない。
+        assert!(
+            serde_json::from_str::<WorkspaceSpec>(
+                r#"{"kind":"remote","cluster":"pegasus","path":"/x","mode":"bogus"}"#
+            )
+            .is_err()
+        );
+
+        // `Local` には関係しない（既定を返すだけ）。
+        assert_eq!(
+            WorkspaceSpec::local("/srv/repo").remote_mode(),
+            WorkspaceMode::Worktree
         );
     }
 }

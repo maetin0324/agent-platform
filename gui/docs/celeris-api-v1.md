@@ -1,6 +1,12 @@
 # celeris HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-22 Phase 99（ADR-0059、コマンド実行だけのオペレーションを worktree 無しでクラスタで動かす）
+  — **追加のみ。v1 のまま**。`WorkspaceSpec::Remote` に任意の `mode`（`"worktree"` | `"shared"`、既定
+  `"worktree"`）と省略可の `path` を追加（§3.46）。エンドポイント 107: `PUT /clusters/{id}/settings`
+  （クラスタの実効の作業ディレクトリの DB 上書き、**管理系**。§3.107）。`GET /clusters` の
+  `items[].work_dir` / `items[].work_dir_source` を追加（§3.23）。DB のスキーマ版数は **25**
+  （migration 0025: `cluster_settings`）。
 - 改訂: 2026-09-22 Phase 94（ADR-0058、P-G38-1）— **追加のみ。v1 のまま**。`GET /releases` の
   `items[].verify.checks[]`（検査ごとの合否・詳細。§3.66）と `items[].gate`（ゲート各段の内訳。§3.66）を追加。
   既存の `gate_ok`・`verify.ok`/`live_ok`/`at` は変えていない。
@@ -366,6 +372,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 104 | DELETE | `/skills/{name}` | skill を消す（mount されていれば 409 `skill_mounted`。**管理系**） | 204 | ファイル + コミット |
 | 105 | POST | `/org/{id}/skills` | ノードに skill を mount する（**管理系**） | 200 `OrgNode` | store |
 | 106 | DELETE | `/org/{id}/skills/{skill}` | ノードから skill を unmount する（**管理系**） | 200 `OrgNode` | store |
+| 107 | PUT | `/clusters/{id}/settings` | クラスタの実効の作業ディレクトリを DB で上書きする（ADR-0059 D6、Phase 99。**管理系**） | 200 `ClusterSettingsView` | store `cluster_settings_set` |
 
 ---
 
@@ -785,6 +792,10 @@ ADR-0017 M4: `POST /reload` に成功すると、次の tick のスナップシ�
   **鍵認証を試しても**繋がらなかった状態（人の TOTP 入力が要る）。`GET /clusters` にはこれだけが出る
   （プロンプト文字列やコードは `POST /clusters/{id}/connect`/`connect/code` の応答にだけ載る。§3.39〜3.41
   と同じ経路で接続する）。この状態は Discord にも `cluster_login_needed`（§5.1）で 1 回だけ知らせる。
+- `work_dir` / `work_dir_source`（ADR-0059 D6、Phase 99）: 実効の作業ディレクトリ（DB の上書き
+  `cluster_settings` があればそれ、無ければ設定ファイルの `[[clusters]] work_dir`）と、その出どころ
+  （`"settings"` / `"config"`）。どちらも無ければ両方 `null`。`WorkspaceSpec::Remote.path` の省略・相対
+  パスはここから解決される（§3.46、§3.107）。
 
 ```json
 {"items": [
@@ -1080,6 +1091,26 @@ task-api 自身は ssh を起動しない（DESIGN §5.10 の境界）。未知�
 進行中の接続セッションを取り消す（ssh の子プロセスをプロセスグループごと落とす）、または既に張った接続を切る
 （`ssh -O exit <host>` を `BatchMode=yes` で呼ぶ）。無ければ何もしない。
 
+#### 3.107 `PUT /clusters/{id}/settings` → 200 `ClusterSettingsView`（ADR-0059 D6、Phase 99。**管理系**）
+
+クラスタの**実効の作業ディレクトリ**を DB（`cluster_settings`）で上書きする。`WorkspaceSpec::Remote.path`
+が省略・相対のタスクは、実効の作業ディレクトリ（DB の上書き > 設定ファイルの `[[clusters]] work_dir`）
+からの相対として解決される（§3.46 の `WorkspaceSpec` の節、Phase 99 追記）。
+
+```json
+{"work_dir": "/work/NBB/rmaeda"}
+```
+
+```json
+{"cluster_id": "pegasus", "work_dir": "/work/NBB/rmaeda", "updated_at": "2026-09-22T12:00:00Z"}
+```
+
+- `work_dir` は絶対パスか `~`/`~/…` だけ許す（それ以外・空文字は 422 `validation`、
+  `errors[0].field = "work_dir"`）。`null`（または省略）で DB の上書きを消し、設定ファイルの値に戻す。
+- 未知の cluster id（`[[clusters]]` に無い）は 404 `cluster_not_found`。
+- `GET /clusters`（§3.23）の `items[].work_dir` / `work_dir_source`（`"settings"` = この API で上書き
+  済み、`"config"` = 設定ファイルの値、`work_dir` が `null` ならどちらも `null`）にそのまま反映される。
+
 ### 3.42〜3.49 組織・案件・途中目標（ADR-0033 D1/D2、Phase 23）
 
 SPEC §3.2〜§3.3 の「組織（一つ、役割の木）」と「案件・仕事の木」を第一級のエンティティにしたもの。
@@ -1220,11 +1251,30 @@ Phase 55 から**管理系**（§1.3）。また **`PATCH` では `paused` / `ca
 `GET /projects/{id}` の応答には `repos[]`（primary が先頭）が増えた。
 
 **Phase 49（ADR-0041 D1）**: `kind = "local"` は任意で `mode` を持てる（`"worktree"` | `"shared"`、**既定
-`"worktree"`**）。知らない値は 400 `bad_request`（本文の解析で落ちる）。`remote` にこのキーは無い。
+`"worktree"`**）。知らない値は 400 `bad_request`（本文の解析で落ちる）。
 
 ```json
 {"workspace":{"kind":"local","path":"~/workspace/agent-platform","mode":"worktree"}}
 ```
+
+**Phase 99（ADR-0059 D1）**: `kind = "remote"` も任意で `mode` を持てる（同じ語彙 `"worktree"` |
+`"shared"`、**既定 `"worktree"`**。軸は別で、こちらは「クラスタ側の同期方針」を決める）。省略したものは
+Phase 98 までの `{"kind":"remote","cluster":"…","path":"…"}` と 1 バイトも変わらない。
+
+```json
+{"workspace":{"kind":"remote","cluster":"pegasus","path":"~","mode":"shared"}}
+```
+
+- `"worktree"`（既定）: 従来どおりそのクラスタの `[[clusters]] sync` 設定に従う（`worktree` / `rsync` /
+  `none`。ADR-0018 D4 / ADR-0019 D1）。
+- `"shared"`: **同期も worktree も行わない**（クラスタの `sync` 設定に関わらず何もしない）。`path` を
+  そのままクラスタ側の作業ディレクトリとして使う。コマンドを実行するだけでコードの diff を作らない
+  仕事向け（実機の障害 2026-09-22: `~` をホームとして worktree を切ろうとして失敗した）。
+- `path` は省略できる（省略すると空文字列として保存される）。絶対パス・`~`/`~/…` はそのまま使う。
+  それ以外（省略・相対パス）は、そのクラスタの実効の作業ディレクトリ（`GET /clusters` の `work_dir`。
+  §3.100 参照）からの相対として解決する。実効の作業ディレクトリが無ければ、その run は「クラスタ
+  `<id>` の作業ディレクトリが未登録です。`PUT /clusters/{id}/settings` かクラスタ画面で登録してください」
+  で失敗する。
 
 - `"worktree"`（既定）: `path` が git リポジトリなら、celeris は**タスクごとに `git worktree` を切る**。
   ワーカーのカレントディレクトリは `<workspace_root>/<task_id>/tree`、ブランチは `celeris/<task_id>`

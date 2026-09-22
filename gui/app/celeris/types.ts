@@ -392,6 +392,18 @@ export type Event =
        */
       score: number;
       type: "assigned";
+    }
+  | {
+      cluster: string;
+      /**
+       * クラスタ側の作業ディレクトリ（展開前の `path` の文字列表現）。
+       */
+      path: string;
+      /**
+       * worktree 準備が失敗した理由（ssh.rs の stderr）。
+       */
+      reason: string;
+      type: "workspace_mode_downgraded";
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -429,7 +441,18 @@ export type WorkspaceSpec =
   | {
       cluster: string;
       kind: "remote";
-      path: string;
+      /**
+       * ADR-0059 D1: クラスタ側の同期方針。`Local.mode`（ADR-0041 D1）と語彙は同じ
+       * （`Worktree` | `Shared`）だが軸は別（作業ツリーの分離ではなく、同期そのものをするか）。
+       * 省略時は JSON に出さない（Phase 98 までの `{"kind":"remote","cluster":"…","path":"…"}` と
+       * 1 バイトも変わらない）。
+       */
+      mode?: WorkspaceMode | null;
+      /**
+       * ADR-0059 D6: 省略可（`#[serde(default)]`）。省略・相対パスは実効クラスタ `work_dir`
+       * から解決する（celeris は解決しない。展開・解決はリモートスクリプト生成側で行う）。
+       */
+      path?: string;
     };
 /**
  * ADR-0041 D1: ローカルの作業場所の使い方。並列のタスクが同じ作業ツリーで `git checkout` して
@@ -661,6 +684,8 @@ export interface ApiV1Schema {
   changes: ChangesView;
   cluster_connect_result: ClusterConnectResult;
   cluster_connect_start: ClusterConnectStart;
+  cluster_settings: ClusterSettingsView;
+  cluster_settings_put: ClusterSettingsPutBody;
   clusters: Clusters;
   comment: CommentBody;
   comment_list: CommentList;
@@ -1253,6 +1278,23 @@ export interface ClusterConnectStart {
   prompt?: string | null;
 }
 /**
+ * `PUT /clusters/{id}/settings` の応答。
+ */
+export interface ClusterSettingsView {
+  cluster_id: string;
+  updated_at: string;
+  /**
+   * 書いた後の DB 上書きの値（`null` なら上書きを消した = 設定ファイルの値に戻る）。
+   */
+  work_dir?: string | null;
+}
+/**
+ * ADR-0059 D6: `PUT /clusters/{id}/settings` の要求本文と応答。
+ */
+export interface ClusterSettingsPutBody {
+  work_dir?: string | null;
+}
+/**
  * `GET /clusters`（ADR-0018 受け入れ条件8）。
  */
 export interface Clusters {
@@ -1315,6 +1357,17 @@ export interface ClusterView {
    * スナップショットが無ければ `false`。
    */
   tunnel_login_needed?: boolean;
+  /**
+   * ADR-0059 D6: 実効の作業ディレクトリ（DB の上書き `cluster_settings` があればそれ、無ければ
+   * 設定ファイルの `work_dir`）。どちらも無ければ `null`（`WorkspaceSpec::Remote.path` が相対・
+   * 省略のタスクはこのクラスタでは失敗する）。
+   */
+  work_dir?: string | null;
+  /**
+   * ADR-0059 D6: `work_dir` の出どころ。`"settings"`（DB の上書き）/ `"config"`（設定ファイル）。
+   * `work_dir` が `null` なら `null`。
+   */
+  work_dir_source?: string | null;
 }
 /**
  * ADR-0053 D3（Phase 66）: `[[clusters.forwards]]` 1 本の要約と生存（`GET /clusters` にそのまま出す）。
@@ -1463,6 +1516,11 @@ export interface ClusterConfigView {
    * `"rsync"` | `"none"`。
    */
   sync: string;
+  /**
+   * ADR-0059 D6: 設定ファイルの `[[clusters]] work_dir`（DB の上書きは含まない。`GET /clusters` の
+   * `ClusterView.work_dir`/`work_dir_source` が実効値を持つ）。
+   */
+  work_dir?: string | null;
 }
 /**
  * ADR-0016 D2: `[delegation]` の上限。
@@ -3287,6 +3345,11 @@ export interface NewTaskSpec {
   tier?: Tier | null;
   title: string;
   workspace?: string | null;
+  /**
+   * ADR-0059 D1: `cluster` を指定したときの `WorkspaceSpec::Remote.mode`。省略時は `Worktree`
+   * （従来どおりクラスタの `sync` 設定に従う）。`Local` タスク（`cluster` 無し）には関係ない。
+   */
+  workspace_mode?: WorkspaceMode | null;
 }
 /**
  * Phase 39（ADR-0037 D4）: 通知（Discord）。`GET /notify` と `POST /notify/test` の応答。
@@ -3752,7 +3815,18 @@ export interface ProjectRepo {
     | {
         cluster: string;
         kind: "remote";
-        path: string;
+        /**
+         * ADR-0059 D1: クラスタ側の同期方針。`Local.mode`（ADR-0041 D1）と語彙は同じ
+         * （`Worktree` | `Shared`）だが軸は別（作業ツリーの分離ではなく、同期そのものをするか）。
+         * 省略時は JSON に出さない（Phase 98 までの `{"kind":"remote","cluster":"…","path":"…"}` と
+         * 1 バイトも変わらない）。
+         */
+        mode?: WorkspaceMode | null;
+        /**
+         * ADR-0059 D6: 省略可（`#[serde(default)]`）。省略・相対パスは実効クラスタ `work_dir`
+         * から解決する（celeris は解決しない。展開・解決はリモートスクリプト生成側で行う）。
+         */
+        path?: string;
       };
   /**
    * 案件の中で一意の slug（既定はディレクトリ名）。タスクの作業場所では
@@ -4309,7 +4383,18 @@ export interface RepoCreateBody {
     | {
         cluster: string;
         kind: "remote";
-        path: string;
+        /**
+         * ADR-0059 D1: クラスタ側の同期方針。`Local.mode`（ADR-0041 D1）と語彙は同じ
+         * （`Worktree` | `Shared`）だが軸は別（作業ツリーの分離ではなく、同期そのものをするか）。
+         * 省略時は JSON に出さない（Phase 98 までの `{"kind":"remote","cluster":"…","path":"…"}` と
+         * 1 バイトも変わらない）。
+         */
+        mode?: WorkspaceMode | null;
+        /**
+         * ADR-0059 D6: 省略可（`#[serde(default)]`）。省略・相対パスは実効クラスタ `work_dir`
+         * から解決する（celeris は解決しない。展開・解決はリモートスクリプト生成側で行う）。
+         */
+        path?: string;
       };
   /**
    * 案件の中で一意の slug。省略すると `location` のディレクトリ名から作る。

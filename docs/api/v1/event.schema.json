@@ -605,6 +605,33 @@
             "reason"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0059 D3（Phase 99）: `mode` 省略のリモートタスクが worktree 準備で「git リポジトリでない」\n（exit 65）になり、`repos` が無い（コードを触らない仕事）ので `shared` として続行した。\n状態は変えない（`replay` は無視する）。この後 `task.workspace.mode` が `Some(Shared)` に\n書き戻る（`Event::Edited` は積まない。編集は人によるものではないため）。",
+          "properties": {
+            "cluster": {
+              "type": "string"
+            },
+            "path": {
+              "description": "クラスタ側の作業ディレクトリ（展開前の `path` の文字列表現）。",
+              "type": "string"
+            },
+            "reason": {
+              "description": "worktree 準備が失敗した理由（ssh.rs の stderr）。",
+              "type": "string"
+            },
+            "type": {
+              "const": "workspace_mode_downgraded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cluster",
+            "path",
+            "reason"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1043,14 +1070,26 @@
               "const": "remote",
               "type": "string"
             },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0059 D1: クラスタ側の同期方針。`Local.mode`（ADR-0041 D1）と語彙は同じ\n（`Worktree` | `Shared`）だが軸は別（作業ツリーの分離ではなく、同期そのものをするか）。\n省略時は JSON に出さない（Phase 98 までの `{\"kind\":\"remote\",\"cluster\":\"…\",\"path\":\"…\"}` と\n1 バイトも変わらない）。"
+            },
             "path": {
+              "default": "",
+              "description": "ADR-0059 D6: 省略可（`#[serde(default)]`）。省略・相対パスは実効クラスタ `work_dir`\nから解決する（celeris は解決しない。展開・解決はリモートスクリプト生成側で行う）。",
               "type": "string"
             }
           },
           "required": [
             "kind",
-            "cluster",
-            "path"
+            "cluster"
           ],
           "type": "object"
         }

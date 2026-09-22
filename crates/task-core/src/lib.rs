@@ -122,8 +122,8 @@ pub use repos::{
     resolve_task_repos, valid_repo_name,
 };
 pub use store::{
-    EventRow, ListFilter, ListOrder, Page, SCHEMA_VERSION, SqliteStore, StoreError, StoreOptions,
-    TaskStore, event_row_schema_value,
+    ClusterSettings, EventRow, ListFilter, ListOrder, Page, SCHEMA_VERSION, SqliteStore,
+    StoreError, StoreOptions, TaskStore, event_row_schema_value,
 };
 pub use transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
 

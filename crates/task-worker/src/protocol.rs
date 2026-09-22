@@ -312,6 +312,22 @@ pub struct OrgNodeContext {
     pub tools: Vec<String>,
 }
 
+/// `context.clusters[]`（ADR-0059 D6 / Phase 99）: CoS の対話 run にだけ渡す `[[clusters]]` の一覧
+/// （id・接続状態・実効の作業ディレクトリ）。CoS が `create_task.workspace` を組むときに、`path` を
+/// どのクラスタのどの作業ディレクトリにすればよいか（あるいは登録されていないので `path` を省略すべきか）
+/// を前置きから判断できるようにする（実機障害 2026-09-22: `~` をホームとして使い、ホームでは
+/// worktree が切れず失敗した）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterContext {
+    pub id: String,
+    /// この tick で `ssh -O check` が成功したか（ADR-0018 D2）。
+    pub connected: bool,
+    /// 実効の作業ディレクトリ（DB の上書き `cluster_settings` > 設定ファイルの `work_dir`）。
+    /// どちらも無ければ `null`（このクラスタへは `path` を明示しないと動かない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<String>,
+}
+
 impl From<&task_core::OrgNode> for OrgNodeContext {
     fn from(n: &task_core::OrgNode) -> Self {
         Self {
@@ -377,6 +393,10 @@ pub struct RunContext {
     /// ADR-0033 D4: 分解・委譲できる run に渡す組織図（どの課に何を振るかを `assignee` で決めさせる）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub organization: Vec<OrgNodeContext>,
+    /// ADR-0059 D6（Phase 99）: **CoS の対話 run** にだけ渡す `[[clusters]]` の一覧（id・接続状態・
+    /// 実効の作業ディレクトリ）。CoS 以外の run・継続中の run では常に空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub clusters: Vec<ClusterContext>,
     /// ADR-0033 D4（Phase 28）: 対話用タスクの run にだけ `Some`。委譲・`Question` を使わせず、
     /// 返事だけを求める前置き（`preamble::conversation_instructions`）を出すための印。
     #[serde(default, skip_serializing_if = "Option::is_none")]

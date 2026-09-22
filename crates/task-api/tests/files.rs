@@ -182,6 +182,7 @@ async fn missing_runs_files_workspaces_and_tasks_are_404() {
     remote.workspace = WorkspaceSpec::Remote {
         cluster: "hpc".into(),
         path: "/scratch/x".into(),
+        mode: None,
     };
     env.store.create_task(&remote, vec![]).expect("create");
     // ADR-0018 D1: Remote の run ファイルは写し `workspace_root/<task_id>` にある。写しがまだ無ければ 404。

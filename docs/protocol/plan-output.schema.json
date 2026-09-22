@@ -317,14 +317,26 @@
               "const": "remote",
               "type": "string"
             },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0059 D1: クラスタ側の同期方針。`Local.mode`（ADR-0041 D1）と語彙は同じ\n（`Worktree` | `Shared`）だが軸は別（作業ツリーの分離ではなく、同期そのものをするか）。\n省略時は JSON に出さない（Phase 98 までの `{\"kind\":\"remote\",\"cluster\":\"…\",\"path\":\"…\"}` と\n1 バイトも変わらない）。"
+            },
             "path": {
+              "default": "",
+              "description": "ADR-0059 D6: 省略可（`#[serde(default)]`）。省略・相対パスは実効クラスタ `work_dir`\nから解決する（celeris は解決しない。展開・解決はリモートスクリプト生成側で行う）。",
               "type": "string"
             }
           },
           "required": [
             "kind",
-            "cluster",
-            "path"
+            "cluster"
           ],
           "type": "object"
         }

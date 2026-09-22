@@ -68,10 +68,12 @@ const MIGRATION_0022: &str = include_str!("../migrations/0022_llm_proxy_requests
 const MIGRATION_0023: &str = include_str!("../migrations/0023_node_sessions.sql");
 /// ADR-0056 D1 / D4（Phase 78）: `mcp_clients` / `mcp_calls`（MCP サーバーの認証とログ）。
 const MIGRATION_0024: &str = include_str!("../migrations/0024_mcp.sql");
+/// ADR-0059 D6（Phase 99）: `cluster_settings`（クラスタの作業ディレクトリの DB 上書き）。
+const MIGRATION_0025: &str = include_str!("../migrations/0025_cluster_settings.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 24;
+pub const SCHEMA_VERSION: u32 = 25;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
 #[derive(Debug, Clone, Copy)]
@@ -857,6 +859,31 @@ pub trait TaskStore:
         keep: &str,
         heartbeat_before: OffsetDateTime,
     ) -> Result<Vec<String>, StoreError>;
+
+    // ---- ADR-0059 D6（Phase 99）: クラスタの作業ディレクトリの DB 上書き ----
+
+    /// 1 クラスタ分の上書き。無ければ `Ok(None)`（設定ファイルの値を使う）。
+    fn cluster_settings_get(&self, cluster_id: &str) -> Result<Option<ClusterSettings>, StoreError>;
+    /// 全クラスタの上書き一覧（`cluster_id` 昇順。`GET /clusters` が一括で使う）。
+    fn cluster_settings_list(&self) -> Result<Vec<ClusterSettings>, StoreError>;
+    /// `work_dir = Some(..)` なら upsert、`None` なら行を消す（上書きの解除）。
+    fn cluster_settings_set(
+        &self,
+        cluster_id: &str,
+        work_dir: Option<&str>,
+        now: OffsetDateTime,
+    ) -> Result<(), StoreError>;
+}
+
+/// ADR-0059 D6（Phase 99）: `cluster_settings` の 1 行。`work_dir` は絶対パスか `~`/`~/…`
+/// （検証は書き込み側〈API ハンドラ〉で行う。ここは型だけ）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterSettings {
+    pub cluster_id: String,
+    pub work_dir: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    #[schemars(with = "String")]
+    pub updated_at: OffsetDateTime,
 }
 
 pub struct SqliteStore {
@@ -1133,6 +1160,7 @@ impl SqliteStore {
             22 => Ok(MIGRATION_0022),
             23 => Ok(MIGRATION_0023),
             24 => Ok(MIGRATION_0024),
+            25 => Ok(MIGRATION_0025),
             other => Err(StoreError::Invalid(format!(
                 "unknown migration version: {other}"
             ))),
@@ -3818,6 +3846,81 @@ impl TaskStore for SqliteStore {
         tx.commit()?;
         Ok(removed)
     }
+
+    fn cluster_settings_get(&self, cluster_id: &str) -> Result<Option<ClusterSettings>, StoreError> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT cluster_id, work_dir, updated_at FROM cluster_settings WHERE cluster_id = ?1",
+            params![cluster_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?
+        .map(|(cluster_id, work_dir, updated_at)| {
+            Ok(ClusterSettings {
+                cluster_id,
+                work_dir,
+                updated_at: parse_rfc3339(&updated_at)?,
+            })
+        })
+        .transpose()
+    }
+
+    fn cluster_settings_list(&self) -> Result<Vec<ClusterSettings>, StoreError> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT cluster_id, work_dir, updated_at FROM cluster_settings ORDER BY cluster_id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (cluster_id, work_dir, updated_at) = row?;
+            out.push(ClusterSettings {
+                cluster_id,
+                work_dir,
+                updated_at: parse_rfc3339(&updated_at)?,
+            });
+        }
+        Ok(out)
+    }
+
+    fn cluster_settings_set(
+        &self,
+        cluster_id: &str,
+        work_dir: Option<&str>,
+        now: OffsetDateTime,
+    ) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        match work_dir {
+            Some(work_dir) => {
+                conn.execute(
+                    "INSERT INTO cluster_settings (cluster_id, work_dir, updated_at) \
+                     VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(cluster_id) DO UPDATE SET work_dir = excluded.work_dir, \
+                     updated_at = excluded.updated_at",
+                    params![cluster_id, work_dir, format_rfc3339(now)?],
+                )?;
+            }
+            None => {
+                conn.execute(
+                    "DELETE FROM cluster_settings WHERE cluster_id = ?1",
+                    params![cluster_id],
+                )?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -5054,6 +5157,52 @@ mod tests {
         ));
     }
 
+    /// ADR-0059 D6（Phase 99）: `cluster_settings` の get/list/set。`work_dir = None` で行を削除する
+    /// （上書きを消す）。
+    #[test]
+    fn cluster_settings_get_list_and_set_including_clearing_the_override() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let now = OffsetDateTime::now_utc();
+        assert_eq!(store.cluster_settings_get("pegasus").unwrap(), None);
+        assert_eq!(store.cluster_settings_list().unwrap(), vec![]);
+
+        store
+            .cluster_settings_set("pegasus", Some("/work/NBB/rmaeda"), now)
+            .unwrap();
+        let got = store.cluster_settings_get("pegasus").unwrap().unwrap();
+        assert_eq!(got.cluster_id, "pegasus");
+        assert_eq!(got.work_dir.as_deref(), Some("/work/NBB/rmaeda"));
+
+        // upsert（同じ id を上書き）。
+        store
+            .cluster_settings_set("pegasus", Some("/work/NBB/other"), now)
+            .unwrap();
+        assert_eq!(
+            store
+                .cluster_settings_get("pegasus")
+                .unwrap()
+                .unwrap()
+                .work_dir
+                .as_deref(),
+            Some("/work/NBB/other")
+        );
+
+        store.cluster_settings_set("sirius", Some("~/work"), now).unwrap();
+        let mut list = store.cluster_settings_list().unwrap();
+        list.sort_by(|a, b| a.cluster_id.cmp(&b.cluster_id));
+        assert_eq!(
+            list.iter()
+                .map(|c| (c.cluster_id.as_str(), c.work_dir.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![("pegasus", Some("/work/NBB/other")), ("sirius", Some("~/work"))]
+        );
+
+        // `None` で消す。
+        store.cluster_settings_set("pegasus", None, now).unwrap();
+        assert_eq!(store.cluster_settings_get("pegasus").unwrap(), None);
+        assert_eq!(store.cluster_settings_list().unwrap().len(), 1);
+    }
+
     /// ADR-0013 D5: ファイル DB では `PRAGMA journal_mode` が `wal` になる。
     #[test]
     fn open_sets_wal_journal_mode_for_file_backed_db() {
@@ -5780,7 +5929,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(SCHEMA_VERSION, 25);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -6254,6 +6403,7 @@ mod tests {
         let remote_spec = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: std::path::PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            mode: None,
         };
         let mut remote = sample_project();
         remote.workspace = Some(remote_spec.clone());
@@ -6320,7 +6470,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(SCHEMA_VERSION, 25);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -6811,7 +6961,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(SCHEMA_VERSION, 25);
 
         let project = store.project_get(project_id).unwrap().expect("project");
         assert_eq!(project.status, ProjectStatus::Active);
@@ -6877,7 +7027,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(SCHEMA_VERSION, 25);
 
         // 導入前の行は `metadata = None` として読める。
         let messages = store.message_list("secretary", None, 10).unwrap();
@@ -6970,7 +7120,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 24);
+        assert_eq!(SCHEMA_VERSION, 25);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn

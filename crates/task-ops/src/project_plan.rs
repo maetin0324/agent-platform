@@ -98,14 +98,18 @@ pub fn start(
     // `Local` の `~` はここで `$HOME` に展開する（DB には展開済みの絶対パスが入っている想定だが、
     // 直接 DB を書いた案件でも同じ結果になるように、入口でもう一度通す）。
     let home = task_core::home_dir();
-    let (plan_workspace, plan_cluster) = match project
+    let (plan_workspace, plan_cluster, plan_workspace_mode) = match project
         .workspace
         .as_ref()
         .map(|w| w.with_home_expanded(home.as_deref()))
     {
-        Some(WorkspaceSpec::Local { path, .. }) => (Some(path), None),
-        Some(WorkspaceSpec::Remote { cluster, path }) => (Some(path), Some(cluster)),
-        None => (None, None),
+        Some(WorkspaceSpec::Local { path, .. }) => (Some(path), None, None),
+        Some(WorkspaceSpec::Remote {
+            cluster,
+            path,
+            mode,
+        }) => (Some(path), Some(cluster), mode),
+        None => (None, None, None),
     };
 
     let spec = NewTaskSpec {
@@ -132,6 +136,7 @@ pub fn start(
         // （子はここから継ぐ。決めていなければ従来どおりタスクごとの作業ディレクトリ）。
         workspace: plan_workspace,
         cluster: plan_cluster,
+        workspace_mode: plan_workspace_mode,
         adapter: None,
         // ADR-0044 D3: 裏方の計画タスクにラベル・種類は付けない（`create_support_task` が `ready` にする）。
         labels: Vec::new(),
@@ -515,6 +520,7 @@ mod tests {
         remote.workspace = Some(WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: std::path::PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            mode: None,
         });
         store.project_create(&remote).expect("create project");
         let started = start(&store, &remote, None, None, &[], &[], now()).expect("start");

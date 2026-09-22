@@ -125,6 +125,7 @@ mod tests {
             assignee: None,
             workspace: None,
             cluster: None,
+            workspace_mode: None,
             adapter: None,
             labels: Vec::new(),
             category: None,

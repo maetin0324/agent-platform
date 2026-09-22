@@ -56,6 +56,9 @@ host = "pegasus"                  # ~/.ssh/config の Host 名
 concurrency = 2                   # このクラスタで同時に走らせる run の上限
 sync = "worktree"                 # git 管理下なら worktree（ADR-0019）。管理外なら "rsync"、共有 FS なら "none"
 delete_on_push = false            # 既定 false。既存プロジェクトのファイルを消さない
+# work_dir = "/work/NBB/rmaeda"   # ADR-0059 D6: 省略・相対パスの `WorkspaceSpec::Remote.path` はここから
+#                                  # 解決する（HPC では `~` を作業に使わないのが普通なので既定にしない）。
+#                                  # GUI の `PUT /clusters/{id}/settings` からも上書きできる（DB が勝つ）。
 # ADR-0032 §1 実機確認: pegasus は既存の ControlMaster が生きていて未確認だが、人間の申告どおり sirius と
 # 同じ扱い（publickey の後に keyboard-interactive = TOTP が来る）にする。
 auth = "totp"                     # GUI の「接続」→ 検証コードの入力で張る（ADR-0032 D4）

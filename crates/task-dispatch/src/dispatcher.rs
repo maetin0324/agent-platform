@@ -25,7 +25,7 @@ use task_core::{
     AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec,
     ListFilter, ListOrder, NodeSession, OnChildFailure, OrgKind, ProjectId, ProjectStatus,
     RateLimitObservation, RoleSpec, RunRole, SessionKind, Status, StoreError, Task, TaskId,
-    TaskKind, TaskStore, Tier, Trigger, WorkspaceSpec, support_kind,
+    TaskKind, TaskStore, Tier, Trigger, WorkspaceMode, WorkspaceSpec, support_kind,
 };
 use task_ops::daemon::{
     AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot,
@@ -43,8 +43,9 @@ use task_worker::{
     LocalWorkspace, MemoryContext, MemoryDir, MilestoneBrief, MilestoneReviewContext,
     MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, RecentWork,
     RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace,
-    Reachability, SyncMode, Terminal, WorkerAdapter, WorkerMessage, Workspace,
-    control_master_alive_blocking, remote_exec_instructions,
+    Reachability, SyncMode, Terminal, WorkerAdapter, WorkerMessage, Workspace, WorkspaceError,
+    control_master_alive_blocking, remote_dir_is_resolved, remote_exec_instructions,
+    resolve_remote_dir,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -99,6 +100,9 @@ pub struct ClusterSpec {
     /// ADR-0053 D3（Phase 66）: このクラスタの ssh master に張る port forward（Qwen トンネル等）。
     /// 空なら `refresh_cluster_tunnels` は何もしない（従来どおり）。
     pub forwards: Vec<ClusterForwardSpec>,
+    /// ADR-0059 D6: 設定ファイルの `work_dir`（`[[clusters]] work_dir`）。DB の上書き
+    /// （`cluster_settings`）があればそちらが勝つ（`Dispatcher::effective_work_dir` が決める）。
+    pub work_dir: Option<PathBuf>,
 }
 
 /// ADR-0053 D3: 1 本の port forward（`ssh -O forward -L <listen>:<target> <host>` 相当）。
@@ -254,15 +258,22 @@ enum ForwardPhase {
 pub type TaskFilter = Arc<dyn Fn(&Task) -> bool + Send + Sync>;
 
 impl ClusterSpec {
-    /// このタスクの写し（ローカル）とリモートのパスから、ワーカー用の設定を作る。
-    /// `task_id` は worktree のディレクトリ名とブランチ名に使う（ADR-0019 D2）。
+    /// このタスクの写し（ローカル）とリモートのパス（呼び出し側が D6 の `work_dir` で解決済み）から、
+    /// ワーカー用の設定を作る。`task_id` は worktree のディレクトリ名とブランチ名に使う（ADR-0019 D2）。
+    /// `mode`（ADR-0059 D1、`WorkspaceSpec::Remote.mode`）が `Shared` なら、クラスタの `sync` 設定に
+    /// 関わらず**同期も worktree も行わない**（`SyncMode::None`）。`Worktree`（省略時の既定を含む）は
+    /// 従来どおりクラスタの `sync` に従う。
     pub fn ssh_settings(
         &self,
         remote_path: &std::path::Path,
         task_id: task_core::TaskId,
+        mode: task_core::WorkspaceMode,
     ) -> SshSettings {
         let mut settings = SshSettings::new(self.id.clone(), self.host.clone(), remote_path);
-        settings.sync = self.sync;
+        settings.sync = match mode {
+            task_core::WorkspaceMode::Shared => SyncMode::None,
+            task_core::WorkspaceMode::Worktree => self.sync,
+        };
         settings.delete_on_push = self.delete_on_push;
         settings.setup = self.setup.clone();
         settings.env = self.env.clone();
@@ -696,6 +707,9 @@ struct RunExtras {
     knowledge: Option<task_worker::protocol::KnowledgeContext>,
     /// ADR-0048 D3（Phase 60b）: **CoS の対話 run** にだけ渡す、進行中の案件と途中目標。
     active_projects: Vec<ActiveProjectContext>,
+    /// ADR-0059 D6（Phase 99）: **CoS の対話 run** にだけ渡す `[[clusters]]` の一覧
+    /// （id・接続状態・実効 work_dir）。
+    clusters: Vec<task_worker::ClusterContext>,
     /// ADR-0052 D2（Phase 64）: `langmem` の接続先に届かず、tier `cheap` の汎用ハーネスへ倒した run。
     /// 前置き（`role`）と予算をこの値で上書きする。通常の run では `None`。
     knowledge_fallback: Option<KnowledgeFallbackRun>,
@@ -3728,7 +3742,7 @@ impl Dispatcher {
                     }
                 },
             };
-            if let Some((spec, _)) = &cluster {
+            if let Some((spec, _, _)) = &cluster {
                 if self
                     .cluster_cooldown
                     .get(&spec.id)
@@ -3941,7 +3955,7 @@ impl Dispatcher {
             tracing::info!(task_id = %task.id, %run_id, adapter = %adapter_id, provider = %provider_id, account = account.as_deref(), "dispatching");
             let remote = cluster
                 .as_ref()
-                .map(|(spec, path)| spec.ssh_settings(path, task.id));
+                .map(|(spec, path, mode)| spec.ssh_settings(path, task.id, *mode));
             // ADR-0043 D3（Phase 56）: ホストか、コンテナか、runtime が無くて `blocked` か。
             let container =
                 self.container_decision(&task, worktree.as_ref(), &adapter_id, remote.is_some());
@@ -4005,7 +4019,7 @@ impl Dispatcher {
                     provider: provider_id,
                     handle,
                     since: OffsetDateTime::now_utc(),
-                    cluster: cluster.map(|(spec, _)| spec.id),
+                    cluster: cluster.map(|(spec, ..)| spec.id),
                     account,
                     account_adapter,
                     container: container_stop,
@@ -4326,6 +4340,14 @@ impl Dispatcher {
         } else {
             Vec::new()
         };
+        // ADR-0059 D6（Phase 99）: CoS が `create_task.workspace` を組む材料として、既知のクラスタと
+        // その実効 work_dir を渡す（未登録なら `work_dir: null` なので、CoS は `path` を省略すべきと
+        // 分かる。D4 の指示文と対）。
+        let clusters = if is_cos_conversation && !continuing {
+            self.cluster_context()
+        } else {
+            Vec::new()
+        };
         Ok(RunExtras {
             role,
             children,
@@ -4346,6 +4368,7 @@ impl Dispatcher {
             interrupt,
             knowledge,
             active_projects,
+            clusters,
             // ADR-0052 D2: フォールバックの判断は `dispatch_ready` がする（ここは run ごとの文脈だけ）。
             knowledge_fallback: None,
             session,
@@ -4353,6 +4376,34 @@ impl Dispatcher {
             skills,
             missing_skills,
         })
+    }
+
+    /// ADR-0059 D6（Phase 99）: `[[clusters]]` の id（決定的な順、昇順）と、接続状態・実効
+    /// work_dir（DB の上書き `cluster_settings` > 設定ファイルの `work_dir`）。CoS の対話 run にだけ渡す。
+    fn cluster_context(&self) -> Vec<task_worker::ClusterContext> {
+        let mut ids: Vec<&String> = self.config.clusters.keys().collect();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| {
+                let spec = &self.config.clusters[id];
+                let work_dir = self
+                    .store
+                    .cluster_settings_get(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.work_dir)
+                    .or_else(|| {
+                        spec.work_dir
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned())
+                    });
+                task_worker::ClusterContext {
+                    id: id.clone(),
+                    connected: self.cluster_connected.get(id).copied().unwrap_or(false),
+                    work_dir,
+                }
+            })
+            .collect()
     }
 
     /// ADR-0054 Phase 67c: この run が CoS の対話 run になるなら、その現役セッション（あれば）を返す。
@@ -5071,8 +5122,8 @@ impl Dispatcher {
         let cluster = self.cluster_of(&task);
         let remote_settings = cluster
             .as_ref()
-            .map(|(spec, path)| spec.ssh_settings(path, task.id));
-        let cluster_id = cluster.as_ref().map(|(spec, _)| spec.id.clone());
+            .map(|(spec, path, mode)| spec.ssh_settings(path, task.id, *mode));
+        let cluster_id = cluster.as_ref().map(|(spec, ..)| spec.id.clone());
         let events = self.store.events_for(task_id)?;
         let produced = artifacts_for_run(&events, &run_id);
         // ADR-0014 D1: Reviewer run も対象タスクに WorkerStarted（role: reviewer）を残す（アカウント別の集計に含めるため）。
@@ -6032,7 +6083,7 @@ impl Dispatcher {
                     WorkspaceSpec::Local { path, .. } => {
                         (path.display().to_string(), Some(path.clone()))
                     }
-                    WorkspaceSpec::Remote { cluster, path } => {
+                    WorkspaceSpec::Remote { cluster, path, .. } => {
                         (format!("{cluster}:{}", path.display()), None)
                     }
                 };
@@ -6240,17 +6291,30 @@ impl Dispatcher {
     /// ADR-0046 D8（Phase 59）: **担当が `cluster:<id>` を持たないなら接続経路を渡さない**（remote を
     /// 組まない）。ただし「道具を 1 つも宣言していない」ノード（Phase 59 より前の組織、profile を
     /// 書いていないノード）は従来どおり通す — 宣言した許可リストだけを許可リストとして扱う。
-    fn cluster_of(&self, task: &Task) -> Option<(ClusterSpec, PathBuf)> {
+    ///
+    /// ADR-0059 D6: `path` が絶対・`~`/`~/…` ならそのまま、それ以外（省略・相対）は実効 `work_dir`
+    /// （DB 上書き `cluster_settings` > 設定の `[[clusters]] work_dir` > 無し）からの相対に解決する。
+    /// 解決できなければ `path` をそのまま返す（`remote_dir_is_resolved` で検出できる形のまま。
+    /// ここでは `None` にしない — 「クラスタが無い」とは別の失敗なので `unroutable` に混ぜない）。
+    fn cluster_of(&self, task: &Task) -> Option<(ClusterSpec, PathBuf, WorkspaceMode)> {
         match &task.workspace {
             WorkspaceSpec::Local { .. } => None,
-            WorkspaceSpec::Remote { cluster, path } => {
+            WorkspaceSpec::Remote { cluster, path, .. } => {
                 if !self.task_may_use_cluster(task, cluster) {
                     return None;
                 }
-                self.config
-                    .clusters
-                    .get(cluster)
-                    .map(|spec| (spec.clone(), path.clone()))
+                let spec = self.config.clusters.get(cluster)?.clone();
+                let db_work_dir = self
+                    .store
+                    .cluster_settings_get(cluster)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.work_dir)
+                    .map(PathBuf::from);
+                let work_dir = db_work_dir.or_else(|| spec.work_dir.clone());
+                let resolved =
+                    resolve_remote_dir(path, work_dir.as_deref()).unwrap_or_else(|| path.clone());
+                Some((spec, resolved, task.workspace.remote_mode()))
             }
         }
     }
@@ -6413,18 +6477,60 @@ async fn run_worker(
         tracing::debug!(task_id = %task_id, adapter = %fallback.adapter, "knowledge: running the fallback extraction");
     }
     // ADR-0018 D1/D3: リモート実行のタスクは、クラスタの内容を写しに取り込み、ラッパを置き、その使い方を指示文に足す
-    // （DB のタスクは変えない。ワーカーに渡す写しだけ）。
+    // （DB のタスクは変えない。ワーカーに渡す写しだけ）。ADR-0059 D6: `path` が実効 `work_dir` から解決
+    // できなかった（`cluster_of` が絶対・`~` 始まりに直せなかった）ら、worktree 準備を試す前にここで
+    // 明確なエラーにする。
     let workspace = match &remote {
         Some(settings) => {
-            let ws = SshWorkspace::new(&dir, settings.clone());
-            let prepared = ws
-                .prepare(&task)
-                .await
-                .map_err(|e| workspace_error_to_adapter(e, "workspace prepare"))?;
+            if !remote_dir_is_resolved(&settings.remote_dir) {
+                return Err(AdapterError::Other(format!(
+                    "cluster {}: no working directory registered for {:?}; register one via \
+                     `PUT /clusters/{}/settings` or the clusters screen (ADR-0059 D6)",
+                    settings.cluster, settings.remote_dir, settings.cluster
+                )));
+            }
+            let mut effective_settings = settings.clone();
+            let mut ws = SshWorkspace::new(&dir, effective_settings.clone());
+            let prepared = match ws.prepare(&task).await {
+                Ok(p) => p,
+                // ADR-0059 D3: 自動の格下げ。`mode` 省略・`repos` 無し（コードを触らない仕事）なら、
+                // worktree が切れなくても失敗にせず `shared`（`SyncMode::None`）として同じ run の中で
+                // 続行する。明示的に `mode = "worktree"` を選んだタスクは格下げしない（利用者の意図を
+                // 尊重し、設定ミスを隠さない）。
+                Err(WorkspaceError::NotAGitRepository(reason))
+                    if remote_mode_omitted(&task.workspace) && task.repos.is_empty() =>
+                {
+                    effective_settings.sync = SyncMode::None;
+                    ws = SshWorkspace::new(&dir, effective_settings.clone());
+                    let downgraded = ws.prepare(&task).await.map_err(|e| {
+                        workspace_error_to_adapter(e, "workspace prepare (downgraded to shared)")
+                    })?;
+                    if let Some(new_workspace) = downgraded_remote_workspace(&task.workspace) {
+                        if let Ok(Some(mut fresh)) = store.get(task_id) {
+                            fresh.workspace = new_workspace.clone();
+                            fresh.updated_at = OffsetDateTime::now_utc();
+                            if let Err(e) = store.update_task(
+                                &fresh,
+                                Event::WorkspaceModeDowngraded {
+                                    cluster: effective_settings.cluster.clone(),
+                                    path: effective_settings.remote_dir.to_string_lossy().into_owned(),
+                                    reason,
+                                },
+                            ) {
+                                tracing::warn!(task_id = %task_id, error = %e, "could not persist the workspace mode downgrade (ADR-0059 D3)");
+                            }
+                        }
+                        task.workspace = new_workspace;
+                    }
+                    downgraded
+                }
+                Err(e) => return Err(workspace_error_to_adapter(e, "workspace prepare")),
+            };
             ws.write_remote_exec_helper()
                 .await
                 .map_err(|e| workspace_error_to_adapter(e, "remote-exec helper"))?;
-            task.objective.push_str(&remote_exec_instructions(settings));
+            task.objective
+                .push_str(&remote_exec_instructions(&effective_settings));
             prepared
         }
         // ADR-0041 D1 / ADR-0043 D2: ローカルの作業場所（1 つ以上のリポジトリ）を用意し、その
@@ -6602,6 +6708,8 @@ async fn run_worker(
             // ADR-0033 D5（Phase 26）: 担当宛て + 全員向けの永続の認可。
             standing_rules: extras.standing_rules,
             organization: extras.organization,
+            // ADR-0059 D6（Phase 99）: CoS の対話 run だけに入る。
+            clusters: extras.clusters,
             conversation_addressee: extras.conversation_addressee,
             work_genre: extras.work_genre,
             recent_work: extras.recent_work,
@@ -6686,6 +6794,25 @@ fn workspace_error_to_adapter(e: task_worker::WorkspaceError, context: &str) -> 
             AdapterError::Spawn(std::io::Error::other(format!("{context}: {msg}")))
         }
         other => AdapterError::Other(format!("{context}: {other}")),
+    }
+}
+
+/// ADR-0059 D3: `mode` が省略された（明示的に `"worktree"` を選んでいない）Remote workspace か。
+/// `Local` は関係ないので `false`。
+fn remote_mode_omitted(workspace: &WorkspaceSpec) -> bool {
+    matches!(workspace, WorkspaceSpec::Remote { mode: None, .. })
+}
+
+/// ADR-0059 D3: `Remote` workspace を `mode: Some(Shared)` に書き換えた複製（自動の格下げ）。
+/// `Local` は関係ないので `None`。
+fn downgraded_remote_workspace(workspace: &WorkspaceSpec) -> Option<WorkspaceSpec> {
+    match workspace {
+        WorkspaceSpec::Remote { cluster, path, .. } => Some(WorkspaceSpec::Remote {
+            cluster: cluster.clone(),
+            path: path.clone(),
+            mode: Some(WorkspaceMode::Shared),
+        }),
+        WorkspaceSpec::Local { .. } => None,
     }
 }
 
@@ -9335,6 +9462,7 @@ mod tests {
             t.workspace = WorkspaceSpec::Remote {
                 cluster: "slow".into(),
                 path: dir.path().to_path_buf(),
+                mode: None,
             };
             store.insert(&t).unwrap();
             remote_ids.push(t.id);
@@ -9375,6 +9503,7 @@ mod tests {
                 worktree: Default::default(),
                 auth: "manual".into(),
                 forwards: vec![],
+                work_dir: None,
             },
         );
         if !control_master_alive_blocking(&["ssh".to_string()], "celeris-localhost") {
@@ -9426,6 +9555,7 @@ mod tests {
         task.workspace = WorkspaceSpec::Remote {
             cluster: "offline".into(),
             path: PathBuf::from("/remote/project"),
+            mode: None,
         };
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
@@ -9451,6 +9581,7 @@ mod tests {
                 worktree: Default::default(),
                 auth: "manual".into(),
                 forwards: vec![],
+                work_dir: None,
             },
         );
         let (tx, rx) = tokio::sync::watch::channel(None);
@@ -9532,6 +9663,7 @@ mod tests {
             worktree: Default::default(),
             auth: auth.into(),
             forwards: vec![],
+            work_dir: None,
         }
     }
 
@@ -9547,6 +9679,327 @@ mod tests {
             probe_interval_secs: DEFAULT_TUNNEL_PROBE_INTERVAL_SECS,
         }];
         spec
+    }
+
+    /// ADR-0059 D1（Phase 99）: `mode: Shared` は、クラスタの `sync` 設定に関わらず `SyncMode::None`
+    /// を強制する。`mode` 省略（既定の `Worktree`）は従来どおりクラスタの `sync` に従う。
+    #[test]
+    fn ssh_settings_shared_mode_forces_sync_none_regardless_of_cluster_sync() {
+        let mut spec = cluster_spec_with_auth("pegasus", "pegasus", "manual");
+        spec.sync = SyncMode::Worktree;
+        let task_id = TaskId::new();
+
+        let worktree_settings =
+            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Worktree);
+        assert_eq!(worktree_settings.sync, SyncMode::Worktree);
+
+        let shared_settings =
+            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Shared);
+        assert_eq!(shared_settings.sync, SyncMode::None);
+
+        // rsync クラスタでも同じ: 省略（既定）は従来どおり、shared は None を強制する。
+        spec.sync = SyncMode::Rsync;
+        assert_eq!(
+            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Worktree)
+                .sync,
+            SyncMode::Rsync
+        );
+        assert_eq!(
+            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Shared)
+                .sync,
+            SyncMode::None
+        );
+    }
+
+    /// ADR-0059 D6（Phase 99）: `cluster_of` の実効 `work_dir` は DB の上書き（`cluster_settings`）
+    /// > 設定ファイルの `[[clusters]] work_dir` > 無し、の順。相対パスはそこからの相対に解決する。
+    #[test]
+    fn cluster_of_resolves_relative_paths_against_the_db_override_then_the_config_work_dir() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let mut spec = cluster_spec_with_auth("pegasus", "pegasus", "manual");
+        spec.work_dir = Some(PathBuf::from("/work/NBB/config-default"));
+        d.config.clusters.insert("pegasus".into(), spec);
+
+        let mut task = new_task(
+            std::path::Path::new("/unused"),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("benchfs"),
+            mode: None,
+        };
+
+        // DB の上書きがまだ無ければ設定ファイルの `work_dir` を使う。
+        let (_, resolved, mode) = d.cluster_of(&task).expect("cluster configured");
+        assert_eq!(resolved, PathBuf::from("/work/NBB/config-default/benchfs"));
+        assert_eq!(mode, WorkspaceMode::Worktree);
+
+        // DB の上書きがあればそちらが勝つ。
+        store
+            .cluster_settings_set("pegasus", Some("/work/NBB/db-override"), OffsetDateTime::now_utc())
+            .unwrap();
+        let (_, resolved, _) = d.cluster_of(&task).expect("cluster configured");
+        assert_eq!(resolved, PathBuf::from("/work/NBB/db-override/benchfs"));
+
+        // 絶対パス・`~` はどちらの `work_dir` からも独立にそのまま使う。
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("/scratch/x"),
+            mode: Some(WorkspaceMode::Shared),
+        };
+        let (_, resolved, mode) = d.cluster_of(&task).expect("cluster configured");
+        assert_eq!(resolved, PathBuf::from("/scratch/x"));
+        assert_eq!(mode, WorkspaceMode::Shared);
+    }
+
+    /// ADR-0059 D6: `work_dir` がどこにも無ければ、相対・空の `path` は解決できず、`cluster_of` は
+    /// 受け取った `path` をそのまま返す（`remote_dir_is_resolved` で「解決できなかった」と判定できる形）。
+    #[test]
+    fn cluster_of_leaves_the_path_unresolved_when_there_is_no_work_dir_anywhere() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        d.config.clusters.insert(
+            "pegasus".into(),
+            cluster_spec_with_auth("pegasus", "pegasus", "manual"),
+        );
+        let mut task = new_task(
+            std::path::Path::new("/unused"),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::new(),
+            mode: None,
+        };
+        let (_, resolved, _) = d.cluster_of(&task).expect("cluster configured");
+        assert_eq!(resolved, PathBuf::new());
+        assert!(!task_worker::remote_dir_is_resolved(&resolved));
+    }
+
+    /// ADR-0059 D3（Phase 99）: 実 ssh を起こさずに worktree 準備の exit コードを模す。`-O check`
+    /// （多重接続の確認。`control_master_alive` から呼ばれうる）には常に成功で答え、それ以外の呼び出しは
+    /// `exit_code` を返す（中身は見ない。`ensure_worktree` の分岐はコードそのものだけで決まる）。
+    fn write_stub_ssh(dir: &std::path::Path, exit_code: i32) -> PathBuf {
+        let script = dir.join("stub-ssh.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$3\" = \"-O\" ] && [ \"$4\" = \"check\" ]; then exit 0; fi\nexit {exit_code}\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).unwrap();
+        }
+        script
+    }
+
+    fn remote_task(dir: &std::path::Path, mode: Option<WorkspaceMode>, repos: Vec<task_core::RepoRef>) -> Task {
+        let mut task = new_task(
+            dir,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "pegasus".into(),
+            path: PathBuf::from("/work/proj"),
+            mode,
+        };
+        task.repos = repos;
+        task
+    }
+
+    fn done_adapter() -> Arc<dyn WorkerAdapter> {
+        Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_worker_for_test(
+        store: Arc<dyn TaskStore>,
+        task_id: TaskId,
+        dir: PathBuf,
+        settings: SshSettings,
+    ) -> Result<RunOutcome, AdapterError> {
+        run_worker(
+            store,
+            done_adapter(),
+            task_id,
+            Tier::Standard,
+            dir,
+            "run1",
+            RunLimits {
+                wall_clock: Duration::from_secs(30),
+                idle_timeout: Duration::from_secs(5),
+                kill_grace: Duration::from_millis(100),
+            },
+            LeaseRenewal {
+                ttl: Duration::from_secs(60),
+                every: Duration::from_secs(30),
+            },
+            Some(settings),
+            None,
+            RunExtras::default(),
+            Vec::new(),
+            Vec::new(),
+            DelegationLimits::default(),
+            None,
+            None,
+            ContainerDecision::Host,
+        )
+        .await
+    }
+
+    /// ADR-0059 D3: `mode` 省略・`repos` 無し（コードを触らない仕事）で worktree 準備が exit 65 になったら、
+    /// 失敗にせず `shared`（`SyncMode::None`）として続行し、`Event::WorkspaceModeDowngraded` を残し、
+    /// `task.workspace.mode` を `Some(Shared)` に書き戻す。
+    #[tokio::test]
+    async fn exit_65_with_no_mode_and_no_repos_downgrades_to_shared_and_continues() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub_ssh(tmp.path(), 65);
+        let task = remote_task(tmp.path(), None, Vec::new());
+        store.insert(&task).unwrap();
+
+        let mut settings = SshSettings::new("pegasus", "pegasus", PathBuf::from("/work/proj"));
+        settings.sync = SyncMode::Worktree;
+        settings.task_id = task.id.to_string();
+        settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
+
+        let outcome = run_worker_for_test(
+            store.clone(),
+            task.id,
+            tmp.path().join("mirror"),
+            settings,
+        )
+        .await;
+        assert!(outcome.is_ok(), "{:?}", outcome.err());
+
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::WorkspaceModeDowngraded { cluster, .. } if cluster == "pegasus")),
+            "{events:?}"
+        );
+        let stored = store.get(task.id).unwrap().expect("task exists");
+        assert_eq!(
+            stored.workspace,
+            WorkspaceSpec::Remote {
+                cluster: "pegasus".into(),
+                path: PathBuf::from("/work/proj"),
+                mode: Some(WorkspaceMode::Shared),
+            }
+        );
+    }
+
+    /// ADR-0059 D3: `repos` があるタスク（コードを触る想定）は、`mode` 省略でも exit 65 で格下げせず
+    /// 従来どおり失敗する。
+    #[tokio::test]
+    async fn exit_65_with_repos_present_does_not_downgrade() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub_ssh(tmp.path(), 65);
+        let repo = task_core::RepoRef {
+            repo_id: task_core::RepoId::new(),
+            name: "agent-platform".into(),
+        };
+        let task = remote_task(tmp.path(), None, vec![repo]);
+        store.insert(&task).unwrap();
+
+        let mut settings = SshSettings::new("pegasus", "pegasus", PathBuf::from("/work/proj"));
+        settings.sync = SyncMode::Worktree;
+        settings.task_id = task.id.to_string();
+        settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
+
+        let outcome = run_worker_for_test(
+            store.clone(),
+            task.id,
+            tmp.path().join("mirror"),
+            settings,
+        )
+        .await;
+        assert!(outcome.is_err());
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::WorkspaceModeDowngraded { .. })),
+            "{events:?}"
+        );
+        let stored = store.get(task.id).unwrap().expect("task exists");
+        assert_eq!(stored.workspace.remote_mode(), WorkspaceMode::Worktree);
+    }
+
+    /// ADR-0059 D3: 明示的に `mode = "worktree"` を選んだタスクは、`repos` が無くても exit 65 で
+    /// 格下げしない（利用者の意図を尊重する）。
+    #[tokio::test]
+    async fn exit_65_with_explicit_worktree_mode_does_not_downgrade() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub_ssh(tmp.path(), 65);
+        let task = remote_task(tmp.path(), Some(WorkspaceMode::Worktree), Vec::new());
+        store.insert(&task).unwrap();
+
+        let mut settings = SshSettings::new("pegasus", "pegasus", PathBuf::from("/work/proj"));
+        settings.sync = SyncMode::Worktree;
+        settings.task_id = task.id.to_string();
+        settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
+
+        let outcome = run_worker_for_test(
+            store.clone(),
+            task.id,
+            tmp.path().join("mirror"),
+            settings,
+        )
+        .await;
+        assert!(outcome.is_err());
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::WorkspaceModeDowngraded { .. })),
+            "{events:?}"
+        );
     }
 
     // ---- ADR-0053 D3: `refresh_cluster_tunnels` の状態機械（偽の ssh/probe で完全に決定的） ----
@@ -10024,6 +10477,7 @@ mod tests {
         task.workspace = WorkspaceSpec::Remote {
             cluster: "auto".into(),
             path: PathBuf::from("/remote/project"),
+            mode: None,
         };
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
@@ -10094,6 +10548,7 @@ mod tests {
         task.workspace = WorkspaceSpec::Remote {
             cluster: "auto".into(),
             path: PathBuf::from("/remote/project"),
+            mode: None,
         };
         store.insert(&task).unwrap();
         let adapter = Arc::new(InstantAdapter {
@@ -10157,6 +10612,7 @@ mod tests {
             task.workspace = WorkspaceSpec::Remote {
                 cluster: "auto".into(),
                 path: PathBuf::from("/remote/project"),
+                mode: None,
             };
             store.insert(&task).unwrap();
             let adapter = Arc::new(InstantAdapter {
@@ -10291,6 +10747,7 @@ mod tests {
                 worktree: Default::default(),
                 auth: "manual".into(),
                 forwards: vec![],
+                work_dir: None,
             },
         );
         d.cluster_cooldown
@@ -13107,6 +13564,7 @@ mod tests {
         with_workspace.workspace = Some(WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            mode: None,
         });
         store.project_create(&with_workspace).unwrap();
         let plain = titled_project("作業場所なし");

@@ -13891,3 +13891,195 @@ stderr の末尾を `provider::looks_like_resume_rpc_failure`（新規。`thread
 - **実機確認 A（CoS の振る舞い）**: 昇格直後に `POST /console/instruct` で同じ文を CoS へ送った（message 01M34CCV8EX61FYV37C416P310、対話タスク 01M34CCV8E7B6FCMQD0W7HDVQ7）。run は claude-code の新規セッション（前セッションは 449k トークンで rollover）で 17 秒後に done。返事: 「pegasusクラスタのログインノードでpegasusinfo/rbudgetcheckを実行する仕事をcluster-hpc課に委譲した。結果は担当からの報告後にお伝えする。」`actions_executed` に `create_task` 1 件。作られたタスク 01M34CDBGFKSD8VGYMDCA5GAQM は `ready`、assignee `cluster-hpc`、`workspace = {"kind":"remote","cluster":"pegasus","path":"~"}`、受け入れ条件は reviewer 3 件（両コマンドの出力全文、失敗時はエラーと終了コード）+ 既定 1 件。断らずに組織へ流す動きを確認。
 - そのタスクは pegasus の ssh master が無いため cooldown（`cooldown_until` 11:05:59Z、`tunnel_login_needed=true`）で待機中。人が GUI のクラスタ画面で pegasus に「接続」（TOTP）すれば次の tick から実行される（ADR-0018 D2 / ADR-0032 の設計どおり）。
 - **実機確認 B（codex の resume 自己回復）**: 今回の run は claude-code だったため未観測。次に codex の resume が `thread/resume` 失敗を起こしたとき、run ディレクトリに `stderr.resume_retry.log` / `stdout.resume_retry.jsonl` が残り run が done になることで確認する（親が次回観測時に追記）。
+
+## Phase 99 — コマンド実行だけのオペレーションを worktree 無しでクラスタで動かす・クラスタの作業ディレクトリ・`.taskd` を `.celeris` に（ADR-0059、2026-09-22）
+
+celeris のみ（Rust）。本番（2026-09-22 11:37 UTC、タスク 01M34CDBGFKSD8VGYMDCA5GAQM）で、CoS が
+`workspace = {"kind":"remote","cluster":"pegasus","path":"~"}` の `cluster-hpc` タスクを作ったところ、
+pegasus が接続された後 `adapter: workspace prepare: remote error: cannot prepare the git worktree on
+pegasus (exit Some(66)): no such directory: '~'` で 3 回連続 failed した。原因は (1) `sync = "worktree"`
+が全タスクに適用され、コードの diff を作らないコマンド実行だけの仕事でも worktree を切ろうとする、
+(2) `path` の `~` を `shq` で引用するためリモートのシェルで展開されない、の 2 つ。親エージェントから
+追加指示（人の指摘 2 点）を受け、`.taskd/remote-exec` の `.celeris/` への改名と、クラスタごとの
+「作業ディレクトリ」（`~` を既定にしない）も同じ Phase に含めた。ADR は `docs/adr/0059-command-only-remote-workspace.md`。
+
+### A. `WorkspaceSpec::Remote.mode`（D1）と `~` の展開（D2）
+
+**条件**: `mode` を省略した Remote タスクは従来どおり。`mode: "shared"` は `SyncMode::None` を強制し、
+worktree も同期も行わない。`~`/`~/…` はリモートのシェルで `$HOME` に展開される（cd・mkdir・worktree
+準備・`.celeris/remote-exec` のどこでも）。
+
+**実装**:
+- `crates/task-core/src/model.rs`: `WorkspaceSpec::Remote` に `mode: Option<WorkspaceMode>`（省略時は
+  JSON に出さない）と `path: PathBuf`（`#[serde(default)]`。省略可）を追加。`WorkspaceSpec::remote_mode()`
+  を新設（`Local` の `local_mode()` と対）。`WorkspaceSpec::Remote` を構築するコード全箇所（`grep -rn
+  'WorkspaceSpec::Remote {' crates`。約 20 箇所、うち大半はテスト）を `mode` 込みに直した。
+- `crates/task-worker/src/ssh.rs`: `shell_remote_path`（`~`/`~/…` だけ `"$HOME"` に展開、それ以外は
+  従来どおり `shq`）を `remote_script`・`ensure_remote_dir`・`ensure_worktree`・
+  `write_remote_exec_helper` の全箇所に通した。`WorkspaceError::NotAGitRepository`（exit 65 を
+  `Remote` から独立させ、文字列パースでなく型で判定できるように）を追加。
+- `crates/task-dispatch/src/dispatcher.rs`: `ClusterSpec::ssh_settings` が `mode: WorkspaceMode` を
+  受け取り、`Shared` なら `settings.sync = SyncMode::None` を強制（クラスタの `sync` 設定を上書き）。
+  `cluster_of` の戻り値に `WorkspaceMode` を追加（呼び出し側 2 か所を修正）。
+
+### B. 自動の格下げ（D3）
+
+**条件**: `mode` 省略・`repos` 無しのタスクで worktree 準備が exit 65 になったら、失敗にせず `shared`
+として同じ run の中で続行し、`Event::WorkspaceModeDowngraded {cluster, path, reason}` を残し、
+`task.workspace.mode` を `Some(Shared)` に書き戻す。`mode` を明示的に `"worktree"` にしたタスク、
+`repos` があるタスクは格下げしない（従来どおり失敗）。exit 66（ディレクトリが無い）は `~` の展開で
+解決する問題なので格下げの対象にしない。
+
+**実装**: `crates/task-dispatch/src/dispatcher.rs::run_worker` の Remote 分岐で、1 回目の
+`ws.prepare(&task)` が `WorkspaceError::NotAGitRepository` を返し、かつ `remote_mode_omitted(&task
+.workspace) && task.repos.is_empty()` なら、`effective_settings.sync = SyncMode::None` にして
+`ws.prepare(&task)` をもう一度呼ぶ（1 回だけ）。成功したら **`store.get(task_id)` で読み直した最新の
+Task**（ephemeral な `worker_hint.tier`/`budget` の書き換えを DB に漏らさないため。`assign_if_needed`
+と同じ規律）に `workspace.mode = Some(Shared)` を入れて `store.update_task` + イベントを書く。
+
+`Event::WorkspaceModeDowngraded` を `task_core::Event` に追加し、`task-api` の `EVENT_TYPES`/
+`event_type_name` にも足した（`docs/api/v1/event.schema.json` を `UPDATE_SCHEMA=1 cargo test -p
+task-core` で再生成）。
+
+### C. クラスタの「作業ディレクトリ」（D6）
+
+**条件**: `[[clusters]] work_dir`（設定ファイル）と DB の上書き（`cluster_settings`。GUI から `PUT
+/clusters/{id}/settings`）を持てる。実効値 = DB > 設定 > 無し。`WorkspaceSpec::Remote.path` が絶対・
+`~`/`~/…` ならそのまま、それ以外（省略・相対）は実効 `work_dir` からの相対に解決する。実効
+`work_dir` が無ければ、その run は明確なメッセージ（`PUT /clusters/{id}/settings` かクラスタ画面で
+登録してほしい旨）で失敗する。
+
+**実装**:
+- `crates/task-core/migrations/0025_cluster_settings.sql`（schema_version 25）:
+  `cluster_settings(cluster_id PK, work_dir, updated_at)`。`TaskStore` に `cluster_settings_get` /
+  `cluster_settings_list` / `cluster_settings_set`（`work_dir = None` で行を削除）を追加。
+- `crates/celeris/src/config.rs`: `ClusterConfig.work_dir: Option<PathBuf>`（`#[serde(default)]`）。
+  `config/celeris.clusters.example.toml`（`config/celeris.example.toml` には `[[clusters]]` の例が
+  無かったため、実際の例ファイルの方に追記）にコメント例。
+- `crates/task-worker/src/ssh.rs`: `resolve_remote_dir`（純粋関数。絶対・`~` はそのまま、空・相対は
+  `work_dir` から解決、`work_dir` 無しは `None`）と `remote_dir_is_resolved`（結果から解決できたかを
+  判定）。
+- `crates/task-dispatch/src/dispatcher.rs::cluster_of`: DB の上書き（`store.cluster_settings_get`）と
+  設定の `work_dir` を合成し `resolve_remote_dir` で解決。`run_worker` は `Some(settings) =>` の先頭で
+  `remote_dir_is_resolved` を確認し、解決できていなければ `AdapterError::Other` で明確なエラーにする
+  （worktree 準備を試みる前）。
+- `crates/task-api`: `ClusterView.work_dir` / `work_dir_source`（`"settings"` / `"config"`）、
+  `ClusterConfigView.work_dir`（設定ファイルの値のみ）。`PUT /clusters/{id}/settings`
+  （`ClusterSettingsPutBody` → `ClusterSettingsView`。管理系、絶対パスか `~`/`~/…` だけ許可、`null`
+  で消す、未知の cluster id は 404）。スキーマは `docs/api/v1/api-v1.schema.json`
+  （`UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::`）と `gui/app/celeris/types.ts`
+  （`pnpm gen:types`）を再生成した。
+
+### D. CoS の指示（D4）とクラスタ一覧の前置き（D6）
+
+**条件**: CoS の対話指示に「コマンド実行だけの仕事は `workspace` に `"mode":"shared"` を付ける。`path`
+はクラスタの作業ディレクトリを使い、`~` は使わない。未登録のクラスタなら `path` を省略し、人に登録を
+頼む」規則が入る。CoS の対話 run の前置きに、既知のクラスタ一覧（id・接続状態・実効 work_dir）が
+新設の節として付く。
+
+**実装**:
+- `crates/task-worker/src/preamble.rs::conversation_instructions`（Secretary 分岐）の Phase 98 の
+  クラスタ規則を改訂し、`mode: "shared"` と `~` を使わない指示、未登録クラスタの扱いを追記。
+  `actions_instructions()` の `create_task` 例にも `"mode":"shared"` を足した。
+- `crates/task-worker/src/protocol.rs`: `ClusterContext {id, connected, work_dir}` を新設し、
+  `RunContext.clusters: Vec<ClusterContext>`（CoS の対話 run にだけ非空）を追加。
+  `crates/task-dispatch/src/dispatcher.rs::run_extras` が `is_cos_conversation && !continuing` の
+  ときだけ `cluster_context()`（`self.config.clusters` の id 昇順 + DB 上書き/設定の実効 work_dir +
+  `cluster_connected`）を埋める。
+- `crates/task-worker/src/preamble.rs::clusters_section`（新設）: `## クラスタ (clusters)` の節を
+  `active_projects_section` の直後に出す（CoS 以外・`clusters` が空の run では 1 バイトも変わらない）。
+  `docs/protocol/worker-protocol.schema.json` を `UPDATE_SCHEMA=1 cargo test -p task-worker` で
+  再生成した。
+
+### E. `.taskd/remote-exec` → `.celeris/remote-exec`（D5）
+
+**条件**: リモート実行ヘルパの置き場と使い方の指示文を `.celeris/remote-exec` に改名する。
+`SYNC_ALWAYS_EXCLUDED` は後方互換で `.taskd/` を残したまま `.celeris/` を追加する。run 開始時に古い
+`.taskd/remote-exec` があれば消す。ADR-0036 D1 の `.taskd/artifacts/<task_id>/`（別の規約）は触らない。
+
+**実装**: `crates/task-worker/src/ssh.rs::write_remote_exec_helper` / `remote_exec_instructions` /
+`SYNC_ALWAYS_EXCLUDED`。`crates/celerisctl/src/commands/worker.rs` のエラー文面も合わせた。
+
+### テスト
+
+| 対象 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| `mode` の JSON 表現（省略・`shared`・`path` 省略・知らない値の拒否） | `cargo test -p task-core --lib model::` | exit 0。**4 passed**（新規 2 件を含む） |
+| `cluster_settings` の CRUD | `cargo test -p task-core --lib cluster_settings` | exit 0。1 passed |
+| `~` 展開・`resolve_remote_dir`・`remote_dir_is_resolved`・`SyncMode::None` の no-op・exit 65/66 の型判定・`.celeris` 改名と旧ラッパ削除 | `cargo test -p task-worker --lib ssh::` | exit 0。**9 passed** |
+| CoS の指示文・`clusters_section`・`organization_section` | `cargo test -p task-worker --lib preamble::` | exit 0。**16 passed** |
+| `ssh_settings` の mode 上書き、`cluster_of` の work_dir 優先順位（DB > 設定 > 無し）、相対パス解決、exit 65 の格下げ（3 パターン: 格下げする／`repos` ありで格下げしない／`mode=worktree` 明示で格下げしない） | `cargo test -p task-dispatch --lib -- ssh_settings_shared cluster_of_ exit_65` | exit 0。**6 passed** |
+| `create_task.workspace.mode = "shared"` のエンドツーエンド | `cargo test -p task-ops --lib actions::` | exit 0。**15 passed**（新規 1 件を含む） |
+| `PUT /clusters/{id}/settings` / `GET /clusters` の `work_dir`（401/404/422/200、`null` で消える） | `cargo test -p task-api --test cluster_settings_admin` | exit 0。**5 passed** |
+| task-api 全体（既存フィクスチャの `work_dir: None` 追加を含む） | `cargo test -p task-api` | exit 0。全 `test result: ok` |
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（全 `test result: ok` 行の passed 合計 **1823**） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| schema（task-api、`WorkspaceSpec`/`ClusterSettings*`/`ClusterView` が API に出るため） | `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::` | exit 0。`docs/api/v1/api-v1.schema.json` を再生成（+120 行） |
+| schema（task-core、`plan`/`event` が `WorkspaceSpec`/`Event` を含むため） | `UPDATE_SCHEMA=1 cargo test -p task-core --lib` | exit 0（219 passed）。`docs/api/v1/event.schema.json`・`docs/protocol/plan-output.schema.json` を再生成 |
+| schema（task-worker、`RunContext.clusters`/`WorkspaceSpec` を含むため） | `UPDATE_SCHEMA=1 cargo test -p task-worker` | exit 0。`docs/protocol/worker-protocol.schema.json` を再生成 |
+| GUI 型 | `export PATH=/usr/lib/node_modules/corepack/shims:$PATH && cd gui && pnpm install --frozen-lockfile && pnpm gen:types` | exit 0。`app/celeris/types.ts` に差分（`WorkspaceSpec.mode`/`path?`、`ClusterView.work_dir*`、`ClusterSettings*`、`Event.workspace_mode_downgraded`） |
+| GUI typecheck | `pnpm typecheck` | exit 0（型エラー 0） |
+| GUI test | `pnpm test` | exit 0。**1036 passed**（68 files） |
+
+補足: 既存の `assert_eq!(SCHEMA_VERSION, 24)`（migration テスト 5 件の「意図的なトリップワイヤ」。
+`crates/task-core/src/store.rs`）を `25` に更新した（これを直さないと schema_version を上げるたびに
+このテストが落ちる設計）。
+
+### 変更したファイル
+
+- `docs/adr/0059-command-only-remote-workspace.md`（新規）
+- `crates/task-core/src/model.rs`（`WorkspaceSpec::Remote.mode`/`path` 省略可、`remote_mode()`、
+  `Event::WorkspaceModeDowngraded`、テスト）
+- `crates/task-core/src/store.rs`（`ClusterSettings`、`cluster_settings_*`、`SCHEMA_VERSION = 25`、
+  `MIGRATION_0025`、`SCHEMA_VERSION` トリップワイヤ 5 件の更新、テスト）
+- `crates/task-core/migrations/0025_cluster_settings.sql`（新規）
+- `crates/task-core/src/lib.rs`（`ClusterSettings` の re-export）
+- `crates/task-core/src/{delegate,plan,repos}.rs`（`WorkspaceSpec::Remote` の construction/pattern 修正）
+- `crates/task-worker/src/ssh.rs`（`shell_remote_path`、`resolve_remote_dir`、`remote_dir_is_resolved`、
+  `WorkspaceError::NotAGitRepository`、`.celeris` 改名、テスト 9 件）
+- `crates/task-worker/src/workspace.rs`（`WorkspaceError::NotAGitRepository`）
+- `crates/task-worker/src/protocol.rs`（`ClusterContext`、`RunContext.clusters`）
+- `crates/task-worker/src/preamble.rs`（CoS の指示文改訂、`clusters_section`、テスト）
+- `crates/task-worker/src/{claude_code,lib}.rs`（pattern 修正、re-export）
+- `crates/task-dispatch/src/dispatcher.rs`（`ClusterSpec.work_dir`/`ssh_settings` の mode 上書き、
+  `cluster_of` の work_dir 解決、`run_worker` の格下げロジック、`cluster_context`、テスト 6 件）
+- `crates/task-ops/src/{add,actions,delegate,inbox,project_plan,retry,view}.rs`
+  （`NewTaskSpec.workspace_mode`、pattern/construction 修正、テスト）
+- `crates/task-api/src/{types,handlers,lib,schema,query}.rs`（`ClusterView.work_dir*`、
+  `ClusterSettingsPutBody`/`View`、`PUT /clusters/{id}/settings`、`EVENT_TYPES`）
+- `crates/task-api/tests/cluster_settings_admin.rs`（新規）
+- `crates/task-api/tests/{common/mod.rs,files.rs}`（フィクスチャ修正）
+- `crates/celeris/src/{config,lib,knowledge_maint,reports}.rs`（`ClusterConfig.work_dir`、
+  `ClusterConfigView.work_dir`、pattern 修正）
+- `crates/celerisctl/src/commands/{add,query,worker}.rs`（pattern 修正、`.celeris` 改名、
+  `ssh_settings` に mode を渡す）
+- `config/celeris.clusters.example.toml`（`work_dir` の例）
+- `docs/api/v1/api-v1.schema.json` / `docs/api/v1/event.schema.json` /
+  `docs/protocol/plan-output.schema.json` / `docs/protocol/worker-protocol.schema.json`（再生成）
+- `gui/app/celeris/types.ts`（`pnpm gen:types` で再生成）
+- `gui/docs/celeris-api-v1.md`（`WorkspaceSpec.mode`（remote）、`GET /clusters` の `work_dir*`、
+  `PUT /clusters/{id}/settings`（§3.107）、エンドポイント一覧 107、改訂ログ）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34）。本番での確認は親エージェントが昇格後に行う: (1) CoS に
+  「pegasus のログインノードで `pegasusinfo` を実行して」と依頼し、`workspace.mode = "shared"` 付きの
+  `create_task` が作られ、`path` がクラスタ画面の実効 work_dir（または省略）になっていること。
+  (2) 実際に pegasus に接続されたときに worktree を切らず即座にコマンドが実行され、`~` を使わずに
+  完了すること。(3) `PUT /clusters/{id}/settings` で pegasus の work_dir を GUI から登録できること。
+- `gui/app/**` のクラスタ画面（`work_dir` の入力フォーム、`PUT /clusters/{id}/settings` の呼び出し）は
+  この Phase では触っていない（指示どおり Phase 100 で別のエージェントが行う）。API・型
+  （`gui/app/celeris/types.ts`）は用意済み。
+- `celerisctl add` に `--workspace-mode` のような引数は足していない（指示の「celerisctl add は引数を
+  増やさない」方針を踏襲。`workspace_mode: None` 固定。GUI/API からは `mode` を指定できる）。
+- `docs/gui/api.md`（`gui/docs/celeris-api-v1.md` とは別の、GUI 側リポジトリの参照用と思われるファイル）
+  には触れていない。指示された更新先は `gui/docs/celeris-api-v1.md` のみだったため。
+
+### 提案
+
+- なし（今回の指示の範囲で閉じた）。

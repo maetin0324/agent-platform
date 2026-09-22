@@ -2424,6 +2424,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 &task_core::WorkspaceSpec::Remote {
                     cluster: "pegasus".into(),
                     path: std::path::PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+                    mode: None,
                 },
             )),
             ..RunContext::default()

@@ -51,7 +51,9 @@ impl Default for WorktreeSettings {
 /// 同期の両方向で常に除外するもの（P-46）。celeris が写しに作る管理用のディレクトリで、
 /// クラスタ側の既存プロジェクトに持ち込まないし、`--delete` 付きの pull で手元から消してもいけない。
 /// `artifacts/` は**除外しない**（成果物はクラスタで作られることがあり、受け入れ条件の照合に要る）。
-pub const SYNC_ALWAYS_EXCLUDED: [&str; 3] = [".taskd/", "runs/", "inputs/"];
+/// ADR-0059 D5: `.taskd/` はプラットフォーム名が taskd だった頃の名残（`.celeris/` に改名した）。
+/// 後方互換のため両方を除外に残す（古い写し・クラスタ側の残骸を同期に巻き込まない）。
+pub const SYNC_ALWAYS_EXCLUDED: [&str; 4] = [".taskd/", ".celeris/", "runs/", "inputs/"];
 
 /// 1 タスク分のリモート実行の設定。
 #[derive(Debug, Clone)]
@@ -137,6 +139,47 @@ fn shq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+/// ADR-0059 D2: リモート側のパスをシェルの引数として安全に書く。先頭の `~`（単独）または `~/…` だけを
+/// `"$HOME"`（クォート済みのシェル変数）に展開する（`~user` は展開しない。ADR-0039 D5 の
+/// `expand_home` と同じ方針: celeris は他ユーザの home を知らない）。それ以外はこれまでどおり `shq`
+/// でシングルクォート引用する。worktree 準備・`mkdir`・`cd`・`.celeris/remote-exec` の `cd` など、
+/// クラスタ側のパスをスクリプトに埋め込むすべての箇所がこれを通る。
+fn shell_remote_path(raw: &str) -> String {
+    if raw == "~" {
+        return "\"$HOME\"".to_string();
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return format!("\"$HOME\"{}", shq(&format!("/{rest}")));
+    }
+    shq(raw)
+}
+
+/// ADR-0059 D6: `path`（タスクの workspace）と実効 `work_dir`（呼び出し側が DB 上書き > 設定 > 無し の
+/// 順で決めたもの）から、クラスタで使うディレクトリを決める（純粋関数。celeris はこれ以上パスを
+/// 書き換えない）。絶対パス（`/` 始まり）・`~`/`~/…` はそのまま使う（展開は上の `shell_remote_path`
+/// が実行時に行う）。空、またはそれ以外の相対パスは `work_dir` からの相対にする。`work_dir` が無ければ
+/// `None`（呼び出し側は `path` をそのまま返し、`remote_dir_is_resolved` で「解決できなかった」ことを
+/// 検出する）。
+pub fn resolve_remote_dir(path: &Path, work_dir: Option<&Path>) -> Option<PathBuf> {
+    let raw = path.to_string_lossy();
+    if raw.starts_with('/') || raw.starts_with('~') {
+        return Some(path.to_path_buf());
+    }
+    let base = work_dir?;
+    if raw.is_empty() {
+        Some(base.to_path_buf())
+    } else {
+        Some(base.join(path))
+    }
+}
+
+/// ADR-0059 D6: `resolve_remote_dir` が解決できたかどうかを、結果の `PathBuf` から判定する
+/// （`work_dir` が無いまま `path` をそのまま返した場合は絶対でも `~` 始まりでもない）。
+pub fn remote_dir_is_resolved(path: &Path) -> bool {
+    let raw = path.to_string_lossy();
+    raw.starts_with('/') || raw.starts_with('~')
+}
+
 /// ローカルの作業ディレクトリを持ちつつ、コマンドをリモートで実行するワークスペース。
 #[derive(Debug, Clone)]
 pub struct SshWorkspace {
@@ -188,7 +231,7 @@ impl SshWorkspace {
         let base = &self.settings.worktree.base;
         let mut inner = format!(
             "if [ ! -e {wt}/.git ]; then git worktree add -B {branch} {wt} {base} >/dev/null; fi\n",
-            wt = shq(&wt),
+            wt = shell_remote_path(&wt),
             branch = shq(&branch),
             base = shq(base),
         );
@@ -202,7 +245,7 @@ impl SshWorkspace {
                 .collect();
             inner.push_str(&format!(
                 "git -C {wt} sparse-checkout set --cone {paths} >/dev/null\n",
-                wt = shq(&wt),
+                wt = shell_remote_path(&wt),
                 paths = paths.join(" ")
             ));
         }
@@ -210,21 +253,25 @@ impl SshWorkspace {
         // git の worktree 管理は共有なので、あれば `flock` で直列化する（無ければそのまま実行する）。
         let script = format!(
             "set -e\n\
-             cd {project} 2>/dev/null || {{ echo \"no such directory: {project}\" >&2; exit 66; }}\n\
+             cd {project} 2>/dev/null || {{ echo \"no such directory: {project_display}\" >&2; exit 66; }}\n\
              gitdir=$(git rev-parse --git-common-dir 2>/dev/null) || {{ echo \"not a git repository\" >&2; exit 65; }}\n\
              if command -v flock >/dev/null 2>&1; then\n\
                exec 9>\"$gitdir/celeris-worktree.lock\"\n\
                flock 9\n\
              fi\n\
              {inner}",
-            project = shq(&project),
+            project = shell_remote_path(&project),
+            project_display = project,
             inner = inner,
         );
         let out = self.run_ssh(&script, Duration::from_secs(600)).await?;
         match out.exit {
             Some(0) => Ok(()),
-            Some(65) => Err(WorkspaceError::Remote(format!(
-                "{project} on {} is not a git repository; use sync = \"rsync\" for this cluster (ADR-0019 D3)",
+            // ADR-0059 D3: 専用のバリアントにする（呼び出し側が「格下げしてよいか」を型で判定できるように。
+            // 文字列のパースはしない）。
+            Some(65) => Err(WorkspaceError::NotAGitRepository(format!(
+                "{project} on {} is not a git repository; use sync = \"rsync\" for this cluster (ADR-0019 D3), \
+                 or leave `mode` unset with no `repos` on a command-only task to run it as `shared` (ADR-0059 D3)",
                 self.settings.cluster
             ))),
             other => Err(WorkspaceError::Remote(format!(
@@ -270,7 +317,7 @@ impl SshWorkspace {
         let mut script = String::new();
         script.push_str(&format!(
             "cd {} && ",
-            shq(&self.effective_remote_dir().to_string_lossy())
+            shell_remote_path(&self.effective_remote_dir().to_string_lossy())
         ));
         for (k, v) in &self.settings.env {
             script.push_str(&format!("export {k}={} && ", shq(v)));
@@ -292,7 +339,10 @@ impl SshWorkspace {
         }
         let dir = self.effective_remote_dir().to_string_lossy().to_string();
         let out = self
-            .run_ssh(&format!("mkdir -p {}", shq(&dir)), Duration::from_secs(60))
+            .run_ssh(
+                &format!("mkdir -p {}", shell_remote_path(&dir)),
+                Duration::from_secs(60),
+            )
             .await?;
         if out.exit != Some(0) {
             return Err(WorkspaceError::Remote(format!(
@@ -400,9 +450,14 @@ impl SshWorkspace {
         }
     }
 
-    /// ワーカーがクラスタでコマンドを実行するためのラッパ `.taskd/remote-exec`（ADR-0018 D3）。
+    /// ワーカーがクラスタでコマンドを実行するためのラッパ `.celeris/remote-exec`（ADR-0018 D3、
+    /// ADR-0059 D5 で `.taskd/remote-exec` から改名）。
     pub async fn write_remote_exec_helper(&self) -> Result<PathBuf, WorkspaceError> {
-        let dir = self.local.dir().join(".taskd");
+        // ADR-0059 D5: 改名前の古いラッパが写しに残っていたら消す（新しいものと混同しないため。
+        // `.taskd/artifacts/<task_id>/` は ADR-0036 D1 の別の規約なので触らない）。
+        let old = self.local.dir().join(".taskd").join("remote-exec");
+        let _ = tokio::fs::remove_file(&old).await;
+        let dir = self.local.dir().join(".celeris");
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join("remote-exec");
         let ssh = self.ssh_base().join(" ");
@@ -417,7 +472,7 @@ impl SshWorkspace {
         let script = format!(
             "#!/bin/sh\n\
              # celeris が run ごとに作るラッパ（ADR-0018 D3）。クラスタ {cluster} でコマンドを実行する。\n\
-             # 使い方: .taskd/remote-exec <コマンド ...>\n\
+             # 使い方: .celeris/remote-exec <コマンド ...>\n\
              set -u\n\
              if [ $# -eq 0 ]; then echo \"usage: $0 <command...>\" >&2; exit 2; fi\n\
              cmd=\"$*\"\n\
@@ -425,7 +480,7 @@ impl SshWorkspace {
             cluster = self.settings.cluster,
             ssh = ssh,
             host = self.settings.host,
-            remote_q = remote,
+            remote_q = shell_remote_path(&remote),
             prefix = prefix,
         );
         tokio::fs::write(&path, script).await?;
@@ -440,13 +495,14 @@ impl SshWorkspace {
     }
 }
 
-/// ワーカーへ渡す指示文（ADR-0018 D3）。`RunRequest.task.objective` の末尾に足し、`.taskd/remote-exec` の存在と使い方を伝える。
+/// ワーカーへ渡す指示文（ADR-0018 D3）。`RunRequest.task.objective` の末尾に足し、`.celeris/remote-exec`
+/// の存在と使い方を伝える（ADR-0059 D5 で `.taskd/remote-exec` から改名）。
 /// ワーカーが従うかは保証しない（受け入れ条件はクラスタ側で判定されるので、手元だけで済ませた仕事は条件で落ちる）。
 pub fn remote_exec_instructions(settings: &SshSettings) -> String {
     let base = format!(
         "\n\n[celeris] このタスクの正はクラスタ `{cluster}`（ssh host `{host}`）の `{dir}` です。手元の作業ディレクトリはその写しで、\
          run の後にクラスタへ同期され、受け入れ条件のコマンドはクラスタ側で実行されます。\
-         重い処理・クラスタ上のデータやモジュールを使う処理は `.taskd/remote-exec <コマンド ...>` で実行してください\
+         重い処理・クラスタ上のデータやモジュールを使う処理は `.celeris/remote-exec <コマンド ...>` で実行してください\
          （クラスタの作業ディレクトリで実行され、終了コードと出力がそのまま返ります）。",
         cluster = settings.cluster,
         host = settings.host,
@@ -546,5 +602,156 @@ impl Workspace for SshWorkspace {
     async fn collect(&self, task: &Task) -> Result<Vec<ArtifactRef>, WorkspaceError> {
         self.pull().await?;
         self.local.collect(task).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- ADR-0059 D2: `~` の展開（純粋関数） ----
+
+    #[test]
+    fn shell_remote_path_expands_only_a_leading_tilde() {
+        assert_eq!(shell_remote_path("~"), "\"$HOME\"");
+        assert_eq!(shell_remote_path("~/work/project"), "\"$HOME\"'/work/project'");
+        // `~user` は展開しない（celeris は他ユーザの home を知らない。ADR-0039 D5 と同じ方針）。
+        assert_eq!(shell_remote_path("~user/x"), "'~user/x'");
+        // それ以外は従来どおり `shq`。
+        assert_eq!(shell_remote_path("/work/x"), "'/work/x'");
+        assert_eq!(shell_remote_path("relative/x"), "'relative/x'");
+        assert_eq!(shell_remote_path("it's/quoted"), "'it'\\''s/quoted'");
+    }
+
+    // ---- ADR-0059 D6: `work_dir` からの相対解決（純粋関数） ----
+
+    #[test]
+    fn resolve_remote_dir_keeps_absolute_and_tilde_paths_untouched() {
+        let work_dir = Some(Path::new("/work/NBB/rmaeda"));
+        assert_eq!(
+            resolve_remote_dir(Path::new("/scratch/x"), work_dir),
+            Some(PathBuf::from("/scratch/x"))
+        );
+        assert_eq!(
+            resolve_remote_dir(Path::new("~"), work_dir),
+            Some(PathBuf::from("~"))
+        );
+        assert_eq!(
+            resolve_remote_dir(Path::new("~/work"), work_dir),
+            Some(PathBuf::from("~/work"))
+        );
+        // `work_dir` が無くても絶対・`~` はそのまま解決できる。
+        assert_eq!(
+            resolve_remote_dir(Path::new("/scratch/x"), None),
+            Some(PathBuf::from("/scratch/x"))
+        );
+    }
+
+    #[test]
+    fn resolve_remote_dir_resolves_empty_and_relative_paths_against_work_dir() {
+        let work_dir = Some(Path::new("/work/NBB/rmaeda"));
+        assert_eq!(
+            resolve_remote_dir(Path::new(""), work_dir),
+            Some(PathBuf::from("/work/NBB/rmaeda"))
+        );
+        assert_eq!(
+            resolve_remote_dir(Path::new("benchfs"), work_dir),
+            Some(PathBuf::from("/work/NBB/rmaeda/benchfs"))
+        );
+    }
+
+    #[test]
+    fn resolve_remote_dir_is_none_when_there_is_no_work_dir_to_resolve_against() {
+        assert_eq!(resolve_remote_dir(Path::new(""), None), None);
+        assert_eq!(resolve_remote_dir(Path::new("benchfs"), None), None);
+    }
+
+    #[test]
+    fn remote_dir_is_resolved_matches_absolute_and_tilde_only() {
+        assert!(remote_dir_is_resolved(Path::new("/work/x")));
+        assert!(remote_dir_is_resolved(Path::new("~")));
+        assert!(remote_dir_is_resolved(Path::new("~/work")));
+        assert!(!remote_dir_is_resolved(Path::new("")));
+        assert!(!remote_dir_is_resolved(Path::new("relative")));
+    }
+
+    // ---- ADR-0018 D5 / ADR-0059: `SyncMode::None` は同期を一切しない ----
+
+    #[tokio::test]
+    async fn sync_none_push_and_pull_never_run_rsync_or_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = SshSettings::new("c", "h", PathBuf::from("/work/x"));
+        settings.sync = SyncMode::None;
+        // 呼ばれたら即座にエラーで分かるように、実在しないプログラムを指す。
+        settings.ssh_command = vec!["/nonexistent/ssh-should-not-run".into()];
+        settings.rsync_command = vec!["/nonexistent/rsync-should-not-run".into()];
+        let ws = SshWorkspace::new(dir.path(), settings);
+        ws.push().await.expect("push is a no-op under SyncMode::None");
+        ws.pull().await.expect("pull is a no-op under SyncMode::None");
+    }
+
+    // ---- ADR-0059 D3: worktree 準備の exit 65 を型で区別する ----
+
+    #[tokio::test]
+    async fn ensure_worktree_maps_exit_65_to_not_a_git_repository_and_exit_66_to_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        for (exit_code, matches_not_a_git_repo) in [(65, true), (66, false), (1, false)] {
+            let stub = dir.path().join(format!("stub-{exit_code}.sh"));
+            std::fs::write(&stub, format!("#!/bin/sh\nexit {exit_code}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&stub, perms).unwrap();
+            }
+            let mut settings = SshSettings::new("c", "h", PathBuf::from("/work/proj"));
+            settings.sync = SyncMode::Worktree;
+            settings.task_id = "01TESTTASK".into();
+            settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
+            let mirror = dir.path().join(format!("mirror-{exit_code}"));
+            let ws = SshWorkspace::new(&mirror, settings);
+            let err = ws.ensure_worktree().await.expect_err("stub always fails");
+            assert_eq!(
+                matches!(err, WorkspaceError::NotAGitRepository(_)),
+                matches_not_a_git_repo,
+                "exit {exit_code}: {err:?}"
+            );
+        }
+    }
+
+    // ---- ADR-0059 D5: `.taskd/remote-exec` -> `.celeris/remote-exec` ----
+
+    #[tokio::test]
+    async fn write_remote_exec_helper_writes_celeris_and_cleans_up_the_old_taskd_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join("mirror");
+        tokio::fs::create_dir_all(mirror.join(".taskd")).await.unwrap();
+        tokio::fs::write(mirror.join(".taskd").join("remote-exec"), "old wrapper")
+            .await
+            .unwrap();
+
+        let mut settings = SshSettings::new("pegasus", "pegasus", PathBuf::from("~/work/proj"));
+        settings.sync = SyncMode::None;
+        let ws = SshWorkspace::new(&mirror, settings);
+        let path = ws.write_remote_exec_helper().await.expect("write helper");
+        assert_eq!(path, mirror.join(".celeris").join("remote-exec"));
+        assert!(path.is_file());
+        assert!(
+            !mirror.join(".taskd").join("remote-exec").exists(),
+            "the old wrapper must be removed"
+        );
+
+        // ADR-0059 D2: `~/work/proj` は `.celeris/remote-exec` の生成スクリプトの中で `"$HOME"` に展開される。
+        let script = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(script.contains("\"$HOME\"'/work/proj'"), "{script}");
+    }
+
+    // ---- ADR-0018 D3 / ADR-0059 D5: `.celeris/` は同期から常に除外し、`.taskd/` も後方互換で残す ----
+
+    #[test]
+    fn sync_always_excluded_keeps_the_legacy_taskd_alongside_celeris() {
+        assert!(SYNC_ALWAYS_EXCLUDED.contains(&".taskd/"));
+        assert!(SYNC_ALWAYS_EXCLUDED.contains(&".celeris/"));
     }
 }

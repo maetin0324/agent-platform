@@ -55,6 +55,9 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
     // ADR-0048 D3（Phase 60b）: CoS の対話 run にだけ、進行中の案件とその途中目標。
     // `context.active_projects` が空の run（CoS 以外）の前置きは Phase 60a までとバイト単位で同じ。
     out.push_str(&active_projects_section(context));
+    // ADR-0059 D6（Phase 99）: CoS の対話 run にだけ、クラスタの一覧（id・接続状態・実効 work_dir）。
+    // `context.clusters` が空の run の前置きは Phase 98 までと 1 バイトも変わらない。
+    out.push_str(&clusters_section(context));
     out.push_str(&workspace_section(context));
     // ADR-0047 D2（Phase 61）: マウントされた知識の**索引だけ**（本文は入れない。道具で読む）。
     // `context.knowledge` が無い run の前置きは Phase 60 までと 1 バイトも変わらない。
@@ -457,6 +460,38 @@ fn active_projects_section(context: &RunContext) -> String {
     out
 }
 
+/// ADR-0059 D6（Phase 99）: CoS の対話 run にだけ出す「クラスタ」の節（id・接続状態・実効
+/// work_dir）。`create_task.workspace` の `path` をどう組むか（登録済みの work_dir を使うか、
+/// 未登録なら省略するか）の材料。
+fn clusters_section(context: &RunContext) -> String {
+    if context.conversation_addressee != Some(ConversationAddressee::Secretary)
+        || context.clusters.is_empty()
+    {
+        return String::new();
+    }
+    let mut out = String::from("## クラスタ (clusters)\n");
+    for cluster in &context.clusters {
+        let connected = if cluster.connected { "接続中" } else { "未接続" };
+        match &cluster.work_dir {
+            Some(work_dir) => {
+                out.push_str(&format!(
+                    "- `{}`（{connected}） 作業ディレクトリ: `{work_dir}`\n",
+                    cluster.id
+                ));
+            }
+            None => {
+                out.push_str(&format!(
+                    "- `{}`（{connected}） 作業ディレクトリ: 未登録（`path` は省略し、\
+                     人に登録を頼む）\n",
+                    cluster.id
+                ));
+            }
+        }
+    }
+    out.push('\n');
+    out
+}
+
 /// ADR-0039 D3: 案件の作業場所から、前置きに出す 1 行を組む（純粋関数。ディスパッチャがこれを
 /// `RunContext::workspace_note` に入れる）。`Remote` は ADR-0018 D1 の「クラスタ側が正、手元は写し」を書く。
 pub fn workspace_note(spec: &task_core::WorkspaceSpec) -> String {
@@ -464,7 +499,7 @@ pub fn workspace_note(spec: &task_core::WorkspaceSpec) -> String {
         task_core::WorkspaceSpec::Local { path, .. } => {
             format!("この案件のコードは `{}` にある。", path.display())
         }
-        task_core::WorkspaceSpec::Remote { cluster, path } => format!(
+        task_core::WorkspaceSpec::Remote { cluster, path, .. } => format!(
             "この案件のコードはクラスタ {cluster} の `{}` にある。いまのカレントディレクトリはその写しで、\
              celeris が run の前後で同期する。",
             path.display()
@@ -768,9 +803,14 @@ fn conversation_instructions(context: &RunContext) -> String {
                  ください（ADR-0046 D8 のとおりこの対話 run 自身には道具が無いのが正常で、それは断る理由に\
                  なりません）。`cluster:<id>` を tools に持つノードの仕事として `create_task` を書き、\
                  `workspace` に `{{\"kind\":\"remote\",\"cluster\":\"<id>\",\"path\":\"<クラスタ側の作業\
-                 ディレクトリ>\"}}` を入れてください。path は案件の作業場所、無ければ人の依頼文にある場所、\
-                 それも無ければクラスタのホームを表す `~` を使い、返事で「〜として cluster-hpc に依頼した」\
-                 のように伝えてください。\n\n\
+                 ディレクトリ>\"}}` を入れてください。path は案件の作業場所、無ければ人の依頼文にある場所。\
+                 コマンドを実行する・状態を見る・ジョブを流すだけでコードの diff を作らない仕事は、\
+                 `workspace` に `\"mode\":\"shared\"` も付けてください（worktree を切らず、そのまま実行\
+                 します）。この場合の `path` は下の「クラスタ」に出ている実効の作業ディレクトリを使い、\
+                 `~` は使わないでください（HPC のホームは作業用ではないのが普通です）。指したいクラスタの\
+                 作業ディレクトリが「未登録」なら `path` を省略し（celeris が登録され次第その場所を使い\
+                 ます）、返事で人に「cluster-hpc へ依頼したが、<id> クラスタの作業ディレクトリが未登録\
+                 なのでクラスタ画面で登録してほしい」のように一言添えてください。\n\n\
                  {}",
                 actions_instructions()
             )
@@ -797,9 +837,13 @@ fn actions_instructions() -> String {
      - `{\"type\": \"create_task\", \"title\": \"…\", \"objective\": \"…\", \"acceptance\": [\"…\"], \
      \"harness\": \"coding\", \"skills\": [\"rust\"], \"mode\": \"prototype\", \"repos\": [], \
      \"project\": \"<案件の id か null>\", \"milestone\": \"<途中目標の id か null>\", \"assignee\": null, \
-     \"workspace\": {\"kind\":\"remote\",\"cluster\":\"<id>\",\"path\":\"<作業ディレクトリか ~>\"}}`\
+     \"workspace\": {\"kind\":\"remote\",\"cluster\":\"<id>\",\"path\":\"<作業ディレクトリ>\",\
+     \"mode\":\"shared\"}}`\
      （`workspace` は省略可。クラスタでの仕事だけ入れる。\
      ローカルなら `{\"kind\":\"local\",\"path\":\"…\"}`）\n\
+     `workspace.mode` はコマンドを実行するだけでコードの diff を作らない仕事のとき `\"shared\"` にします\
+     （worktree を切らず、`path` にそのまま cd して実行します。ADR-0059）。コードを直す仕事では付けません\
+     （省略時は worktree）。`create_task.mode`（下）とは別のフィールドです。\n\
      - `{\"type\": \"propose_project\", \"title\": \"…\", \"request\": \"…\", \"repos\": [\"/abs/path\"]}`\n\
      - `{\"type\": \"add_milestone\", \"project\": \"<案件の id>\", \"title\": \"…\", \"description\": \"…\"}`\n\
      - `{\"type\": \"ask_human\", \"text\": \"…\"}`\n\
@@ -1151,9 +1195,14 @@ mod tests {
         assert!(out.contains("『ssh が禁止されている』『read-only』を理由に断らないで"), "{out}");
         assert!(out.contains("cluster:<id>"), "{out}");
         assert!(
-            out.contains(r#""workspace": {"kind":"remote","cluster":"<id>","path":"<作業ディレクトリか ~>"}"#),
+            out.contains(
+                r#""workspace": {"kind":"remote","cluster":"<id>","path":"<作業ディレクトリ>","mode":"shared"}"#
+            ),
             "{out}"
         );
+        // ADR-0059 D6: `~` を既定にしない・未登録なら `path` を省略して人に登録を頼む規則が入る。
+        assert!(out.contains("`~` は使わないでください"), "{out}");
+        assert!(out.contains("path` を省略し"), "{out}");
 
         let other = RunContext {
             conversation_addressee: Some(ConversationAddressee::Other),
@@ -1211,6 +1260,57 @@ mod tests {
         );
         // 道具が無いノードは「道具:」を出さない（従来どおり）。
         assert!(out.contains("- `cos` Chief of Staff / harnesses: conversation\n"), "{out}");
+    }
+
+    /// ADR-0059 D6（Phase 99）: CoS 宛てに「クラスタ」の節が付き、実効 work_dir の有無で文面が変わる
+    /// （登録済みならそのパス、未登録なら `path` を省略して人に登録を頼む案内）。CoS 以外・
+    /// `context.clusters` が空の run には出ない。
+    #[test]
+    fn clusters_section_shows_the_effective_work_dir_or_that_it_is_unregistered() {
+        let secretary = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Secretary),
+            clusters: vec![
+                crate::protocol::ClusterContext {
+                    id: "pegasus".into(),
+                    connected: true,
+                    work_dir: Some("/work/NBB/rmaeda".into()),
+                },
+                crate::protocol::ClusterContext {
+                    id: "sirius".into(),
+                    connected: false,
+                    work_dir: None,
+                },
+            ],
+            ..RunContext::default()
+        };
+        let out = render(&secretary, "artifacts");
+        assert!(out.contains("## クラスタ"), "{out}");
+        assert!(
+            out.contains("- `pegasus`（接続中） 作業ディレクトリ: `/work/NBB/rmaeda`"),
+            "{out}"
+        );
+        assert!(
+            out.contains("- `sirius`（未接続） 作業ディレクトリ: 未登録"),
+            "{out}"
+        );
+
+        let other = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Other),
+            clusters: vec![crate::protocol::ClusterContext {
+                id: "pegasus".into(),
+                connected: true,
+                work_dir: Some("/work/NBB/rmaeda".into()),
+            }],
+            ..RunContext::default()
+        };
+        assert!(!render(&other, "artifacts").contains("## クラスタ"));
+
+        // 空なら Phase 98 までと 1 バイトも変わらない（節ごと出ない）。
+        let empty = RunContext {
+            conversation_addressee: Some(ConversationAddressee::Secretary),
+            ..RunContext::default()
+        };
+        assert!(!render(&empty, "artifacts").contains("## クラスタ"));
     }
 
     /// ADR-0048 D3（Phase 60b）: CoS の対話にだけ「進行中の案件」の節と `actions` の説明が付く。

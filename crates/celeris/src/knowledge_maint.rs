@@ -274,6 +274,7 @@ fn build_run_spec(
             assignee: Some(assignee),
             workspace: None,
             cluster: None,
+            workspace_mode: None,
             // ADR-0047 D4: harness の解決に頼らず、adapter/tier を明示する（`knowledge` harness は
             // 組み込みのままで `[[genres]]`/`[[roles]]` に射影されないため。task_core::report::KNOWLEDGE_ROLE
             // のドキュメントコメント参照）。

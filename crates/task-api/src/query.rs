@@ -149,7 +149,7 @@ pub(crate) fn parse_snake<T: DeserializeOwned>(what: &str, value: &str) -> Resul
 }
 
 /// `Event` の serde の `type` 名（`types` クエリの語彙）。
-pub(crate) const EVENT_TYPES: [&str; 17] = [
+pub(crate) const EVENT_TYPES: [&str; 18] = [
     "created",
     "transitioned",
     "worker_started",
@@ -168,6 +168,8 @@ pub(crate) const EVENT_TYPES: [&str; 17] = [
     "edited",
     // ADR-0046 D5（Phase 59）: matching が担当を決めた。
     "assigned",
+    // ADR-0059 D3（Phase 99）: worktree が切れず `shared` に格下げした。
+    "workspace_mode_downgraded",
 ];
 
 pub(crate) fn event_type_name(event: &Event) -> &'static str {
@@ -189,6 +191,7 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::Retried { .. } => "retried",
         Event::Edited { .. } => "edited",
         Event::Assigned { .. } => "assigned",
+        Event::WorkspaceModeDowngraded { .. } => "workspace_mode_downgraded",
     }
 }
 

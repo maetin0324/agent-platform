@@ -379,6 +379,7 @@ mod tests {
             default_repo_name(&WorkspaceSpec::Remote {
                 cluster: "pegasus".into(),
                 path: PathBuf::from("/work/NBB/rmaeda/BenchFS Paper"),
+                mode: None,
             }),
             "benchfs-paper"
         );
@@ -398,6 +399,7 @@ mod tests {
             WorkspaceSpec::Remote {
                 cluster: "pegasus".into(),
                 path: PathBuf::from("/work/x"),
+                mode: None,
             },
         );
         cluster.project_id = code.project_id;
@@ -463,6 +465,7 @@ mod tests {
             WorkspaceSpec::Remote {
                 cluster: "pegasus".into(),
                 path: PathBuf::from("/work/x"),
+                mode: None,
             },
         );
         remote_b.sync = Some(RepoSync::None);

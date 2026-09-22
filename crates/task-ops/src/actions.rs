@@ -279,8 +279,13 @@ fn create_task_action(
     };
     // Phase 98（ADR-0018）: `workspace` がクラスタを指すなら `[[clusters]]` に存在すること。
     // 未知のクラスタは action 全体を検証で落とす（人に理由が見える。`FailedAction`）。
-    let (ws_path, ws_cluster) = match workspace.as_deref() {
-        Some(WorkspaceSpec::Remote { cluster, path }) => {
+    // ADR-0059 D1（Phase 99）: `mode`（`"shared"` 等）も `NewTaskSpec.workspace_mode` へ運ぶ。
+    let (ws_path, ws_cluster, ws_mode) = match workspace.as_deref() {
+        Some(WorkspaceSpec::Remote {
+            cluster,
+            path,
+            mode,
+        }) => {
             if !known_clusters.iter().any(|c| c == cluster) {
                 return Err(format!(
                     "unknown cluster: {cluster:?}（設定済み: {}）",
@@ -291,10 +296,10 @@ fn create_task_action(
                     }
                 ));
             }
-            (Some(path.clone()), Some(cluster.clone()))
+            (Some(path.clone()), Some(cluster.clone()), *mode)
         }
-        Some(WorkspaceSpec::Local { path, .. }) => (Some(path.clone()), None),
-        None => (None, None),
+        Some(WorkspaceSpec::Local { path, .. }) => (Some(path.clone()), None, None),
+        None => (None, None, None),
     };
     let spec = NewTaskSpec {
         title: title.to_string(),
@@ -321,6 +326,7 @@ fn create_task_action(
         assignee: assignee.clone(),
         workspace: ws_path,
         cluster: ws_cluster,
+        workspace_mode: ws_mode,
         adapter: None,
         repos: repos.to_vec(),
         labels: Vec::new(),
@@ -659,6 +665,47 @@ mod tests {
             task_core::WorkspaceSpec::Remote {
                 cluster: "pegasus".to_string(),
                 path: "~".into(),
+                mode: None,
+            }
+        );
+    }
+
+    /// ADR-0059 D1（Phase 99）: `create_task.workspace.mode = "shared"` は、実行後のタスクの
+    /// `WorkspaceSpec::Remote.mode` にそのまま届く（`NewTaskSpec.workspace_mode` を経由する）。
+    #[test]
+    fn create_task_with_workspace_mode_shared_makes_a_shared_remote_task() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_engineering(&store);
+        let task = cos_task();
+        let parsed = parse(
+            r#"{"actions":[{"type":"create_task","title":"pegasusinfo を実行","objective":"実行して",
+               "acceptance":["結果が分かる"],"harness":"coding",
+               "workspace":{"kind":"remote","cluster":"pegasus","path":"~","mode":"shared"}}]}"#,
+        );
+        let known_clusters = vec!["pegasus".to_string()];
+        let outcome = execute(
+            &store,
+            &[],
+            &[],
+            &[],
+            &known_clusters,
+            &task,
+            "run-cluster-shared",
+            &parsed.0,
+            &parsed.1,
+            now(),
+        )
+        .unwrap()
+        .expect("not idempotent-skipped");
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        let created = outcome.executed[0].task_id.expect("task id");
+        let stored = store.get(created).unwrap().expect("task exists");
+        assert_eq!(
+            stored.workspace,
+            task_core::WorkspaceSpec::Remote {
+                cluster: "pegasus".to_string(),
+                path: "~".into(),
+                mode: Some(task_core::WorkspaceMode::Shared),
             }
         );
     }
