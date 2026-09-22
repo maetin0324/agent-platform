@@ -904,6 +904,13 @@ pub struct ClusterConfig {
     /// 空（既定）なら celeris はトンネルの生存を見ない（従来どおり）。
     #[serde(default)]
     pub forwards: Vec<ClusterForwardConfig>,
+    /// ADR-0060（Phase 103）: master の起こし方。`"auto"`（既定）は `systemd-run` が PATH にあり
+    /// `XDG_RUNTIME_DIR` が設定されていれば `"systemd-run"`、無ければ `"inline"` として扱う。
+    /// `"systemd-run"`: `systemd-run --user --scope` で celeris（`celeris@<sha12>` unit）の cgroup の
+    /// 外の一時 scope に起こす。unit が `KillMode=control-group`（既定）で止まっても master は道連れに
+    /// ならない。`"inline"`: 従来どおり celeris の直接の子として起こす（cgroup の中に留まる）。
+    #[serde(default = "default_master_launcher")]
+    pub master_launcher: String,
 }
 
 /// `[[clusters.forwards]]`（ADR-0053 D3）: 1 本の port forward。
@@ -945,6 +952,9 @@ fn default_cluster_sync() -> String {
 }
 fn default_cluster_auth() -> String {
     "manual".to_string()
+}
+fn default_master_launcher() -> String {
+    "auto".to_string()
 }
 fn default_worktree_base() -> String {
     "HEAD".to_string()
@@ -1906,6 +1916,13 @@ impl Config {
                 return Err(ConfigError::Invalid(format!(
                     "[[clusters]] {}: auth must be \"manual\", \"publickey\" or \"totp\" (got {:?})",
                     c.id, c.auth
+                )));
+            }
+            // ADR-0060（Phase 103）: master の起こし方も 3 つだけ。既定は "auto"。
+            if !matches!(c.master_launcher.as_str(), "auto" | "systemd-run" | "inline") {
+                return Err(ConfigError::Invalid(format!(
+                    "[[clusters]] {}: master_launcher must be \"auto\", \"systemd-run\" or \"inline\" (got {:?})",
+                    c.id, c.master_launcher
                 )));
             }
             // ADR-0019 D2: 自動削除は実装しない（実行結果を消してしまわないため）。

@@ -556,7 +556,7 @@ pub fn build_dispatcher(
         config.account_pool_providers(),
         config.dispatch_config(),
     );
-    dispatcher.set_cluster_connector(cluster_connector(masters));
+    dispatcher.set_cluster_connector(cluster_connector(masters, master_launchers(config)));
     // ADR-0053 D3（Phase 66）: `[[clusters.forwards]]`（Qwen トンネル等）の(再)確立と生存監視。
     // 設定に forward が無ければ `refresh_cluster_tunnels` 自体が早期に戻るので、挿しても無害。
     let tunnel_forward_children: TunnelForwardChildren =
@@ -603,6 +603,30 @@ pub fn seed_org_if_empty(store: &dyn TaskStore, config: &Config) -> Result<usize
 pub type ClusterMasters =
     Arc<std::sync::Mutex<HashMap<String, task_worker::cluster_login::ClusterMaster>>>;
 
+/// ADR-0060（Phase 103）: `[[clusters]] master_launcher` を、クラスタ id ごとに実際の起こし方へ解決する。
+/// `[[clusters]]` は `POST /reload` で変わらない（起動時に再読込しない）ので、起動時に一度だけ計算すれば
+/// 十分（`cluster_connector` の呼び出しごとに `systemd-run` の PATH 検索をやり直さない）。
+fn master_launchers(
+    config: &Config,
+) -> Arc<HashMap<String, task_worker::cluster_login::MasterLauncher>> {
+    let has_systemd_run = task_worker::cluster_login::systemd_run_on_path();
+    let has_xdg_runtime_dir = task_worker::cluster_login::xdg_runtime_dir_is_set();
+    Arc::new(
+        config
+            .clusters
+            .iter()
+            .map(|c| {
+                let launcher = task_worker::cluster_login::resolve_master_launcher(
+                    &c.master_launcher,
+                    has_systemd_run,
+                    has_xdg_runtime_dir,
+                );
+                (c.id.clone(), launcher)
+            })
+            .collect(),
+    )
+}
+
 /// ADR-0032 D3: `auth = "publickey"` のクラスタを、ディスパッチの直前に 1 回だけ自分で張る。
 ///
 /// **時間の設計**: これはディスパッチループの中から同期で呼ばれる（`control_master_alive_blocking` と
@@ -610,13 +634,22 @@ pub type ClusterMasters =
 /// そこで **`AUTO_CONNECT_TIMEOUT` を短く（8 秒）**切る。鍵だけの接続は実測で 1 秒未満なので
 /// （ADR-0032 §1 の fern03）、これで足りる。間に合わなければその tick は cooldown に落ち、
 /// 次の機会に再試行される（人を待たせるより tick を止めない方を優先する）。
-fn cluster_connector(masters: ClusterMasters) -> task_dispatch::dispatcher::ClusterConnector {
+fn cluster_connector(
+    masters: ClusterMasters,
+    launchers: Arc<HashMap<String, task_worker::cluster_login::MasterLauncher>>,
+) -> task_dispatch::dispatcher::ClusterConnector {
     /// 自動接続に使う上限。ディスパッチループを止めないために短くしてある（上の説明）。
     const AUTO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
     Arc::new(move |cluster_id: &str, host: &str| {
         let host = host.to_string();
         let cluster_id = cluster_id.to_string();
+        // ADR-0060（Phase 103）: master_launcher は `[[clusters]]` 由来（再読込では変わらない）なので、
+        // 起動時に一度だけ解決して渡された表から引く。無ければ安全側（従来どおり inline）。
+        let launcher = launchers
+            .get(&cluster_id)
+            .cloned()
+            .unwrap_or(task_worker::cluster_login::MasterLauncher::Inline);
         // Phase 66b（本番 2026-09-21 の観測）: このクロージャは非同期の `start_connect` を専用ランタイムで
         // `block_on` する。呼び出し元（`task_dispatch::dispatcher::run_cluster_hooks_off_async`）は
         // tokio の文脈を持たない OS スレッドへ逃がしてから呼ぶ契約になっているが、万一これが破られて
@@ -642,6 +675,8 @@ fn cluster_connector(masters: ClusterMasters) -> task_dispatch::dispatcher::Clus
         let outcome = runtime.block_on(task_worker::cluster_login::start_connect(
             &["ssh".to_string()],
             &host,
+            &cluster_id,
+            &launcher,
             false, // publickey のみ。人の入力は要らない（要るクラスタはここに来ない）
             AUTO_CONNECT_TIMEOUT,
             AUTO_CONNECT_TIMEOUT,
@@ -676,7 +711,9 @@ fn cluster_connector(masters: ClusterMasters) -> task_dispatch::dispatcher::Clus
 
 /// ADR-0053 D3（Phase 66）: celeris が spawn したフォールバックの `ssh -N -L` 子を保持する場所。
 /// `-O forward` が届かないとき（bnode150 が pegasus から直接届かない等）だけここに増える。
-/// Drop で全部落とす（celeris の終了とともに閉じる。`ClusterMaster` の Drop と同じ理由）。
+/// Drop で全部落とす（celeris の終了とともに閉じる）。**master 本体（`ClusterMaster`）とは違い**、
+/// この子は ADR-0060 の対象外（celeris の cgroup の中のまま。滅多に使わないフォールバック経路なので、
+/// このフェーズでは触っていない）。
 #[derive(Default)]
 struct TunnelForwardRegistry(HashMap<String, std::process::Child>);
 

@@ -888,6 +888,7 @@ mod tests {
             worktree_paths: vec![],
             remove_worktree_when: "never".into(),
             forwards: vec![],
+            master_launcher: "auto".into(),
         }
     }
 

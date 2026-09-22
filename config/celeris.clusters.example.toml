@@ -62,6 +62,12 @@ delete_on_push = false            # 既定 false。既存プロジェクトの�
 # ADR-0032 §1 実機確認: pegasus は既存の ControlMaster が生きていて未確認だが、人間の申告どおり sirius と
 # 同じ扱い（publickey の後に keyboard-interactive = TOTP が来る）にする。
 auth = "totp"                     # GUI の「接続」→ 検証コードの入力で張る（ADR-0032 D4）
+# master_launcher = "auto"        # ADR-0060: 既定 "auto"（systemd-run が PATH にあり XDG_RUNTIME_DIR が
+#                                  # 設定されていれば "systemd-run" を使う。celeris@.service の環境ならそう
+#                                  # なる）。ssh の ControlMaster を celeris の unit の cgroup の外（一時
+#                                  # scope）で起こし、昇格（停止→起動・ライブ切替）で master を切らない。
+#                                  # 明示するなら "systemd-run"（強制）か "inline"（従来どおり celeris の
+#                                  # 直接の子。cgroup の中に留まる）。
 # worktree_root = "/work/NBB/rmaeda/.celeris-worktrees"  # 既定は <project>/.celeris-worktrees
 # worktree_base = "HEAD"          # 切り出す元。"origin/main" なども指定できる
 # worktree_paths = ["src", "Cargo.toml", "lib/pluvio/src"]

@@ -77,6 +77,12 @@ pub fn spawn_connect_start(
     }
     let host = cluster.host.clone();
     let interactive = cluster.auth == "totp";
+    // ADR-0060（Phase 103）: master の起こし方を解決する（環境の判定は同期・軽いのでここで済ませる）。
+    let launcher = task_worker::cluster_login::resolve_master_launcher(
+        &cluster.master_launcher,
+        task_worker::cluster_login::systemd_run_on_path(),
+        task_worker::cluster_login::xdg_runtime_dir_is_set(),
+    );
 
     tokio::spawn(async move {
         // 押し直しに備えて、古いセッションは先に畳む（アカウントのログインと同じ）。
@@ -86,6 +92,8 @@ pub fn spawn_connect_start(
         let outcome = start_connect(
             &["ssh".to_string()],
             &host,
+            &id,
+            &launcher,
             interactive,
             PROMPT_TIMEOUT,
             CONNECT_TIMEOUT,
@@ -210,8 +218,9 @@ pub fn spawn_connect_cancel(
                 })
                 .await;
         }
-        // celeris が保持している master を落とす（Drop でプロセスグループごと SIGKILL）。
-        drop_master(&masters, &id);
+        // celeris が保持している master を落とす（ADR-0060: 明示的な切断なので、`ClusterMaster::kill`
+        // でプロセスグループごと SIGKILL する。通常の Drop はもう殺さない）。
+        drop_master(&masters, &id).await;
         // 人が張った master が残っているかもしれないので、こちらも閉じる。
         let result = disconnect(&["ssh".to_string()], &host).await;
         tracing::info!(who = "admin", op = "cluster_disconnect", cluster = %id, "cluster: disconnect requested");
@@ -247,12 +256,18 @@ fn hold_master(
     }
 }
 
-fn drop_master(masters: &ClusterMasters, id: &str) {
-    match masters.lock() {
-        Ok(mut held) => {
-            held.remove(id);
+/// ADR-0060: 登録簿から取り除くだけでは master は死なない（通常の Drop はもう殺さない）。
+/// 明示的な切断（`DELETE /clusters/{id}/connect`）だからここで `ClusterMaster::kill` を呼ぶ。
+async fn drop_master(masters: &ClusterMasters, id: &str) {
+    let master = match masters.lock() {
+        Ok(mut held) => held.remove(id),
+        Err(_) => {
+            tracing::warn!(cluster = %id, "cluster: master registry is poisoned");
+            None
         }
-        Err(_) => tracing::warn!(cluster = %id, "cluster: master registry is poisoned"),
+    };
+    if let Some(master) = master {
+        master.kill().await;
     }
 }
 

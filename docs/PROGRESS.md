@@ -14494,3 +14494,120 @@ celeris 側は無変更（`crates/` 無変更、`docs/celeris-api-v1.md` 無変�
 - `promote.sh cd18773d6341` → mode=live、DB バックアップ 14M、新 celeris が 2 秒で active、GUI 切替 2 秒、`current -> releases/cd18773d6341`。`GET /health` release=cd18773d6341 role=active schema_version=25、GUI `/healthz` 同 release。
 - 回帰の検査: `pnpm e2e:mock` に composer の実送信検査（home@mobile / org-node@mobile / home@desktop。偽 celeris に `POST /console/instruct`）を追加。修正前のコードで実際に 405 を検出したことを Phase 102 節に記録。`mobile-audit` の `tap` ルールは 404 だけを無視し 405 等は違反に数えるようにした。
 - 実機（Nothing Phone）でホーム画面から送信して 405 が再発しないことは人が確認する。
+
+## Phase 103 — クラスタの ssh ControlMaster をリリース（昇格）で切らない（ADR-0060、Rust のみ。完了日 2026-09-22）
+
+本番（2026-09-22）で、昇格（停止→起動・ライブ切替のいずれも）のたびに pegasus の `connected` が
+`false` に戻り、TOTP の再ログインが毎回必要になる不具合が観測された（13:18 の停止→起動、13:44 と
+15:18 のライブ切替）。原因の分析と決定は `docs/adr/0060-ssh-master-outside-the-daemon-cgroup.md` を見よ。
+要点だけここに書く。
+
+### 原因（実機の観測 + コード調査）
+
+1. **cgroup 経由の巻き添え**: master（`ssh -M -N <host>`）は celeris の子として起き、`ControlPersist`
+   で認証後に自分を切り離す（PPID 1）が、**`celeris@<sha12>` unit の cgroup には残ったまま**になる。
+   unit の `KillMode`（`deploy/systemd/celeris@.service`）は既定の `control-group` なので、unit が
+   止まると cgroup 内の全プロセスに `SIGTERM` が飛び、切り離された master も道連れに死ぬ。
+2. **celeris 自身の Rust コードも殺していた（コードを読んで判明。実機で直接は確認していないが、
+   1 の観測と整合する）**: `crates/celeris/src/main.rs` は `std::process::exit` を呼ばず、`SIGTERM` →
+   `tick_loop` が `Ok(Exit::..)` を返す → `main()` が普通に戻る、という正常終了の経路を通る。この
+   ため `ClusterMasters`（`Arc<Mutex<HashMap<..,ClusterMaster>>>`）はスタック巻き戻しで drop され、
+   旧い `impl Drop for ClusterMaster`（drop のたびにプロセスグループへ `SIGKILL`）がすべての master を
+   殺していた。cgroup の問題だけ直しても、この経路は残ったままだった。
+
+### 条件と実装
+
+**条件 1: master は `systemd-run --user --scope` で celeris の cgroup の外に起こす（既定 `auto`）**
+
+- `crates/task-worker/src/cluster_login.rs`: `MasterLauncher`（`Inline` / `SystemdRun { program }`）、
+  `resolve_master_launcher`（純関数。`"systemd-run"`/`"inline"` は強制、`"auto"` は
+  `has_systemd_run && has_xdg_runtime_dir` のときだけ `SystemdRun`）、`launch_master_command`（純関数。
+  `systemd-run --user --scope --quiet --unit celeris-ssh-master-<id>-<短い乱数> --description "celeris
+  ssh master (<id>)" -- <program> <args...>` を組み立てる。クラスタ id は systemd のユニット名として
+  安全な文字だけに落とす）、`path_has_executable`/`systemd_run_on_path`/`xdg_runtime_dir_is_set`
+  （`which systemd-run` 相当と `XDG_RUNTIME_DIR` の確認）を追加。`start_connect`/`start_publickey`/
+  `start_totp` は `cluster_id: &str` と `launcher: &MasterLauncher` を新たに受け取る。
+- `crates/celeris/src/config.rs`: `ClusterConfig::master_launcher`（既定 `"auto"`）を追加し、
+  `Config::validate` で `"auto"`/`"systemd-run"`/`"inline"` の 3 値だけを受け付ける。
+- `crates/celeris/src/cluster_admin.rs::spawn_connect_start`（GUI の手動接続）と
+  `crates/celeris/src/lib.rs::cluster_connector`（ディスパッチャの自動接続。`master_launchers` で
+  起動時に一度だけ id → `MasterLauncher` の表を作り、クロージャに渡す）の両方を、解決した
+  `MasterLauncher` で `start_connect` を呼ぶように変更した。
+- **実行したコマンド**: `cargo test -p task-worker --lib cluster_login`
+- **出力の要点**: exit 0、**21 passed**（新規 11 件を含む: `launch_master_command_wraps_with_systemd_run`
+  〈argv が仕様どおり〉、`launch_master_command_sanitizes_the_cluster_id_in_the_unit_name`、
+  `launch_master_command_inline_is_unchanged`、`resolve_master_launcher_auto_needs_both_conditions`、
+  `resolve_master_launcher_explicit_values_ignore_the_environment`、
+  `path_has_executable_finds_an_executable_file_in_one_of_the_path_dirs`、
+  `path_has_executable_ignores_non_executable_files`、
+  `fake_systemd_run_execs_ssh_and_preserves_the_askpass_env`〈偽 `systemd-run`〈`--` の後を `exec` する
+  だけのスクリプト〉を経由しても `SSH_ASKPASS` 等の環境変数が末端の ssh まで届くことを実プロセスで確認〉、
+  `cluster_master_kill_terminates_the_child_explicitly`）。
+
+**条件 2: 接続成立後は celeris の終了・再起動で master を殺さない**
+
+- `crates/task-worker/src/cluster_login.rs::ClusterMaster` から `impl Drop` を削除し、`kill(self)`
+  （明示的切断専用。`SIGKILL` + `wait`）に置き換えた。`spawn_master` の `Command` は `kill_on_drop(true)`
+  → `false` に変更（tokio のオーファンキューが reap するので zombie は残らない）。
+  `ClusterConnectSession`（TOTP のプロンプト待ち = pending 状態）の `cancel`/`Drop` は変更していない
+  （保留中の取り消しは従来どおり子を殺す）。
+- `crates/celeris/src/cluster_admin.rs::drop_master` を `async fn` にし、`DELETE /clusters/{id}/connect`
+  のときだけ `ClusterMaster::kill().await` を呼ぶ（`ssh -O exit` も従来どおり続けて呼ぶ）。
+- **既存テストの書き換え**: `publickey_connects_after_a_delay` は「drop したら偽 ssh プロセスが**生きて
+  いる**こと」を確認するように反転させた（以前は「drop したら死ぬ」を確認していた）。テストの後始末は
+  `nix::sys::signal::kill` で明示的に行う。
+- **実行したコマンド**: `cargo test -p task-worker --lib cluster_login`（上と同じ実行に含む）
+- **出力の要点**: `publickey_connects_after_a_delay` と `cluster_master_kill_terminates_the_child_explicitly`
+  がそれぞれ「殺さない」「明示的に殺せば死ぬ」の両方を確認、exit 0。
+
+**条件 3: `[[clusters.forwards]]`（Qwen トンネル）が二重 bind をエラーにしないことの確認（コード変更なし）**
+
+- `crates/task-dispatch/src/dispatcher.rs::refresh_one_forward`（Phase 85）は、listener（手元の TCP
+  connect probe）が生きていれば `tunnel_forward_ensurer`（`-O forward` の再発行）を一切呼ばない設計に
+  既になっていることをコードを読んで確認した（`self.probe_listener(&fwd.listen)` が true なら
+  `ensure(...)` の呼び出し自体をスキップする）。master が昇格をまたいで生き残れば forward の listener も
+  生きたままなので、新リリースは起動直後にこの probe が真を返し、`-O forward` の再発行は起きない。
+  この Phase では `dispatcher.rs` は変更していない。
+- **実行したコマンド**: `cargo test -p task-dispatch --lib`（既存テストの回帰が無いことの確認）
+- **出力の要点**: exit 0、**224 passed / 0 failed**（`tunnel_` 関連テストを含め既存の tunnel 関連テスト
+  すべて green。`dispatcher.rs` は変更していないので件数は phase 開始前と同じ）。
+
+**条件 4: ゲート**
+
+- **実行したコマンド**: `cargo test --workspace --no-fail-fast`
+- **出力の要点**: exit 0、**1843 passed / 0 failed**（+doctest 3 ignored）。
+- **実行したコマンド**: `cargo clippy --workspace --all-targets -- -D warnings`
+- **出力の要点**: exit 0（warning 0）。
+- **実行したコマンド**: `git status --porcelain -- docs/api docs/protocol`
+- **出力の要点**: 差分ゼロ（`crates/task-api/src/types.rs` を変えていないので schema 再生成は不要。
+  `gui/docs/celeris-api-v1.md` も無変更）。
+
+### 触った副作用（見つけて直した既存コードの前提のズレ）
+
+- `crates/celerisctl/src/commands/worker.rs` のテスト用 `ClusterConfig` リテラル生成（`fn cluster(...)`）に
+  `master_launcher: "auto".into()` を追加（`ClusterConfig` にフィールドを足したので構造体リテラルの
+  漏れを埋めた。振る舞いは変えていない）。
+- `crates/celeris/src/lib.rs::TunnelForwardRegistry` の Drop コメントが「`ClusterMaster` の Drop と同じ
+  理由」と書いていたが、`ClusterMaster` はもう Drop で殺さないので古くなっていた。コメントだけ直した
+  （フォールバックの `ssh -N -L` 子自体の挙動は変えていない。ADR-0060「採らない」節に明記）。
+
+### 未解決事項
+
+- **実機未確認（ADR-0009 P-34）**。親エージェントが昇格 → 人が pegasus に一度接続 → **次の昇格の後も**
+  `GET /clusters` の pegasus `connected=true` が維持され、`systemctl --user status
+  'celeris-ssh-master-pegasus-*'`（または `systemd-cgls --user`）で ssh master が
+  `celeris-ssh-master-pegasus-*` scope に居ることを確認する必要がある。
+- フォールバックの `ssh -N -L`（`tunnel_forward_ensurer` が bnode150 直結不可のときに張る別プロセス）は
+  今回 cgroup の外に出していない（滅多に使わない経路。ADR-0060「採らない」節）。本番で頻発するようなら
+  別 Phase で扱う。
+- P-100-1 で「celeris 自身の Rust コードも master を殺していた」ことをコード調査で見つけたが、本番の
+  ログでこの経路（cgroup 経由か Rust の Drop 経由か）のどちらが実際に効いていたかまでは切り分けていない
+  （両方直したので実害はない）。
+
+### 提案
+
+- フォールバックの `ssh -N -L` トンネル子プロセスも、頻度が上がるようなら同じ `systemd-run --scope` に
+  乗せる（ADR-0060 の対象を広げる）。
+- `systemd-run` が使えない環境（`auto` が `inline` に倒れたとき）向けに、`GET /daemon` か
+  `GET /clusters` に「この master は cgroup の外に出ていない」旨を出せると運用上わかりやすい
+  （今回は範囲外。GUI・API の変更は禁止されていたため見送った）。
