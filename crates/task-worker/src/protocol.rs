@@ -393,8 +393,10 @@ pub struct RunContext {
     /// ADR-0033 D4: 分解・委譲できる run に渡す組織図（どの課に何を振るかを `assignee` で決めさせる）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub organization: Vec<OrgNodeContext>,
-    /// ADR-0059 D6（Phase 99）: **CoS の対話 run** にだけ渡す `[[clusters]]` の一覧（id・接続状態・
-    /// 実効の作業ディレクトリ）。CoS 以外の run・継続中の run では常に空。
+    /// ADR-0059 D6（Phase 99）/ Phase 99b 追記: **CoS の対話 run** にだけ渡す `[[clusters]]` の一覧
+    /// （id・接続状態・実効の作業ディレクトリ）。`recent_work` / `knowledge` / `profile` / `role` と
+    /// 同じく継続中の run でも毎回渡す（クラスタの登録・接続状態は差分でなく「いまの状態」）。CoS 以外
+    /// の run では常に空。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub clusters: Vec<ClusterContext>,
     /// ADR-0033 D4（Phase 28）: 対話用タスクの run にだけ `Some`。委譲・`Question` を使わせず、
