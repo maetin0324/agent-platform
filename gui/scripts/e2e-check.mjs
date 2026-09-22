@@ -26,6 +26,12 @@
 //   4. `/knowledge/skills` が描画すること（`knowledge-skills`）。
 //   5. 実在するタスク（`/tasks/<id>`）でタブ（概要・タイムライン・変更・ファイル・成果物）を切り替え、
 //      対応する節（`info-section` 等）が出ること。`?tab=` を差し替える `<Link>` のクリックだけで、POST は無い。
+//
+// Phase 102 追記（本番不具合の回帰検査）: 上記は「読み取りだけ」の原則どおりだが、`checkConsoleComposerSubmit`
+// だけは例外的に `POST /console/instruct` を送る（ホーム＝インデックスルートからの送信が 405 になっていた
+// 回帰の検査。ADR-0057 追記）。読み取り専用という staging（`e2e:staging`）の前提は崩さないよう、この 1 つ
+// だけ `mode === "mock"` のときにしか呼ばない（`scripts/lib/celeris-fixture.mjs` が偽の
+// `POST /api/v1/console/instruct`〈202 固定応答〉を持つ）。
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { createRequire } from "node:module";
@@ -160,6 +166,85 @@ async function loadChromium() {
   const require = createRequire(path.join(GUI_DIR, "package.json"));
   const { chromium } = require("@playwright/test");
   return chromium;
+}
+
+/**
+ * Phase 102（本番不具合の回帰検査。ADR-0057 追記）: Console composer（入力欄）から実際に送信し、
+ * エラー画面（React Router のエラー境界。`~/root.tsx::ErrorPanel` は `404`/`405` のような状態コードだけの
+ * `h1` を出す）に置き換わらないこと、送信後に入力欄が空になる（成功）か送信中表示のまま（まだ pending）で
+ * あることを見る。**書き込み**（`POST /console/instruct`）を伴うので `pnpm e2e:mock`（偽 celeris）だけで
+ * 走らせる（`pnpm e2e:staging` は本番 DB のスナップショットに対して読み取り専用、というこの検査全体の
+ * 前提〈ファイル冒頭のコメント〉を崩さないため。呼び出し側で `mode === "mock"` のときだけ呼ぶ）。
+ * 2 つの composer インスタンス（モバイル・デスクトップ、ADR-0057 D2）が同時に DOM にいるので、`:visible`
+ * （CSS の `lg:hidden`/`hidden lg:block` で片方だけが実際に見える）で対象を絞る。
+ * @param {import("@playwright/test").Browser} browser
+ * @param {string} guiBase
+ * @param {string} guiOrigin
+ * @param {{ device: object, routePath: string, label: string }} target
+ * @returns {Promise<string[]>}
+ */
+async function checkConsoleComposerSubmit(browser, guiBase, guiOrigin, { device, routePath, label }) {
+  const failures = [];
+  const context = await browser.newContext(device);
+  await context.route("**/*", (route) => {
+    const url = new URL(route.request().url());
+    return url.origin === guiOrigin ? route.continue() : route.abort();
+  });
+  const page = await context.newPage();
+  /** @type {string[]} */
+  const consoleErrors = [];
+  page.on("console", (msg) => {
+    if (msg.type() === "error") consoleErrors.push(msg.text());
+  });
+  page.on("pageerror", (err) => consoleErrors.push(err.message));
+  try {
+    await page.goto(`${guiBase}${routePath}`, { waitUntil: "load", timeout: 30_000 });
+    const textarea = page.locator('[data-testid="console-text"]:visible');
+    await textarea.waitFor({ state: "visible", timeout: 10_000 });
+    await textarea.fill("e2e-check: Phase 102 の 405 回帰検査");
+    await page.locator('[data-testid="console-send"]:visible').click();
+    await page.waitForTimeout(500);
+
+    // `~/root.tsx::ErrorPanel` は 404/405 等を状態コードだけの `h1`（"404"・"405"…）として描く。405
+    // そのもの（インデックスルートの action 解決ミス）に加え、他の状態コードでもエラー画面自体は違反。
+    const errorHeadings = await page
+      .locator("h1")
+      .filter({ hasText: /^\d{3}$/ })
+      .allTextContents();
+    if (errorHeadings.length > 0) {
+      failures.push(`console composer submit (${label}): error page rendered (heading "${errorHeadings[0]}")`);
+    }
+    const composerStillThere = await page.locator('[data-testid="console-text"]:visible').count();
+    if (composerStillThere === 0) {
+      failures.push(
+        `console composer submit (${label}): composer disappeared after submit (error boundary likely replaced the page)`,
+      );
+    } else {
+      const value = await textarea.inputValue().catch(() => null);
+      const submitting = await page
+        .locator('[data-testid="console-send"]:visible')
+        .isDisabled()
+        .catch(() => false);
+      if (value !== "" && !submitting) {
+        failures.push(
+          `console composer submit (${label}): textarea not cleared and send button not showing "submitting" ` +
+            `after send (value="${value}")`,
+        );
+      }
+    }
+    const routerErrors = consoleErrors.filter((m) =>
+      /does not have an action|no way to handle the request|method not allowed/i.test(m),
+    );
+    if (routerErrors.length > 0) {
+      failures.push(`console composer submit (${label}): console error(s): ${routerErrors.join(" | ").slice(0, 300)}`);
+    }
+  } catch (e) {
+    failures.push(`console composer submit (${label}): ${/** @type {Error} */ (e).message}`);
+  } finally {
+    await page.close();
+    await context.close();
+  }
+  return failures;
 }
 
 async function main() {
@@ -393,6 +478,26 @@ async function main() {
         await page.close();
       }
       await context.close();
+    }
+
+    // Phase 102（本番不具合: ホーム〈インデックスルート〉からの CoS 送信が 405 になる回帰の検査）。
+    // 書き込み（POST）を伴うので mock モードだけ。org-node はモバイルだけで十分（非インデックスルートは
+    // 元々 405 を踏まないが、composer が root/Console のどちらからも同じ動きをすることの確認を兼ねる）。
+    if (mode === "mock") {
+      const submitTargets = [
+        { device: MOBILE_DEVICE, routePath: "/", label: "home@mobile" },
+        { device: MOBILE_DEVICE, routePath: `/org/${ORG_NODE_ID}`, label: "org-node@mobile" },
+        { device: { viewport: { width: 1280, height: 800 } }, routePath: "/", label: "home@desktop" },
+      ];
+      for (const target of submitTargets) {
+        const submitFailures = await checkConsoleComposerSubmit(browser, guiBase, guiOrigin, target);
+        failures.push(...submitFailures);
+      }
+    } else {
+      notes.push(
+        "staging mode: skipped console composer submit checks (they POST /console/instruct; " +
+          "e2e:staging must stay read-only against the production snapshot)",
+      );
     }
 
     // 受け入れ条件 5: 実在するタスクでタブを切り替える（読み取りのみ。`?tab=` を差し替える <Link> のクリック）。

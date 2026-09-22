@@ -934,17 +934,21 @@ async function checkPrimaryActionTap(page, route) {
   if (!target.found || target.disabled) return violations;
   const consoleErrors = [];
   const onConsole = (msg) => {
-    // 偽の celeris（`celeris-fixture.mjs::setupMockCeleris`）は GET しか実装しない（このリポジトリの
-    // e2e/監査の慣例: 書き込みを試さない）ので、primary action が変更系の POST を発行すると、GUI の
-    // action は celeris からの 404（"not_found"）をそのまま HTTP ステータスとして返す（`clusters.tsx`
-    // の action が celeris のエラーの status をそのまま反映する、等）。Chromium はこの種の非 2xx な
-    // 応答を、アプリの JS が実際に `console.error` を呼んだかどうかに関わらず「Failed to load resource:
-    // the server responded with a status of NNN」として自動的にコンソールへ出す（ブラウザ自身のネット
-    // ワークログで、アプリのバグの兆候ではない）。この検査が見たいのは「タップの結果アプリが例外を
-    // 投げる／処理し損ねる」ことなので、この定型メッセージだけは対象から除く。
+    // 偽の celeris（`celeris-fixture.mjs::setupMockCeleris`）は GET（と、Phase 102 で足した
+    // `POST /console/instruct` の 1 本）しか実装しない（このリポジトリの e2e/監査の慣例: 基本は書き込みを
+    // 試さない）ので、primary action が他の変更系の POST を発行すると、GUI の action は celeris からの
+    // 404（"not_found"）をそのまま HTTP ステータスとして返す（`clusters.tsx` の action が celeris の
+    // エラーの status をそのまま反映する、等）。Chromium はこの種の非 2xx な応答を、アプリの JS が実際に
+    // `console.error` を呼んだかどうかに関わらず「Failed to load resource: the server responded with a
+    // status of NNN」として自動的にコンソールへ出す（ブラウザ自身のネットワークログで、アプリのバグの
+    // 兆候ではない）。この検査が見たいのは「タップの結果アプリが例外を投げる／処理し損ねる」ことなので、
+    // この定型メッセージのうち**フィクスチャが未実装なことがわかっている 404** だけを対象から除く。
+    // Phase 102（本番不具合の再発防止）: 以前はここが `\d+`（任意の状態コード）を無視していたため、
+    // ホーム（インデックスルート）からの送信が 405 になる回帰をこの検査は検出できなかった。405 や
+    // それ以外の状態コード（アプリのバグの兆候になりうる）は無視せず違反として数える。
     if (
       msg.type() === "error" &&
-      !/^Failed to load resource: the server responded with a status of \d+/.test(msg.text())
+      !/^Failed to load resource: the server responded with a status of 404/.test(msg.text())
     ) {
       consoleErrors.push(msg.text());
     }

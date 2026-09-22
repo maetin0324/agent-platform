@@ -7107,3 +7107,128 @@ celeris の応答ではなく GUI 側の固定文言なので、422 の実際の
 ### 提案
 
 - なし（今回の指示の範囲で閉じた）。
+
+## Phase G49 — スマホのホーム画面から CoS に送信すると 405 になる回帰の修正（ADR-0057 追記、celeris Phase 102、緊急の不具合修正。完了日 2026-09-22）
+
+本番（2026-09-22、Nothing Phone、`home-dev:7700`）で、Console の入力欄からホーム（`/`）越しに送信すると
+`405 Error: Route "root" does not have an action, but you are trying to submit to it.` のエラー画面に
+なる不具合が報告された。celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。
+
+### 原因（受け入れ条件 1、調査）
+
+Phase 92（ADR-0057）で composer（入力欄）を `~/root.tsx` のレイアウトレベルへ移し、送信先は
+`~/components/ConsoleComposer.tsx` の `submit()` が `fetcher.submit(..., { action: pathname })` で
+`useLocation().pathname` をそのまま指定していた。`/`（`~/routes/home.tsx`）は React Router の
+**インデックスルート**で、素の `action: "/"` はインデックスルート自身ではなく親（`root`。action 無し）に
+解決される仕様（インデックスルート自身へ送るには `"/?index"` の形が要る）。`/org/:id`
+（`~/routes/org.$id.tsx`）は非インデックスなので影響しなかった（ADR-0057 の D2 コメントにも「どちらも
+同じ `action` を持つ」と書いてあったが、実際には `/` だけ違った——Phase 92 のテストが純関数だけで、
+`pnpm e2e:mock` は GET のみの偽 celeris に対し「変更系のタップは 404 を無視」する作りだったため、この
+回帰を検出できなかった）。
+
+### 修正前に検査が落ちることの確認（受け入れ条件「修正前に確認してから直す」）
+
+`gui/scripts/e2e-check.mjs` に新設した `checkConsoleComposerSubmit`（下記「2.」）を、**修正を当てる前の
+コードに対して**実行し、実際に検出することを確認した:
+
+```
+"failures": [
+  "console composer submit (home@mobile): error page rendered (heading \"405\")",
+  "console composer submit (home@mobile): composer disappeared after submit (error boundary likely replaced the page)",
+  "console composer submit (home@mobile): console error(s): Route \"root\" does not have an action, but you are trying to submit to it. To fix this, please add an `action` function to the route",
+  "console composer submit (home@desktop): error page rendered (heading \"405\")",
+  "console composer submit (home@desktop): composer disappeared after submit (error boundary likely replaced the page)",
+  "console composer submit (home@desktop): console error(s): Route \"root\" does not have an action, but you are trying to submit to it. To fix this, please add an `action` function to the route"
+]
+```
+
+（org-node@mobile は失敗しなかった——非インデックスルートなので影響が無いという原因の見立てと一致する。）
+`ConsoleComposer.tsx::submit()` を `action: consoleComposerActionFor(pathname)` に戻すと、同じ検査が
+`"failures": []` になった。本番の実際の文言（"Route \"root\" does not have an action, but you are trying
+to submit to it. To fix this, please add an `action` function to the route"）とも一致した。
+
+### 1. 修正（受け入れ条件 1）
+
+`app/lib/console-composer.ts` に純粋関数 `consoleComposerActionFor(pathname): string` を追加
+（`/` → `/?index`、それ以外はそのまま）。`ConsoleComposer.tsx` の `submit()` は
+`action: consoleComposerActionFor(pathname)` を使う（登録側〈`useRegisterConsoleComposer`〉が action を
+渡す代替案は採らなかった——「判断ロジックは `~/lib/console-composer.ts` の純粋関数に 1 か所へ集める」
+という ADR-0057 D1 の既存方針に揃えたため）。決定は `docs/adr/0057-console-composer-layout-level.md` の
+末尾に `## Phase 102 追記（2026-09-22）` として追記した（本文は書き換えていない）。
+
+### 2. 回帰を捕まえるテスト（受け入れ条件 2）
+
+- vitest（`test/unit/console-composer.test.ts`）: `consoleComposerActionFor("/")` === `"/?index"`、
+  `consoleComposerActionFor("/org/cos")` === `"/org/cos"`（境界 2 件）。
+- e2e（`gui/scripts/e2e-check.mjs::checkConsoleComposerSubmit`、`gui/scripts/lib/celeris-fixture.mjs` に
+  `POST /api/v1/console/instruct`〈202 固定応答 `{message_id, node_id: "cos", task_id}`〉を新設）:
+  `pnpm e2e:mock` のときだけ（**書き込み**を伴うため、`e2e:staging` は本番 DB スナップショットに読み取り
+  専用のままにする——ファイル冒頭のコメントに Phase 102 追記として明記）、home・org-node の composer に
+  実際に文字を入れてタップで送信し、(a) エラー画面（`~/root.tsx::ErrorPanel` の状態コードだけの `h1`）に
+  ならないこと、(b) composer 自体が消えない（エラー境界に置き換わらない）こと、(c) 送信後に入力欄が
+  空になる（成功）か送信中表示のまま（まだ pending）であること、(d) React Router のルーティングエラーの
+  コンソールメッセージが出ないこと、を見る。desktop viewport では home で 1 回。2 つの composer
+  インスタンス（モバイル・デスクトップ、ADR-0057 D2）が同時に DOM にいるので、`:visible` で対象を絞った
+  （`page.locator('[data-testid="console-text"]:visible')` 等）。
+
+### 3. `pnpm mobile-audit` の `tap` ルールの見落とし穴（受け入れ条件 3）
+
+`gui/scripts/mobile-audit.mjs::checkPrimaryActionTap`（Phase 91）は、タップ後のコンソールエラーのうち
+`/^Failed to load resource: the server responded with a status of \d+/`（**任意の**状態コード）を
+「フィクスチャが GET しか実装しないことによる定型メッセージ」として無視していた。これでは 405 も無視
+されてしまい、この検査は今回の回帰を検出できなかった（実際、`console-send` は初期状態でテキストが
+空なので `disabled` になり、Phase 91 以降ずっとタップ自体がスキップされていたため、この検査自体は
+今回の不具合には無関係だったが、将来 primary-action が composer 以外の 405 を踏んでも検出できない穴
+だった）。正規表現を **404 だけ**（`status of 404` 固定）を無視する形に狭め、405 を含むそれ以外の状態
+コードは違反として数えるようにした。「タップの結果アプリが例外を投げる／処理し損ねる」ことを見たいという
+検査の趣旨（既存コメント）に対し、404 以外は無視しない方が趣旨に合う。
+
+### 4. ゲート（受け入れ条件 4）
+
+すべて `gui/` で、`export PATH=/usr/lib/node_modules/corepack/shims:$PATH` を先に実行。
+
+| ゲート | コマンド | 結果 |
+| --- | --- | --- |
+| 依存の再取得 | `pnpm install --frozen-lockfile` | exit 0 |
+| lint | `pnpm lint` | 最初 `scripts/e2e-check.mjs` の整形差分で失敗 → `pnpm biome check --write .` で
+  解消 → 再実行で exit 0（254 files） |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0、**1054 passed**（68 files。Phase G48 時点の 1052 から `consoleComposerActionFor`
+  の 2 テスト増） |
+| build | `pnpm build` | exit 0（`INEFFECTIVE_DYNAMIC_IMPORT` 警告 2 件は既存・無関係） |
+| 型生成の差分ゼロ | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | exit 0（差分ゼロ。
+  celeris の型は変えていない） |
+| mobile-audit 1 回目 | `pnpm mobile-audit` | `routes=26 schemes=2 violations=0` |
+| mobile-audit 2 回目 | `pnpm mobile-audit` | `routes=26 schemes=2 violations=0` |
+| mobile-audit 3 回目（時間計測込み） | `pnpm mobile-audit` | `routes=26 schemes=2 violations=0`、93.0 秒
+  （120 秒予算内） |
+| e2e:mock | `pnpm e2e:mock` | 修正前は `"ok": false`、6 failures（上記「修正前に検査が落ちることの確認」）。
+  修正後は `"ok": true`、`"failures": []`（新設した composer 送信検査 3 件を含む） |
+
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` は
+このフェーズのスコープ外（実行していない。Phase 80 以降の GUI-only フェーズと同じ扱い）。
+
+### 変更したファイル
+
+- `gui/app/lib/console-composer.ts`（`consoleComposerActionFor` 新設）
+- `gui/app/components/ConsoleComposer.tsx`（`submit()` が `consoleComposerActionFor` を使う）
+- `gui/test/unit/console-composer.test.ts`（境界テスト 2 件）
+- `gui/scripts/lib/celeris-fixture.mjs`（`POST /api/v1/console/instruct` の偽エンドポイント）
+- `gui/scripts/e2e-check.mjs`（`checkConsoleComposerSubmit`、mock モード限定の呼び出し、冒頭コメント追記）
+- `gui/scripts/mobile-audit.mjs`（`tap` ルールの無視対象を 404 だけに限定）
+- `docs/adr/0057-console-composer-layout-level.md`（`## Phase 102 追記` を追加。既存本文は書き換えていない）
+- `docs/PROGRESS.md`（`## Phase 102`）
+- `gui/docs/PROGRESS.md`（この節）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34）。本番での実際の送信確認は親エージェントが昇格後に行う。
+- `pnpm e2e:staging`（`verify.sh` から呼ぶ経路）では composer 送信検査を実行しない（本番 DB スナップショット
+  への書き込みを避けるため）。本番での確認は上記の実機確認と合わせて行う必要がある。
+- `~/org.$id.tsx` 自身は今回の 405 を踏まなかったが、将来 composer 以外の管理系フォームが `useLocation().
+  pathname` を素の `action` に使う実装を足すと同じ穴（`/` がインデックスルートであること）を踏みうる。
+  横展開の検査（他の `fetcher.submit`/`<Form action={pathname}>` の grep）は今回のスコープ外。
+
+### 提案
+
+- なし（今回の指示の範囲で閉じた）。

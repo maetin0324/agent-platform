@@ -82,3 +82,14 @@ Phase 91（ADR-0055 ラウンド 15）で、`~/root.tsx` の `.animate-fade-in`�
   0 件を維持する（構造的に直ったので待ちはもう理屈の上では不要だが、将来の再発検知のため両方残す）。
 - デスクトップの見た目・DOM 構造は不変（`Console` の右カラム内、`position: static`）。
 - 実機（`env(safe-area-inset-bottom)` を含む本当の意味での確認）は未確認のまま（ADR-0009 P-34）。
+
+## Phase 102 追記（2026-09-22）
+
+本番でホーム（`/`）から CoS に送信すると 405 になる不具合が見つかった。D2 の `fetcher.submit(...,
+{ action: pathname })` が `pathname` をそのまま送信先にしていたが、`/` は home.tsx の**インデックスルート**
+で、React Router では素の `action: "/"` はインデックスルート自身ではなく親（`root`。action 無し）に解決
+される（`"/?index"` の形がインデックスルート自身を指す React Router の仕様）。`/org/:id` は非インデックス
+なので影響しなかった。修正は「決め方は純粋関数」という D1 の方針どおり `~/lib/console-composer.ts` に
+`consoleComposerActionFor(pathname)`（`/` → `/?index`、それ以外はそのまま）を足し、`ConsoleComposer.tsx`
+の `submit()` から呼ぶ形にした（登録側が action を渡す代替案は採らなかった。判断ロジックを 1 か所
+〈`console-composer.ts`〉に保つ既存の方針に揃えたため）。

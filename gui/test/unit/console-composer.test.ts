@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { buildInstructBody } from "~/lib/console";
-import { consoleComposerScopeForLocation, isConsoleComposerPathname } from "~/lib/console-composer";
+import {
+  consoleComposerActionFor,
+  consoleComposerScopeForLocation,
+  isConsoleComposerPathname,
+} from "~/lib/console-composer";
 
 /**
  * ADR-0057（Phase 92「Console composer をレイアウトレベルへ」）。composer 自体（`~/components/
@@ -77,5 +81,16 @@ describe("composer の送信は「いま見ているノード」へ飛ぶ（受�
   it("/（scope=all）では既定の scope を付けない（celeris の既定 = CoS）", () => {
     const scope = consoleComposerScopeForLocation("/", "");
     expect(buildInstructBody("状況は？", null, scope)).toEqual({ text: "状況は？" });
+  });
+});
+
+describe("consoleComposerActionFor（送信先の action。Phase 102: home からの送信が 405 になる回帰の修正）", () => {
+  it("/（インデックスルート）は /?index へ送る（素の / だと React Router が親 root へ解決し 405 になるため）", () => {
+    expect(consoleComposerActionFor("/")).toBe("/?index");
+  });
+
+  it("/org/:id（非インデックス）はそのまま", () => {
+    expect(consoleComposerActionFor("/org/cos")).toBe("/org/cos");
+    expect(consoleComposerActionFor("/org/coding-poc")).toBe("/org/coding-poc");
   });
 });

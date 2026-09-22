@@ -14428,3 +14428,59 @@ Remote Desktop Commander（RDC）経由で home-dev のシェルを叩けるよ�
   - 監査: `GET /mcp/calls?client=chatgpt-rdc` → 4 件（tasks_list / task_comment / console_instruct / console_reply、すべて ok=true、console_reply latency 13010ms）。
 - 残り（人が行う。auto mode の分類器が RDC 関連のシェル操作を「外部からの入口」として拒否したため）: `bash scripts/rdc/setup-chatgpt-rdc.sh ~/.config/celeris/secrets/mcp-token-chatgpt-rdc` → `sudo -iu chatgpt-rdc -- celeris-chat --list` → tmux 内で `npx @wonderwhy-er/desktop-commander@latest remote`（device verification）→ ChatGPT の Developer mode で `https://mcp.desktopcommander.app/mcp` を connector に。完了後、`GET /mcp/calls?client=chatgpt-rdc` に ChatGPT 発の呼び出しが並ぶことを確認して追記する。
 - 判断待ち: MCP client `chatgpt`（旧 18201 用、scope に org:write / skills:write）を revoke するか。
+## Phase 102 — スマホのホーム画面から CoS に送信すると 405 になる回帰の修正（GUI のみ、緊急の不具合修正。完了日 2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更、`docs/celeris-api-v1.md` 無変更。GUI だけの Phase）。本番
+（2026-09-22、Nothing Phone、`home-dev:7700`）で、Console の入力欄からホーム画面越しに CoS へ送信すると
+`405 Error: Route "root" does not have an action, but you are trying to submit to it.` のエラー画面に
+なる不具合が報告された。詳細・証跡は `gui/docs/PROGRESS.md`「Phase G49」を参照（GUI の実装詳細は gui 側に
+書く、このリポジトリの慣例どおり）。
+
+要点:
+
+1. **原因**: Phase 92（ADR-0057）で入力欄（composer）をレイアウトレベル（`~/root.tsx`）へ移した際、送信先
+   （`fetcher.submit` の `action`）に `useLocation().pathname` をそのまま渡していた。`/`
+   （`~/routes/home.tsx`）は React Router の**インデックスルート**で、素の `action: "/"` は
+   インデックスルート自身ではなく親（`root`。action 無し）に解決される仕様のため 405 になる
+   （インデックスルート自身へ送るには `"/?index"` の形が要る）。`/org/:id` は非インデックスなので
+   影響しなかった。Phase 92 のテストが純関数だけで、`pnpm e2e:mock` の偽 celeris は GET しか実装せず
+   「変更系のタップは 404 を無視」する作りだったため、この回帰を検出できていなかった。
+2. **修正前に検査が落ちることを確認してから直した**（`gui/docs/PROGRESS.md` Phase G49 に全文）:
+   新設した e2e 検査を修正前のコードに対して実行し、本番と同じ文言のエラー（`Route "root" does not have
+   an action, ...`）と `405` の見出しを実際に検出することを確認したうえで修正を適用した。
+3. **修正**: `~/lib/console-composer.ts` に純粋関数 `consoleComposerActionFor(pathname)`（`/` →
+   `/?index`、それ以外はそのまま）を追加し、`ConsoleComposer.tsx::submit()` から呼ぶ（ADR-0057 D1 の
+   「判断ロジックは純粋関数に集める」方針どおり）。決定は `docs/adr/0057-console-composer-layout-level.md`
+   の末尾に `## Phase 102 追記` として追記した（既存本文は書き換えていない）。
+4. **回帰を捕まえるテストを 2 段で追加**: vitest（`consoleComposerActionFor` の境界 2 件）と、e2e
+   （`gui/scripts/e2e-check.mjs::checkConsoleComposerSubmit`。偽 celeris に `POST /console/instruct`
+   〈202 固定応答〉を新設し、home・org-node のモバイル、home のデスクトップで composer に実際に入力・
+   送信し、エラー画面に置き換わらないこと・入力欄が空になる/送信中表示になることを見る。**書き込みを
+   伴うので `pnpm e2e:mock` のときだけ**実行し、`pnpm e2e:staging`〈本番 DB スナップショット、読み取り
+   専用の前提〉では実行しない）。
+5. **`pnpm mobile-audit` の `tap` ルールの穴も直した**: 「変更系タップの 404 を無視」する正規表現が
+   任意の状態コード（`\d+`）を無視していたため、405 のような他の状態コードも無視されうる穴があった
+   （実際には Phase 91 以降 `console-send` は初期状態で `disabled` のためタップ自体スキップされており
+   今回の不具合そのものには無関係だったが、将来の同種の回帰を捕まえられない構造上の穴だった）。404 だけを
+   無視するように狭めた。
+6. **ゲート**: `pnpm install --frozen-lockfile`（exit 0）/ `pnpm lint`（整形差分 1 件を `biome check
+   --write` で解消後、exit 0、254 files）/ `pnpm typecheck`（exit 0）/ `pnpm test`（exit 0、**1054
+   passed**、68 files。Phase G48 の 1052 から +2）/ `pnpm build`（exit 0、既存の
+   `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件のみ）/ `pnpm gen:types && git diff --exit-code
+   app/celeris/types.ts`（差分ゼロ）/ `pnpm mobile-audit` ×3（**exit 0、`{"ok":true,"total":0}`、
+   `routes=26 schemes=2 violations=0`、実測 93.0 秒、120 秒予算内）/ `pnpm e2e:mock`（**修正前**は
+   `"ok":false`・6 failures、**修正後**は `"ok":true`・`"failures":[]`）すべて exit 0。
+   `crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings`
+   はこのフェーズのスコープ外（実行していない。Phase 80 以降の GUI-only フェーズと同じ扱い）。
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。親が昇格後、Nothing Phone 実機（または実機相当のモバイルブラウザ）から
+  ホーム画面の入力欄で実際に送信し、405 が再発しないことを確認する。
+- `pnpm e2e:staging` では composer 送信検査を実行しない（本番 DB スナップショットへの書き込みを避けるため）。
+  本番確認は上記の実機確認で兼ねる。
+- 本番 = Phase 65〜101/101b。実装中: Phase 102（このワークトリー。GUI のみ、緊急の不具合修正）。
+
+### 提案
+
+- なし（今回の指示の範囲で閉じた）。
