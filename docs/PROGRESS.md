@@ -13527,3 +13527,13 @@ GUI の実装詳細は gui 側に書く）。
   別途「ログの末尾を返す」読み取り専用エンドポイントを検討する（このリポジトリの慣例で `promote_failed.json`
   の `error` が末尾 20 行だけを運ぶのと同じ形にできる）。
 - 本番 = Phase 65〜93。実装中: Phase 94（このワークトリー）。
+
+### Phase 94 の本番反映（2026-09-22、ライブ切替）
+
+- merge: `worktree-agent-a6a37d5176ce60864` → main `4869205`（`docs/PROGRESS.md` の append 衝突 1 件は両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1789 / failed 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、`pnpm gen:types` 差分ゼロ（Phase 94 が types.ts を更新済み）、`pnpm typecheck` exit 0、`pnpm lint` exit 0、`pnpm test` 68 files / 1036 passed。push 済み。
+- `scripts/selfdeploy/release.sh main` → exit 0、`sha12=486920518d94 schema_version=24`、`changes.json: base=20a239226879 commits=3 files=13 sensitive=1`。sensitive は `crates/celeris/src/releases.rs`（昇格ロジックを持つファイル）。差分を確認したところ削除行は import の並べ替えのみで、追加は `read_verify_checks`/`read_gate` とテスト 2 件だけ（`start_promote` は不変）と判断して昇格した。ゲート 10 段すべて exit 0（cargo-test 127.0s、cargo-clippy 24.6s、pnpm-mobile-audit 90.9s、pnpm-e2e-mock 9.6s）。
+- `verify.sh 486920518d94` → exit 0、check 1〜4, 4b, 5（N-1 = 20a239226879）, 6（smoke done in 5.14s）すべて true、`ok=true live_ok=true`。
+- `promote.sh 486920518d94` → mode=live、DB バックアップ 14M、新 celeris が 2 秒で active（5/5）、GUI 切替 3 秒、`current -> releases/486920518d94`。
+- 実機確認（ADR-0058 の受け入れ）: `GET /health` release=486920518d94 role=active schema_version=24。`GET /releases`（本番、items 4 件）で現行を含む 3 リリースに `verify.checks` 7 件（id 1,2,3,4,4b,5,6 すべて ok=true）と `gate.steps` 10 段（ok=true）が載ることを確認。
+- 気づき（軽微）: ゲート成功時の `gate.failed_step` は `null` ではなく空文字 `""` で返る（`gate.json` が `failed_step: ""` を書くため）。GUI の `releaseGateStepRows` は step 名との一致で失敗段を決めるので表示に影響はないが、型が `Option<String>` である以上 celeris 側で空文字を `None` に正規化するのが自然。次の Rust ラウンドで直す（提案 P-94-1）。
+- 本番 `/releases` 画面の見た目（検査内訳・gate 内訳の `<details>`）はスマホ実機で人が確認する（ADR-0009 P-34）。
