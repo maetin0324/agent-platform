@@ -13350,3 +13350,13 @@ bottom)` の構造を確かめる検査を新設した。詳細・証跡は `gui
   その 0.25 秒を待ってから測るようにした。完全に無くすには `.animate-fade-in` を fixed な要素の祖先に
   しないアーキテクチャ変更が要る）。
 - 本番 = Phase 65〜90。実装中: Phase 91（このワークトリー。GUI のみ）。
+
+### Phase 91 の本番反映（2026-09-22、ライブ切替）
+
+- merge: `worktree-agent-a3596e8cd84a859e2` → main `d294f89`（衝突なし）。GUI ゲート（main 上）: `pnpm gen:types` 差分ゼロ、`pnpm typecheck` exit 0、`pnpm lint` exit 0、`pnpm test` 67 files / 1019 passed。push 済み。
+- `scripts/selfdeploy/release.sh main` → exit 0、`sha12=d294f898e72c schema_version=24`、`changes.json: base=9192a0bd5401 commits=3 files=6 sensitive=0`。ゲート 9 段すべて exit 0（cargo-test 129.7s、cargo-clippy 19.6s、cargo-build 30.6s、pnpm-typecheck 1.7s、pnpm-test 2.6s、pnpm-mobile-audit・pnpm-e2e-mock を含む）。
+- `verify.sh d294f898e72c` → exit 0、check 1〜4, 4b（`pnpm e2e:staging` ok）, 5（N-1 = 9192a0bd5401）, 6（smoke done in 5.07s）すべて true、`ok=true live_ok=true`。
+- `promote.sh d294f898e72c` → mode=live、DB バックアップ 14M（`backups/20260922-024215-pre-d294f898e72c.sqlite3`）、新 celeris が 2 秒で active（5/5）、GUI 切替 3 秒、`current -> releases/d294f898e72c`、`previous -> releases/9192a0bd5401`。
+- 直後の確認: `GET /health` release=d294f898e72c role=active schema_version=24、GUI `/healthz` release=d294f898e72c。
+- 本番で新たに有効になったもの: Phase 91 の `.animate-fade-in` 修正（Console 入力欄の `position: fixed` が破れる実バグ）。実機（Nothing Phone）での見た目は人が確認する（ADR-0009 P-34）。
+- 次: Phase 92（ADR-0057、Console 入力欄をレイアウトレベルへ、P-G42-1）を Sonnet で起動済み。
