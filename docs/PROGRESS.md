@@ -13220,3 +13220,10 @@ cat ~/.local/celeris/releases/.build/<sha12>/gate.json   # 失敗時。成功時
   同居しているため）。次の `release.sh main` の `gate.json` で 9 段・両方 exit 0 を確認すること。
 - 実機未確認（ADR-0009 P-34。サンドボックスに外向きネットワークが無い）。
 - 本番 = Phase 65〜88。実装中: Phase 89（このワークトリー。`release.sh` と docs/ADR のみ、GUI 本体は無変更）。
+
+### Phase 89 の本番反映 — release ゲートが 9 段に（2026-09-22 00:22–00:2x UTC。`e2ad86b7dafc`、ライブ切替）
+
+- main `e2ad86b` = Phase 89（`release.sh` に `pnpm-mobile-audit` と `pnpm-e2e-mock` の 2 段。Chromium 不在は明示的な false）。
+  実機の初回: **`step pnpm-mobile-audit: exit 0 in 79.4 s`、`step pnpm-e2e-mock: exit 0 in 7.8 s`**（gate.json に記録）。`release.sh` → `e2ad86b7dafc`（schema 24）。
+  `verify.sh` `ok=true live_ok=true`（check 4b 含む）→ `promote.sh` mode=live。本番 = Phase 65〜89。
+- これで「設計規律（26 route × light/dark の 12 ルール）と GUI e2e」は release の段階で必ず通る。release 1 回あたり +1.5 分。
