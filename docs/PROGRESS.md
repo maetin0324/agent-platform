@@ -13880,3 +13880,14 @@ stderr の末尾を `provider::looks_like_resume_rpc_failure`（新規。`thread
 ### 提案
 
 - なし（今回の 2 件は指示書の範囲で閉じた）。
+
+### Phase 98 の本番反映（2026-09-22、ライブ切替）と実機確認
+
+- 経緯: 人が CoS に「pegasus のログインノードで `pegasusinfo`, `rbudgetcheck` を実行して」と対話で頼み、CoS が「この実行環境ではクラスタへの SSH が禁止され、ファイルも読み取り専用のため、委譲ファイルを作成できません」と断った（タスク 01M337NT3QT1FR1G6WHS9G6NDA、codex、2026-09-22 00:18 UTC）。原因は (1) 対話 run の前置きに汎用の `delegate.json` 委譲と対話用の `actions` が両方入っていたこと、(2) CoS ノードに tools が無く「ssh は使うな」が理由に転用されたこと。同じ対話の 1 回目の run は codex の `thread/resume` が `list_turns is not supported yet (-32601)` で落ち、retryable エラーとして 1 run 無駄になっていた。
+- merge: `worktree-agent-a7e95da1233b51ad2` → main `495f645`（衝突なし）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1799 / failed 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、`pnpm gen:types` 差分ゼロ、`pnpm typecheck` exit 0。push 済み。
+- `scripts/selfdeploy/release.sh main` → exit 0、`sha12=495f6455c440 schema_version=24`、`changes.json: base=e0806ca2ff3f commits=3 files=11 sensitive=0`。ゲート 10 段すべて exit 0（cargo-test 123.7s、cargo-clippy 23.8s、pnpm-mobile-audit 89.6s、pnpm-e2e-mock 9.3s）。
+- `verify.sh 495f6455c440` → exit 0、check 1〜4, 4b, 5（N-1 = e0806ca2ff3f）, 6（smoke done in 6.24s）すべて true、`ok=true live_ok=true`。
+- `promote.sh 495f6455c440` → mode=live、DB バックアップ 14M、新 celeris が 2 秒で active（5/5）、GUI 切替 1 秒、`current -> releases/495f6455c440`。`GET /health` release=495f6455c440 role=active schema_version=24。
+- **実機確認 A（CoS の振る舞い）**: 昇格直後に `POST /console/instruct` で同じ文を CoS へ送った（message 01M34CCV8EX61FYV37C416P310、対話タスク 01M34CCV8E7B6FCMQD0W7HDVQ7）。run は claude-code の新規セッション（前セッションは 449k トークンで rollover）で 17 秒後に done。返事: 「pegasusクラスタのログインノードでpegasusinfo/rbudgetcheckを実行する仕事をcluster-hpc課に委譲した。結果は担当からの報告後にお伝えする。」`actions_executed` に `create_task` 1 件。作られたタスク 01M34CDBGFKSD8VGYMDCA5GAQM は `ready`、assignee `cluster-hpc`、`workspace = {"kind":"remote","cluster":"pegasus","path":"~"}`、受け入れ条件は reviewer 3 件（両コマンドの出力全文、失敗時はエラーと終了コード）+ 既定 1 件。断らずに組織へ流す動きを確認。
+- そのタスクは pegasus の ssh master が無いため cooldown（`cooldown_until` 11:05:59Z、`tunnel_login_needed=true`）で待機中。人が GUI のクラスタ画面で pegasus に「接続」（TOTP）すれば次の tick から実行される（ADR-0018 D2 / ADR-0032 の設計どおり）。
+- **実機確認 B（codex の resume 自己回復）**: 今回の run は claude-code だったため未観測。次に codex の resume が `thread/resume` 失敗を起こしたとき、run ディレクトリに `stderr.resume_retry.log` / `stdout.resume_retry.jsonl` が残り run が done になることで確認する（親が次回観測時に追記）。
