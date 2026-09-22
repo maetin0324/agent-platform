@@ -1,8 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CelerisClient } from "~/celeris/client.server";
-import { cancelClusterConnect, startClusterConnect, submitClusterConnectCode } from "~/celeris/clusters-admin.server";
-import type { ClusterConnectResult, ClusterConnectStart, Clusters } from "~/celeris/types";
-import { clusterConnectPanelState, clusterStatusWord, loadClusters } from "~/routes/clusters";
+import {
+  cancelClusterConnect,
+  putClusterSettings,
+  readClusterWorkDir,
+  startClusterConnect,
+  submitClusterConnectCode,
+} from "~/celeris/clusters-admin.server";
+import type { ClusterConnectResult, ClusterConnectStart, ClusterSettingsView, Clusters } from "~/celeris/types";
+import {
+  clusterConnectPanelState,
+  clusterStatusWord,
+  clusterWorkDirWord,
+  loadClusters,
+  showClusterWorkDirClear,
+} from "~/routes/clusters";
 import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 let mock: MockCeleris;
@@ -34,6 +46,9 @@ const clustersView: Clusters = {
       cooldown_remaining_secs: null,
       auth: "publickey",
       connect_pending: false,
+      // ADR-0059 D6（Phase 99/100）: DB の上書き（画面から登録）。
+      work_dir: "/work/NBB/rmaeda",
+      work_dir_source: "settings",
     },
     {
       id: "gpu-b",
@@ -50,6 +65,9 @@ const clustersView: Clusters = {
       cooldown_remaining_secs: 300,
       auth: "totp",
       connect_pending: true,
+      // 作業ディレクトリが未登録（設定ファイルにも DB にも無い）。
+      work_dir: null,
+      work_dir_source: null,
     },
   ],
 };
@@ -73,6 +91,15 @@ describe("loadClusters", () => {
 
     expect(result.clusters.items[0]).toMatchObject({ auth: "publickey", connect_pending: false });
     expect(result.clusters.items[1]).toMatchObject({ auth: "totp", connect_pending: true });
+  });
+
+  it("passes work_dir and work_dir_source through unmodified (ADR-0059 D6)", async () => {
+    mock.on("GET", "/api/v1/clusters", (_req, res) => sendJson(res, 200, clustersView));
+
+    const result = await loadClusters(client, new Request("http://gui.invalid/clusters"));
+
+    expect(result.clusters.items[0]).toMatchObject({ work_dir: "/work/NBB/rmaeda", work_dir_source: "settings" });
+    expect(result.clusters.items[1]).toMatchObject({ work_dir: null, work_dir_source: null });
   });
 
   it("rejects when celeris is not reachable (loader converts this to a Response)", async () => {
@@ -348,5 +375,154 @@ describe("clusterStatusWord", () => {
       expect(word).not.toMatch(/\s/);
       expect(word.length).toBeLessThanOrEqual(12);
     }
+  });
+});
+
+/**
+ * 作業ディレクトリの表示（ADR-0059 D6、ADR-0055 ラウンド 21、docs/celeris-api-v1.md §3.23/§3.107）:
+ * 実効値の出どころを 1 語のバッジにする純関数と、「上書きを消す」ボタンの出し分け。
+ */
+describe("clusterWorkDirWord", () => {
+  it("DB の上書きは settings", () => {
+    expect(clusterWorkDirWord("settings")).toBe("settings");
+  });
+
+  it("設定ファイルの値は config", () => {
+    expect(clusterWorkDirWord("config")).toBe("config");
+  });
+
+  it("どちらも無ければ unregistered（値を捏造しない）", () => {
+    expect(clusterWorkDirWord(null)).toBe("unregistered");
+    expect(clusterWorkDirWord(undefined)).toBe("unregistered");
+    expect(clusterWorkDirWord("")).toBe("unregistered");
+  });
+
+  it("バッジ 1 語（空白なし）", () => {
+    for (const source of ["settings", "config", null, undefined]) {
+      expect(clusterWorkDirWord(source)).not.toMatch(/\s/);
+    }
+  });
+});
+
+describe("showClusterWorkDirClear", () => {
+  it("DB の上書きがあるときだけ「上書きを消す」を出す", () => {
+    expect(showClusterWorkDirClear("settings")).toBe(true);
+  });
+
+  it("設定ファイルの値・未登録では出さない（消すものが無い）", () => {
+    expect(showClusterWorkDirClear("config")).toBe(false);
+    expect(showClusterWorkDirClear(null)).toBe(false);
+    expect(showClusterWorkDirClear(undefined)).toBe(false);
+  });
+});
+
+describe("readClusterWorkDir", () => {
+  it("無ければ空文字（celeris の 422 に任せる）", () => {
+    const form = new FormData();
+    expect(readClusterWorkDir(form)).toBe("");
+  });
+
+  it("前後の空白だけ落とす", () => {
+    const form = new FormData();
+    form.set("work_dir", "  /work/NBB/rmaeda  ");
+    expect(readClusterWorkDir(form)).toBe("/work/NBB/rmaeda");
+  });
+
+  it("空白だけの入力は空文字のまま（null にしない。`putClusterSettings` の null は「消す」ボタン専用）", () => {
+    const form = new FormData();
+    form.set("work_dir", "   ");
+    expect(readClusterWorkDir(form)).toBe("");
+  });
+});
+
+/**
+ * `PUT /clusters/{id}/settings`（ADR-0059 D6 §3.107）の中継。celeris の応答をそのまま素通しし、
+ * エラーは `ActionError` として返す（例外にしない）。接続の中継と同じく `POST /reload` は一切呼ばない。
+ */
+describe("putClusterSettings", () => {
+  it("絶対パスの保存: 応答をそのまま返し、要求本文に work_dir を載せる", async () => {
+    const settings: ClusterSettingsView = {
+      cluster_id: "pegasus",
+      work_dir: "/work/NBB/rmaeda",
+      updated_at: "2026-09-22T12:00:00Z",
+    };
+    mock.on("PUT", "/api/v1/clusters/pegasus/settings", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ work_dir: "/work/NBB/rmaeda" });
+      sendJson(res, 200, settings);
+    });
+
+    const result = await putClusterSettings(client, "pegasus", "/work/NBB/rmaeda");
+
+    expect(result).toEqual({ ok: true, op: "cluster_settings", id: "pegasus", settings });
+    expect(mock.requests.some((r) => r.url === "/api/v1/reload")).toBe(false);
+  });
+
+  it("null を送ると上書きを消す（応答の work_dir も null）", async () => {
+    const settings: ClusterSettingsView = {
+      cluster_id: "pegasus",
+      work_dir: null,
+      updated_at: "2026-09-22T12:00:00Z",
+    };
+    mock.on("PUT", "/api/v1/clusters/pegasus/settings", (_req, res, body) => {
+      expect(JSON.parse(body)).toEqual({ work_dir: null });
+      sendJson(res, 200, settings);
+    });
+
+    const result = await putClusterSettings(client, "pegasus", null);
+
+    expect(result).toEqual({ ok: true, op: "cluster_settings", id: "pegasus", settings });
+  });
+
+  it("422 validation（絶対パスでも ~ 始まりでもない）は ActionError として返る（例外にしない）", async () => {
+    mock.on("PUT", "/api/v1/clusters/pegasus/settings", (_req, res) =>
+      sendProblem(res, {
+        status: 422,
+        code: "validation",
+        detail: "work_dir must be an absolute path or ~ / ~/…",
+        extra: {
+          errors: [{ field: "work_dir", message: "work_dir must be an absolute path or ~ / ~/…" }],
+        },
+      }),
+    );
+
+    const result = await putClusterSettings(client, "pegasus", "relative/path");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatchObject({ status: 422, code: "validation" });
+      expect(result.error.fields.work_dir).toEqual(["work_dir must be an absolute path or ~ / ~/…"]);
+    }
+  });
+
+  it("404 cluster_not_found は ActionError として返る", async () => {
+    mock.on("PUT", "/api/v1/clusters/unknown/settings", (_req, res) =>
+      sendProblem(res, { status: 404, code: "cluster_not_found", detail: "no such cluster" }),
+    );
+
+    const result = await putClusterSettings(client, "unknown", "/work/x");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatchObject({ status: 404, code: "cluster_not_found" });
+  });
+
+  it("401 unauthorized（管理系、token_file 未設定でも 401）は ActionError として返る", async () => {
+    mock.on("PUT", "/api/v1/clusters/pegasus/settings", (_req, res) =>
+      sendProblem(res, { status: 401, code: "unauthorized", detail: "token required" }),
+    );
+
+    const result = await putClusterSettings(client, "pegasus", "/work/x");
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatchObject({ status: 401, code: "unauthorized" });
+  });
+
+  it("does not call POST /reload", async () => {
+    mock.on("PUT", "/api/v1/clusters/pegasus/settings", (_req, res) =>
+      sendJson(res, 200, { cluster_id: "pegasus", work_dir: "/work/x", updated_at: "2026-09-22T12:00:00Z" }),
+    );
+
+    await putClusterSettings(client, "pegasus", "/work/x");
+
+    expect(mock.requests.some((r) => r.url === "/api/v1/reload")).toBe(false);
   });
 });

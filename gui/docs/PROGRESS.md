@@ -6988,3 +6988,122 @@ Rust 側のゲートは celeris 側の PROGRESS に書く）。
 ### 提案
 
 - P-G46-1〜P-G46-6（上記「4.」に記載）。
+
+## Phase G48 — クラスタ画面から「作業ディレクトリ」を登録・変更する（ADR-0059 D6、ADR-0055 ラウンド 21、celeris Phase 100。2026-09-22）
+
+celeris 側（Phase 99、ADR-0059 D6）で `[[clusters]] work_dir`（設定）・DB の上書き
+（`cluster_settings`）・`GET /clusters` の `work_dir`/`work_dir_source`・`PUT /clusters/{id}/settings`
+が入ったが、GUI にはまだ表示も入力も無かった（Phase 99 の未解決事項に明記）。この Phase はそれを埋める
+（GUI のみ。`crates/` は 1 行も変えていない）。前提（`app/celeris/types.ts` に `ClusterView.work_dir`/
+`work_dir_source` と `ClusterSettingsPutBody`/`ClusterSettingsView` が既にある、26 route、監査違反 0）は
+着手前に確認済み。
+
+### 1. 表示（受け入れ条件 1）
+
+`app/routes/clusters.tsx` の `ClusterWorkDirSection`: カードの `dl`（sync/concurrency/…）の直後に、
+実効値（`item.work_dir`、`Mono` + `break-all`）または未登録案内「未登録。コマンド実行だけのタスクは
+ここで動きます」（`item.work_dir` が `null`）を表示し、右肩に出どころの 1 語バッジ
+（`clusterWorkDirWord`: `"settings"` | `"config"` | `"unregistered"`）を添える。`/clusters` は
+`app/lib/labels.ts` の対象外の「裏方の画面」（同ファイルの冒頭コメント）なので、`auth` バッジ
+（`"manual"`/`"publickey"`/`"totp"`）と同じ流儀で celeris の値をそのまま英単語で出す（日本語に翻訳
+しない）。
+
+### 2. 編集フォーム（受け入れ条件 2）
+
+`<details>`（トンネルの「これは何を意味しますか？」と同じ折りたたみの流儀。「接続」節は常時展開なので
+そちらには揃えていない — 作業ディレクトリは滅多に変えない設定なので、既定で閉じておく方が画面が
+騒がしくならない）の中にテキスト入力 1 つ + 「保存」+ 「上書きを消す」（`work_dir_source === "settings"`
+のときだけ表示、`showClusterWorkDirClear` で判定）。送信は `fetcher.Form` → `action` の
+`intent=cluster_work_dir_save`/`cluster_work_dir_clear` → `app/celeris/clusters-admin.server.ts::putClusterSettings`
+→ `PUT /clusters/{id}/settings`。ブラウザから celeris を直接叩くコードは無い（gui/CLAUDE.md の境界）。
+
+422 の `errors[]`（celeris の実際の文言は英語: `"work_dir must be an absolute path or ~ / ~/…"`。
+`crates/task-api/src/handlers.rs::put_cluster_settings` で確認した）は既存の `FieldErrors`
+（`app/components/Flash.tsx`）でそのまま入力欄の下に出す（GUI 側で翻訳・再検証しない。CLAUDE.md の
+「celeris の API が足りない・仕様と違うと分かったら GUI 側で回避しない」と同じ理由）。常設の日本語ヒント
+「絶対パスか ~ で始めてください。」は `FieldErrors` とは別に静的な `hintClass` の一行として出す（これは
+celeris の応答ではなく GUI 側の固定文言なので、422 の実際の文言とは独立に常に見える）。
+
+「保存」は入力欄の値をそのまま送る（空欄なら celeris の 422 をそのまま見せる）。「上書きを消す」は
+入力欄を見ず常に `work_dir: null` を送る（`readClusterWorkDir` の空文字化と混同しないよう、
+`clusters-admin.server.ts` の関数コメントに明記した）。
+
+### 3. BFF のクライアント関数と型（受け入れ条件 3）
+
+- `app/celeris/action-types.ts`: `ClusterSettingsOutcome`（`{ok:true, op:"cluster_settings", id,
+  settings}` | `{ok:false, ..., error}`）と、`/clusters` の action 全体の型
+  `ClusterActionOutcome = ClusterConnectOutcome | ClusterSettingsOutcome` を追加。
+- `app/celeris/clusters-admin.server.ts`: `putClusterSettings`（`PUT /clusters/{id}/settings` の中継。
+  celeris のエラーは例外にせず `{ok:false, error}` にする。**`POST /reload` は呼ばない** —
+  §3.107 に reload の記述が無く `GET /clusters` にそのまま反映されるため、ADR-0032 の接続と同じ扱い）と
+  `readClusterWorkDir`（フォーム読み取り。`formString` と違い空文字を `null` にしない）を追加。
+- `app/celeris/types.ts` は変更していない（Phase 99 で既に生成済みの `ClusterSettingsPutBody`/
+  `ClusterSettingsView`/`ClusterView.work_dir*` をそのまま使う）。`pnpm gen:types` の差分ゼロを確認した。
+
+### 4. mock celeris・偽 celeris fixture（受け入れ条件 4）
+
+- `gui/test/mock-celeris`（vitest、`test/unit/clusters.test.ts`）: 既存の `startMockCeleris` は
+  任意の method/path をテストごとに登録できる汎用モックなので、`server.ts`/`fixtures.ts` 自体は変更せず、
+  テストファイル内で `mock.on("PUT", "/api/v1/clusters/pegasus/settings", ...)` を必要な分だけ登録した
+  （200 保存・200 消去・422 validation・404 cluster_not_found・401 unauthorized の 5 通り）。
+  `loadClusters` のテストの fixture（`clustersView`）にも `work_dir`/`work_dir_source` を追加した
+  （gpu-a=settings、gpu-b=null の 2 通り）。
+- `gui/scripts/lib/celeris-fixture.mjs`（`pnpm e2e:mock`/`pnpm mobile-audit`/`pnpm screenshots:mobile`
+  が使う実際に起動する偽 celeris）: `GET /clusters` の 3 件（gpu1/pegasus/gpu2）に
+  `work_dir`/`work_dir_source` を足し、`unregistered`（gpu1、両方 `null`）・`config`（pegasus、
+  `/work/NBB/rmaeda`）・`settings`（gpu2、`/work/NBB/rmaeda-gui`）の 3 通りを揃えた。この偽 celeris は
+  パス完全一致のルータ（動的セグメント無し）なので、`PUT /clusters/{id}/settings` は 3 クラスタ id
+  それぞれに個別登録した（バリデーション規則は celeris 本体と同じ: 絶対パスか `~`/`~/…`、それ以外・
+  空文字は 422、`work_dir: null` は 200 で消去）。
+
+### 5. テスト（受け入れ条件 5）
+
+`test/unit/clusters.test.ts` に追加:
+- `clusterWorkDirWord`（settings/config/unregistered の 3 通り、値の捏造をしないこと、1 語であること）
+- `showClusterWorkDirClear`（`"settings"` のときだけ true）
+- `readClusterWorkDir`（未指定は空文字、前後の空白を落とす、空白のみは空文字のまま＝null にしない）
+- `putClusterSettings`（200 保存で要求本文の検証込み、200 消去（`work_dir: null` を送る）、422
+  validation で `error.fields.work_dir` の中身を確認、404 cluster_not_found、401 unauthorized、
+  `POST /reload` を呼ばないこと）
+- `loadClusters` に `work_dir`/`work_dir_source` の素通し確認を追加
+
+`gui/scripts/e2e-check.mjs` の `clusters` ルート検査（受け入れ条件の「clusters 画面検査に work_dir の
+表示が含まれるように」）: `[data-testid="cluster-work-dir"]` セクションの有無、mock モードでは
+`settings`/`config`/`unregistered` の 3 バッジ語がすべて出ていること、`cluster-work-dir-empty`
+（未登録案内）が出ていることを確認する。
+
+### 6. ゲート（受け入れ条件 6）
+
+すべて `gui/` で、`export PATH=/usr/lib/node_modules/corepack/shims:$PATH` を先に実行。
+
+| ゲート | コマンド | 結果 |
+| --- | --- | --- |
+| 依存の再取得 | `pnpm install --frozen-lockfile` | exit 0 |
+| lint | `pnpm lint` | 最初 2 ファイルの整形差分で失敗 → `pnpm biome check --write .` で解消 →
+  再実行で exit 0 |
+| typecheck | `pnpm typecheck` | exit 0 |
+| test | `pnpm test` | exit 0、**1052 passed**（68 files。Phase G46 時点の 1036 から新規テスト分だけ増加） |
+| build | `pnpm build` | exit 0（`INEFFECTIVE_DYNAMIC_IMPORT` 警告 2 件は既存・無関係） |
+| 型生成の差分ゼロ | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | exit 0（差分ゼロ） |
+| mobile-audit 1 回目 | `pnpm mobile-audit` | `routes=26 schemes=2 violations=0`、92.99s |
+| mobile-audit 2 回目 | `pnpm mobile-audit` | `routes=26 schemes=2 violations=0`、95.02s |
+| e2e:mock | `E2E_SKIP_BUILD=1 pnpm e2e:mock` | `"ok": true`、failures 0（追加した clusters の
+  work_dir 検査を含む） |
+| screenshots:mobile | `pnpm screenshots:mobile` | `{"ok":true,"routes":26,"schemes":2,"saved":52}`。
+  `clusters-light.png`/`clusters-dark.png` を Read で目視: gpu1 = `unregistered`（琥珀系バッジ + 案内文）、
+  pegasus = `config`（実効値 `/work/NBB/rmaeda`、灰色系バッジ、直下に TOTP ログイン警告・トンネル節と
+  自然に並ぶ）、gpu2 = `settings`（実効値 `/work/NBB/rmaeda-gui`、緑系バッジ）。393px 幅で横はみ出し無し、
+  light/dark とも可読 |
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34）。pegasus / sirius に `/work/NBB/rmaeda` を登録して画面に表示されることの
+  本番確認は親エージェントが昇格後に行う。
+- Phase G46 の所見（`clusters` 行、cooldown の非現実的な日数表示）はこの Phase のスコープ外（mock
+  fixture の cooldown 値は変更していない）。
+- `gui/scripts/lib/celeris-fixture.mjs` の `PUT` ハンドラは 3 クラスタ id に個別登録する作り（動的
+  ルーティングが無いため）。将来 fixture にクラスタを足す場合は同じパターンで 1 行増やす必要がある。
+
+### 提案
+
+- なし（今回の指示の範囲で閉じた）。

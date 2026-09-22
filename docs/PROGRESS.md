@@ -14093,3 +14093,76 @@ task-core` で再生成）。
 - 作業ディレクトリの登録（人の指示: pegasus / sirius の実体は `/work/NBB/rmaeda`、コードは `/work/NBB/rmaeda/workspace`）: `PUT /clusters/pegasus/settings` と `PUT /clusters/sirius/settings` に `{"work_dir":"/work/NBB/rmaeda"}` → 200。`GET /clusters` で両方 `work_dir=/work/NBB/rmaeda work_dir_source=settings`、fern03 は null。あわせて `~/.config/celeris/config.toml` の両クラスタに `work_dir = "/work/NBB/rmaeda"` を追記（バックアップ `config.toml.bak-20260922i`、tomllib で構文確認。celeris は設定の再読み込みを持たないので次回起動から。**注意**: Phase 99 より前のリリースへ戻すときはこの行を外す必要がある。`deny_unknown_fields`）。
 - **実機確認（CoS）**: `POST /console/instruct` で同じ依頼（対話タスク 01M34MACCEZ032A6YF8R4BMFM1、claude-code、継続セッション）。35 秒で done。返事:「前回の委譲は git worktree 作成に失敗した（path に ~ を指定したため）。今回はコマンド実行のみの仕事として mode:shared で再委譲した。pegasus クラスタの作業ディレクトリが未登録のため path は省略した — クラスタ画面で登録してもらえると次回から安定する。」`create_task` 1 件 → タスク 01M34MB6XEB3F68568A7A1FS9S（ready、cluster-hpc、`workspace = {"kind":"remote","cluster":"pegasus","path":"","mode":"shared"}`）。`path` 省略は実効 work_dir（DB: /work/NBB/rmaeda）で解決されるので、pegasus 再接続後にそこで worktree 無しに実行される見込み（親が観測して追記）。
 - **見つかった穴（Phase 99b で修正中）**: CoS は「作業ディレクトリが未登録」と言ったが実際は登録済み。run の `request.json` に `context.clusters` が無かった。`dispatcher.rs` の `clusters` が `is_cos_conversation && !continuing` で、継続セッションでは空になるため（`recent_work` などは継続中も渡している）。継続中も渡すよう修正する。
+## Phase 100 — クラスタ画面から「作業ディレクトリ」を登録・変更する（ADR-0059 D6、ADR-0055 ラウンド 21、GUI のみ。完了日 2026-09-22）
+
+`gui/` のみ。Phase 99 が celeris 側（`[[clusters]] work_dir`、DB の上書き `cluster_settings`、
+`GET /clusters` の `work_dir`/`work_dir_source`、`PUT /clusters/{id}/settings`）を用意したが、GUI には
+表示も入力も無かった（Phase 99 の未解決事項）。この Phase は GUI 側の表示・編集フォームだけを足す。
+詳細は `gui/docs/PROGRESS.md` の `## Phase G48` に記録した（celeris 側の変更は無い。celeris 側のコード
+は 1 行も変えていない）。
+
+**条件**:
+- `gui/app/routes/clusters.tsx` の各カードに実効の作業ディレクトリと出どころ（`settings`/`config`/
+  `unregistered`）の 1 語バッジを表示、未登録なら「未登録。コマンド実行だけのタスクはここで動きます」を
+  出す。`<details>` で折りたたむ編集フォーム（パス入力 + 保存 + 上書きを消す）。
+- `gui/app/celeris/clusters-admin.server.ts` に `putClusterSettings`（`PUT /clusters/{id}/settings` の
+  中継）を追加。`gui/app/celeris/action-types.ts` に `ClusterSettingsOutcome`/`ClusterActionOutcome` を
+  追加。`app/celeris/types.ts` は変更していない（Phase 99 で既に用意済みの型をそのまま使う）。
+- mock celeris（`gui/test/mock-celeris`、vitest 用）と偽 celeris fixture
+  （`gui/scripts/lib/celeris-fixture.mjs`、`pnpm e2e:mock`/`pnpm mobile-audit`/`pnpm screenshots:mobile`
+  用）の両方で `work_dir`/`work_dir_source` の 3 通り（gpu1=unregistered、pegasus=config、
+  gpu2=settings）と `PUT /clusters/{id}/settings`（422 も返す）を用意した。
+- vitest（純関数・action レベル）と `pnpm e2e:mock` の clusters 画面検査を足した。
+
+**実行したコマンドと出力の要点**（すべて `gui/` で、`export PATH=/usr/lib/node_modules/corepack/shims:$PATH`
+を先に実行）:
+
+| ゲート | コマンド | 結果 |
+| --- | --- | --- |
+| 依存の再取得 | `pnpm install --frozen-lockfile` | exit 0 |
+| lint | `pnpm lint`（`biome check .`） | exit 0（`biome check --write .` で 2 ファイルの整形差分を先に直した） |
+| typecheck | `pnpm typecheck` | exit 0（型エラー 0） |
+| test | `pnpm test` | exit 0。**1052 passed**（68 files、うち `test/unit/clusters.test.ts` に
+  `clusterWorkDirWord`/`showClusterWorkDirClear`/`readClusterWorkDir`/`putClusterSettings`（200 保存・
+  200 消去・422 validation・404 cluster_not_found・401 unauthorized・reload 不呼出）の新規ケースを追加） |
+| build | `pnpm build` | exit 0（既存の `INEFFECTIVE_DYNAMIC_IMPORT` 警告 2 件のみ。今回の変更とは無関係、Phase 99 以前から） |
+| 型生成の差分ゼロ | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | exit 0（差分ゼロ。`types.ts` は変更していない） |
+| mobile-audit 1 回目 | `pnpm mobile-audit` | `routes=26 schemes=2 violations=0 perf_worst=project-detail 556.0KB`、所要 92.99s |
+| mobile-audit 2 回目 | `pnpm mobile-audit` | `routes=26 schemes=2 violations=0 perf_worst=project-detail 556.0KB`、所要 95.02s |
+| e2e:mock | `pnpm e2e:mock`（`E2E_SKIP_BUILD=1`。事前に `pnpm build` 済み） | `"ok": true`、failures なし。追加した
+  clusters 画面検査（`cluster-work-dir` セクションの有無、`settings`/`config`/`unregistered` の 3
+  バッジ語すべての出現、`cluster-work-dir-empty` の出現）も通過 |
+| screenshots:mobile | `pnpm screenshots:mobile` | `{"ok":true,"routes":26,"schemes":2,"saved":52,...}`。
+  `clusters-light.png`/`clusters-dark.png` を Read で目視確認: gpu1=`unregistered`（橙系バッジ + 案内文）、
+  pegasus=`config`（実効値 `/work/NBB/rmaeda`）、gpu2=`settings`（実効値 `/work/NBB/rmaeda-gui`、緑系
+  バッジ）。393px 幅に収まり、light/dark とも横はみ出し無し |
+
+### 変更したファイル
+
+- `gui/app/celeris/action-types.ts`（`ClusterSettingsOutcome`、`ClusterActionOutcome` を追加）
+- `gui/app/celeris/clusters-admin.server.ts`（`putClusterSettings`、`readClusterWorkDir` を追加）
+- `gui/app/routes/clusters.tsx`（`ClusterWorkDirSection` コンポーネント、`clusterWorkDirWord`/
+  `showClusterWorkDirClear` 純関数、`action` に `cluster_work_dir_save`/`cluster_work_dir_clear` の
+  intent を追加）
+- `gui/test/unit/clusters.test.ts`（新規テストケース多数。既存 fixture に `work_dir`/`work_dir_source`
+  を追加）
+- `gui/scripts/lib/celeris-fixture.mjs`（`/clusters` の 3 件に `work_dir`/`work_dir_source`、
+  `PUT /clusters/{id}/settings` のハンドラ 3 件（gpu1/pegasus/gpu2、422 も返す）を追加）
+- `gui/scripts/e2e-check.mjs`（`clusters` ルートの構造チェックを追加）
+- `gui/docs/PROGRESS.md`（`## Phase G48` を追加）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34）。pegasus / sirius に `/work/NBB/rmaeda` を登録し画面に表示されることの
+  本番確認は、親エージェントが昇格後に行う（このエージェントは `~/.config/celeris` 等の本番環境に触れて
+  いない。禁止事項どおり）。
+- 保存フォームは 1 クラスタ 1 テキスト入力（相対パス入力時の 422 も celeris がそのまま検証する。GUI 側
+  では絶対パス/`~` の事前検証をしていない。CLAUDE.md の「celeris の API が足りない・仕様と違うと分かった
+  ら GUI 側で回避しない」「判断ロジックの再実装をしない」に沿った判断）。
+- `gui/scripts/lib/celeris-fixture.mjs` の `PUT /clusters/{id}/settings` は、偽 celeris のルーティングが
+  パス完全一致（動的セグメント無し）なので、fixture が知っている 3 クラスタ id（gpu1/pegasus/gpu2）に
+  対してだけ登録した。他の id を足す場合は同じパターンで 1 行増やす必要がある。
+
+### 提案
+
+- なし（今回の指示の範囲で閉じた）。
