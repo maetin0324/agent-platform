@@ -90,10 +90,31 @@ scripts/selfdeploy/release.sh celeris/01M2XXX # 自己改善の案件の実装�
 
 - `~/.local/celeris/releases/.build/<sha12>` に **detached worktree** を生やして、そこでだけビルドする。
   作業チェックアウト（`~/workspace/agent-platform`）が汚れていても、その中身は使われない。
-- gate（この順。1 つでも非 0 ならリリースを作らない）:
+- gate（この順。1 つでも非 0 ならリリースを作らない。全 9 段）:
   自前のworkspaceパッケージの `cargo clean -p …`（外部依存のキャッシュは保持）
   → `cargo test --workspace` → `cargo clippy --workspace -- -D warnings` → `cargo build --release -p celeris -p celerisctl`
   → GUI `pnpm install --frozen-lockfile` → `pnpm typecheck` → `pnpm test` → `pnpm build`
+  → `pnpm mobile-audit`（`pnpm-mobile-audit`） → `pnpm e2e:mock`（`pnpm-e2e-mock`）
+- **Phase 89（`pnpm-mobile-audit` / `pnpm-e2e-mock`。ADR-0041 追記、ADR-0055 D3）**: `pnpm-build` の直後に
+  足した 2 段。どちらも `$BUILD/gui` で走り、直前の `pnpm-build` が作った `$BUILD/gui/build` を
+  そのまま使い回す（`MOBILE_AUDIT_SKIP_BUILD=1` / `E2E_SKIP_BUILD=1`。ビルドをやり直さない）。
+  - `pnpm-mobile-audit`: `gui/scripts/mobile-audit.mjs`（ADR-0055 D1）。偽の celeris + ビルド済み GUI を
+    自分のポートに起こし、全画面 × light/dark を Playwright Chromium で監査する。1 件でも違反があれば
+    非 0。
+  - `pnpm-e2e-mock`: `gui/scripts/e2e-check.mjs` の `pnpm e2e:mock`（Phase 83 / G36 が足した読み取り専用
+    e2e の、オフライン・偽 celeris に対するモード。`verify.sh` の検査 4b が使う `pnpm e2e:staging` とは
+    別物で、こちらは何も外の staging に繋がない）。
+  - どちらも `timeout "${SD_AUDIT_TIMEOUT:-600}"`（既定 600 秒）で壁時計の上限を掛ける。他の段と同じ
+    `run_step` を通るので、lock の fd（8, 9）は継がない（Phase 66c の lock-leak 対策がそのまま効く）。
+  - **Playwright の Chromium 実行ファイル**: `pnpm install --frozen-lockfile`（`pnpm-install` 段）は
+    `@playwright/test` という npm パッケージを入れるだけで、Chromium の実行ファイル自体
+    （`pnpm exec playwright install chromium` で落とすもの）は入れない。実行ファイルはホストの
+    `~/.cache/ms-playwright/` に**バージョンごとに 1 つ**入っていて、`pnpm-lock.yaml` が固定されている
+    限りどの worktree からも同じキャッシュを共有できる。**リリースを作るホストでは事前に一度
+    `pnpm exec playwright install chromium` を実行しておくこと**（このリポジトリの devDependencies は
+    固定版なので、以後 `pnpm install` のたびに入れ直す必要は無い）。無いままこの 2 段を回すと、
+    ブラウザ起動の呼び出し**前**に軽い存在チェックが入り、ハングせずに `false — playwright browser not
+    installed`（`.gate-pnpm-mobile-audit.log` / `.gate-pnpm-e2e-mock.log`）で即座に失敗する。
 - 異なるSHAのビルドも共有出力を上書きしないよう直列化する。待ち時間の上限は
   `SD_RELEASE_LOCK_WAIT`（既定1800秒）。Cargo自身のロックだけでは、doctestや成果物コピーまで保護できない。
   別worktreeの相対dep-info・mtimeによる古いメタデータの再利用も防ぐため、自前パッケージを先に掃除する。

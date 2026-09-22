@@ -138,3 +138,33 @@ release の `gui/` を試し、どちらにも `@playwright/test` が無けれ�
 （クラッシュさせない。ADR-0041 D2 の「本番には触れない」は変えない設計判断: Playwright が無い環境でも
 verify.sh 自体は最後まで走り切り、原因が分かる形で false になる）。詳細は `docs/selfdeploy.md` の
 「検査 4b」節、受け入れ条件は `docs/PROGRESS.md` の Phase 83。
+
+## 6. Phase 89 追記（2026-09-22）: release ゲートに mobile-audit と e2e:mock を足す
+
+検査 4b（上）と D5 の煙試験は**昇格前の staging**を見るので、GUI の見た目の退行（画面は 200 を返すが
+壊れている・コンソールエラーが出る等）を拾えるのは verify の段になってからだった。それでは「壊れた
+リリースが `~/.local/celeris/releases/<sha12>/` として**作られてしまう**」こと自体は防げない
+（D2 の gate は cargo と GUI の型検査・単体テスト・ビルドまでしか見ていない）。
+
+`release.sh` の gate に、`pnpm-build` の直後（cargo 側と GUI 側の折り返し地点）に 2 段足した:
+
+- **`pnpm-mobile-audit`**（`pnpm mobile-audit`。ADR-0055 D1）: 全画面 × light/dark を Playwright Chromium
+  で機械監査する。1 件でも違反があれば非 0。
+- **`pnpm-e2e-mock`**（`pnpm e2e:mock`。Phase 83 / G36 の読み取り専用 e2e の、外部に何も繋がない
+  オフラインモード）。
+
+どちらも直前の `pnpm-build` が作った `$BUILD/gui/build` を使い回す（`MOBILE_AUDIT_SKIP_BUILD=1` /
+`E2E_SKIP_BUILD=1`）ので、gate 全体としては `pnpm build` を 1 回しか走らせない。`timeout
+"${SD_AUDIT_TIMEOUT:-600}"`（既定 600 秒）で壁時計の上限を掛け、他の段と同じ `run_step` を通るので
+lock の fd（8, 9）は継がない（Phase 66c の対策がそのまま効く）。gate.json への記録の形は他の段と同じ
+（`{step, exit, secs, log}`）。
+
+Playwright の Chromium 実行ファイルは `pnpm install --frozen-lockfile` では入らず、ホストの
+`~/.cache/ms-playwright/` を worktree 間で共有する前提（`pnpm-lock.yaml` が固定なのでバージョンは
+ずれない）。**release を作るホストは事前に `pnpm exec playwright install chromium` を 1 度実行して
+おく必要がある**。無い場合はブラウザ起動を試みる前の軽い存在チェックで検知し、ハングせずに
+`false — playwright browser not installed` として即座に非 0 で終わる（`.gate-pnpm-mobile-audit.log` /
+`.gate-pnpm-e2e-mock.log` に理由を残す）。`verify.sh` の検査 4b（`gui/scripts/e2e-check.mjs` の
+`pnpm e2e:staging`）はそのまま変更していない。
+
+gate は D2 の記述どおり「7 段」から**9 段**になった。受け入れ条件は `docs/PROGRESS.md` の Phase 89。

@@ -13115,3 +13115,108 @@ Phase のスコープ外（実行していない。Phase 80/82/83/84/86/87 と�
   question-approval-link）を fixture で描画して違反を修正。`--routes` / `--repeat`）。GUI ゲート: typecheck / lint exit 0、`pnpm test` 1004 passed、
   `pnpm mobile-audit` 違反 0（merge 後 1 回で 0。エージェント側では通算 8 回連続 0）、`pnpm e2e:mock` ok。
   `release.sh` → `4c7b5d724aca`（schema 24）。`verify.sh` `ok=true live_ok=true` → `promote.sh` mode=live。本番 = Phase 65〜88。
+
+## Phase 89 — release ゲートに mobile-audit と e2e:mock を足す（2026-09-22）
+
+`crates/` は無変更（`scripts/selfdeploy/release.sh` と docs/ADR のみ）。ADR-0041 の gate（D2）は cargo 側と
+GUI 側の型検査・単体テスト・ビルドまでしか見ておらず、Phase 83 の検査 4b（`verify.sh`）・D5 の煙試験も
+**昇格前の staging** を見るだけなので、「見た目のデザイン退行（画面は 200 を返すが壊れている・
+コンソールエラーが出る等）を積んだリリースがそもそも `~/.local/celeris/releases/<sha12>/` として
+作られてしまう」ことは防げていなかった。`release.sh` の gate に、`pnpm-build` の直後（cargo と GUI の
+折り返し）に 2 段を足し、これができないようにした。
+
+### 1. `scripts/selfdeploy/release.sh`（受け入れ条件 1）
+
+- `run_step pnpm-mobile-audit "$BUILD/gui" -- run_pnpm_mobile_audit` と
+  `run_step pnpm-e2e-mock "$BUILD/gui" -- run_pnpm_e2e_mock` を `pnpm-build` の直後に追加した。
+  `run_pnpm_mobile_audit` / `run_pnpm_e2e_mock` は release.sh 内の bash 関数（`run_step` の
+  `( cd "$workdir" && "$@" )` はサブシェル＝同じプロセスの fork なので、`export -f` 無しで呼べる）。
+  - `run_pnpm_mobile_audit`: `MOBILE_AUDIT_SKIP_BUILD=1 timeout "${SD_AUDIT_TIMEOUT:-600}" pnpm mobile-audit`
+  - `run_pnpm_e2e_mock`: `E2E_SKIP_BUILD=1 timeout "${SD_AUDIT_TIMEOUT:-600}" pnpm e2e:mock`
+  - どちらも直前の `pnpm-build` が作った `$BUILD/gui/build` を使い回す（`pnpm build` を 2 回目以降
+    走らせない）。`SD_AUDIT_TIMEOUT`（既定 600 秒）で壁時計の上限を掛ける。
+  - **lock の fd（8, 9）を子に継がせない（Phase 66c の対策）は、既存の `run_step` 自体が
+    `>"$log" 2>&1 8>&- 9>&-` を持っているので、この 2 段にも自動的に効く**（`run_step` を変更していない
+    ので新規のコードを足す必要が無かった）。
+  - `gate.json` への記録も既存の `run_step`/`write_gate_json` をそのまま通るので、他の 7 段と同じ形
+    （`{step, exit, secs, log}`）で `pnpm-mobile-audit` / `pnpm-e2e-mock` が積まれる。
+- **Playwright の Chromium 実行ファイルの前提**を `sd_check_playwright_chromium()` として追加した。
+  `pnpm install --frozen-lockfile`（既存の `pnpm-install` 段）は `@playwright/test` という npm パッケージを
+  node_modules に入れるだけで、`pnpm exec playwright install chromium` で落とす**ブラウザの実行ファイル
+  自体**は入れない（このリポジトリに postinstall フックが無いことを `gui/package.json` で確認した）。
+  実行ファイルはホストの `~/.cache/ms-playwright/`（`pnpm-lock.yaml` 固定なのでバージョンはずれない、
+  worktree 間で共有される場所）に入る。このホストには既に `chromium-1243` 系が入っていることを
+  `node -e 'chromium.executablePath()'` で確認した。`sd_check_playwright_chromium` は
+  `chromium.executablePath()` の存在をブラウザを起動せずに確かめ、無ければ 1 行
+  `false — playwright browser not installed (missing <path>; run: pnpm exec playwright install chromium ...)`
+  を出して即 exit 1（ブラウザ起動を試みて分かりにくい長いエラーでハングしたように見える、を避ける）。
+  `run_pnpm_mobile_audit` / `run_pnpm_e2e_mock` の先頭でこれを呼ぶ。
+- `release.sh` 冒頭のコメント（gate の説明）と `usage()` の `env:` に `SD_AUDIT_TIMEOUT` を追記した。
+
+### 2. `verify.sh`（受け入れ条件 2）
+
+無変更（指示どおり）。検査 4b はそのまま `pnpm e2e:staging`（staging に対する読み取り専用 e2e）を使う。
+
+### 3. ドキュメント（受け入れ条件 2）
+
+- `docs/selfdeploy.md`: 「2. リリースを作る（`release.sh`）」の gate 一覧を 7 段 → **9 段**に更新し、
+  `pnpm-mobile-audit` / `pnpm-e2e-mock` の節（何をするか・ビルド使い回し・タイムアウト・
+  Playwright の Chromium 実行ファイルの前提と失敗時の挙動）を追加した。
+- `docs/adr/0041-self-improvement-loop-hardening.md`: 「6. Phase 89 追記」を追加（上と同じ内容の設計判断の記録）。
+
+### 4. テスト（受け入れ条件 3）
+
+- `bash -n scripts/selfdeploy/release.sh` → **exit 0**。
+- ドライリスティング（`grep -n '^run_step ' scripts/selfdeploy/release.sh`）→ 9 行、順序:
+  `cargo-workspace-clean, cargo-test, cargo-clippy, cargo-build, pnpm-install, pnpm-typecheck, pnpm-test,
+  pnpm-build, pnpm-mobile-audit, pnpm-e2e-mock`。新しい 2 段が `pnpm-build` の直後にあることを確認した
+  （`release.sh` を実際には実行していない。指示どおりコーディネータに委ねる）。
+- このワークトリーの `gui/` で手動実行（`pnpm install --frozen-lockfile` 後）:
+  - `node -e '... chromium.executablePath() ...'` → `/home/rmaeda/.cache/ms-playwright/chromium-1243/
+    chrome-linux64/chrome exists: true`（このホストでは前提が満たされている ＝
+    `sd_check_playwright_chromium` は通り、本番の 2 段が実際に `pnpm mobile-audit` / `pnpm e2e:mock` を
+    走らせるところまで確認できた。「無いときに `false — playwright browser not installed` で即失敗する」
+    分岐は、このホストに実行ファイルが既にあるため実地では踏んでいない＝未検証）。
+  - `pnpm build` → **exit 0**。
+  - `MOBILE_AUDIT_SKIP_BUILD=1 timeout 600 pnpm mobile-audit` → **exit 0**、
+    `{"ok": true, "total": 0}`、`routes=26 schemes=2 violations=0`（release.sh が呼ぶのと同じ環境変数・
+    タイムアウトで確認）。
+  - `E2E_SKIP_BUILD=1 timeout 600 pnpm e2e:mock` → **exit 0**、`{"ok": true, "mode": "mock", "failures": []}`。
+
+### 5. ゲート（受け入れ条件 4。全部 exit 0）
+
+`PATH` に `/usr/lib/node_modules/corepack/shims` を通して `gui/` で実行:
+
+- `pnpm lint` → exit 0（biome check、243 files、fix 無し）。
+- `pnpm typecheck` → exit 0（`react-router typegen && tsc -b`）。
+- `pnpm test` → exit 0（**Test Files 65 passed / Tests 1004 passed**。Phase 88 から件数不変）。
+- `pnpm mobile-audit` → exit 0（`{"ok": true, "total": 0}`、`routes=26 schemes=2 violations=0`。上と同じ実行）。
+- `pnpm e2e:mock` → exit 0（`{"ok": true, "mode": "mock", "failures": []}`。上と同じ実行）。
+- 参考: `pnpm gen:types && git diff --exit-code app/celeris/types.ts` → 差分ゼロ。
+- `crates/` を一切変更していないため `cargo test --workspace` / `cargo clippy --workspace -- -D warnings` は
+  このフェーズのスコープ外（実行していない。Phase 80/82/83/84/86/87/88 と同じ扱い）。
+
+### 実機確認の手順（コーディネータへ）
+
+```bash
+scripts/selfdeploy/release.sh main
+cat ~/.local/celeris/releases/.build/<sha12>/gate.json   # 失敗時。成功時は releases/<sha12>/gate.json
+# steps に "pnpm-mobile-audit" と "pnpm-e2e-mock" が exit 0 で入っていること、
+# 直前の "pnpm-build" より後ろにあること、secs（duration）が入っていることを見る。
+```
+
+このホストに Playwright の Chromium が無い場合は、事前に一度
+`( cd ~/workspace/agent-platform/gui && PATH=/usr/lib/node_modules/corepack/shims:$PATH pnpm exec playwright install chromium )`
+を実行しておく（`docs/selfdeploy.md` に手順を書いた）。
+
+### 未解決事項
+
+- 「Chromium が無いときに `false — playwright browser not installed` で失敗する」分岐は、このホストに
+  既に実行ファイルがあるため実地では確認できていない（コードレビューと `node -e` での
+  `executablePath()`/`existsSync` の単体確認のみ）。別ホスト（あるいは `HOME=$(mktemp -d)` で
+  `~/.cache/ms-playwright` を空にした状態）で `release.sh` を回したときにこの分岐が実際に踏まれるかは
+  コーディネータ側で確認するとより確実。
+- `release.sh` 自体は指示により実行していない（本番の `~/.local/celeris/` を握る環境がこのマシンに
+  同居しているため）。次の `release.sh main` の `gate.json` で 9 段・両方 exit 0 を確認すること。
+- 実機未確認（ADR-0009 P-34。サンドボックスに外向きネットワークが無い）。
+- 本番 = Phase 65〜88。実装中: Phase 89（このワークトリー。`release.sh` と docs/ADR のみ、GUI 本体は無変更）。

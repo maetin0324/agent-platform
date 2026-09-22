@@ -2,9 +2,16 @@
 # scripts/selfdeploy/release.sh <git-ref> — ADR-0040 D1/D2 の「リリース」段。
 #
 #   作業チェックアウトとは別の detached の作業ツリー（$CELERIS_STATE_DIR/releases/.build/<sha12>）で
-#   cargo test → clippy → build --release → GUI pnpm install/typecheck/test/build を順に回し、
+#   cargo test → clippy → build --release → GUI pnpm install/typecheck/test/build
+#   → pnpm mobile-audit → pnpm e2e:mock を順に回し、
 #   全部 exit 0 のときだけ $CELERIS_STATE_DIR/releases/<sha12>/ を作る。
 #   1 つでも非 0 なら**リリースを作らず**、.build/<sha12>/gate.json だけ残す。
+#
+# Phase 89（ADR-0041 追記、ADR-0055 D3）: `pnpm-build` の直後に `pnpm-mobile-audit`（`pnpm mobile-audit`。
+# ADR-0055 D1 の全画面 × light/dark）と `pnpm-e2e-mock`（`pnpm e2e:mock`。Phase 83 / G36 の読み取り専用
+# e2e をオフラインの偽 celeris に対して）を足した。どちらも `pnpm build` 済みの `$BUILD/gui/build` を
+# 使い回す（`MOBILE_AUDIT_SKIP_BUILD=1` / `E2E_SKIP_BUILD=1`）ので、ビルドをやり直さない。
+# これで見た目のデザイン退行（画面が壊れているのに 200 は返る等）を積んでリリースを作ることが無くなる。
 #
 # 本番には一切触れない（プロセスも DB も config も）。人でもワーカーでも実行してよい（D5）。
 set -euo pipefail
@@ -23,6 +30,10 @@ env:
   CELERIS_CONFIG_DIR  既定 ~/.config/celeris（config.toml と秘密）
   CELERIS_STATE_DIR   既定 ~/.local/celeris（releases / backups / staging …）
   SD_REPO     既定 ~/workspace/agent-platform（git worktree を生やす元のリポジトリ）
+  SD_AUDIT_TIMEOUT  既定 600（秒）。`pnpm-mobile-audit` / `pnpm-e2e-mock` それぞれの壁時計の上限
+                    （Phase 89。ADR-0041 追記）。Playwright の Chromium 実行ファイルが
+                    ~/.cache/ms-playwright に無いホストでは、この 2 ステップは待たずに
+                    「false — playwright browser not installed」で失敗する（`docs/selfdeploy.md` 参照）。
 EOF
   exit 2
 }
@@ -107,6 +118,41 @@ run_step() {
   fi
 }
 
+# Phase 89（ADR-0041 追記）: `pnpm-mobile-audit` / `pnpm-e2e-mock` の前置きチェック。
+# `pnpm install --frozen-lockfile`（`pnpm-install` ステップ）は `@playwright/test` という npm パッケージを
+# node_modules に入れるだけで、Playwright の Chromium 実行ファイルそのもの（`pnpm exec playwright install
+# chromium` で落とすもの）は入れない（このリポジトリに postinstall フックは無いことを確認済み）。
+# Chromium はホストの `~/.cache/ms-playwright/` に**バージョンごとに 1 つ**入っていて、`pnpm-lock.yaml` が
+# 固定されている限り worktree をいくつ切っても同じキャッシュを共有できる（Phase 89 で確認: このホストには
+# 既に chromium-1243 系が入っていた）。無ければ `chromium.launch()` の呼び出しがエラーで落ちる
+# （ハングはしないが、ステップの出力が Playwright のインストール手順の長い ASCII アートになって
+# 「何が悪いか」が gate.json だけからは分かりにくい）。ここで先に軽く（ブラウザを起動せずパスの存在だけ）
+# 確かめて、無ければ即座に分かりやすい 1 行で失敗させる。
+sd_check_playwright_chromium() {
+  node -e '
+    const { chromium } = require("@playwright/test");
+    const fs = require("fs");
+    const p = chromium.executablePath();
+    if (!fs.existsSync(p)) {
+      console.error(
+        "false — playwright browser not installed (missing " + p + "; " +
+        "run: pnpm exec playwright install chromium on this host, cached under ~/.cache/ms-playwright)"
+      );
+      process.exit(1);
+    }
+  '
+}
+
+run_pnpm_mobile_audit() {
+  sd_check_playwright_chromium || return 1
+  MOBILE_AUDIT_SKIP_BUILD=1 timeout "${SD_AUDIT_TIMEOUT:-600}" pnpm mobile-audit
+}
+
+run_pnpm_e2e_mock() {
+  sd_check_playwright_chromium || return 1
+  E2E_SKIP_BUILD=1 timeout "${SD_AUDIT_TIMEOUT:-600}" pnpm e2e:mock
+}
+
 # gate.json を書く（成功でも失敗でも同じ形）。
 write_gate_json() {
   local dest="$1" steps
@@ -147,6 +193,10 @@ run_step pnpm-install "$BUILD/gui" -- pnpm install --frozen-lockfile
 run_step pnpm-typecheck "$BUILD/gui" -- pnpm typecheck
 run_step pnpm-test "$BUILD/gui" -- pnpm test
 run_step pnpm-build "$BUILD/gui" -- pnpm build
+# Phase 89（ADR-0041 追記、ADR-0055 D3）: デザイン退行（画面は 200 を返すが壊れている）を積んだまま
+# リリースを作らないための 2 つ。どちらも直前の `pnpm-build` の `$BUILD/gui/build` を使い回す。
+run_step pnpm-mobile-audit "$BUILD/gui" -- run_pnpm_mobile_audit
+run_step pnpm-e2e-mock "$BUILD/gui" -- run_pnpm_e2e_mock
 
 if [ "$GATE_OK" != true ]; then
   write_gate_json "$BUILD/gate.json"
