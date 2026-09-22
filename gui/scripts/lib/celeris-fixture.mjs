@@ -8,6 +8,7 @@
 // ここを変えると mobile-audit.mjs と e2e-check.mjs の両方に効く。1 か所にまとめたのは、同じ画面一覧・同じ
 // 偽データを 2 度書くと片方だけ更新し忘れる事故が起きるため（Phase 83 で e2e-check.mjs を足すときに発見）。
 import http from "node:http";
+import { createRequire } from "node:module";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +16,27 @@ import { fileURLToPath } from "node:url";
 const GUI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const fx = await import(path.join(GUI_DIR, "test/mock-celeris/fixtures.ts"));
+
+// Phase 91（ADR-0055 ラウンド 15、D1 の「本物のモバイル・エミュレーション」）: mobile-audit.mjs と
+// e2e-check.mjs の両方が、モバイルの Playwright コンテキストをここから作る（1 か所にまとめる理由は
+// このファイルの他のものと同じ: 2 か所に同じ寸法・UA を書くと片方だけ更新し忘れる事故が起きるため）。
+// Playwright の組み込みデバイス記述子 `devices["Pixel 7"]`（`isMobile`/`hasTouch`/`defaultBrowserType`
+// 等、実機の Chrome-on-Android に近い挙動一式が揃っている）を土台にし、ADR-0055 D1 が指定する寸法
+// （393×851）・`deviceScaleFactor`（2.75）・UA（Nothing Phone 2a）だけを上書きする。以前（Phase 69〜90）は
+// これらの値を手で列挙していた（`isMobile: true`/`hasTouch: true` 自体は Phase 69 の最初のコミットから
+// 既に指定していたので機能的な差は無いが、`devices[...]` を土台にすることで、Pixel 7 記述子が将来
+// 増やすかもしれない他のモバイル固有のコンテキストオプションも自動的に追随する）。
+const require = createRequire(path.join(GUI_DIR, "package.json"));
+const { devices } = require("@playwright/test");
+
+export const MOBILE_DEVICE = {
+  ...devices["Pixel 7"],
+  viewport: { width: 393, height: 851 },
+  deviceScaleFactor: 2.75,
+  userAgent:
+    "Mozilla/5.0 (Linux; Android 14; Nothing Phone 2a) AppleWebKit/537.36 (KHTML, like Gecko) " +
+    "Chrome/128.0.0.0 Mobile Safari/537.36",
+};
 
 export const TASK_ID = "01BOARDTASK00000000000001";
 export const PROJECT_ID = "p1";
