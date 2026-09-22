@@ -14674,3 +14674,10 @@ before/after・測定値は `gui/docs/PROGRESS.md`「Phase G47」を参照。
 - ダークモードの面の区別は「1 段だけ」の最小変更に留めた。人の目でさらに強くしたい場合は
   `--surface-2`/`--surface-3` も含めた段階の引き直しが要るが、今回のスコープ（小さく確実に）を超える。
 - 本番 = Phase 65〜93。実装中: Phase 95・96（Phase 94〈releases.tsx 等〉とは別ワークトリー系列）。
+
+### Phase 96 の本番反映（2026-09-22、ライブ切替）と Phase 103（ADR-0060）の受け入れ確認
+
+- merge: `worktree-agent-ab533fbb6ad6f3b3d`（Phase 96、G46 の残り所見）→ main `c22d7dc`（`docs/PROGRESS.md` と `gui/docs/PROGRESS.md` の append 衝突を両方残して解決）。GUI ゲート（main 上）: `pnpm gen:types` 差分ゼロ、`pnpm typecheck` / `pnpm lint` exit 0、`pnpm test` 68 files / 1061 passed。push 済み。
+- `release.sh main` → exit 0、`sha12=c22d7dcfa445 schema_version=25`、`changes.json: base=9b43a211e6fd commits=3 files=7 sensitive=0`。ゲート 10 段すべて exit 0（cargo-test 125.0s、cargo-clippy 37.5s）。`verify.sh c22d7dcfa445` → exit 0、check 1〜4, 4b, 5（N-1 = 9b43a211e6fd）, 6（smoke 6.4s）すべて true、`ok=true live_ok=true`。
+- **Phase 103 の受け入れ（ssh master が昇格で切れない）**: 人が 19:15Z 頃 GUI から pegasus に接続 → master は `celeris-ssh-master-pegasus-4D76X42X.scope`（`systemctl --user list-units`、active running）に居て、`GET /clusters` pegasus `connected=true`。19:21:15Z に `promote.sh c22d7dcfa445`（live）→ 旧 unit `celeris@9b43a211e6fd` は約 10 秒で消えた。**その後も** `celeris-ssh-master-pegasus-4D76X42X.scope` は active running、`ssh -M -N pegasus`（pid 3015753）は同じ pid で生存、`GET /clusters` pegasus `connected=true`、`tunnel_login_needed=false`、昇格後の `cluster_unavailable` イベント 0 件。これまで 3 回の昇格で毎回切れていた接続が維持された。
+- 本番で新たに有効になったもの: Phase 96（cooldown の「年・か月」表示、inbox タイルの高さ、深い組織の木の字下げと省略、org-detail の skill リンクの省略記号バグ修正、ダークモードの surface を 1 段明るく）。見た目は人が実機で確認する。
