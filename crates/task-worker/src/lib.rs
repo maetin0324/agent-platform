@@ -13,6 +13,9 @@ pub mod codex;
 pub mod codex_account;
 /// ADR-0043 D3（Phase 56）: ハーネスの CLI をコンテナの中で起こす（runtime 検出・包み方・イメージ）。
 pub mod container;
+/// ADR-0060 D1 / Phase 105: celeris の cgroup の外で子プロセスを起こす共通の小道具
+/// （`cluster_login.rs` の ssh master と `celeris::releases::start_promote` の両方が使う）。
+pub mod detach;
 pub mod delegate_file;
 pub mod fake;
 /// ADR-0047 D4（Phase 62）: 知識整理 run（`langmem` の memory manager を包む）。

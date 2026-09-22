@@ -14868,3 +14868,121 @@ untracked ファイルとして毎回の worktree に残っていたこと。前
 - 復旧（23:28Z）: 親が `promote.sh 4fff25348ed6` を素のコマンドで再実行 → `promote.sh` の再開ロジック「celeris already took over; resuming the incomplete GUI/link handoff」が働き、GUI 切替 3 秒、`current -> releases/4fff25348ed6`、`promoted.json` 作成。`GET /health` release=4fff25348ed6 role=active schema_version=25。pegasus の ssh master（`celeris-ssh-master-pegasus-4D76X42X.scope`）はこの昇格でも生存（Phase 103 の効果、2 回目の確認）。
 - main: 自己改善 run は local main に 2 コミット（`ac974ed` phase 104、`4fff253` delivery-repair）を積んでいたが origin へは push されていなかった。本番が既に走っているので親が `git push origin main`（fast-forward、3ed0acc → 4fff253）。
 - 根本原因は Phase 103（ADR-0060）の ssh master と同じ（`setsid` は cgroup を抜けない）。Phase 105（`start_promote` を `systemd-run --user --scope` で起こす、`GET /releases` に途中停止の可視化）を Sonnet で起動済み。
+## Phase 105（完了日 2026-09-22）: GUI からの昇格を `systemd-run --scope` で起こす（ADR-0060 D1 追記）
+
+### 原因（本番の観測、2026-09-22 21:55 UTC）
+
+人が GUI の「昇格」でリリース `4fff25348ed6` を昇格した。当時の `start_promote` は `setsid` で
+`promote.sh` を起こしており、`promote.sh` は 21:55:43 に `systemctl --user start
+celeris@4fff25348ed6` まで進んだ。新デーモンが `active` になった 1 秒後（21:55:44）に旧デーモン
+`celeris@c22d7dcfa445` が「`active` → `draining`」→ 在庫の run が無かったので即「drained; exiting
+0」。systemd は旧 unit の cgroup 全体を殺し、**`setsid` しただけで cgroup に残っていた
+`promote.sh` も一緒に死んだ**（ADR-0060 の ssh master とまったく同じ原因: `setsid` は cgroup を
+抜けない）。結果、`promote.log` は `systemctl --user start` の行で途切れ、`current` symlink と GUI
+は旧のまま、`promoted.json` 無し、`GET /releases` は `running=4fff…` / `current=c22d7…` の
+ちぐはぐな状態で 1 時間半止まっていた。親が手で `promote.sh 4fff25348ed6` を再実行し、
+`promote.sh` の再開ロジック（「celeris already took over; resuming the incomplete GUI/link
+handoff」、`scripts/selfdeploy/promote.sh` 90〜100 行付近）で完了した。
+
+### 条件 1: `start_promote` が `promote.sh` を `systemd-run --user --scope` で起こす（`inline` フォールバック込み）
+
+- 判断（`resolve_detach_launcher`）と argv の組み立て（`wrap_command`）を
+  `crates/task-worker/src/detach.rs`（新規）に共通化し、`cluster_login.rs` の
+  `MasterLauncher`/`resolve_master_launcher`/`launch_master_command`/`path_has_executable`/
+  `systemd_run_on_path`/`xdg_runtime_dir_is_set` はそこへ委譲する薄い型別名・関数に変えた
+  （公開名・シグネチャ・挙動は変えていない）。
+- `crates/celeris/src/releases.rs`: `start_promote` は環境から `resolve_detach_launcher("auto", …)`
+  で launcher を決め、`start_promote_with_launcher`（本体、launcher を注入できる）を呼ぶ。
+  `promote_exec_command`（純関数）が `(exec_program, exec_args)` を組み立てる:
+  `Inline` は従来どおり `setsid <script> <sha12>`、`SystemdRun` は `<systemd-run> --user --scope
+  --quiet --unit celeris-promote-<sha12>-<短い乱数> --description "celeris promote <sha12>" --
+  sh -c '<script> <sha12>'`。外側の `sh -c "... </dev/null >>promote.log 2>&1 & printf '%s\n' \"$!\"
+  >promote.lock"` によるバックグラウンド化・pid 捕捉の仕組みは launcher に依らず共通のまま
+  （zombie を作らない設計は変えていない）。
+- **実行したコマンド**: `cargo test -p task-worker --lib cluster_login` /
+  `cargo test -p task-worker --lib detach`
+- **出力の要点**: exit 0、cluster_login **21 passed**（既存テストすべて無変更で green。挙動が
+  変わっていないことの証跡）、detach **7 passed**（新規）。
+- **実行したコマンド**: `cargo test -p celeris --lib releases::`
+- **出力の要点**: exit 0、**21 passed**（既存 15 件は `start_promote_with_launcher(&root, sha,
+  &DetachLauncher::Inline)` を明示して呼ぶよう更新——この開発環境は実際に `systemd-run`/
+  `XDG_RUNTIME_DIR` を両方持つため、`auto` のままだと本物の `systemd-run` を呼んでしまう。
+  新規 6 件: `promote_exec_command_wraps_with_systemd_run`（argv の形）、
+  `promote_exec_command_inline_is_setsid`、
+  `promoting_via_fake_systemd_run_writes_the_lock_and_streams_the_log`（偽 `systemd-run`
+  ―`--` の後を `exec` するだけのスクリプト―経由で実際に detached 起動・`promote.lock` の pid・
+  `promote.log` への出力・二重起動 409 を確認。**本物の `systemd-run` は一切呼んでいない**）、
+  `promote_stale_when_lock_pid_is_dead_and_not_promoted`、
+  `promote_not_stale_when_promoted_json_exists`、`promote_not_stale_when_lock_pid_is_alive`）。
+
+### 条件 2: `GET /releases` に `promote_stale` / `promote_last_line`
+
+- `task_api::types::ReleaseItem` に `promote_stale: bool`（既定 `false`）と
+  `promote_last_line: Option<String>` を追加。`celeris::releases::read_release` で計算:
+  `promote_stale` は「`promote.lock` の pid が死んでいる」かつ「`promoted.json` が無い」かつ
+  「`promote.log` の最後の行が `promote.sh` 成功時の一行（`sd_log "promoted $SHA12
+  (mode=$MODE)…"`）まで進んでいない」の 3 条件がすべて真のときだけ。`promote_last_line` は
+  `promote.log` の最後の空でない行。
+- 独立の `ReleasePromoteFailure`（`promote_failed.json`。celeris 自身が EXIT トラップで書く明示的な
+  失敗）とは別物として残した（統合しない方を選んだ: `promote_stale` は「途中で殺された」ケースを
+  拾うためのもので、`promote.sh` 自身は失敗を検知できずに死ぬケースが対象。両方の情報を GUI が
+  好きに組み合わせられるほうが素直）。
+- **実行したコマンド**: `cargo test -p celeris --lib releases:: promote_stale`
+- **出力の要点**: exit 0、3 件 green（上の条件 1 の出力に含まれる）。
+
+### 条件 3: ゲート（cargo・GUI 型・GUI テスト）
+
+- **実行したコマンド**: `cargo test --workspace --no-fail-fast`
+- **出力の要点**: exit 0、**1876 passed / 0 failed**（+4 ignored: 既存の実クラスタ要 2 件・
+  doctest 1 件・既存の `#[ignore]` 1 件。前 Phase から増減なし、退行なし）。
+- **実行したコマンド**: `cargo clippy --workspace --all-targets -- -D warnings`
+- **出力の要点**: exit 0（warning 0）。
+- **実行したコマンド**: `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::`
+- **出力の要点**: exit 0、2 passed。`docs/api/v1/api-v1.schema.json` に `promote_stale` /
+  `promote_last_line` の 2 フィールドだけの差分が生成された（`ReleaseItem` の項目に追加。他は無変更）。
+- **実行したコマンド**（`gui/`）: `pnpm install --frozen-lockfile && pnpm gen:types && pnpm typecheck
+  && pnpm test`
+- **出力の要点**: `install` exit 0（lockfile どおり）。`gen:types` は `gui/app/celeris/types.ts` を
+  再生成し、`ReleaseItem` に `promote_stale?: boolean` / `promote_last_line?: string | null` が
+  追加された（同時に、この worktree では未反映だった Phase 104（ADR-0061）分の型差分
+  `RunMetrics`/`Usage` の cache/cost フィールドも一緒に再生成された。今回のスコープ外だが
+  `docs/api/v1/api-v1.schema.json` 自体は Phase 104 で既にコミット済みで、`types.ts` 側の再生成漏れ
+  だっただけなので、このコミットに含めた）。`typecheck` exit 0（`tsc -b` エラー無し）。`test`
+  （vitest）exit 0、**68 test files / 1061 passed**。
+
+### 文書
+
+- `docs/adr/0040-self-improvement-deploy.md` 末尾に「Phase 105 追記」を追加（本文は書き換えていない）。
+- `docs/adr/0060-ssh-master-outside-the-daemon-cgroup.md` 末尾に相互参照を追加（本文は書き換えていない）。
+- `gui/docs/celeris-api-v1.md`: 冒頭の改訂履歴、§3.66（`GET /releases` の応答例と説明）、§3.67
+  （`POST /releases/{sha12}/promote` の起こし方の説明）を更新。
+
+### 変更ファイル
+
+- 新規: `crates/task-worker/src/detach.rs`
+- 変更: `crates/task-worker/src/lib.rs`（`pub mod detach;`）、
+  `crates/task-worker/src/cluster_login.rs`（`detach` への委譲）、
+  `crates/celeris/src/releases.rs`（`start_promote`/`start_promote_with_launcher`/
+  `promote_exec_command`/`promote_stale`/`promote_last_line`/`lock_pid` と新規テスト）、
+  `crates/task-api/src/types.rs`（`ReleaseItem` の 2 フィールド）、
+  `crates/task-api/tests/task_management.rs`（フィクスチャに 2 フィールド追加）、
+  `docs/api/v1/api-v1.schema.json`（再生成）、`gui/app/celeris/types.ts`（再生成）、
+  `gui/docs/celeris-api-v1.md`、`docs/adr/0040-self-improvement-deploy.md`、
+  `docs/adr/0060-ssh-master-outside-the-daemon-cgroup.md`。
+
+### 未解決事項
+
+- GUI の見た目（`promote_stale`/`promote_last_line` を画面に出す）はこの Phase の範囲外
+  （契約だけ足した。指示どおり次の GUI Phase へ）。
+- 本番確認（親エージェントが実施予定）: 次に GUI から昇格して (a) `promote.log` が「promoted」まで
+  進む、(b) `systemctl --user list-units 'celeris-promote-*'` に scope が現れ（完了後に消え）る、
+  (c) `current` と GUI が新しい版に切り替わる、の 3 点を確認する。この worktree からは
+  `systemctl`/`systemd-run` を実行していない（禁止事項どおり、テストは偽物のみ）。
+
+### 提案
+
+- P-105-1: `promote_stale`/`promote_last_line` を GUI の「リリース」画面に赤いバナー等で出す
+  （`promote_failed` の既存表示と並べて）。
+- P-105-2: ADR-0060 の master と同様、`celeris-promote-*` scope が異常終了で残り続けないかを本番の
+  数回の昇格で確かめ、必要なら `systemd-run` に `--collect` 等の後始末オプションを足す判断を
+  別 Phase で行う（この Phase では触れていない）。

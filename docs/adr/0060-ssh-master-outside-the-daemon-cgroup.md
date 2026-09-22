@@ -120,3 +120,13 @@ systemd-run --user --scope --quiet \
 `start_connect` 呼び出し（GUI 手動接続、ディスパッチャの自動接続の 2 経路）を解決した `MasterLauncher`
 で呼ぶように変えた。テストは実 ssh・実 systemd-run を使わず、既存の偽 ssh の流儀で偽 `systemd-run` も
 作った。詳細は `docs/PROGRESS.md` の Phase 103 節を見よ。
+
+## Phase 105 追記（2026-09-22）: `promote.sh` にも同じ問題があった
+
+昇格そのもの（`promote.sh`）も celeris の子として `setsid` で起こしていたため、この ADR の master と
+同じ理由（cgroup 経由の巻き添え）で、旧デーモンの drain に途中で殺されていた（本番 2026-09-22
+21:55 UTC の観測）。判断（`resolve_master_launcher` 相当）と argv の組み立て
+（`launch_master_command` 相当）を `crates/task-worker/src/detach.rs`（`DetachLauncher` /
+`resolve_detach_launcher` / `wrap_command`）に共通化し、`cluster_login.rs` はそこへ委譲する薄い
+型別名・関数に変えた（挙動・既存テストは変えていない）。`promote.sh` 側の決定と受け入れ条件は
+ADR-0040 の「Phase 105 追記」、`docs/PROGRESS.md` の Phase 105 節を見よ。

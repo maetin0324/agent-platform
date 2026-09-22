@@ -190,3 +190,46 @@ DB バックアップ → `start taskd@<new>` → `health` 200 と `schema_versi
    （`taskd::releases::FsReleases`）は taskd 側にあり、task-api はファイルの規約を知らないまま。
 7. **`POST /releases/{sha12}/promote` に `require_active` を付けない**。昇格を始めるのに
    ディスパッチャは要らない（外部プロセスを起こすだけ）。むしろ `standby` からも押せる方がよい。
+
+## Phase 105 追記（2026-09-22）: `promote.sh` を celeris の cgroup の外で起こす（ADR-0060 D1 と同じ理由）
+
+### 本番で起きたこと（2026-09-22 21:55 UTC）
+
+人が GUI の「昇格」でリリース `4fff25348ed6` を昇格した。`start_promote`（当時）は `setsid` で
+`promote.sh` を起こし、`promote.sh` は 21:55:43 に `systemctl --user start celeris@4fff25348ed6`
+まで進んだ。新デーモンが `active` になった 1 秒後（21:55:44）に旧デーモン `celeris@c22d7dcfa445` が
+「`active` → `draining`」（在庫の run が無かったので即座に「drained; exiting 0」）。systemd は旧 unit
+の cgroup 全体を殺し、**`setsid` しただけで cgroup に残っていた `promote.sh` も一緒に死んだ**。
+結果、`promote.log` は `systemctl --user start` の行で途切れ、`current` symlink と GUI
+（`celeris-gui@`）は旧のまま、`promoted.json` 無し、`GET /releases` は
+`running=4fff…` / `current=c22d7…` のちぐはぐな状態で 1 時間半止まっていた。親が手で
+`promote.sh 4fff25348ed6` を再実行し、`promote.sh` の再開ロジック（「celeris already took over;
+resuming the incomplete GUI/link handoff」）で完了した。
+
+原因は ADR-0060 の ssh master とまったく同じ: **`setsid` は cgroup を抜けない**。D4 の drain
+（`celeris@<sha12>` unit が `KillMode=control-group`（既定）で止まる）は、`promote.sh` 自身が
+「動いている celeris を止める・引き継ぐ」ためにその celeris の子として起こされている限り、
+自分自身の drain に巻き込まれうる。
+
+### 決定（この ADR の D4/D6 の実装だけを変える。設計は変えていない）
+
+- `start_promote` は `promote.sh` を **`systemd-run --user --scope --quiet --unit
+  celeris-promote-<sha12>-<短い乱数> --description "celeris promote <sha12>" -- sh -c '<script> <sha12>'`**
+  で起こす（`setsid` の代わり）。`systemd-run` が無い／`XDG_RUNTIME_DIR` が無い環境（テスト、非
+  systemd）では従来どおり `setsid` にフォールバック（`auto`。判定は ADR-0060 D1 の
+  `resolve_master_launcher` と同じ規則）。`promote.lock` に書く pid は `--scope` が exec するので
+  そのまま `sh` の pid になり、`promoting_pid` の生存判定はそのまま使える。
+  判断（`resolve_detach_launcher`）と argv の組み立て（`wrap_command`）は
+  `crates/task-worker/src/detach.rs` に共通化し、ssh master（`cluster_login.rs`）と
+  `promote.sh`（`celeris::releases::start_promote`）の両方が使う（重複を避けるための共通化で、
+  設計上の新しい判断ではない）。
+- `GET /releases` の `items[]` に **`promote_stale`**（`promote.lock` の pid が死んでいるのに
+  `promoted.json` が無く、`promote.log` が `promote.sh` 成功時の一行まで進んでいない）と
+  **`promote_last_line`**（`promote.log` の最後の行）を足した。人が「昇格が途中で止まったまま」を
+  見分けるための材料。GUI の表示は次の GUI Phase に任せる（この Phase では API 契約だけ）。
+- **採らない**（変えていない）: celeris が自分で `promote.sh` の続きをやる（昇格の手順は script
+  1 か所のまま）。`celeris@.service` の `KillMode` 変更。
+
+詳細・受け入れ条件は `docs/PROGRESS.md` の Phase 105 節、実装は `crates/task-worker/src/detach.rs`、
+`crates/celeris/src/releases.rs::start_promote` / `start_promote_with_launcher` /
+`promote_exec_command`。
