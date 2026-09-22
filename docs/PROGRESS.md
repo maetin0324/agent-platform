@@ -13401,3 +13401,13 @@ composer-layout-level.md` に書いた（React Context による登録 API を�
 - 実機未確認（ADR-0009 P-34。ヘッドレス Chromium は `env(safe-area-inset-bottom)` を実機のように 0 より
   大きい値へ解決しない）。
 - 本番 = Phase 65〜91。実装中: Phase 92（このワークトリー。GUI のみ）。
+
+### Phase 92 の本番反映（2026-09-22、ライブ切替）
+
+- merge: `worktree-agent-a48ffbd03264575d0` → main `de0402e`（`docs/PROGRESS.md` の append 衝突 1 件は両方残して解決）。GUI ゲート（main 上）: `pnpm gen:types` 差分ゼロ、`pnpm typecheck` exit 0、`pnpm lint` exit 0、`pnpm test` 68 files / 1030 passed。push 済み。
+- `scripts/selfdeploy/release.sh main` → exit 0、`sha12=de0402e4f414 schema_version=24`、`changes.json: base=d294f898e72c commits=3 files=10 sensitive=0`。ゲート 10 段すべて exit 0（cargo-test 122.8s、cargo-clippy 22.1s、cargo-build 31.2s、pnpm-build 3.4s、pnpm-mobile-audit 90.3s、pnpm-e2e-mock 9.4s）。
+- `verify.sh de0402e4f414` → exit 0、check 1〜4, 4b, 5（N-1 = d294f898e72c）, 6（smoke done in 6.17s）すべて true、`ok=true live_ok=true`。
+- `promote.sh de0402e4f414` → mode=live、DB バックアップ 14M（`backups/20260922-033425-pre-de0402e4f414.sqlite3`）、新 celeris が 2 秒で active（5/5）、GUI 切替 1 秒、`current -> releases/de0402e4f414`。
+- 直後の確認: `GET /health` release=de0402e4f414 role=active schema_version=24、GUI `/` 200。
+- 本番で新たに有効になったもの: Console 入力欄がレイアウトレベル（`root.tsx`、`MobileTabBar` と同階層）に移動（ADR-0057）。ホームと組織ノード画面で入力欄がタブバー直上に固定され、ページ遷移アニメーションの影響を受けない。実機（Nothing Phone）での見た目・キーボード表示時の挙動は人が確認する（ADR-0009 P-34）。
+- 次: Phase 93（`/inbox` を mobile-audit に追加、ADR-0055 ラウンド17）を Sonnet で起動済み。
