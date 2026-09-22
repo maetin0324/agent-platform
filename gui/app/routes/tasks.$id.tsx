@@ -58,6 +58,7 @@ import {
 } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { ImageViewer } from "~/components/ImageViewer";
+import { LocalTime } from "~/components/LocalTime";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Sha256Badge } from "~/components/Sha256Badge";
 import { Badge, GenreLabel, KindBadge, RoleLabel, StatusBadge } from "~/components/ui/badge";
@@ -112,7 +113,6 @@ import {
 } from "~/lib/labels";
 import { isLiveStatusScreen } from "~/lib/live-status";
 import { milestoneTitle } from "~/lib/project-index";
-import { relativeTimeLabel } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import {
   groupTimelineWorkerProgress,
@@ -997,14 +997,11 @@ function OverviewTab({
                         </td>
                         <td className={tdClass}>{run.model}</td>
                         {/* フェーズ 74（ADR-0055 D2 ラウンド 6）: 生の ISO は表の幅も取るので相対表示に揃える。 */}
-                        <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")} title={run.started_at}>
-                          {relativeTimeLabel(run.started_at, fetchedAt)}
+                        <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}>
+                          <LocalTime iso={run.started_at} fetchedAtIso={fetchedAt} />
                         </td>
-                        <td
-                          className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}
-                          title={run.finished_at ?? undefined}
-                        >
-                          {run.finished_at ? relativeTimeLabel(run.finished_at, fetchedAt) : "-"}
+                        <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}>
+                          {run.finished_at ? <LocalTime iso={run.finished_at} fetchedAtIso={fetchedAt} /> : "-"}
                         </td>
                         <td className={tdClass}>
                           {run.outcome ? (
@@ -1934,10 +1931,9 @@ function TimelineRow({ taskId, item, fetchedAt }: { taskId: string; item: Timeli
       <p className="flex flex-wrap items-center gap-2">
         {/* ADR-0055 D1-4: モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
             フェーズ 74（ADR-0055 D2 ラウンド 6）: 生の ISO のままだと 393px には長すぎるので、他画面
-            （`/approvals` 等）と同じ `relativeTimeLabel` に揃え、絶対時刻は `title` に残す。 */}
-        <span className="text-sm text-fg-subtle lg:text-xs" title={item.at}>
-          {relativeTimeLabel(item.at, fetchedAt)}
-        </span>
+            （`/approvals` 等）と同じ `LocalTime`（`~/lib/reports.ts::relativeTimeLabel`）に揃え、
+            絶対時刻は `title`/`dateTime` に残す。 */}
+        <LocalTime iso={item.at} fetchedAtIso={fetchedAt} className="text-sm text-fg-subtle lg:text-xs" />
         <Badge tone={TIMELINE_TONE[item.kind] ?? "neutral"}>{timelineKindLabel(item.kind)}</Badge>
         {item.kind === "event" && <Mono>{item.event.type}</Mono>}
       </p>
@@ -1965,9 +1961,7 @@ function TimelineProgressGroupRow({ items, fetchedAt }: { items: TimelineWorkerP
           1 語のバッジ + 色。ここでは `kind` = "event" のバッジ、`worker_progress` は他の event 行と
           同じ `Mono` 表示にする）。 */}
       <p className="flex flex-wrap items-center gap-2">
-        <span className="text-sm text-fg-subtle lg:text-xs" title={last.at}>
-          {relativeTimeLabel(last.at, fetchedAt)}
-        </span>
+        <LocalTime iso={last.at} fetchedAtIso={fetchedAt} className="text-sm text-fg-subtle lg:text-xs" />
         <Badge tone={TIMELINE_TONE.event ?? "neutral"}>{timelineKindLabel("event")}</Badge>
         <Mono>worker_progress</Mono>
       </p>

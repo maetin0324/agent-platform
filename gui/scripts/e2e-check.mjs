@@ -319,6 +319,61 @@ async function main() {
       await context.close();
     }
 
+    // Phase 90（ADR-0055 ラウンド 14、U-G37-1）: `~/components/LocalTime.tsx` のハイドレーション安全性。
+    // このサンドボックス（`pnpm e2e:mock`）は GUI サーバー・ブラウザとも UTC で、モック celeris の時刻も
+    // 固定できない（`test/mock-celeris/fixtures.ts` は現実の時刻を使わない）ため、素の環境ではサーバと
+    // ブラウザのタイムゾーンが食い違う実配置を再現できない。代わりに Playwright の `timezoneId` で
+    // ブラウザ側だけ非 UTC（米国中部・日本）にし、`home`・`inbox` を開いてコンソールに React の
+    // ハイドレーション不一致警告（"Hydration failed" / "Text content does not match" 等）が出ないことを
+    // 確認する（`LocalTime` はサーバ・ハイドレーション前は常に UTC を描画し、マウント後だけ視聴者の
+    // タイムゾーンに切り替えるので、ブラウザのタイムゾーンが何であっても不一致にならない設計）。
+    const HYDRATION_CHECK_ROUTES = ["home", "inbox"];
+    const HYDRATION_CHECK_TIMEZONES = ["America/Chicago", "Asia/Tokyo"];
+    for (const timezoneId of HYDRATION_CHECK_TIMEZONES) {
+      const context = await browser.newContext({ viewport: { width: 393, height: 851 }, timezoneId });
+      await context.route("**/*", (route) => {
+        const url = new URL(route.request().url());
+        return url.origin === guiOrigin ? route.continue() : route.abort();
+      });
+      for (const routeName of HYDRATION_CHECK_ROUTES) {
+        const found = routes.find((r) => r.route === routeName);
+        if (!found) {
+          notes.push(`hydration check (${timezoneId}): route "${routeName}" not in buildRoutes() — skipped`);
+          continue;
+        }
+        const page = await context.newPage();
+        /** @type {string[]} */
+        const consoleErrors = [];
+        page.on("console", (msg) => {
+          if (msg.type() === "error") consoleErrors.push(msg.text());
+        });
+        page.on("pageerror", (err) => consoleErrors.push(err.message));
+        try {
+          await page.goto(`${guiBase}${found.path}`, { waitUntil: "load", timeout: 30_000 });
+          // ハイドレーション完了（マウント後の `useSyncExternalStore` の切り替え）を待つ余裕を見る。
+          await page.waitForTimeout(300);
+        } catch (e) {
+          failures.push(`hydration(${timezoneId}) ${routeName}: goto failed: ${/** @type {Error} */ (e).message}`);
+          await page.close();
+          continue;
+        }
+        const hydrationIssues = consoleErrors.filter((m) =>
+          /hydration failed|did not match|text content does not match/i.test(m),
+        );
+        if (hydrationIssues.length > 0) {
+          failures.push(`hydration(${timezoneId}) ${routeName}: ${hydrationIssues.join(" | ").slice(0, 300)}`);
+        } else if (consoleErrors.length > 0) {
+          // ハイドレーション以外のコンソールエラーは、メインのビューポート走査（UTC の既定タイムゾーン）
+          // で既にすべてのルートに対して失敗として拾っているので、ここでは参考情報として記録するだけ。
+          notes.push(
+            `hydration(${timezoneId}) ${routeName}: console error(s): ${consoleErrors.join(" | ").slice(0, 200)}`,
+          );
+        }
+        await page.close();
+      }
+      await context.close();
+    }
+
     // 受け入れ条件 5: 実在するタスクでタブを切り替える（読み取りのみ。`?tab=` を差し替える <Link> のクリック）。
     if (ids.taskId) {
       const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });

@@ -14,7 +14,9 @@ import type {
   ReportList,
 } from "~/celeris/types";
 import {
+  absoluteDateLabel,
   buildReportsQuery,
+  dateTimeLabel,
   filterReportsByKind,
   notificationMessage,
   relativeTimeLabel,
@@ -155,25 +157,39 @@ describe("relativeTimeLabel", () => {
   });
 });
 
-// Phase 84（U-G31-3 の解消）: 絶対日付フォールバックは UTC ではなく実行環境のローカルタイムゾーンの
-// 年月日を使う。`process.env.TZ` を切り替えて、同じ ISO でもタイムゾーンによって結果が変わることを確認する
-// （UTC のままなら両ケースとも同じ値になってしまうので、これが違うこと自体がローカル化の証拠になる）。
-describe("relativeTimeLabel の絶対日付フォールバック — ローカルタイムゾーン（Phase 84, U-G31-3）", () => {
-  const originalTz = process.env.TZ;
-
-  afterEach(() => {
-    if (originalTz === undefined) delete process.env.TZ;
-    else process.env.TZ = originalTz;
-  });
-
-  it("UTC 環境では UTC の年月日と同じ結果", () => {
-    process.env.TZ = "UTC";
+// Phase 90（U-G37-1 の解消）: Phase 84 では絶対日付フォールバックに `Date` のローカル getter（実行環境
+// 依存。`process.env.TZ` で切り替えていた）を使っていたが、SSR（GUI サーバー、通常 UTC）と CSR（ブラウザ、
+// 視聴者のタイムゾーン）が食い違う実配置ではハイドレーション後に表示が変わってしまっていた
+// （`docs/PROGRESS.md` Phase 84 の未解決事項 U-G37-1）。`Date` のローカル/UTC getter をやめ、
+// `Intl.DateTimeFormat` + **明示的な `timeZone` 引数**にしたので、`process.env.TZ` を切り替えるのではなく
+// 同じ実行環境のまま `timeZone` 引数を変えて、同じ ISO でも結果が変わることを直接確認する
+// （既定値のままなら両ケースとも同じ値になってしまうので、これが違うこと自体が「明示的な引数で決まる」
+// ことの証拠になる。`~/components/LocalTime.tsx` がサーバでは常に `"UTC"`、ハイドレーション後は
+// 視聴者の解決済みタイムゾーンを渡す）。
+describe("absoluteDateLabel / relativeTimeLabel の絶対日付フォールバック — 明示的な timeZone（Phase 90, U-G37-1）", () => {
+  it("既定（引数省略）は UTC", () => {
+    expect(absoluteDateLabel("2025-12-31T23:00:00Z", "2026-09-17T00:00:00Z")).toBe("2025/12/31");
     expect(relativeTimeLabel("2025-12-31T23:00:00Z", "2026-09-17T00:00:00Z")).toBe("2025/12/31");
   });
 
-  it("UTC+14（Pacific/Kiritimati）ではローカル日付が 1 日進み、年またぎが解消されて M/D になる", () => {
-    process.env.TZ = "Pacific/Kiritimati";
-    expect(relativeTimeLabel("2025-12-31T23:00:00Z", "2026-09-17T00:00:00Z")).toBe("1/1");
+  it("UTC+14（Pacific/Kiritimati）を明示すると日付が 1 日進み、年またぎが解消されて M/D になる", () => {
+    expect(absoluteDateLabel("2025-12-31T23:00:00Z", "2026-09-17T00:00:00Z", "Pacific/Kiritimati")).toBe("1/1");
+    expect(relativeTimeLabel("2025-12-31T23:00:00Z", "2026-09-17T00:00:00Z", "Pacific/Kiritimati")).toBe("1/1");
+  });
+
+  it("America/Chicago（DST 中は UTC-5）を明示すると同じ瞬間でも日付が変わりうる", () => {
+    expect(absoluteDateLabel("2026-09-17T02:00:00Z", "2026-09-17T12:00:00Z", "UTC")).toBe("9/17");
+    expect(absoluteDateLabel("2026-09-17T02:00:00Z", "2026-09-17T12:00:00Z", "America/Chicago")).toBe("9/16");
+  });
+});
+
+describe('dateTimeLabel（`~/components/LocalTime.tsx` の mode="datetime" 用。Phase 90）', () => {
+  it("既定は UTC の年月日時分", () => {
+    expect(dateTimeLabel("2026-09-22T05:06:00Z")).toBe("2026/9/22 05:06");
+  });
+
+  it("Asia/Tokyo（UTC+9）を明示すると時刻がずれる", () => {
+    expect(dateTimeLabel("2026-09-22T05:06:00Z", "Asia/Tokyo")).toBe("2026/9/22 14:06");
   });
 });
 

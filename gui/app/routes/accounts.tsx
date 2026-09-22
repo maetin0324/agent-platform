@@ -30,6 +30,7 @@ import type {
 } from "~/celeris/types";
 import { AccountActionFlash, ErrorFlash, SecretActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { LocalTime } from "~/components/LocalTime";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -53,7 +54,6 @@ import {
   tierResolutionReasonLabel,
 } from "~/lib/llm-sources";
 import { mcpAuthKindWord, mcpClientStatusWord, mcpConnectionUrlHint, mcpScopeLabel, sortMcpScopes } from "~/lib/mcp";
-import { relativeTimeLabel } from "~/lib/reports";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/accounts";
@@ -666,13 +666,11 @@ function McpClientCard({ client, fetchedAt }: { client: McpClient; fetchedAt: st
 
         <dl className="grid grid-cols-1 gap-x-4 gap-y-3 text-sm sm:grid-cols-2">
           <DataItem label="created_at">
-            <span title={client.created_at}>{relativeTimeLabel(client.created_at, fetchedAt)}</span>
+            <LocalTime iso={client.created_at} fetchedAtIso={fetchedAt} />
           </DataItem>
           <DataItem label="last_used_at">
             {client.last_used_at ? (
-              <span data-testid="mcp-client-last-used" title={client.last_used_at}>
-                {relativeTimeLabel(client.last_used_at, fetchedAt)}
-              </span>
+              <LocalTime iso={client.last_used_at} fetchedAtIso={fetchedAt} dataTestId="mcp-client-last-used" />
             ) : (
               <span className="text-fg-subtle">未使用</span>
             )}
@@ -761,7 +759,7 @@ function McpCallRow({ call, fetchedAt }: { call: McpCall; fetchedAt: string }) {
           </Badge>
         )}
         <span data-testid="mcp-call-latency">{call.latency_ms}ms</span>
-        <span title={call.at}>{relativeTimeLabel(call.at, fetchedAt)}</span>
+        <LocalTime iso={call.at} fetchedAtIso={fetchedAt} />
       </span>
     </li>
   );
@@ -853,7 +851,8 @@ function AccountCard({
           <DataItem label="observed_at" wide>
             {item.usage ? (
               <>
-                {item.usage.observed_at}（{relativeTimeLabel(item.usage.observed_at, fetchedAt)}・{item.usage.source}）
+                {item.usage.observed_at}（<LocalTime iso={item.usage.observed_at} fetchedAtIso={fetchedAt} />・
+                {item.usage.source}）
               </>
             ) : (
               "-"
@@ -1277,7 +1276,7 @@ function SecretCard({
           <span data-testid="secret-updated-at">
             {item.updated_at ? (
               <>
-                {item.updated_at}（{relativeTimeLabel(item.updated_at, fetchedAt)}）
+                {item.updated_at}（<LocalTime iso={item.updated_at} fetchedAtIso={fetchedAt} />）
               </>
             ) : (
               "未設定（設定はこの秘密を参照していますが、まだ値が入っていません）"

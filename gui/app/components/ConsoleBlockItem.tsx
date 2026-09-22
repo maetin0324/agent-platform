@@ -20,8 +20,8 @@ import { shortId, truncateLabel } from "~/lib/format";
 import { isKnowledgeFallback } from "~/lib/knowledge";
 import { resolveMcpAuthorLabel } from "~/lib/mcp";
 import { milestoneDecisionValid } from "~/lib/milestone-review";
-import { relativeTimeLabel } from "~/lib/reports";
 import { cn } from "~/lib/utils";
+import { LocalTime } from "./LocalTime";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { Badge, StatusBadge } from "./ui/badge";
 import { Button } from "./ui/button";
@@ -180,9 +180,7 @@ function BlockHeader({
         <Icon name={icon} className="size-3.5 shrink-0" />
         <span className="min-w-0 truncate">{who}</span>
       </span>
-      <span className="shrink-0" title={atIso}>
-        {relativeTimeLabel(atIso, fetchedAt)}
-      </span>
+      <LocalTime iso={atIso} fetchedAtIso={fetchedAt} className="shrink-0" />
     </div>
   );
 }
@@ -473,7 +471,7 @@ function TaskBlockView({
         <span className="flex items-center gap-2">
           {/* ADR-0055 D2: 長い id は末尾だけ、全文は title 属性。 */}
           <Mono title={t.task_id}>{shortId(t.task_id)}</Mono>
-          <span title={block.at}>{relativeTimeLabel(block.at, fetchedAt)}</span>
+          <LocalTime iso={block.at} fetchedAtIso={fetchedAt} />
         </span>
         <ReplyButton onClick={() => setCommenting((v) => !v)} />
       </div>

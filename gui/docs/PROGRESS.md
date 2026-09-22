@@ -6112,3 +6112,154 @@ Phase のスコープ外（実行していない。Phase 80/82/83/84/86/G39 と�
 - **P-G40-2**: `perf` の CPU スロットリングを `checkFocusOrder` 以外の重い検査（`runChecks` 全体）にも
   意図的に掛けて「ミッドレンジ機での操作性」を見る監査を足すかどうか検討する（今回はスコープ外として
   むしろ外す方向にしたが、別ルールとして足す価値はあるかもしれない）。
+
+## Phase G41 — スマホ UX ラウンド 14: タイムゾーンに安全な時刻表示（ADR-0055、celeris Phase 90。2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。Phase 84（G37、U-G31-3）の未解決事項 U-G37-1
+（`~/lib/reports.ts::absoluteDateLabel` の絶対日付フォールバックが `Date` のローカル getter＝実行環境の
+タイムゾーンに依存していて、SSR（GUI サーバー、通常 UTC）と CSR（ブラウザ）のタイムゾーンが食い違う実配置
+ではハイドレーション直後に表示が変わりうる、というもの。人が実際にシカゴから見ていて GUI ホストが UTC、
+という状況で顕在化しうる）を解消した。
+
+### 1. `<LocalTime>` コンポーネントと純粋関数の明示的な timeZone 化（受け入れ条件 1）
+
+- **`~/lib/reports.ts`**: `absoluteDateLabel`（従来は非 export の内部関数）を export し、`Date` の
+  ローカル/UTC getter をやめて `Intl.DateTimeFormat`（`formatToParts` で年月日だけを取り出す
+  `zonedDateParts`）に変えた。`absoluteDateLabel`/`relativeTimeLabel` はどちらも第 3 引数
+  `timeZone: string = "UTC"`（IANA 名）を取る。新規 `dateTimeLabel(iso, timeZone = "UTC")`（年月日時分、
+  `mode="datetime"` 用）も追加した。3 関数とも「絶対時刻そのものは返さない」規律は変えていない
+  （呼び出し側 = `LocalTime` が `title`/`dateTime` 属性に生の ISO を残す）。
+- **`~/lib/clock.ts`**（新規）: 「毎分すくなくとも 1 回」更新する共有の時計（受け入れ条件 3）。
+  モジュールスコープに `now: number | null` と購読者集合を持ち、`setInterval` は購読者が 1 人以上いる間
+  だけ 1 本（`LocalTime` を画面にいくつ並べても増えない）。`document.visibilitychange` でタブが非表示の
+  間は止め、表示に戻ったら即座に 1 回進めてから再開する。`getServerClockSnapshot()` は常に `null`
+  （サーバ・ハイドレーション前の決定的な値）。
+- **`~/lib/time-zone.ts`**（新規）: 視聴者の「表示タイムゾーン」設定（受け入れ条件 2、詳細は次節）。
+  `getServerTimeZoneSnapshot()` は常に `"UTC"`（決定的）。
+- **`~/components/LocalTime.tsx`**（新規）: `iso`・`fetchedAtIso`（省略可）・`mode`
+  （`"relative"`〈既定〉/`"absolute"`/`"datetime"`）・`className`・`dataTestId` を受け取り、`<time
+  dateTime={iso} title={iso}>` を描く。`useSyncExternalStore` を 2 回使う
+  （`subscribeTimeZonePreference`+`getServerTimeZoneSnapshot`、`subscribeClock`+`getServerClockSnapshot`）:
+  **サーバとハイドレーション直後のクライアントは必ず同じ文字列を描画する**（タイムゾーンは `"UTC"`、
+  「今」は `fetchedAtIso ?? iso`）。マウント後、React が `getServerSnapshot` から `getSnapshot` に切り
+  替える通常の状態更新として、視聴者の解決済みタイムゾーンと毎分更新される時計に切り替わる。これは
+  ハイドレーションの一致判定の**後**に起きる通常の再描画なので「Hydration failed」等の警告にはならない
+  （`useSyncExternalStore` がこの用途のために提供する公式パターン）。
+- **JSX からの直接呼び出しをすべて `<LocalTime>` に置き換えた**（`grep -rn "relativeTimeLabel\|
+  absoluteDateLabel" app` で見つかった全 18 箇所。`~/lib/reports.ts` 自身と `LocalTime.tsx` 以外に
+  直接呼び出しは残っていないことを確認済み）: `ArtifactsList.tsx`（1）・`ConsoleBlockItem.tsx`（2）・
+  `ReportsList.tsx`（1）・`accounts.tsx`（5: `client.created_at`/`last_used_at`/`call.at`/
+  `item.usage.observed_at`/`item.updated_at`〈秘密の更新時刻〉）・`approvals.tsx`（3: `head.created_at`/
+  `approval.created_at`/`rule.created_at`）・`inbox.tsx`（2: `<time>` を `<LocalTime>` に統合。`dateTime`
+  属性は `LocalTime` 自身が持つので二重にしない）・`tasks.$id.tsx`（4: run の `started_at`/`finished_at`、
+  タイムラインの `item.at`/`last.at`）。`org.tsx` の `toLocaleString("ja-JP")`（`approx_tokens` の桁区切り、
+  時刻ではない）はスコープ外のまま変更していない。
+- 既存の `title={iso}` を個別に持っていたラッパー要素（`<span>`/`<p>`/`<time>`）は、`LocalTime` 自身が
+  `title`/`dateTime` を持つため二重にせず、構造的に必要なもの（`<td>` 等）だけ残して中身を `LocalTime`
+  に差し替えた。
+
+### 2. 視聴者ごとの「表示タイムゾーン」設定（受け入れ条件 2）
+
+- `~/lib/time-zone.ts`: `"auto"`（既定、`Intl.DateTimeFormat().resolvedOptions().timeZone` で検出）か
+  固定の IANA 名を `localStorage`（キー `celeris:viewer-time-zone`）に保存する。celeris への問い合わせは
+  無い、この端末・このブラウザだけの見た目の好み。読み書きは `typeof window` チェック + try/catch で包む
+  （SSR・プライベートブラウジング・ストレージ無効化のいずれでも例外にしない）。同じタブ内の変更は自作
+  イベント、他タブでの変更はブラウザ標準の `storage` イベントの両方で `useSyncExternalStore` の再描画に
+  つながる。既知の候補 7 件（`auto`/UTC/Asia/Tokyo/America/Chicago/America/New_York/
+  America/Los_Angeles/Europe/London）を `TIME_ZONE_OPTIONS` として持つ（`isKnownTimeZoneValue` で検査可能。
+  `<select>` は自由入力ではなくここから選ぶ）。
+- `~/components/TimeZonePreference.tsx`（新規、共通部品）: ラベル「表示タイムゾーン」+ `<select>` +
+  「いま『{resolved}』として表示しています…現在時刻の例: {`<LocalTime mode="datetime">`}」というプレビュー
+  行（設定を変えた効果がその場で分かるように。`mode="datetime"` の唯一の呼び出し元）。設定 UI 自身も
+  `useSyncExternalStore`（`getServerTimeZonePreferenceSnapshot` は常に `"auto"`）でハイドレーション安全。
+- モバイルの「その他」シート（`~/root.tsx::MobileTabBar`）のヘッダ直下と、`/help` の新しい節
+  「表示設定」（`id="settings"`、目次にも追加）の両方に `<TimeZonePreference>` を置いた。
+
+### 3. 相対時刻の毎分更新（受け入れ条件 3）
+
+- `~/lib/clock.ts` の共有ストアで実現（上記 1 節）。`test/unit/clock.test.ts` で「複数回購読しても
+  `setInterval` は 1 本だけ」「毎分すくなくとも 1 回、購読者に通知する」「最後の購読者が抜けると止まり、
+  再購読すればまた動く」を `vi.useFakeTimers()` で確認した。
+
+### 4. テスト（受け入れ条件 4）
+
+- `test/unit/reports.test.ts`: 既存の「`relativeTimeLabel` の絶対日付フォールバック — ローカルタイム
+  ゾーン（Phase 84, U-G31-3）」節（`process.env.TZ` を切り替える方式）を、`absoluteDateLabel`/
+  `relativeTimeLabel` の第 3 引数に明示的な `timeZone` を渡す方式に置き換えた（`"UTC"` 既定・
+  `Pacific/Kiritimati`〈年またぎが解消〉・`America/Chicago`〈DST 中は UTC-5、同じ瞬間でも日付が変わる〉の
+  3 ケース）。新規 `dateTimeLabel` のテスト（UTC 既定・`Asia/Tokyo` で時刻がずれる）も追加した。
+- `test/unit/clock.test.ts`（新規、5 件）・`test/unit/time-zone.test.ts`（新規、7 件。vitest の
+  `environment: "node"`〈`window`/`document` が無い〉で「SSR と同じ経路」を自然に検査でき、`"auto"`/
+  `"UTC"` へのフォールバックが例外を投げないことを直接確認できた）。
+- `LocalTime`/`TimeZonePreference` 自体（React コンポーネント）の DOM 描画テストは追加していない
+  （`~/lib/reports.ts` の docstring どおり「DOM を描画する単体テストはこのリポジトリに無い」慣例に従い、
+  判断・計算はすべて純粋関数側でテストし、コンポーネントは薄い配線に留めた）。正しく配線されていることは
+  `pnpm build` + `pnpm e2e:mock`（ハイドレーション検査、下記）で確認した。
+- `scripts/e2e-check.mjs`: 既存のビューポート走査（26 route × mobile/desktop、UTC の既定タイムゾーン）
+  に加えて、Playwright の `timezoneId` を `America/Chicago`/`Asia/Tokyo` にした 2 回の実行で `home`・
+  `inbox` を開き、コンソールに "Hydration failed"/"Text content does not match"（大小文字を問わず正規表現
+  一致）等のハイドレーション不一致警告が出ないことを確認する検査を追加した。**このサンドボックス
+  （`pnpm e2e:mock`）は GUI サーバー・ブラウザとも UTC で、モック celeris の時刻も固定できない**ため、
+  ブラウザ側だけを非 UTC にする形で「LocalTime が SSR/CSR の最初の描画を必ず一致させる設計になっている
+  こと」を検査する（サーバー側も非 UTC にした「サーバーとブラウザが異なる非 UTC」の完全な組み合わせは
+  実機でのみ確認できる。下記「未解決事項」）。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ |
+| lint | `pnpm lint`（`biome check .`。1 回目は accounts.tsx の折り返しで 1 件、`biome check --write .` で自動整形） | exit 0。`Checked 249 files … No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（`react-router typegen && tsc -b`、出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 67 passed (67) / Tests 1019 passed (1019)**（Phase G40 の 1004 から +15: `clock.test.ts` 5、`time-zone.test.ts` 7、`reports.test.ts` +3） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は変化なし。新規チャンク `LocalTime-*.js` 4.20kB（gzip 1.99kB） |
+| mobile-audit | `MOBILE_AUDIT_SKIP_BUILD=1 pnpm mobile-audit` | **exit 0、`{"ok": true, "total": 0, "by_rule": {}, "by_scheme": {"light": 0, "dark": 0}}`**（26 route × light/dark。route 数・違反数とも Phase G40 から変化なし） |
+| e2e:mock | `E2E_SKIP_BUILD=1 pnpm e2e:mock` | **`{"ok": true, "mode": "mock", "failures": []}`**（`America/Chicago`/`Asia/Tokyo` の 2 タイムゾーン × `home`/`inbox` のハイドレーション検査を含む。コンソールエラー・ハイドレーション警告とも 0 件） |
+
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` はこの
+Phase のスコープ外（実行していない。Phase 80/82/83/84/86/87/88/G39/G40 と同じ扱い）。
+
+### 変更したファイル
+
+- `app/lib/reports.ts`（`absoluteDateLabel` を export + `Intl.DateTimeFormat` ベースに、`relativeTimeLabel`
+  に `timeZone` 引数、`dateTimeLabel` 新規）
+- `app/lib/clock.ts`（新規）・`app/lib/time-zone.ts`（新規）
+- `app/components/LocalTime.tsx`（新規）・`app/components/TimeZonePreference.tsx`（新規）
+- `app/components/ArtifactsList.tsx`・`app/components/ConsoleBlockItem.tsx`・`app/components/ReportsList.tsx`・
+  `app/routes/accounts.tsx`・`app/routes/approvals.tsx`・`app/routes/inbox.tsx`・`app/routes/tasks.$id.tsx`
+  （`relativeTimeLabel`/`absoluteDateLabel` の直接呼び出しを `<LocalTime>` に置き換え）
+- `app/root.tsx`（モバイル「その他」シートに `<TimeZonePreference>`）・`app/routes/help.tsx`（新しい節
+  「表示設定」、目次に追加）
+- `scripts/e2e-check.mjs`（`America/Chicago`/`Asia/Tokyo` でのハイドレーション検査を追加）
+- `test/unit/reports.test.ts`（絶対日付フォールバックのテストを明示的 `timeZone` 方式に置き換え、
+  `dateTimeLabel` のテスト追加）・`test/unit/clock.test.ts`（新規）・`test/unit/time-zone.test.ts`（新規）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34）。このサンドボックスは GUI サーバー・ブラウザとも UTC で、`pnpm e2e:mock`
+  のハイドレーション検査もブラウザの `timezoneId` を変えるだけ（GUI サーバー側は依然 UTC）なので、
+  「サーバーとブラウザの両方が非 UTC で、かつ互いに異なる」実配置そのものは再現できていない。実機
+  （日本のスマホ、GUI サーバーは UTC 想定）で `/`・`/inbox`・7 日超の絶対日付が出る画面（`/reports`・
+  `/accounts` 等）を開き、ブラウザの開発者コンソールにハイドレーション関連の警告/エラーが出ないこと、
+  「その他」シート／`/help` の「表示タイムゾーン」を切り替えると表示が実際に変わることを確認する必要
+  がある。
+- 表示タイムゾーンの設定は `localStorage`（この端末・このブラウザだけ）が仕様どおりの範囲で、別の端末・
+  シークレットウィンドウでは毎回「自動」に戻る。celeris 側に永続化する（アカウント単位の設定にする）
+  要望が出たら、GUI 単独では実現できない（celeris 側のスキーマ拡張が要る）ため別途検討。
+- `TIME_ZONE_OPTIONS` の候補は 7 件（auto/UTC/Asia/Tokyo/America/Chicago/America/New_York/
+  America/Los_Angeles/Europe/London）に絞った。自由入力（任意の IANA 名をテキストで入力）にはしていない
+  （`isKnownTimeZoneValue`/`Intl.DateTimeFormat` の妥当性検査は用意してあるので、要望があれば `<select>`
+  に「その他（入力）」を足すだけで拡張できる）。
+- `LocalTime`/`TimeZonePreference` コンポーネント自体の DOM 描画テストは無い（このリポジトリの既存の
+  慣例どおり。`pnpm e2e:mock`/`pnpm mobile-audit`/実機確認で配線を確かめる）。
+
+### 提案
+
+- **P-G41-1**: U-G37-1 の完全な確認（GUI サーバーとブラウザが「互いに異なる非 UTC」の実配置）は、この
+  サンドボックスの制約上どうしても実機頼みになる。次に実機確認の機会があれば、`TZ=Asia/Tokyo node
+  server.js` のような GUI サーバー起動オプションを一時的に用意して、`e2e-check.mjs` 側からもサーバーの
+  タイムゾーンを制御できるようにすると、このギャップをサンドボックス内で埋められる（今回はスコープ外
+  として見送った）。
+- **P-G41-2**: 「表示タイムゾーン」をアカウント単位で celeris 側に永続化する要望が出た場合、
+  `docs/celeris-api-v1.md` にビューア設定用の小さなエンドポイントを足すかどうかの検討が要る（このワーク
+  トリークは `crates/` に触れないため提案のみ）。

@@ -3,6 +3,7 @@ import { Link, useFetcher } from "react-router";
 import type { ReportOpOutcome } from "~/celeris/action-types";
 import type { OrgNode, Project, Report, ReportDetail, ReportKind } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
+import { LocalTime } from "~/components/LocalTime";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -10,7 +11,7 @@ import { touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import type { Tone } from "~/components/ui/tone";
 import { shortId } from "~/lib/format";
-import { relativeTimeLabel, reportNodeName, reportProjectName } from "~/lib/reports";
+import { reportNodeName, reportProjectName } from "~/lib/reports";
 import { cn } from "~/lib/utils";
 
 /**
@@ -168,9 +169,11 @@ function ReportRow({
           {reportNodeName(report, org)}
         </span>
         {/* ADR-0055 D2 ラウンド 7（Phase 75）: 相対表示は `title` に絶対時刻を残す（他画面と同じ規律）。 */}
-        <span className="shrink-0 text-sm tabular-nums text-fg-subtle lg:text-xs" title={report.created_at}>
-          {relativeTimeLabel(report.created_at, fetchedAt)}
-        </span>
+        <LocalTime
+          iso={report.created_at}
+          fetchedAtIso={fetchedAt}
+          className="shrink-0 text-sm tabular-nums text-fg-subtle lg:text-xs"
+        />
         {!isRead && (
           <Badge tone="info" dot className="shrink-0">
             未読

@@ -55,44 +55,72 @@ export function reportNodeName(report: Pick<Report, "node_id">, org: OrgNode[]):
 /** 7 日（ADR-0055 D2 ラウンド 7）を超えたら「n 前」ではなく絶対日付にする。 */
 const RELATIVE_ABSOLUTE_THRESHOLD_SECONDS = 7 * 86400;
 
-/**
- * 7 日を超えた `relativeTimeLabel` のフォールバック絶対日付。**実行環境のローカルタイムゾーン**の年月日で
- * 比較・整形する（`Date` のローカル getter。Phase 84、U-G31-3 の解消。以前は UTC の年月日で比較していたが、
- * ユーザーが見ている「今日」の感覚とずれることがあった）。同じ年なら `"M/D"`、違えば `"YYYY/M/D"`。
- * 絶対時刻そのものは返さない（呼び出し側が `title` 属性に生の ISO 文字列を残す規律は変えていない。
- * ローカル日付はあくまで短い表示用で、正確な時刻はそちらで確認できる）。
- *
- * **既知の限界**: SSR（GUI サーバーの Node プロセス）と CSR（ブラウザ）は同じ `Date` のローカル getter を
- * 使うが、両者のタイムゾーンは同じ保証が無い（ADR-0055 が想定するスマホからのアクセスでは、GUI サーバーの
- * ホストとブラウザは別のタイムゾーンにありうる）。ずれると、7 日を超えた絶対日付表示だけ SSR の文字列と
- * ハイドレーション後の文字列が食い違い、React が 1 回だけ静かに client 側の値に差し替える
- * （hydration mismatch。相対表示・7 日以内はどちらの環境でも同じ計算になるので影響しない）。今回はこの
- * ずれを検出・警告抑制する仕組みまでは入れていない（`docs/PROGRESS.md` Phase 84 の未解決事項）。
- */
-function absoluteDateLabel(iso: string, fetchedAtIso: string): string {
-  const d = new Date(iso);
-  const now = new Date(fetchedAtIso);
-  const y = d.getFullYear();
-  const m = d.getMonth() + 1;
-  const day = d.getDate();
-  return y === now.getFullYear() ? `${m}/${day}` : `${y}/${m}/${day}`;
+/** `Intl.DateTimeFormat` で、指定したタイムゾーンでの年月日だけを取り出す（`Date` のローカル/UTC getter は
+ * 実行環境（ホスト or ブラウザ）に縛られるので使わない。任意のタイムゾーンを明示的に扱うための内部関数）。 */
+function zonedDateParts(iso: string, timeZone: string): { year: number; month: number; day: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+  }).formatToParts(new Date(iso));
+  const get = (type: "year" | "month" | "day") => Number(parts.find((p) => p.type === type)?.value ?? "0");
+  return { year: get("year"), month: get("month"), day: get("day") };
 }
 
 /**
- * 相対時刻（「n 前」）。Console・タイムライン・`/approvals`・`/accounts` 等で使う（ADR-0055 D2
- * ラウンド 7、P-G30-1）。1 単位に丸める（`formatDuration` の期間表示より粗い。コンパクトにするため）:
- * 10 秒未満は「たった今」、それ以降は秒・分・時間・日のうち最大の単位を 1 つだけ出し、7 日を超えたら
- * 絶対日付にする。絶対時刻は返さない（呼び出し側が `title` 属性に生の ISO 文字列を残す）。
+ * 7 日を超えた `relativeTimeLabel` のフォールバック絶対日付。**指定したタイムゾーン**（IANA 名。
+ * 既定は `"UTC"`）の年月日で比較・整形する（Phase 90、U-G37-1 の解消）。同じ年なら `"M/D"`、
+ * 違えば `"YYYY/M/D"`。絶対時刻そのものは返さない（呼び出し側 = `~/components/LocalTime.tsx` が
+ * `title`/`dateTime` 属性に生の ISO 文字列を残す）。
+ *
+ * **経緯**: Phase 84（U-G31-3）で UTC 固定から `Date` のローカル getter（実行環境依存）に変えたが、
+ * SSR（GUI サーバーの Node プロセス。通常 UTC）と CSR（ブラウザ。視聴者のタイムゾーン）が食い違う実配置
+ * では、7 日を超えた絶対日付表示だけハイドレーション直後に文字列が変わってしまっていた（U-G37-1）。
+ * Phase 90 で `Date` のローカル/UTC getter をやめ、`Intl.DateTimeFormat` + **呼び出し側が渡す明示的な
+ * `timeZone`** に変えた: `LocalTime` はサーバ・ハイドレーション前は常に `"UTC"` を渡し（決定的、
+ * サーバとクライアントの最初の描画が必ず一致する）、ハイドレーション後だけ視聴者の解決済みタイムゾーン
+ * （`~/lib/time-zone.ts`）に安全に差し替える。
  */
-export function relativeTimeLabel(iso: string, fetchedAtIso: string): string {
+export function absoluteDateLabel(iso: string, fetchedAtIso: string, timeZone = "UTC"): string {
+  const d = zonedDateParts(iso, timeZone);
+  const now = zonedDateParts(fetchedAtIso, timeZone);
+  return d.year === now.year ? `${d.month}/${d.day}` : `${d.year}/${d.month}/${d.day}`;
+}
+
+/**
+ * 相対時刻（「n 前」）。Console・タイムライン・`/approvals`・`/accounts` 等では直接ではなく
+ * `~/components/LocalTime.tsx` 経由で使う（ADR-0055 D2 ラウンド 7、P-G30-1、Phase 90）。1 単位に丸める
+ * （`formatDuration` の期間表示より粗い。コンパクトにするため）: 10 秒未満は「たった今」、それ以降は
+ * 秒・分・時間・日のうち最大の単位を 1 つだけ出し、7 日を超えたら絶対日付（`timeZone` 引数、既定 `"UTC"`）
+ * にする。絶対時刻は返さない（呼び出し側が `title`/`dateTime` 属性に生の ISO 文字列を残す）。
+ */
+export function relativeTimeLabel(iso: string, fetchedAtIso: string, timeZone = "UTC"): string {
   const totalSeconds = secondsBetween(iso, fetchedAtIso);
-  if (totalSeconds >= RELATIVE_ABSOLUTE_THRESHOLD_SECONDS) return absoluteDateLabel(iso, fetchedAtIso);
+  if (totalSeconds >= RELATIVE_ABSOLUTE_THRESHOLD_SECONDS) return absoluteDateLabel(iso, fetchedAtIso, timeZone);
   const { days, hours, minutes, seconds } = splitDuration(totalSeconds);
   if (days > 0) return `${days}日前`;
   if (hours > 0) return `${hours}時間前`;
   if (minutes > 0) return `${minutes}分前`;
   if (seconds < 10) return "たった今";
   return `${seconds}秒前`;
+}
+
+/**
+ * 年月日時分（指定したタイムゾーン、既定 `"UTC"`）。`~/components/LocalTime.tsx` の `mode="datetime"` 用
+ * （Phase 90）。相対表示ではなく絶対時刻をそのまま見せたい箇所（視聴者のタイムゾーン設定のプレビュー等）
+ * で使う。絶対時刻を返す関数なので、呼び出し側は必要なら別途 `title` に ISO を残すこと。
+ */
+export function dateTimeLabel(iso: string, timeZone = "UTC"): string {
+  return new Intl.DateTimeFormat("ja-JP", {
+    timeZone,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(new Date(iso));
 }
 
 /** ナビの「報告」バッジの色（SPEC §4「良い知らせも悪い知らせも」。bad_news があれば赤）。 */

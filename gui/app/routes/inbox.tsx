@@ -8,12 +8,12 @@ import { runInboxAction } from "~/celeris/route-actions.server";
 import type { ApprovalItem, AttentionItem, DraftGroup, Inbox, QuestionItem } from "~/celeris/types";
 import { RetryFlash, TransitionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { LocalTime } from "~/components/LocalTime";
 import { Button } from "~/components/ui/button";
 import { checkboxClass, hintClass, textareaClass } from "~/components/ui/form";
 import { Icon, type IconName } from "~/components/ui/Icon";
 import { Alert, EmptyState, PageHeader, SectionTitle, StatCard } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
-import { relativeTimeLabel } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import type { Route } from "./+types/inbox";
 
@@ -248,14 +248,12 @@ function ApprovalRow({ item, fetchedAt }: { item: ApprovalItem; fetchedAt: strin
           {item.approval.title}
         </Link>
         {/* ADR-0055 D1-4: 本文 14px 以上（モバイルは text-sm、デスクトップは lg:text-xs）。 */}
-        <time
-          dateTime={item.requested_at}
-          title={item.requested_at}
+        <LocalTime
+          iso={item.requested_at}
+          fetchedAtIso={fetchedAt}
           className="text-sm font-normal text-fg-subtle lg:text-xs"
-          data-testid="approval-requested-at"
-        >
-          {relativeTimeLabel(item.requested_at, fetchedAt)}
-        </time>
+          dataTestId="approval-requested-at"
+        />
       </p>
       {item.parent && (
         <p className="mt-1 flex flex-wrap items-center gap-1.5 text-fg-muted" data-testid="approval-parent-title">
@@ -346,14 +344,12 @@ function QuestionRow({ item, fetchedAt }: { item: QuestionItem; fetchedAt: strin
           {item.task.title}
         </Link>
         {item.asked_at && (
-          <time
-            dateTime={item.asked_at}
-            title={item.asked_at}
+          <LocalTime
+            iso={item.asked_at}
+            fetchedAtIso={fetchedAt}
             className="text-sm font-normal text-fg-subtle lg:text-xs"
-            data-testid="question-asked-at"
-          >
-            {relativeTimeLabel(item.asked_at, fetchedAt)}
-          </time>
+            dataTestId="question-asked-at"
+          />
         )}
       </p>
       <p className="mt-1 text-fg" data-testid="question-text">

@@ -13,6 +13,7 @@ import {
 } from "react-router";
 import { authCheck, sessionContext } from "~/auth.server";
 import { NotificationsWatcher } from "~/components/NotificationsWatcher";
+import { TimeZonePreference } from "~/components/TimeZonePreference";
 import { Badge } from "~/components/ui/badge";
 import { buttonClass } from "~/components/ui/button";
 import { Icon, type IconName } from "~/components/ui/Icon";
@@ -543,6 +544,9 @@ function MobileTabBar({
                 <Icon name="x" className="size-4.5" />
               </button>
             </div>
+            {/* ADR-0055 ラウンド 14（U-G37-1 の受け入れ条件 2）: 表示タイムゾーンの視聴者設定。
+                celeris への問い合わせは無い（`localStorage` だけの見た目の好み）。 */}
+            <TimeZonePreference className="mb-3 rounded-lg border border-border bg-surface-2/40 p-3" />
             <ul className="grid grid-cols-2 gap-2">
               {MOBILE_OTHER.map((item) => {
                 const active = isActive(pathname, item.href);

@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router";
+import { TimeZonePreference } from "~/components/TimeZonePreference";
 import { StatusBadge } from "~/components/ui/badge";
 import { Card, CardBody } from "~/components/ui/card";
 import { tableClass, tdClass, thClass, theadClass, touchLinkClass, trHoverClass } from "~/components/ui/form";
@@ -167,6 +168,7 @@ const TOC = [
   { id: "acceptance", heading: "受け入れ条件", icon: "checkCircle" },
   { id: "status", heading: "状態", icon: "activity" },
   { id: "mcp", heading: "MCP で外から使う", icon: "network" },
+  { id: "settings", heading: "表示設定", icon: "clock" },
   { id: "glossary", heading: "用語集", icon: "book" },
   { id: "trouble", heading: "困ったとき", icon: "help" },
 ] satisfies { id: string; heading: string; icon: IconName }[];
@@ -531,6 +533,16 @@ export default function HelpPage() {
           で、発行済みの客・スコープ・直近の呼び出しを見られます。設定例・接続手順の全文は
           <Mono>docs/mcp.md</Mono> にあります。
         </p>
+      </Section>
+
+      <Section id="settings" icon="clock" tone="neutral" heading="表示設定" testId="help-settings-section">
+        <p className="text-sm text-fg-muted">
+          時刻の表示（「n 前」・報告や承認の一覧などの相対時刻）は既定でブラウザが検出したタイムゾーンを
+          使います。celeris には問い合わせず、この端末・このブラウザだけの見た目の設定（
+          <Mono>localStorage</Mono>）です。固定のタイムゾーンにしたいときはここか、モバイルの「その他」
+          シートから変更できます。
+        </p>
+        <TimeZonePreference className="mt-3 max-w-sm" />
       </Section>
 
       <Section id="glossary" icon="book" tone="neutral" heading="用語集" testId="help-glossary-section">

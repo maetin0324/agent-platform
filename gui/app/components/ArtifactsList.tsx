@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { CodeViewer } from "~/components/CodeViewer";
 import { ImageViewer } from "~/components/ImageViewer";
+import { LocalTime } from "~/components/LocalTime";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Sha256Badge } from "~/components/Sha256Badge";
 import { Badge, statusTone } from "~/components/ui/badge";
@@ -10,7 +11,6 @@ import { Icon } from "~/components/ui/Icon";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { isSourcesArtifact, type ProjectArtifactRow, parseSourcesJson } from "~/lib/artifacts";
 import { taskStatusLabel } from "~/lib/labels";
-import { relativeTimeLabel } from "~/lib/reports";
 
 /**
  * 案件を横断した成果物一覧の部品（SPEC §2.2「調査結果の文書と見るべき関連研究へのリンクがまとまって読める」）。
@@ -103,8 +103,8 @@ function ArtifactRow({ row, fetchedAt }: { row: ProjectArtifactRow; fetchedAt: s
               </span>
             )}
           </p>
-          <p className="text-xs tabular-nums text-fg-subtle" title={artifact.ts}>
-            {relativeTimeLabel(artifact.ts, fetchedAt)}
+          <p className="text-xs tabular-nums text-fg-subtle">
+            <LocalTime iso={artifact.ts} fetchedAtIso={fetchedAt} />
           </p>
         </div>
         {canOpen && (

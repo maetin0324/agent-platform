@@ -13227,3 +13227,54 @@ cat ~/.local/celeris/releases/.build/<sha12>/gate.json   # 失敗時。成功時
   実機の初回: **`step pnpm-mobile-audit: exit 0 in 79.4 s`、`step pnpm-e2e-mock: exit 0 in 7.8 s`**（gate.json に記録）。`release.sh` → `e2ad86b7dafc`（schema 24）。
   `verify.sh` `ok=true live_ok=true`（check 4b 含む）→ `promote.sh` mode=live。本番 = Phase 65〜89。
 - これで「設計規律（26 route × light/dark の 12 ルール）と GUI e2e」は release の段階で必ず通る。release 1 回あたり +1.5 分。
+
+## Phase 90 — スマホ UX ラウンド 14（タイムゾーンに安全な時刻表示。ADR-0055。2026-09-22）
+
+GUI のみ（`crates/`・`docs/DESIGN.md`・`docs/SPEC.md`・ADR は無変更）。Phase 84（U-G31-3）の未解決事項
+U-G37-1（`absoluteDateLabel` の絶対日付フォールバックが `Date` のローカル getter＝実行環境のタイムゾーン
+に依存していて、GUI サーバー〈SSR、通常 UTC〉と視聴者のブラウザ〈CSR〉のタイムゾーンが食い違う実配置
+（人がシカゴから見ていて GUI ホストが UTC、等）ではハイドレーション直後に表示が変わりうる問題）を解消
+した。詳細・証跡は `gui/docs/PROGRESS.md`「Phase G41」を参照（GUI の実装詳細は gui 側に書く、このリポジトリ
+の慣例どおり）。要点:
+
+1. **`<LocalTime>` コンポーネント**（`gui/app/components/LocalTime.tsx`、新規）: `relativeTimeLabel`/
+   `absoluteDateLabel`（`~/lib/reports.ts`）の直接呼び出しを JSX から無くし、この 1 コンポーネント経由に
+   統一した。サーバ・ハイドレーション前は常にタイムゾーン `"UTC"`・「今」は `null`（→ `fetchedAtIso` に
+   フォールバック）という決定的な値を描画し、マウント後だけ視聴者の解決済みタイムゾーンと、毎分すくなく
+   とも 1 回更新される共有の時計に安全に切り替える（`useSyncExternalStore` の `getServerSnapshot` を使う
+   公式の SSR/CSR 差分パターン）。`~/lib/reports.ts` の純粋関数（`absoluteDateLabel`/`relativeTimeLabel`/
+   新規 `dateTimeLabel`）は第 3 引数に明示的な IANA `timeZone`（既定 `"UTC"`）を取るようにし、`Date` の
+   ローカル/UTC getter をやめて `Intl.DateTimeFormat` に統一した。
+2. **視聴者ごとの「表示タイムゾーン」設定**（`~/lib/time-zone.ts`、新規）: `auto`（既定、ブラウザ検出）か
+   固定の IANA 名を `localStorage` に保存する（celeris への問い合わせは無い、この端末・このブラウザだけの
+   見た目の好み。読み書きは try/catch で包む）。モバイルの「その他」シートと `/help` の両方に
+   `<TimeZonePreference>`（共通部品、新規）として置いた。
+3. **毎分の更新**（`~/lib/clock.ts`、新規）: `<LocalTime>` を画面にいくつ並べても `setInterval` は 1 本
+   だけ（モジュールスコープの共有ストア）。タブが非表示の間は止める。
+4. ハイドレーション不一致が実際に起きないことを、`pnpm build` に加えて `pnpm e2e:mock`（Playwright の
+   `timezoneId` を `America/Chicago`/`Asia/Tokyo` にして `home`・`inbox` を開き、コンソールに
+   "Hydration failed"/"Text content does not match" が出ないことを見る）で確認した。
+
+### ゲート（証拠コマンドと出力の要点。詳細は gui/docs/PROGRESS.md Phase G41）
+
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ）/ `pnpm lint`（exit 0、249 files、
+fix 無し）/ `pnpm typecheck`（exit 0）/ `pnpm test`（exit 0、**Test Files 67 passed / Tests 1019 passed**、
+Phase 89 の 1004 から +15: `clock.test.ts` 5、`time-zone.test.ts` 7、`reports.test.ts` +3）/ `pnpm build`
+（exit 0、既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は変化なし）/ `pnpm mobile-audit`
+（**exit 0、`{"ok":true,"total":0}`、`routes=26 schemes=2 violations=0`**、light/dark とも 0）/
+`pnpm e2e:mock`（**`{"ok": true, "mode": "mock", "failures": []}`**。ハイドレーション検査の 2 タイムゾーン
+× 2 route でもコンソールエラー無し）すべて exit 0。
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` はこの
+Phase のスコープ外（実行していない。Phase 80/82/83/84/86/87/88/89 と同じ扱い）。
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34。このサンドボックスは GUI サーバー・ブラウザとも UTC で、`pnpm e2e:mock` の
+  ハイドレーション検査もブラウザの `timezoneId` を変えるだけ＝ GUI サーバー側は依然 UTC のままなので、
+  「サーバーとブラウザの両方が非 UTC で、かつ互いに異なる」実配置そのものは再現できていない。実機（日本の
+  スマホ、GUI サーバーは UTC 想定）で `/`・`/inbox`・7 日超の絶対日付が出る画面を開き、ブラウザの開発者
+  コンソールにハイドレーション警告が出ないこと、「その他」シート／`/help` の「表示タイムゾーン」で
+  固定タイムゾーンに切り替えると表示が実際に変わることを確認する必要がある。
+- 表示タイムゾーンの設定は `localStorage`（この端末・このブラウザだけ）なので、別の端末・シークレット
+  ウィンドウでは毎回「自動」に戻る（仕様どおり。celeris 側に永続化する要望が出たら別途検討）。
+- 本番 = Phase 65〜89。実装中: Phase 90（このワークトリー。GUI のみ）。

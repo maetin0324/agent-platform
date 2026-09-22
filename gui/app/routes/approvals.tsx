@@ -22,6 +22,7 @@ import type {
 } from "~/celeris/types";
 import { ApprovalActionFlash, StandingRuleActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { LocalTime } from "~/components/LocalTime";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -38,7 +39,6 @@ import {
   standingRuleTargetName,
 } from "~/lib/approvals";
 import { decisionLabel } from "~/lib/labels";
-import { relativeTimeLabel } from "~/lib/reports";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
@@ -319,7 +319,7 @@ function PendingApprovalCard({
               裏方のタスク
             </Link>
           )}
-          <span title={head.created_at}>{relativeTimeLabel(head.created_at, fetchedAt)}</span>
+          <LocalTime iso={head.created_at} fetchedAtIso={fetchedAt} />
         </span>
       </div>
 
@@ -459,7 +459,7 @@ function DecidedApprovalRow({
               裏方のタスク
             </Link>
           )}
-          <span title={approval.created_at}>{relativeTimeLabel(approval.created_at, fetchedAt)}</span>
+          <LocalTime iso={approval.created_at} fetchedAtIso={fetchedAt} />
         </span>
       </div>
       <div data-testid="approval-question" className="mt-1.5 text-sm">
@@ -488,8 +488,8 @@ function StandingRuleRow({ rule, org, fetchedAt }: { rule: StandingRule; org: Or
         <Badge tone={rule.node_id ? "neutral" : "teal"}>{standingRuleTargetName(rule, org)}</Badge>
         <p className="mt-1.5 text-sm text-fg">{rule.rule}</p>
         {/* フェーズ 74（ADR-0055 D2 ラウンド 6）: 生の ISO のままだったので、他の一覧と同じ相対表示に揃える。 */}
-        <p className="mt-1 text-sm text-fg-subtle lg:text-xs" title={rule.created_at}>
-          {relativeTimeLabel(rule.created_at, fetchedAt)}
+        <p className="mt-1 text-sm text-fg-subtle lg:text-xs">
+          <LocalTime iso={rule.created_at} fetchedAtIso={fetchedAt} />
         </p>
       </div>
       <details className="group shrink-0">
