@@ -13285,3 +13285,68 @@ Phase のスコープ外（実行していない。Phase 80/82/83/84/86/87/88/89
   `pnpm test` 1019 passed。release ゲート 9 段: `pnpm-mobile-audit` exit 0（79.9 s）、`pnpm-e2e-mock` exit 0（9.5 s）。`release.sh` → `9192a0bd5401`（schema 24）。
   `verify.sh` `ok=true live_ok=true` → `promote.sh` mode=live。本番 = Phase 65〜90。
 - 人（いまシカゴ）に効く変更: 時刻表示がブラウザのタイムゾーン（または「その他」シートの表示タイムゾーン設定）で出る。ISO は `title` に残る。
+
+## Phase 91 — スマホ UX ラウンド 15（本物のモバイル・エミュレーションで監査。ADR-0055。2026-09-22）
+
+GUI のみ（`crates/`・`docs/DESIGN.md`・`docs/SPEC.md`・ADR は無変更）。ADR-0055 D1 の機械検査は Phase 69 から
+`isMobile: true`/`hasTouch: true`/Chrome-on-Android UA/`deviceScaleFactor 2.75` を指定していたが、(1) その
+「本物さ」を Playwright の組み込みデバイス記述子ベースに揃え、`gui/scripts/e2e-check.mjs` の mobile viewport
+にも同じ設定を広げ、(2) 実際のタッチ入力（CDP）で操作する検査を新設し、(3) `100dvh`/`env(safe-area-inset-
+bottom)` の構造を確かめる検査を新設した。詳細・証跡は `gui/docs/PROGRESS.md`「Phase G42」を参照（GUI の
+実装詳細は gui 側に書く、このリポジトリの慣例どおり）。要点:
+
+1. **忠実性（受け入れ条件 1）**: `gui/scripts/mobile-audit.mjs` は既に Phase 69 から `isMobile`/`hasTouch`/
+   UA/dpr を手で列挙していた（機能的な差は無い）。`gui/scripts/lib/celeris-fixture.mjs` に共有の
+   `MOBILE_DEVICE`（Playwright の `devices["Pixel 7"]` を土台に、寸法・dpr・UA を ADR-0055 D1 の値へ上書き）
+   を新設し、mobile-audit.mjs はそれを使うよう置き換えた（違反数は変化なし: 26 route × light/dark で 0→0）。
+   一方 `gui/scripts/e2e-check.mjs` の mobile viewport（26 route × mobile/desktop の一部）は寸法だけで
+   `isMobile` 等を指定していなかった。同じ `MOBILE_DEVICE` を使うよう変更し、desktop viewport は指示どおり
+   1280×800 の非モバイルのまま変更していない。`isMobile: true` に伴う viewport-meta の扱いの変化は
+   `pnpm e2e:mock` を再実行して確認したが、新たな失敗は出なかった（`{"ok":true,"failures":[]}` のまま）。
+2. **タッチ操作（受け入れ条件 2、新設ルール）**: `touch-scroll`（横スクロールが要るコンテナに CDP
+   `Input.dispatchTouchEvent` で実際にスワイプし、`scrollLeft` が動くことを確認）と `tap`（各画面の主操作
+   ボタンを `click()` ではなく `locator.tap()` で操作し、コンソールエラーが出ないことを確認）を追加した。
+   開発中に見つけた 2 つは**監査スクリプト自身の**不具合で、アプリのコードは直していない:
+   - `tap` が `releases`/`knowledge/skills` の主操作（閉じた `<details>` の中）を「見える」と誤判定して
+     タイムアウトしていた（`isNotVisible` の既存の閉じた `<details>` 対応を使っていなかったため。再利用
+     するよう修正）。
+   - `touch-scroll` が `task-changes`/`task-files` のタブ行を誤検知していた（先行する検査がページを末尾まで
+     スクロールしたまま戻さないため、CDP のビューポート相対座標がずれていた。対象要素を
+     `scrollIntoViewIfNeeded()` してから測るよう修正）。
+   偽の celeris（`celeris-fixture.mjs`）は読み取り専用（GET のみ）なので、`tap` が変更系ボタンを押すと
+   ブラウザが「Failed to load resource: 404」をコンソールへ自動で出す（アプリのバグではない、ブラウザ自身の
+   ネットワークログ）。これは対象から除外した。26 route（light のみ、時間予算のため）で最終的に 0 件。
+3. **ビューポート単位（受け入れ条件 3、新設ルール）**: `viewport-units`（Console の入力欄の下端がタブ
+   バーの上端より下に出ない、両方ともビューポート内に収まっている）を追加し、**実際のバグを 1 件発見して
+   直した**: ページ遷移のフェードインアニメーション（`.animate-fade-in`、`<Outlet/>` を包む）が
+   `animation-fill-mode: both` で `transform` を動かしていたため、Chromium がこの要素を Console 入力欄
+   （`position: fixed`）の containing block に差し替えてしまい、入力欄がビューポートではなくこの div を
+   基準に配置され続けていた（`home`/`org-node` の light/dark で **4 件**、内容は「入力欄の下端 814〜816 が
+   タブバー上端 787 より下」）。`app/app.css` を 2 か所直した: `transform` ではなく独立した `translate`
+   プロパティに変更（`transform` は値が `none` 以外だと containing block を作る仕様）、`animation-fill-mode`
+   から `forwards` を外し `backwards` だけに（終了後も「適用中」を保つ `forwards` が同じ問題を起こす
+   Chromium の挙動を実測で確認）。直した結果 **0 件**。またこの検査自体、`runChecks`（`load` 直後）の中に
+   置くと、先行する `checkFixedOverlays` がページを末尾までスクロールしたままにする副作用でバグを見逃す
+   （壊れていた入力欄がスクロールで画面外に出て「重ならない」と誤って合格する）ことが分かったため、
+   別枠（フェードイン 0.25 秒が収まるのを待ってから）に切り出した。
+4. **ゲート**: `pnpm lint`（exit 0、249 files）/ `pnpm typecheck`（exit 0）/ `pnpm test`（exit 0、
+   **1019 passed**、Phase 90 から件数不変）/ `pnpm build`（exit 0、既存の `[INEFFECTIVE_DYNAMIC_IMPORT]`
+   警告 2 件のみ）/ `pnpm mobile-audit` ×2（**exit 0、`{"ok":true,"total":0}`、`routes=26 schemes=2
+   violations=0`、実測 89.2 s / 89.1 s**。Phase 90 の 79.9 s から新規検査分で +9 秒、120 秒予算内）/
+   `pnpm e2e:mock`（**`{"ok":true,"mode":"mock","failures":[]}`**）/ `pnpm gen:types && git diff --exit-code
+   app/celeris/types.ts`（差分ゼロ）すべて exit 0。
+   `crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` は
+   このフェーズのスコープ外（実行していない。Phase 80/82/83/84/86/87/88/89/90 と同じ扱い）。
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34。ヘッドレス Chromium は `env(safe-area-inset-bottom)` を実機のように 0 より
+  大きい値へ解決しないため、`viewport-units` 検査は「重ならない・ビューポート内」という構造の健全性
+  までしか確かめられない）。
+- `.animate-fade-in` に起因する一過性（0.25 秒間）の containing block の差し替え自体は、`transform`
+  ではなく `translate` を使ってもアニメーションが実際に再生中は Chromium が同様の挙動を見せることを実測
+  で確認した（`getAnimations()` が空になる＝アニメーションが完全に終わるまで続く）。恒久的な破損は直した
+  が、ページ表示直後の 0.25 秒だけ入力欄の位置がわずかにずれる余地は残る（実害はほぼ無いと判断し、監査は
+  その 0.25 秒を待ってから測るようにした。完全に無くすには `.animate-fade-in` を fixed な要素の祖先に
+  しないアーキテクチャ変更が要る）。
+- 本番 = Phase 65〜90。実装中: Phase 91（このワークトリー。GUI のみ）。

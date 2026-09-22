@@ -181,7 +181,7 @@
   --shadow-lg: 0 8px 24px hsl(var(--shadow-color) / 0.1), 0 2px 6px hsl(var(--shadow-color) / 0.06);
 
   --animate-pulse-dot: pulse-dot 1.6s ease-in-out infinite;
-  --animate-fade-in: fade-in 0.25s ease-out both;
+  --animate-fade-in: fade-in 0.25s ease-out backwards;
 }
 
 @keyframes pulse-dot {
@@ -194,13 +194,28 @@
   }
 }
 
-/* 不透明度は変えない（途中で a11y 検査やスクリーンショットが走ると文字色が薄く測られるため）。位置だけを動かす。 */
+/* 不透明度は変えない（途中で a11y 検査やスクリーンショットが走ると文字色が薄く測られるため）。位置だけを動かす。
+ * Phase 91（ADR-0055 ラウンド 15、受け入れ条件 3、新設の `viewport-units` 検査で発見）: この `.animate-fade-in`
+ * で `<Outlet/>`（各画面の本文）を包むと、その中の `position: fixed` な要素（Console の入力欄、
+ * `~/components/Console.tsx` の `[data-testid="console-input"]`）がビューポートではなくこの div を基準に
+ * 配置されてしまう潜在バグがあった（実機・これまでの監査どちらでも検出されていなかった）。原因は 2 つ重なっていた:
+ * 1. `--animate-fade-in: fade-in 0.25s ease-out both;`（下の `both` を参照）の `forwards` 部分。アニメーション
+ *    終了後も「`to` の値を適用中」の状態を保ち続け、Chromium はこの「今もアニメーションが効いている」要素を、
+ *    アニメーション対象のプロパティが実際に `transform` を動かしていなくても fixed/absolute な子孫の
+ *    containing block を差し替える対象にする（実測で確認。`animation-fill-mode` から `forwards` を外し
+ *    `backwards` だけにすると解消する）。「終了後も `to` の状態を保つ」こと自体は、`to` の値（動きが無い
+ *    静止状態）が要素本来の既定の見た目と一致するので、`forwards` を外しても見た目は変わらない。
+ * 2. `transform` プロパティ自体（`translateY(4px)`/`none`）。`transform` は値が `none` 以外（数学的に単位
+ *    行列でも）だと同じ理由で containing block を差し替える（CSS Transforms の仕様どおりの挙動）。
+ *    `translate`/`scale`/`rotate` は独立した CSS プロパティで、`transform` と違い containing block を
+ *    作らない（仕様上の明記）ので、アニメーション実行中（0.25 秒間）の分もこちらで防ぐ。
+ * 2 つとも直したことで、同じ見た目のアニメーションのまま安全になった。 */
 @keyframes fade-in {
   from {
-    transform: translateY(4px);
+    translate: 0 4px;
   }
   to {
-    transform: none;
+    translate: 0;
   }
 }
 

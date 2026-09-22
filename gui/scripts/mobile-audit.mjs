@@ -21,17 +21,17 @@ import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { getFreePort, ROUTES, setupMockCeleris, waitForHealth } from "./lib/celeris-fixture.mjs";
+import { getFreePort, MOBILE_DEVICE, ROUTES, setupMockCeleris, waitForHealth } from "./lib/celeris-fixture.mjs";
 
 const GUI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(path.join(GUI_DIR, "package.json"));
 const { chromium } = require("@playwright/test");
 
-const VIEWPORT = { width: 393, height: 851 };
-const DEVICE_SCALE_FACTOR = 2.75;
-const USER_AGENT =
-  "Mozilla/5.0 (Linux; Android 14; Nothing Phone 2a) AppleWebKit/537.36 (KHTML, like Gecko) " +
-  "Chrome/128.0.0.0 Mobile Safari/537.36";
+// Phase 91（ADR-0055 ラウンド 15）: 寸法（`window.__MOBILE_AUDIT_WIDTH__`/`HEIGHT__` に使う）だけここで
+// 取り出す。コンテキスト自体は `MOBILE_DEVICE`（`devices["Pixel 7"]` を土台にした本物のモバイル記述子。
+// `celeris-fixture.mjs`）をそのまま渡す（下記 `browser.newContext(MOBILE_DEVICE)`）。値そのもの
+// （393×851、dpr 2.75、Nothing UA）は Phase 69 から変わっていない。
+const VIEWPORT = MOBILE_DEVICE.viewport;
 
 const OUT_DIR = path.join(GUI_DIR, "test/mobile-audit");
 const REPORT_PATH = path.join(OUT_DIR, "report.json");
@@ -424,6 +424,71 @@ function checkTables() {
 }
 
 /**
+ * D1 拡張その 5（Phase 91、ADR-0055 ラウンド 15、受け入れ条件 3「ビューポート単位」）: `isMobile: true`
+ * の下でも、固定の入力欄（composer、`[data-testid="console-text"]` の祖先 `[data-testid="console-input"]`）と
+ * 下部固定タブバー（`[data-testid="mobile-tabbar"]`）が `100dvh`/`env(safe-area-inset-bottom)` を正しく
+ * 尊重していることを、composer の下端がタブバーの上端より下に出ない（＝重ならない）ことと、両方とも
+ * ビューポートの中に収まっている（`top >= 0` かつ `bottom <= height`）ことで確かめる。どちらか一方でも
+ * 画面に無い（Console 以外の画面には composer が無い）場合は対象外（違反にしない）。
+ *
+ * **`runChecks`（`load` 直後）には入れず、別枠の Node 側関数（`checkViewportUnitsSettled`、下記）から
+ * 少し待ってから呼ぶ**。`app/app.css` の `.animate-fade-in`（`<Outlet/>` を包む、各画面共通のページ遷移
+ * アニメーション）は、実行中（0.25 秒間）は Chromium がこの要素を fixed/absolute な子孫の containing
+ * block に差し替えてしまう（アニメーション対象が `transform` ではなく `translate` でも起きる。実測で
+ * 確認した Chromium の実装依存の挙動で、CSS の仕様上 `translate` 自体は containing block を作らないため
+ * 完全に避けるにはこの `.animate-fade-in` を fixed な要素の祖先にしないアーキテクチャ変更が要るが、
+ * 実害は「ページを開いた直後 0.25 秒だけ composer の位置がわずかにずれる」という、実際に触る前に消える
+ * 一過性のもの。`load` 直後に測るとこの一過性の状態を毎回むだに検出してしまうため、アニメーションが
+ * 収まるのを待ってから測る）。
+ *
+ * 注: このサンドボックス（ヘッドレス Chromium）は `env(safe-area-inset-bottom)` を実機のように 0 より
+ * 大きい値へ解決しない（`~/root.tsx` のコメントに既にある既知の制約）ため、この検査は「両者が数値上
+ * 重ならない・ビューポート内に収まる」という構造の健全性までしか確かめられない。実機でホームインジ
+ * ケータの帯がある場合の見た目は実機確認が要る（docs/PROGRESS.md の未解決事項）。
+ */
+function checkViewportUnits() {
+  const violations = [];
+  const composer = document.querySelector('[data-testid="console-input"]');
+  const tabbar = document.querySelector('[data-testid="mobile-tabbar"]');
+  if (!composer || !tabbar) return violations;
+  if (isNotVisible(composer) || isNotVisible(tabbar)) return violations;
+  // `runChecks` の中で `checkFixedOverlays`（D1-5）がこれより先に文書全体を末尾までスクロールし、内側
+  // スクロール領域だけ戻して文書自体のスクロール位置は戻さない。ここで見たいのは「画面を開いた最初の
+  // 状態で、固定要素どうしが重ならずビューポートに収まっているか」なので、先頭に戻してから測る
+  // （さもないと、本当は `position: fixed` が壊れていて実際には通常フローの要素のように動く composer
+  // が、たまたまスクロール位置によってビューポート外に出て「重ならない」と誤って合格してしまう）。
+  window.scrollTo(0, 0);
+  const height = window.__MOBILE_AUDIT_HEIGHT__;
+  const cRect = composer.getBoundingClientRect();
+  const tRect = tabbar.getBoundingClientRect();
+  if (cRect.bottom > tRect.top + 0.5) {
+    violations.push({
+      rule: "viewport-units",
+      selector: cssPathRef(composer),
+      box: { composerBottom: cRect.bottom, tabbarTop: tRect.top },
+      detail: `composer bottom=${cRect.bottom.toFixed(1)} is below the tab bar top=${tRect.top.toFixed(1)}`,
+    });
+  }
+  if (cRect.top < -0.5 || cRect.bottom > height + 0.5) {
+    violations.push({
+      rule: "viewport-units",
+      selector: cssPathRef(composer),
+      box: { top: cRect.top, bottom: cRect.bottom },
+      detail: `composer not within the viewport (height=${height}, top=${cRect.top.toFixed(1)}, bottom=${cRect.bottom.toFixed(1)})`,
+    });
+  }
+  if (tRect.top < -0.5 || tRect.bottom > height + 0.5) {
+    violations.push({
+      rule: "viewport-units",
+      selector: cssPathRef(tabbar),
+      box: { top: tRect.top, bottom: tRect.bottom },
+      detail: `tab bar not within the viewport (height=${height}, top=${tRect.top.toFixed(1)}, bottom=${tRect.bottom.toFixed(1)})`,
+    });
+  }
+  return violations;
+}
+
+/**
  * アクセシブルな名前（Phase 76、ADR-0055 D1 拡張）。WAI-ARIA の accessible name 算出を厳密に実装は
  * しない（そこまでの精度は要らない）が、仕様が挙げる代表的な情報源を優先順位どおりに見る:
  * `aria-label` → `aria-labelledby`（参照先の textContent）→ `<label for>` / 包む `<label>` →
@@ -714,6 +779,198 @@ async function checkFocusOrder(page, route) {
   return violations;
 }
 
+/**
+ * `checkViewportUnits`（上記）を、`app/app.css` の `.animate-fade-in`（ページ遷移の入り口アニメーション、
+ * 0.25 秒）が収まってから呼ぶ。安く済ませるため、まず composer とタブバーが両方とも画面にあるかだけを
+ * 待ち無しで確かめ（Console 以外の画面は待つ意味が無いので早期に諦める）、両方ある画面だけアニメーション
+ * 時間分（0.25 秒 + 余裕）待ってから測る。両方のスキーム（light/dark）で呼ぶ（`perf`/タッチ系と違い、
+ * 対象画面が少ない〈Console がある画面だけ〉ので実行時間への影響は軽い）。
+ */
+async function checkViewportUnitsSettled(page) {
+  const hasBoth = await page.evaluate(() => {
+    return (
+      document.querySelector('[data-testid="console-input"]') !== null &&
+      document.querySelector('[data-testid="mobile-tabbar"]') !== null
+    );
+  });
+  if (!hasBoth) return [];
+  await page.waitForTimeout(400);
+  return page.evaluate(() => window.__checkViewportUnits());
+}
+
+// ---------------------------------------------------------------------------
+// D2 拡張（Phase 91、ADR-0055 ラウンド 15、受け入れ条件 2「タッチ操作」）: 実際のタッチ入力（`page.mouse`
+// の合成マウスイベントではなく、CDP `Input.dispatchTouchEvent` — Chromium の compositor が実機のタッチ
+// ジェスチャーと同じ経路で扱う入力）で操作する。light scheme だけで行う（dark は色だけなのでスクロール
+// 可能性・タップ結果は変わらない、`perf` と同じ慣例）。
+// ---------------------------------------------------------------------------
+
+/**
+ * `touch-scroll`: 横スクロールが要るコンテナ（`overflow-x: auto/scroll` かつ `scrollWidth > clientWidth`。
+ * D1-6 の `checkTables` が見る「表を包む箱」と同種のもの全般が対象）を、指でスワイプしたときと同じ
+ * タッチ入力で実際にスクロールできることを確かめる。JS の合成イベント（`dispatchEvent(new TouchEvent(...))`）
+ * ではブラウザのネイティブなオーバーフロー・スクロール（compositor が担う）は動かないため、CDP の
+ * 低レベル入力を直接叩く（Playwright の `touchscreen.tap()` が内部でしていることの、スワイプ版）。
+ * スクロールできなかった場合は `touch-action` 等を疑えるよう検出時点の値を `detail` に残す。
+ * 判定後は元の `scrollLeft` に戻す（後続のスクリーンショット・他画面の判定に影響しないように）。
+ */
+async function checkTouchScroll(page, cdpSession, route) {
+  const violations = [];
+  if (!cdpSession) return violations;
+  // ここに来るまでに `checkFixedOverlays`（D1-5、`runChecks` の一部）が文書全体を末尾までスクロールした
+  // まま戻していない（内側スクロール領域だけ戻す作り）ことがあり、`checkFocusOrder` の Tab 歩行も
+  // フォーカス先要素をブラウザがネイティブに可視領域へスクロールすることがある。CDP の
+  // `Input.dispatchTouchEvent` はビューポート相対座標を取るので、既知の基準（先頭）に戻してから
+  // 個々のコンテナを `scrollIntoViewIfNeeded` する方が、途中のスクロール量に依存せず安定する。
+  await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+  const scrollers = await page.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll("body *")).filter((el) => {
+      const style = getComputedStyle(el);
+      if (style.overflowX !== "auto" && style.overflowX !== "scroll") return false;
+      if (el.scrollWidth <= el.clientWidth) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+    nodes.forEach((el, i) => {
+      el.setAttribute("data-mobile-audit-scroller", String(i));
+    });
+    return nodes.map((el, i) => ({
+      idx: i,
+      selector: window.__cssPathRef(el),
+      touchAction: getComputedStyle(el).touchAction,
+    }));
+  });
+  for (const { idx, selector, touchAction } of scrollers) {
+    const handle = page.locator(`[data-mobile-audit-scroller="${idx}"]`);
+    // CDP の `Input.dispatchTouchEvent` はビューポート相対座標を取る。画面の下の方（縦スクロールが要る位置）
+    // にあるコンテナだと `boundingBox()` の座標がビューポート外を指し、タッチが要素に届かない
+    // （的外れな場所をタップしたのと同じになる）ので、先にビューポート内へスクロールしておく。
+    await handle.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(50); // スクロールが実際に落ち着くのを待つ（座標を取る前に）。
+    const box = await handle.boundingBox();
+    if (!box) continue;
+    const before = await handle.evaluate((el) => el.scrollLeft);
+    const y = Math.round(box.y + Math.min(box.height / 2, Math.max(box.height - 1, 0)));
+    const startX = Math.round(box.x + Math.max(box.width - 8, box.width / 2));
+    const endX = Math.round(box.x + Math.min(8, box.width / 2));
+    const steps = 10;
+    await cdpSession.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: startX, y }] });
+    for (let s = 1; s <= steps; s += 1) {
+      const x = Math.round(startX + ((endX - startX) * s) / steps);
+      await cdpSession.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y }] });
+      await page.waitForTimeout(16);
+    }
+    await cdpSession.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await page.waitForTimeout(80);
+    const after = await handle.evaluate((el) => el.scrollLeft);
+    await handle.evaluate((el, v) => {
+      el.scrollLeft = v;
+    }, before);
+    if (after <= before + 1) {
+      violations.push({
+        rule: "touch-scroll",
+        selector,
+        box: { before, after },
+        detail:
+          `touch swipe did not scroll this horizontally-scrollable container ` +
+          `(scrollLeft ${before} -> ${after}, touch-action=${touchAction}); route=${route}`,
+      });
+    }
+  }
+  return violations;
+}
+
+/**
+ * `tap`: 各画面の「主な操作」— `[data-primary-action]` があればそれ、無ければ最初の
+ * `button[type="submit"]`、それも無ければ primary variant の `Button`（`~/components/ui/button.tsx` の
+ * `bg-primary`+`text-primary-fg`）— を `click()` ではなく実際のタッチ（`locator.tap()`、`hasTouch: true`
+ * のコンテキストで CDP のタッチ入力を発行する）で操作し、その結果コンソールエラー・例外が出ないことを
+ * 確かめる。無効化されている（`disabled`/`aria-disabled`）ボタンや、そもそも対象が無い画面は対象外
+ * （タップ自体をスキップする。違反にしない）。`<a>` は対象外（タップでナビゲーションが起きると
+ * この監査の前提〈同じページに留まる〉が崩れるため、意図して `button` だけを見る）。
+ */
+async function checkPrimaryActionTap(page, route) {
+  const violations = [];
+  const target = await page.evaluate(() => {
+    // `isNotVisible`（`addInitScript` でこのページに既に注入済み。閉じた `<details>` の中身が
+    // Chromium の `getComputedStyle` 上は `display:none` に**ならない**という既知の落とし穴を扱う。
+    // `runChecks` の各検査と同じ判定を再利用する。`releases`/`knowledge/skills` の主操作は
+    // `<details>` の中（`app/routes/releases.tsx`・`skill-detail`）にあるので、これを使わないと
+    // 閉じたまま見えない要素を「見える」と誤判定してタップを試み、`locator.tap()` がタイムアウトする。
+    const visible = (el) => {
+      if (!el) return false;
+      if (window.__isNotVisible(el)) return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    let el = document.querySelector("[data-primary-action]");
+    let marker = "data-primary-action";
+    if (!el || !visible(el)) {
+      el = Array.from(document.querySelectorAll('button[type="submit"]')).find(visible) ?? null;
+      marker = "submit";
+    }
+    if (!el) {
+      el =
+        Array.from(document.querySelectorAll("button")).find(
+          (b) => visible(b) && b.classList.contains("bg-primary") && b.classList.contains("text-primary-fg"),
+        ) ?? null;
+      marker = "primary-button";
+    }
+    if (!el) return { found: false };
+    el.setAttribute("data-mobile-audit-tap-target", "1");
+    return {
+      found: true,
+      marker,
+      disabled: el.disabled === true || el.getAttribute("aria-disabled") === "true",
+      selector: window.__cssPathRef(el),
+    };
+  });
+  if (!target.found || target.disabled) return violations;
+  const consoleErrors = [];
+  const onConsole = (msg) => {
+    // 偽の celeris（`celeris-fixture.mjs::setupMockCeleris`）は GET しか実装しない（このリポジトリの
+    // e2e/監査の慣例: 書き込みを試さない）ので、primary action が変更系の POST を発行すると、GUI の
+    // action は celeris からの 404（"not_found"）をそのまま HTTP ステータスとして返す（`clusters.tsx`
+    // の action が celeris のエラーの status をそのまま反映する、等）。Chromium はこの種の非 2xx な
+    // 応答を、アプリの JS が実際に `console.error` を呼んだかどうかに関わらず「Failed to load resource:
+    // the server responded with a status of NNN」として自動的にコンソールへ出す（ブラウザ自身のネット
+    // ワークログで、アプリのバグの兆候ではない）。この検査が見たいのは「タップの結果アプリが例外を
+    // 投げる／処理し損ねる」ことなので、この定型メッセージだけは対象から除く。
+    if (
+      msg.type() === "error" &&
+      !/^Failed to load resource: the server responded with a status of \d+/.test(msg.text())
+    ) {
+      consoleErrors.push(msg.text());
+    }
+  };
+  const onPageError = (err) => consoleErrors.push(err.message);
+  page.on("console", onConsole);
+  page.on("pageerror", onPageError);
+  try {
+    await page.locator("[data-mobile-audit-tap-target]").tap({ timeout: 5000 });
+    await page.waitForTimeout(300);
+  } catch (e) {
+    violations.push({
+      rule: "tap",
+      selector: target.selector,
+      box: {},
+      detail: `tap on ${target.marker} (route=${route}) failed: ${/** @type {Error} */ (e).message}`,
+    });
+  } finally {
+    page.off("console", onConsole);
+    page.off("pageerror", onPageError);
+  }
+  if (consoleErrors.length > 0) {
+    violations.push({
+      rule: "tap",
+      selector: target.selector,
+      box: {},
+      detail: `console error after tapping ${target.marker} (route=${route}): ${consoleErrors.join(" | ").slice(0, 300)}`,
+    });
+  }
+  return violations;
+}
+
 // ---------------------------------------------------------------------------
 // D1 拡張その 4（Phase 77、`perf`）: 性能予算。
 // ---------------------------------------------------------------------------
@@ -904,13 +1161,10 @@ async function main() {
   try {
     await waitForHealth(`http://${guiBind}/healthz`);
     browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({
-      viewport: VIEWPORT,
-      deviceScaleFactor: DEVICE_SCALE_FACTOR,
-      userAgent: USER_AGENT,
-      isMobile: true,
-      hasTouch: true,
-    });
+    // Phase 91: `MOBILE_DEVICE`（`devices["Pixel 7"]` 土台）をそのまま渡す。`isMobile`/`hasTouch` は
+    // Phase 69 から変わらず true のままだが、記述子を土台にすることで touch-scroll/tap（下記）が使う
+    // タッチ入力の前提が実機によく似た構成であることを明示する。
+    const context = await browser.newContext(MOBILE_DEVICE);
     // celeris へは fetch/EventSource で直接出ない構成だが、念のため GUI 以外への要求は塞ぐ（外部ネットワーク不使用）。
     await context.route("**/*", (route) => {
       const url = new URL(route.request().url());
@@ -939,10 +1193,15 @@ async function main() {
       computeAccessibleName.toString(),
       checkA11yNames.toString(),
       checkA11yStructure.toString(),
+      checkViewportUnits.toString(),
       runChecks.toString(),
       "window.__runMobileAudit = runChecks;",
+      // Phase 91: `checkViewportUnitsSettled`（Node 側の別枠の `page.evaluate`）が使う。
+      "window.__checkViewportUnits = checkViewportUnits;",
       // Phase 76: `checkFocusOrder`（Node 側、実際に Tab キーを送る）が要素を突き合わせるのに使う。
       "window.__cssPathRef = cssPathRef;",
+      // Phase 91: `checkPrimaryActionTap`（Node 側の別枠の `page.evaluate`）が使う。
+      "window.__isNotVisible = isNotVisible;",
       // Phase 77（`perf`）: FCP/LCP を `PerformanceObserver`（`buffered: true`）で拾う。`addInitScript` は
       // 文書の最初のスクリプトより前に評価されるので、最初のペイントから取りこぼさない。どちらの
       // entry type も未対応のブラウザでは黙って諦める（try/catch。Chromium では両方とも実装済み）。
@@ -1027,6 +1286,12 @@ async function main() {
             const violations = await page.evaluate(() => window.__runMobileAudit());
             for (const v of violations) allViolations.push({ route, scheme, ...v });
 
+            // Phase 91（受け入れ条件 3「ビューポート単位」）: `runChecks` の外（`.animate-fade-in` の
+            // 0.25 秒アニメーションが収まるのを待ってから）で行う。両スキームで呼ぶ（Console がある画面
+            // だけ待つので軽い）。
+            const viewportUnitViolations = await checkViewportUnitsSettled(page);
+            for (const v of viewportUnitViolations) allViolations.push({ route, scheme, ...v });
+
             if (scheme === "light") {
               // スロットリング下のハイドレーション・LCP 確定を待つ（`load` の時点ではまだのことがある）。
               await page.waitForTimeout(PERF_SETTLE_MS);
@@ -1062,6 +1327,19 @@ async function main() {
             // `page.evaluate` 単体の `runChecks` には入れず、ここで別枠として呼ぶ。
             const focusViolations = await checkFocusOrder(page, route);
             for (const v of focusViolations) allViolations.push({ route, scheme, ...v });
+
+            // Phase 91（受け入れ条件 2「タッチ操作」）: `focus-order`（キー入力）の後に行う。タップは
+            // フォーカスを動かしうるので、先に `focus-order`（document 先頭からの Tab 到達性）を済ませて
+            // おく（順序を入れ替えると、この後のタップで生まれた新しいフォーカス位置が `focus-order` の
+            // 起点になってしまい、この検査自体が作った偽陽性になる）。light scheme だけで行う（`perf` と
+            // 同じ慣例。`cdpSession` は light scheme のときだけ生きている＝上の CPU スロットリングと
+            // 同じセッションを使い回す）。
+            if (scheme === "light") {
+              const touchScrollViolations = await checkTouchScroll(page, cdpSession, route);
+              for (const v of touchScrollViolations) allViolations.push({ route, scheme, ...v });
+              const tapViolations = await checkPrimaryActionTap(page, route);
+              for (const v of tapViolations) allViolations.push({ route, scheme, ...v });
+            }
           }
           await cdpSession?.detach().catch(() => {});
           if (pageErrors.length > 0) {

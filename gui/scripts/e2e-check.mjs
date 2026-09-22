@@ -34,6 +34,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildRoutes,
   getFreePort,
+  MOBILE_DEVICE,
   ORG_HEAD_ID,
   ORG_NODE_ID,
   PROJECT_ID,
@@ -46,9 +47,14 @@ import {
 const GUI_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(GUI_DIR, "test/e2e-check");
 
+// Phase 91（ADR-0055 ラウンド 15、受け入れ条件 1）: mobile-audit.mjs と同じ「本物のモバイル」記述子
+// （`isMobile`/`hasTouch`/UA/dpr。`celeris-fixture.mjs::MOBILE_DEVICE`）を mobile viewport に使う
+// （これまでは `viewport` の寸法だけで `isMobile` 等を指定していなかった＝ D5〈`isMobile` が viewport-meta
+// の扱いやスクロールバーを変える〉が e2e:mock 側では検査できていなかった）。desktop viewport は指示どおり
+// 1280×800 の非モバイルのまま変更しない。
 const VIEWPORTS = [
-  { name: "mobile", width: 393, height: 851 },
-  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile", context: MOBILE_DEVICE },
+  { name: "desktop", context: { viewport: { width: 1280, height: 800 } } },
 ];
 
 // タブ → そのタブで出るはずの節の data-testid（`app/routes/tasks.$id.tsx` の `TASK_TABS` と同じ 5 つ）。
@@ -239,7 +245,7 @@ async function main() {
     browser = await chromium.launch({ headless: true });
 
     for (const viewport of VIEWPORTS) {
-      const context = await browser.newContext({ viewport: { width: viewport.width, height: viewport.height } });
+      const context = await browser.newContext(viewport.context);
       // 外部ネットワーク不使用・GUI 以外を直接叩かない（gui/CLAUDE.md の境界の機械的な後押し）。
       await context.route("**/*", (route) => {
         const url = new URL(route.request().url());
