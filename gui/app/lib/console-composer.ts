@@ -47,3 +47,16 @@ export function consoleComposerScopeForLocation(pathname: string, search: string
   if (match) return scopeForNode(decodeURIComponent(match[1]));
   return null;
 }
+
+/**
+ * Phase 102（本番不具合の修正）: `POST /console/instruct` の送信先（`fetcher.submit` の `action`）。
+ * `pathname` だけを受ける（末尾スラッシュ・`?scope=` を含む location 全体は考えない）。
+ *
+ * `/`（`~/routes/home.tsx`）は**インデックスルート**。React Router では素の `action: "/"` はインデックス
+ * ルート自身ではなく親（`root`）に解決され、`root` は action を持たないため 405 になる
+ * （本番で実際に起きた不具合。`ADR-0057` 追記参照）。インデックスルート自身へ送るには `"/?index"` の形が要る
+ * （React Router の仕様）。`/org/:id`（`~/routes/org.$id.tsx`）は非インデックスなのでそのまま。
+ */
+export function consoleComposerActionFor(pathname: string): string {
+  return pathname === "/" ? "/?index" : pathname;
+}

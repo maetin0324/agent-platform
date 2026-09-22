@@ -753,5 +753,20 @@ export async function setupMockCeleris() {
   mock.on("GET", "/api/v1/stream", (_req, res) => sendSse(res));
   mock.on("GET", "/api/v1/console/stream", (_req, res) => sendSse(res));
 
+  // Phase 102（本番でホームからの送信が 405 になった回帰の修正）: e2e-check.mjs が実際に composer から
+  // 送信して「エラー画面が出ないこと」を確かめられるように、`POST /console/instruct`（§3.107、
+  // **管理系**、202 `ConsoleInstructAccepted`）を足す。本文は読み捨て、固定の応答を返すだけでよい
+  // （このフィクスチャは読み取りだけを前提にしてきたが、この 1 本だけは書き込み検査に要る）。
+  mock.on("POST", "/api/v1/console/instruct", (req, res) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      sendJson(res, 202, {
+        message_id: "01E2ECHECKMSG00000000001",
+        node_id: "cos",
+        task_id: "01E2ECHECKTASK0000000001",
+      });
+    });
+  });
+
   return mock;
 }

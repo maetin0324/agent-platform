@@ -9,7 +9,11 @@ import {
   type MentionQuery,
   matchMentionCandidates,
 } from "~/lib/console";
-import { consoleComposerScopeForLocation, isConsoleComposerPathname } from "~/lib/console-composer";
+import {
+  consoleComposerActionFor,
+  consoleComposerScopeForLocation,
+  isConsoleComposerPathname,
+} from "~/lib/console-composer";
 import { cn } from "~/lib/utils";
 import { orgNodeName, projectName } from "./ConsoleBlockItem";
 import { ErrorFlash } from "./Flash";
@@ -85,9 +89,15 @@ export function ConsoleComposer({ variant }: { variant: "mobile" | "desktop" }) 
   function submit() {
     if (!text.trim() || submitting) return;
     const body = buildInstructBody(text, replyTarget, defaultScope);
-    // 送信先は「いま見ているページ」自身（`/` か `/org/:id`。どちらも同じ `action` を持つ）。この composer は
-    // `~/root.tsx` からも呼ばれる（ルートの外）ので、既定の action（最寄りのルート）には頼れない（ADR-0057）。
-    fetcher.submit({ text: body.text, scope: body.scope ?? "" }, { method: "post", action: pathname });
+    // 送信先は「いま見ているページ」自身（`/` か `/org/:id`）。この composer は `~/root.tsx` からも呼ばれる
+    // （ルートの外）ので、既定の action（最寄りのルート）には頼れない（ADR-0057）。`/` は**インデックス
+    // ルート**なので、素の pathname のままだと React Router は親（`root`。action を持たない）へ解決し 405
+    // になる（Phase 102 の本番不具合）。`~/lib/console-composer.ts::consoleComposerActionFor` が
+    // `/` → `/?index` に変換する（`/org/:id` は非インデックスなのでそのまま）。
+    fetcher.submit(
+      { text: body.text, scope: body.scope ?? "" },
+      { method: "post", action: consoleComposerActionFor(pathname) },
+    );
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
