@@ -170,6 +170,7 @@ fn compaction_spec(
         // 作業ディレクトリは `workspace_root/<task_id>`（相対パスをディスパッチャが解決する）。
         workspace: None,
         cluster: None,
+        workspace_mode: None,
         adapter: None,
         // ADR-0044 D3: 裏方（報告のまとめ）にラベル・種類は付けない。
         labels: Vec::new(),

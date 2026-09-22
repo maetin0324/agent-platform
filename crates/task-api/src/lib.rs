@@ -90,7 +90,7 @@ pub use tree::MAX_TEXT_BYTES;
 pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView,
     ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterForwardView,
-    ClusterView, Clusters,
+    ClusterSettingsPutBody, ClusterSettingsView, ClusterView, Clusters,
     ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, GenreConfigView, Health,
     Problem, ProviderConfigView, ProviderStats, ProviderView, Providers, ReleaseChanges,
     ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseRunning, ReleaseVerify, Releases,

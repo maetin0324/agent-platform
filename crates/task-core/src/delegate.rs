@@ -1048,6 +1048,7 @@ mod tests {
         let explicit = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            mode: None,
         };
 
         // 1. 案件も明示も無い → 親を継ぐ（従来）。
@@ -1111,6 +1112,7 @@ mod tests {
         let remote = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: PathBuf::from("~/workspace/rust/benchfs"),
+            mode: None,
         };
         assert_eq!(remote.with_home_expanded(Some(&home)), remote);
         let absolute = WorkspaceSpec::Local {

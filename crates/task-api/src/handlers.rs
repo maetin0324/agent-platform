@@ -37,7 +37,7 @@ use crate::types::{
     AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult,
     AccountLoginStart, AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody,
     ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterForwardView,
-    ClusterView, Clusters,
+    ClusterSettingsPutBody, ClusterSettingsView, ClusterView, Clusters,
     CommentBody, CommentList, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
     MilestoneCreateBody, MilestonePatchBody, MilestoneReviewView, MilestoneView, OrgCreateBody,
     OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody,
@@ -121,6 +121,10 @@ pub(crate) fn router(state: ApiState) -> Router {
             post(submit_account_login_code),
         )
         .route("/api/v1/clusters", get(clusters))
+        .route(
+            "/api/v1/clusters/{id}/settings",
+            put(put_cluster_settings),
+        )
         .route(
             "/api/v1/clusters/{id}/connect",
             post(start_cluster_connect).delete(cancel_cluster_connect),
@@ -2475,12 +2479,27 @@ async fn clusters(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
     no_query(&raw)?;
     let snapshot = state.snapshot();
     let now = OffsetDateTime::now_utc();
+    // ADR-0059 D6: DB の上書き（`cluster_settings`）を一括で読み、設定ファイルの値より優先する。
+    let overrides: Vec<task_core::ClusterSettings> = state
+        .blocking(|store| store.cluster_settings_list().map_err(store_problem))
+        .await?;
     let items = state
         .inner
         .config_view
         .clusters
         .iter()
         .map(|cluster| {
+            let (work_dir, work_dir_source) = overrides
+                .iter()
+                .find(|o| o.cluster_id == cluster.id)
+                .and_then(|o| o.work_dir.clone())
+                .map(|w| (Some(w), Some("settings".to_string())))
+                .unwrap_or_else(|| {
+                    (
+                        cluster.work_dir.clone(),
+                        cluster.work_dir.as_ref().map(|_| "config".to_string()),
+                    )
+                });
             let live = snapshot
                 .as_ref()
                 .and_then(|s| s.clusters.iter().find(|live| live.id == cluster.id));
@@ -2532,10 +2551,64 @@ async fn clusters(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
                     })
                     .collect(),
                 tunnel_login_needed: live.map(|live| live.tunnel_login_needed).unwrap_or(false),
+                work_dir,
+                work_dir_source,
             }
         })
         .collect();
     Ok(json_response(StatusCode::OK, &Clusters { items }))
+}
+
+/// `PUT /clusters/{id}/settings`（ADR-0059 D6）: クラスタの実効の作業ディレクトリを DB で上書きする
+/// （管理系。`token_file` 未設定でも 401）。絶対パスか `~`/`~/…` だけ許す。`work_dir: null`（または
+/// 省略）で上書きを消す（設定ファイルの値に戻る）。
+async fn put_cluster_settings(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    require_known_cluster(&state, &id)?;
+    let put: ClusterSettingsPutBody = read_json(body, false).await?;
+    if let Some(work_dir) = &put.work_dir {
+        let trimmed = work_dir.trim();
+        let ok = !trimmed.is_empty()
+            && (trimmed.starts_with('/') || trimmed == "~" || trimmed.starts_with("~/"));
+        if !ok {
+            return Err(ApiProblem::validation(vec![ValidationError {
+                field: Some("work_dir".into()),
+                message: "work_dir must be an absolute path or ~ / ~/…".into(),
+            }]));
+        }
+    }
+    let cluster_id = id.clone();
+    let work_dir = put.work_dir.clone();
+    let updated_at = OffsetDateTime::now_utc();
+    state
+        .blocking(move |store| {
+            store
+                .cluster_settings_set(&cluster_id, work_dir.as_deref(), updated_at)
+                .map_err(store_problem)
+        })
+        .await?;
+    tracing::info!(
+        who = "admin",
+        op = "cluster_settings_put",
+        cluster_id = %id,
+        has_work_dir = put.work_dir.is_some(),
+        "admin: cluster work_dir updated"
+    );
+    Ok(json_response(
+        StatusCode::OK,
+        &ClusterSettingsView {
+            cluster_id: id,
+            work_dir: put.work_dir,
+            updated_at: rfc3339(updated_at),
+        },
+    ))
 }
 
 // ---- ADR-0032 D5: クラスタへの接続を GUI から張る（すべて管理系: `token_file` 未設定でも 401） ----

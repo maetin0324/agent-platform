@@ -24,7 +24,8 @@ use crate::milestones::{MilestoneDecideBody, MilestoneDecided};
 use crate::project_plan::{ProjectPlanAccepted, ProjectPlanBody};
 use crate::types::{
     AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView,
-    AnswerBody, ArtifactList, CancelBody, ClusterConnectResult, ClusterConnectStart, Clusters,
+    AnswerBody, ArtifactList, CancelBody, ClusterConnectResult, ClusterConnectStart,
+    ClusterSettingsPutBody, ClusterSettingsView, Clusters,
     CommentBody, CommentList, ConfigView, DaemonView, DecisionBody, EventsPage, Health,
     MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, Problem,
     ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody, ProviderCheckResponse,
@@ -68,6 +69,9 @@ pub struct ApiV1Schema {
     /// ADR-0032 D5: `POST /clusters/{id}/connect` と `POST /clusters/{id}/connect/code` の応答。
     pub cluster_connect_start: ClusterConnectStart,
     pub cluster_connect_result: ClusterConnectResult,
+    /// ADR-0059 D6: `PUT /clusters/{id}/settings` の要求本文と応答。
+    pub cluster_settings_put: ClusterSettingsPutBody,
+    pub cluster_settings: ClusterSettingsView,
     /// Phase 20（ADR-0030）: GUI から預かる秘密（API キー等）。`GET /secrets` と `PUT /secrets/{id}` の応答。
     pub secrets: SecretList,
     pub secret_put: SecretPutResult,

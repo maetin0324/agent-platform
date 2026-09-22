@@ -24,6 +24,11 @@ pub enum WorkspaceError {
     /// リモート側の準備に失敗した（ディレクトリが作れない・rsync が異常終了した）。
     #[error("remote error: {0}")]
     Remote(String),
+    /// ADR-0059 D3: `sync = "worktree"` の準備でリモートの `path` が git リポジトリでなかった（exit 65）。
+    /// `Remote` から独立したバリアントにして、呼び出し側（`run_worker`）が文字列を見ずに「自動で
+    /// `shared` へ格下げしてよいか」を型で判定できるようにする。
+    #[error("not a git repository: {0}")]
+    NotAGitRepository(String),
 }
 
 /// `Workspace::exec` の結果。`exit` は signal 終了・タイムアウト時 `None`。

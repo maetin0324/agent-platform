@@ -233,6 +233,8 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         assignee: None,
         workspace: args.workspace,
         cluster: args.cluster,
+        // ADR-0059 D1: `celerisctl add` は引数を増やさない（`workspace_mode` は GUI / API から）。
+        workspace_mode: None,
         adapter: None,
         // ADR-0044 D1/D3: `celerisctl add` は引数を増やさない（ラベル・種類・初期状態は GUI から）。
         labels: Vec::new(),

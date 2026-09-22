@@ -471,6 +471,7 @@ mod tests {
         task.workspace = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: PathBuf::from("/work/NBB/x/benchfs"),
+            mode: None,
         };
         store.insert(&task).expect("insert task");
 

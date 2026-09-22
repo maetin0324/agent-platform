@@ -125,6 +125,10 @@ pub struct NewTaskSpec {
     /// `workspace` がクラスタ側の作業ディレクトリ（既存プロジェクトでよい）。
     #[serde(default)]
     pub cluster: Option<String>,
+    /// ADR-0059 D1: `cluster` を指定したときの `WorkspaceSpec::Remote.mode`。省略時は `Worktree`
+    /// （従来どおりクラスタの `sync` 設定に従う）。`Local` タスク（`cluster` 無し）には関係ない。
+    #[serde(default)]
+    pub workspace_mode: Option<task_core::WorkspaceMode>,
     /// 省略時は役割の既定 → 指定なし。
     #[serde(default)]
     pub adapter: Option<String>,
@@ -478,10 +482,16 @@ fn build_task(
     let id = TaskId::new();
     let workspace = match (spec.cluster, spec.workspace) {
         // ADR-0018: クラスタ指定。path はクラスタ側の作業ディレクトリ（絶対パスで指定する）。
-        (Some(cluster), Some(path)) => WorkspaceSpec::Remote { cluster, path },
+        // ADR-0059 D1: `workspace_mode` が `WorkspaceSpec::Remote.mode` になる（省略時 = 従来どおり）。
+        (Some(cluster), Some(path)) => WorkspaceSpec::Remote {
+            cluster,
+            path,
+            mode: spec.workspace_mode,
+        },
         (Some(cluster), None) => WorkspaceSpec::Remote {
             cluster,
             path: PathBuf::from(id.to_string()),
+            mode: spec.workspace_mode,
         },
         (None, Some(path)) => WorkspaceSpec::Local { path, mode: None },
         (None, None) => WorkspaceSpec::Local {
@@ -586,6 +596,7 @@ mod tests {
             assignee: None,
             workspace: Some(PathBuf::from("/tmp/workspace")),
             cluster: None,
+            workspace_mode: None,
             adapter: None,
             labels: Vec::new(),
             category: None,
@@ -1152,6 +1163,7 @@ mod tests {
     }
 
     /// ADR-0018: `cluster` を指定すると `WorkspaceSpec::Remote` になり、`workspace` はクラスタ側のパスになる。
+    /// ADR-0059 D1: `workspace_mode` を省略すると `mode: None`（従来どおりクラスタの `sync` に従う）。
     #[test]
     fn create_task_with_cluster_makes_a_remote_workspace() {
         let store = SqliteStore::open_in_memory().expect("open store");
@@ -1164,6 +1176,7 @@ mod tests {
             task_core::WorkspaceSpec::Remote {
                 cluster: "pegasus".to_string(),
                 path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+                mode: None,
             }
         );
 
@@ -1176,7 +1189,23 @@ mod tests {
             task.workspace,
             task_core::WorkspaceSpec::Remote {
                 cluster: "pegasus".to_string(),
-                path: PathBuf::from(task.id.to_string())
+                path: PathBuf::from(task.id.to_string()),
+                mode: None,
+            }
+        );
+
+        // ADR-0059 D1: `workspace_mode = "shared"` を明示すると `mode: Some(Shared)` になる。
+        let mut spec = base_spec();
+        spec.cluster = Some("pegasus".to_string());
+        spec.workspace = Some(PathBuf::from("~"));
+        spec.workspace_mode = Some(task_core::WorkspaceMode::Shared);
+        let task = create_task(&store, spec, now()).expect("create");
+        assert_eq!(
+            task.workspace,
+            task_core::WorkspaceSpec::Remote {
+                cluster: "pegasus".to_string(),
+                path: PathBuf::from("~"),
+                mode: Some(task_core::WorkspaceMode::Shared),
             }
         );
     }

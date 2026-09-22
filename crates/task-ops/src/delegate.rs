@@ -672,6 +672,7 @@ mod tests {
             workspace: Some(WorkspaceSpec::Remote {
                 cluster: "pegasus".into(),
                 path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+                mode: None,
             }),
             created_at: now_ts,
             updated_at: now_ts,

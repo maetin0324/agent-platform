@@ -240,6 +240,7 @@ pub fn config_view() -> ConfigView {
         clusters: vec![ClusterConfigView {
             id: "pegasus".into(),
             host: "pegasus".into(),
+            work_dir: None,
             concurrency: 2,
             sync: "rsync".into(),
             delete_on_push: false,

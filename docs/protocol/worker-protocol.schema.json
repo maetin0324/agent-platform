@@ -241,6 +241,30 @@
       ],
       "type": "object"
     },
+    "ClusterContext": {
+      "description": "`context.clusters[]`（ADR-0059 D6 / Phase 99）: CoS の対話 run にだけ渡す `[[clusters]]` の一覧\n（id・接続状態・実効の作業ディレクトリ）。CoS が `create_task.workspace` を組むときに、`path` を\nどのクラスタのどの作業ディレクトリにすればよいか（あるいは登録されていないので `path` を省略すべきか）\nを前置きから判断できるようにする（実機障害 2026-09-22: `~` をホームとして使い、ホームでは\nworktree が切れず失敗した）。",
+      "properties": {
+        "connected": {
+          "description": "この tick で `ssh -O check` が成功したか（ADR-0018 D2）。",
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "work_dir": {
+          "description": "実効の作業ディレクトリ（DB の上書き `cluster_settings` > 設定ファイルの `work_dir`）。\nどちらも無ければ `null`（このクラスタへは `path` を明示しないと動かない）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "connected"
+      ],
+      "type": "object"
+    },
     "CommentAuthorKind": {
       "description": "誰が書いたか（`task_comments.author_kind` の CHECK と対）。",
       "oneOf": [
@@ -1275,6 +1299,13 @@
           },
           "type": "array"
         },
+        "clusters": {
+          "description": "ADR-0059 D6（Phase 99）: **CoS の対話 run** にだけ渡す `[[clusters]]` の一覧（id・接続状態・\n実効の作業ディレクトリ）。CoS 以外の run・継続中の run では常に空。",
+          "items": {
+            "$ref": "#/$defs/ClusterContext"
+          },
+          "type": "array"
+        },
         "comments": {
           "description": "ADR-0044 D2: そのタスクのコメントの**最新 20 件**（古い順）。空なら省略され、\n「コメント」の節も出ない。",
           "items": {
@@ -2087,14 +2118,26 @@
               "const": "remote",
               "type": "string"
             },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WorkspaceMode"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0059 D1: クラスタ側の同期方針。`Local.mode`（ADR-0041 D1）と語彙は同じ\n（`Worktree` | `Shared`）だが軸は別（作業ツリーの分離ではなく、同期そのものをするか）。\n省略時は JSON に出さない（Phase 98 までの `{\"kind\":\"remote\",\"cluster\":\"…\",\"path\":\"…\"}` と\n1 バイトも変わらない）。"
+            },
             "path": {
+              "default": "",
+              "description": "ADR-0059 D6: 省略可（`#[serde(default)]`）。省略・相対パスは実効クラスタ `work_dir`\nから解決する（celeris は解決しない。展開・解決はリモートスクリプト生成側で行う）。",
               "type": "string"
             }
           },
           "required": [
             "kind",
-            "cluster",
-            "path"
+            "cluster"
           ],
           "type": "object"
         }

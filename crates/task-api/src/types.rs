@@ -421,6 +421,10 @@ pub struct ClusterConfigView {
     pub id: String,
     /// `~/.ssh/config` の `Host` 名。
     pub host: String,
+    /// ADR-0059 D6: 設定ファイルの `[[clusters]] work_dir`（DB の上書きは含まない。`GET /clusters` の
+    /// `ClusterView.work_dir`/`work_dir_source` が実効値を持つ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<String>,
     pub concurrency: usize,
     /// `"rsync"` | `"none"`。
     pub sync: String,
@@ -471,6 +475,24 @@ pub struct Clusters {
     pub items: Vec<ClusterView>,
 }
 
+/// `PUT /clusters/{id}/settings`（ADR-0059 D6）の要求本文。絶対パスか `~`/`~/…` だけ許す
+/// （それ以外・空文字は 422 `validation`）。`null`（省略）で DB の上書きを消す。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterSettingsPutBody {
+    #[serde(default)]
+    pub work_dir: Option<String>,
+}
+
+/// `PUT /clusters/{id}/settings` の応答。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ClusterSettingsView {
+    pub cluster_id: String,
+    /// 書いた後の DB 上書きの値（`null` なら上書きを消した = 設定ファイルの値に戻る）。
+    pub work_dir: Option<String>,
+    pub updated_at: String,
+}
+
 /// 設定（`[[clusters]]`）とスナップショット（`ClusterLive`）を結合したもの。`env` の値は出さない。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ClusterView {
@@ -507,6 +529,15 @@ pub struct ClusterView {
     /// スナップショットが無ければ `false`。
     #[serde(default)]
     pub tunnel_login_needed: bool,
+    /// ADR-0059 D6: 実効の作業ディレクトリ（DB の上書き `cluster_settings` があればそれ、無ければ
+    /// 設定ファイルの `work_dir`）。どちらも無ければ `null`（`WorkspaceSpec::Remote.path` が相対・
+    /// 省略のタスクはこのクラスタでは失敗する）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_dir: Option<String>,
+    /// ADR-0059 D6: `work_dir` の出どころ。`"settings"`（DB の上書き）/ `"config"`（設定ファイル）。
+    /// `work_dir` が `null` なら `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_dir_source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

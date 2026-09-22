@@ -845,6 +845,9 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                 ClusterConfigView {
                     id: c.id.clone(),
                     host: c.host.clone(),
+                    // ADR-0059 D6: 設定ファイルの値だけ（DB の上書きは `GET /clusters` の
+                    // `ClusterView.work_dir`/`work_dir_source` が持つ）。
+                    work_dir: c.work_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
                     // ADR-0032 D1: 接続の張り方（`manual` / `publickey` / `totp`）。GUI が出し分けに使う。
                     auth: c.auth.clone(),
                     concurrency: c.concurrency,
@@ -3328,6 +3331,7 @@ auth = "publickey"
             workspace: task_core::WorkspaceSpec::Remote {
                 cluster: "auto".into(),
                 path: PathBuf::from("/remote/project"),
+                mode: None,
             },
             budget: task_core::Budget {
                 max_turns: 3,

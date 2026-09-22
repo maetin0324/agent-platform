@@ -860,6 +860,11 @@ pub struct ClusterConfig {
     pub id: String,
     /// `~/.ssh/config` の `Host` 名（`ControlMaster` の設定が要る）。
     pub host: String,
+    /// ADR-0059 D6: クラスタ側の実効の作業ディレクトリ（例 `/work/NBB/rmaeda`）。省略可。
+    /// `WorkspaceSpec::Remote.path` が省略・相対のときの基準になる（絶対パス・`~`/`~/…` はそのまま）。
+    /// GUI から `PUT /clusters/{id}/settings` で上書きできる（DB の値が勝つ。`ClusterSettings`）。
+    #[serde(default)]
+    pub work_dir: Option<PathBuf>,
     /// このクラスタで同時に走らせる run の上限。
     #[serde(default = "default_cluster_concurrency")]
     pub concurrency: usize,
@@ -2785,6 +2790,9 @@ genre = {}
                             paths: c.worktree_paths.clone(),
                             ..Default::default()
                         },
+                        // ADR-0059 D6: 設定ファイルの `work_dir`。DB の上書きは dispatcher 側
+                        // （`cluster_of`）が実行時に合成する。
+                        work_dir: c.work_dir.clone(),
                         // ADR-0053 D3（Phase 66）。
                         forwards: c
                             .forwards

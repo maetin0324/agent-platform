@@ -129,7 +129,7 @@ fn resolve_cluster_target(
         path.to_path_buf()
     } else {
         match &task.workspace {
-            WorkspaceSpec::Remote { cluster, path } => {
+            WorkspaceSpec::Remote { cluster, path, .. } => {
                 if cluster != cluster_id {
                     warning = Some(format!(
                         "task {} workspace targets cluster {cluster:?}; overriding with --cluster {cluster_id:?}",
@@ -517,7 +517,12 @@ async fn execute_on_cluster(
     selected: &Selected,
     adapter: &dyn WorkerAdapter,
 ) -> Result<ExitCode, CliError> {
-    let settings = target.spec.ssh_settings(&target.remote_path, task.id);
+    // ADR-0059 D1: タスクの `WorkspaceSpec::Remote.mode`（`--workspace` で上書きしたパスでも、
+    // クラスタ側の同期方針はタスクに書いてある `mode` にそのまま従う）。
+    let settings =
+        target
+            .spec
+            .ssh_settings(&target.remote_path, task.id, task.workspace.remote_mode());
     let ws = SshWorkspace::new(&target.mirror_dir, settings.clone());
 
     if !ws.control_master_alive().await {
@@ -534,7 +539,7 @@ async fn execute_on_cluster(
     };
     ws.write_remote_exec_helper()
         .await
-        .map_err(|e| CliError::msg(format!("failed to write .taskd/remote-exec: {e}")))?;
+        .map_err(|e| CliError::msg(format!("failed to write .celeris/remote-exec: {e}")))?;
 
     // ADR-0018 D3: DB のタスクは変えない。渡す写しの `objective` だけにラッパの使い方を足す。
     let mut run_task = task.clone();
@@ -870,6 +875,7 @@ mod tests {
         celeris::config::ClusterConfig {
             id: id.into(),
             host: host.into(),
+            work_dir: None,
             concurrency: 1,
             sync: "rsync".into(),
             auth: "manual".into(),
@@ -967,6 +973,7 @@ mod tests {
             WorkspaceSpec::Remote {
                 cluster: "local".into(),
                 path: "/remote/proj".into(),
+                mode: None,
             },
         );
         let target = resolve_cluster_target(&config, &task, "local", None).unwrap();
@@ -1004,6 +1011,7 @@ mod tests {
             WorkspaceSpec::Remote {
                 cluster: "other".into(),
                 path: "/remote/proj".into(),
+                mode: None,
             },
         );
         let target = resolve_cluster_target(&config, &task, "local", None).unwrap();

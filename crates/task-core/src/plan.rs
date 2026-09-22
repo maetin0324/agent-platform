@@ -1303,6 +1303,7 @@ mod tests {
         let remote = WorkspaceSpec::Remote {
             cluster: "pegasus".into(),
             path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            mode: None,
         };
         let plan = PlanOutput {
             tasks: vec![new_task("a", vec![])],

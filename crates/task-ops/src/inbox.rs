@@ -1115,6 +1115,7 @@ mod tests {
         t.workspace = WorkspaceSpec::Remote {
             cluster: cluster.to_string(),
             path: "workspace".into(),
+            mode: None,
         };
         t
     }
