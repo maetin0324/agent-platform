@@ -14611,3 +14611,11 @@ celeris 側は無変更（`crates/` 無変更、`docs/celeris-api-v1.md` 無変�
 - `systemd-run` が使えない環境（`auto` が `inline` に倒れたとき）向けに、`GET /daemon` か
   `GET /clusters` に「この master は cgroup の外に出ていない」旨を出せると運用上わかりやすい
   （今回は範囲外。GUI・API の変更は禁止されていたため見送った）。
+
+### Phase 103 の本番反映（2026-09-22、ライブ切替。ssh master をデーモンの cgroup の外へ）
+
+- merge: `worktree-agent-a6d1a5305e8d763c6` → main `9b43a21`（衝突なし）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1843 / failed 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、`pnpm gen:types` 差分ゼロ。push 済み。
+- `release.sh main` → exit 0、`sha12=9b43a211e6fd schema_version=25`、`changes.json: base=cd18773d6341 commits=3 files=9 sensitive=1`（`config/celeris.clusters.example.toml` の `master_launcher` の例のみ）。ゲート 10 段すべて exit 0（cargo-test 122.7s、cargo-clippy 31.0s）。
+- `verify.sh 9b43a211e6fd` → exit 0、check 1〜4, 4b, 5（N-1 = cd18773d6341）, 6（smoke 5.08s）すべて true、`ok=true live_ok=true`。
+- `promote.sh 9b43a211e6fd` → mode=live、DB バックアップ 14M、新 celeris が 2 秒で active、GUI 切替 1 秒、`current -> releases/9b43a211e6fd`。`GET /health` release=9b43a211e6fd role=active schema_version=25。
+- この昇格は旧リリース（master を cgroup 内で持つ）からの切替なので pegasus / sirius は従来どおり切れて `connected=false`（想定どおり）。**受け入れの実機確認は次の手順**: (1) 人が GUI から pegasus に接続 → `systemctl --user list-units 'celeris-ssh-master*'` に `celeris-ssh-master-pegasus-<乱数>.scope` が現れる、(2) 次の昇格（Phase 96 を予定）の後も `GET /clusters` の pegasus `connected=true` が維持される。結果は追記する。
