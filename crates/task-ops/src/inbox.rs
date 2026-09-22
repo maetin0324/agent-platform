@@ -660,6 +660,7 @@ mod tests {
                     outcome: "done: implemented".into(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 },
             )
             .expect("finished");
@@ -783,6 +784,7 @@ mod tests {
                     outcome: "question: which version?".into(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 },
             )
             .expect("finished");
@@ -865,6 +867,7 @@ mod tests {
                     outcome: "done: built the plan".into(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 },
             )
             .expect("finished");
@@ -912,6 +915,7 @@ mod tests {
                     outcome: "error(retryable=false): boom".into(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 },
             )
             .expect("finished");

@@ -88,11 +88,16 @@ pub use message::{
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, DEFAULT_PRIORITY, Event, GenreSpec, HARNESS_ADAPTERS,
     Lease, MAX_LABELS, MAX_SKILLS, PRIORITY_LABELS, PROGRESS_DETAIL_MAX_BYTES, ProgressFields,
-    ProgressKind, RoleSpec, RunRole, Status, Task, TaskCategory, TaskId, TaskKind, TaskMode, Tier,
-    Usage, WorkerHint, WorkspaceMode, WorkspaceSpec, artifact_entry_description,
+    ProgressKind, RoleSpec, RunMetrics, RunRole, Status, Task, TaskCategory, TaskId, TaskKind,
+    TaskMode, Tier, Usage, WorkerHint, WorkspaceMode, WorkspaceSpec, artifact_entry_description,
     artifact_entry_name, expand_home, home_dir, is_valid_label, normalize_labels, normalize_skills,
     priority_from_label, priority_label,
 };
+// ---- ADR-0061（Phase 104）: harness routing 基盤（cost 推定・タスク特性ベースの routing）----
+pub mod pricing;
+pub mod routing;
+pub use pricing::estimate_cost_usd;
+pub use routing::{RoutingDecision, RoutingPolicy, RoutingSignals, StaticRoutingPolicy};
 // ---- ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ ----
 // ---- ADR-0054 D1（Phase 67）: ノードごとの継続セッション ----
 pub use node_session::{NodeSession, NodeSessionStore, SessionKind};

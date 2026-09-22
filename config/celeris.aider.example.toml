@@ -1,0 +1,35 @@
+# aider アダプタ（ADR-0061）の設定例。明確で局所的な少数ファイル修正向けのハーネス。相対パスは
+# このファイルのあるディレクトリ基準。
+#
+# 前提: PATH 上に aider（`pip install aider-chat` / `uv tool install aider-chat`）があること。
+# API キーは [[providers]] の行の env（もしくは env_from_secrets 経由でアカウント画面の秘密ストア）で渡す。
+
+db = "../celeris-aider-demo.sqlite3"
+workspace_root = "../workspaces"
+tick_ms = 2000
+max_concurrency = 1
+lease_grace_secs = 60
+idle_timeout_secs = 300
+kill_grace_secs = 10
+review_timeout_secs = 600
+error_cooldown_secs = 300
+
+[plan]
+auto_accept = false
+
+# `[adapters.aider]` は共通設定（ADR-0061）。`model`/`env` は `[[providers]]` の行ごとに上書きできる
+# （`codex` と同じ作り。行の値が優先）。
+[adapters.aider]
+# command = "aider"           # 既定。PATH 上の aider を使うなら省略可
+# extra_args = []              # --message の前に追加する引数（例: ["--architect"]）
+
+[[providers]]
+id = "aider-anthropic"
+adapter = "aider"
+tiers = ["standard", "cheap"]
+concurrency = 1
+model = "anthropic/claude-sonnet-5"
+# env はこの行にだけ渡す（優先順: celeris 自身の環境 < [adapters.aider].env < この行の env。ADR-0061）。
+# ANTHROPIC_API_KEY はこの例では直書きしているが、本番は env_from_secrets（アカウント画面の秘密ストア。
+# ADR-0030 D2）を使うこと。
+env = { ANTHROPIC_API_KEY = "sk-ant-..." }

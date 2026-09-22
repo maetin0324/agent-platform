@@ -1014,6 +1014,9 @@ pub struct AdaptersConfig {
     pub claude_code: ClaudeCodeAdapterConfig,
     #[serde(default)]
     pub codex: CodexAdapterConfig,
+    /// ADR-0061（Phase 104）: `aider` アダプタ（明確で局所的な少数ファイル修正向け）。
+    #[serde(default)]
+    pub aider: AiderAdapterConfig,
     #[serde(default)]
     pub acp: AcpAdapterConfig,
     #[serde(default)]
@@ -1179,6 +1182,44 @@ impl CodexAdapterConfig {
 
 fn default_codex_command() -> String {
     "codex".to_string()
+}
+
+/// `aider` アダプタの設定（ADR-0061）。`codex`（ADR-0008 D4）と同じ作りで、resume 相当の概念は
+/// 無い（aider は 1 回の `--message` で終わる設計。ADR-0061「アダプタ層」）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AiderAdapterConfig {
+    /// 起動するコマンド名／パス。
+    #[serde(default = "default_aider_command")]
+    pub command: String,
+    /// `--message` の前に追加する引数（例: `["--architect"]`）。
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    /// `--model`（省略時は aider の既定モデル）。
+    #[serde(default)]
+    pub model: Option<String>,
+    /// 追加の環境変数（`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` 等）。
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// ADR-0030 D2: 環境変数名 → `[secrets]` の秘密 id。`env` より優先。
+    #[serde(default)]
+    pub env_from_secrets: HashMap<String, String>,
+}
+
+impl Default for AiderAdapterConfig {
+    fn default() -> Self {
+        Self {
+            command: default_aider_command(),
+            extra_args: Vec::new(),
+            model: None,
+            env: HashMap::new(),
+            env_from_secrets: HashMap::new(),
+        }
+    }
+}
+
+fn default_aider_command() -> String {
+    "aider".to_string()
 }
 
 /// `acp` アダプタの設定（ADR-0026 D2）。最初の実装は `opencode acp`。`command`/`args`/`env`/`model` は
@@ -1782,13 +1823,14 @@ impl Config {
             if p.adapter != task_worker::FakeAdapter::ID
                 && p.adapter != task_worker::ClaudeCodeAdapter::ID
                 && p.adapter != task_worker::CodexAdapter::ID
+                && p.adapter != task_worker::AiderAdapter::ID
                 && p.adapter != task_worker::AcpAdapter::ID
                 && p.adapter != task_worker::PaperQaAdapter::ID
                 && p.adapter != task_worker::LdrAdapter::ID
                 && p.adapter != task_worker::LangMemAdapter::ID
             {
                 return Err(ConfigError::Invalid(format!(
-                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex, acp, paperqa, local-deep-research, langmem only)",
+                    "provider {}: adapter {:?} is not available in this build (fake, claude-code, codex, aider, acp, paperqa, local-deep-research, langmem only)",
                     p.id, p.adapter
                 )));
             }
@@ -3551,6 +3593,23 @@ host = "h"
                 .get("OPENCODE_DISABLE_PROJECT_CONFIG")
                 .map(String::as_str),
             Some("1")
+        );
+    }
+
+    /// ADR-0061: `aider` 用の例の設定ファイルが読め、設定検証を通る。
+    #[test]
+    fn loads_aider_example_config() {
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config/celeris.aider.example.toml"
+        ));
+        let cfg = Config::load(path).unwrap();
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.providers[0].adapter, "aider");
+        assert_eq!(cfg.providers[0].model, "anthropic/claude-sonnet-5");
+        assert_eq!(
+            cfg.providers[0].env.get("ANTHROPIC_API_KEY").map(String::as_str),
+            Some("sk-ant-...")
         );
     }
 

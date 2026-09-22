@@ -359,8 +359,12 @@ async fn list_accounts_merges_filesystem_snapshot_and_stats() {
                 usage: Some(task_core::Usage {
                     input_tokens: Some(10),
                     output_tokens: Some(4),
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    cost_usd: None,
                 }),
                 role: None,
+                metrics: None,
             },
         ],
     );

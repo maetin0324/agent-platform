@@ -2427,11 +2427,12 @@ impl Dispatcher {
     ) -> Result<(), DispatchError> {
         // ADR-0024 D2/D4: プールで選んだアカウント（無ければ `None`）。失敗の cooldown をプロバイダかアカウントか
         // どちらに向けるかを後で決める。
-        let (account, account_adapter) = self
+        // ADR-0061（Phase 104）: `since`（dispatch した時刻）も一緒に取り出し、run の wall time を計算する。
+        let (account, account_adapter, run_since) = self
             .running
             .remove(&task_id)
-            .map(|e| (e.account, e.account_adapter))
-            .unwrap_or((None, None));
+            .map(|e| (e.account, e.account_adapter, Some(e.since)))
+            .unwrap_or((None, None, None));
         let Some(task) = self.store.get(task_id)? else {
             tracing::warn!(%task_id, %run_id, "worker finished for unknown task");
             return Ok(());
@@ -2592,11 +2593,18 @@ impl Dispatcher {
         };
         self.policy.report(provider.clone(), &policy_outcome);
 
+        // ADR-0061（Phase 104）: `retries` はこの run が始まった時点でタスクが既に消費していた試行回数
+        // （= 遷移前の `task.attempts`）。
+        let metrics = run_since.map(|since| task_core::RunMetrics {
+            wall_ms: wall_ms_since(since),
+            retries: task.attempts,
+        });
         let finished = Event::WorkerFinished {
             run_id: run_id.clone(),
             outcome: outcome_str.clone(),
             usage,
             role: None,
+            metrics,
         };
         let mut events = vec![finished];
         if let Some(reason) = failure_reason {
@@ -2866,11 +2874,18 @@ impl Dispatcher {
         let entry = self.reviewing.remove(&task_id);
         // ADR-0014 D1: Reviewer run の終わりを WorkerFinished{role: reviewer} として残す（判定の適用・延期・破棄のどれでも）。
         let completed_review_run = outcome.reviewer_run.as_ref().map(|r| r.run_id.clone());
+        // ADR-0061（Phase 104）: `retries` は Reviewer run には無い概念（対象タスクの `attempts` とは別軸）
+        // なので 0 固定。wall time は `ReviewEntry.since` から計算する。
+        let review_metrics = entry.as_ref().map(|e| task_core::RunMetrics {
+            wall_ms: wall_ms_since(e.since),
+            retries: 0,
+        });
         let mut reviewer_finished = outcome.reviewer_run.take().map(|r| Event::WorkerFinished {
             run_id: r.run_id,
             outcome: r.outcome,
             usage: r.usage,
             role: Some(RunRole::Reviewer),
+            metrics: review_metrics,
         });
         let Some(task) = self.store.get(task_id)? else {
             return Ok(());
@@ -3485,16 +3500,24 @@ impl Dispatcher {
             if lease.expires_at > now {
                 continue;
             }
+            // ADR-0061（Phase 104）: `entry` を消費する前に `since`（wall time 計算用）を取っておく。
+            let mut run_since: Option<OffsetDateTime> = None;
             if let Some(entry) = self.running.remove(&task.id) {
+                run_since = Some(entry.since);
                 // ADR-0044 Phase 53 追記: リース喪失も同じ止め方（プロセスグループごと。
                 // コンテナで走っていればラベル越しにも同じ 2 段を送る）。
                 self.stop_run(&entry.run_id, entry.handle, entry.container);
             }
+            let metrics = run_since.map(|since| task_core::RunMetrics {
+                wall_ms: wall_ms_since(since),
+                retries: task.attempts,
+            });
             let finished = Event::WorkerFinished {
                 run_id: lease.worker_run_id.clone(),
                 outcome: "lease_expired".to_string(),
                 usage: None,
                 role: None,
+                metrics,
             };
             match self.store.apply_transition_with_events(
                 task.id,
@@ -6816,6 +6839,14 @@ fn downgraded_remote_workspace(workspace: &WorkspaceSpec) -> Option<WorkspaceSpe
         }),
         WorkspaceSpec::Local { .. } => None,
     }
+}
+
+/// ADR-0061（Phase 104）: dispatch した時刻（`RunEntry`/`ReviewEntry` の `since`）から今までの
+/// 壁時計時間をミリ秒で計算する。`since` が未来（時計のずれ等）なら 0 に丸める。
+fn wall_ms_since(since: OffsetDateTime) -> u64 {
+    (OffsetDateTime::now_utc() - since)
+        .whole_milliseconds()
+        .max(0) as u64
 }
 
 /// `ProviderThrottled.reason` に書く供給側失敗の種別（ADR-0013 D9）。供給側失敗でなければ `None`。
@@ -14120,6 +14151,7 @@ mod tests {
                     outcome: "done: 候補を 3 本に絞った".into(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 },
             )
             .unwrap();
@@ -14503,6 +14535,7 @@ mod tests {
                         .into(),
                 usage: None,
                 role: None,
+                metrics: None,
             },
         )];
         let done_task = Task {
@@ -14521,6 +14554,7 @@ mod tests {
                 outcome: "error(retryable=true): idle timeout".into(),
                 usage: None,
                 role: None,
+                metrics: None,
             },
         )];
         let failed_task = Task {
@@ -14541,6 +14575,7 @@ mod tests {
                     .into(),
                 usage: None,
                 role: None,
+                metrics: None,
             },
         )];
         assert_eq!(
@@ -14560,6 +14595,7 @@ mod tests {
                     outcome: "done: 一見よさそう".into(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 },
             ),
             (
@@ -14640,6 +14676,7 @@ mod tests {
                     outcome: "done: Pluvio と比較可能な非同期ランタイムを 3 件確認した".into(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 },
             )
             .unwrap();

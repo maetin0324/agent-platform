@@ -540,6 +540,7 @@ mod tests {
                     outcome: "question: which version?".to_string(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 },
             )
             .expect("append worker finished");

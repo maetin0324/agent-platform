@@ -1,6 +1,8 @@
 //! task-worker: ワーカープロトコル（DESIGN §5.3, ADR-0003）、アダプタ（§5.4）、
 //! ワークスペース（§5.8）。ディスパッチ判断はここに書かない（それは task-dispatch）。
 
+/// ADR-0061（Phase 104）: `aider` CLI アダプタ（明確で局所的な少数ファイル修正向け）。
+pub mod aider;
 pub mod acp;
 pub mod adapter;
 pub mod artifact;
@@ -40,6 +42,7 @@ pub(crate) mod test_support;
 pub mod workspace;
 
 pub use acp::{AcpAdapter, AcpConfig, AcpPermission};
+pub use aider::{AiderAdapter, AiderConfig};
 pub use adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
 pub use claude_account::{
     AccountCheck, AccountCheckResult, LoginError, LoginOutcome, LoginResult, LoginSession,

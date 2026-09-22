@@ -4408,6 +4408,7 @@ mod tests {
                 outcome: "done: x".into(),
                 usage: None,
                 role: None,
+                metrics: None,
             },
             Event::worker_progress("run-1", "extra"),
         ];
@@ -4888,7 +4889,8 @@ mod tests {
                 run_id: "r".into(),
                 outcome: "done: x".into(),
                 usage: None,
-                role: None
+                role: None,
+                metrics: None,
             }
         );
         assert_eq!(serde_json::to_string(&ev).unwrap(), old);
@@ -7186,6 +7188,7 @@ mod tests {
             outcome: "interrupted: comment".into(),
             usage: None,
             role: None,
+            metrics: None,
         };
         let outcome = store
             .comment_add(&human, Some((Trigger::Interrupt, vec![finished])))

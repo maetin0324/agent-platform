@@ -23,6 +23,7 @@ fn blocked_task(env: &TestEnv) -> Task {
             outcome: "question: which db?".into(),
             usage: None,
             role: None,
+            metrics: None,
         }],
     );
     task

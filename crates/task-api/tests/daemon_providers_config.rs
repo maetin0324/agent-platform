@@ -98,6 +98,7 @@ fn finished(run_id: &str, outcome: &str, usage: Option<Usage>) -> Event {
         outcome: outcome.into(),
         usage,
         role: None,
+        metrics: None,
     }
 }
 
@@ -116,6 +117,9 @@ async fn providers_combine_config_snapshot_and_incremental_stats() {
                 Some(Usage {
                     input_tokens: Some(100),
                     output_tokens: Some(20),
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    cost_usd: None,
                 }),
             ),
             started("r2", Some("claude-b")),
@@ -127,6 +131,9 @@ async fn providers_combine_config_snapshot_and_incremental_stats() {
                 Some(Usage {
                     input_tokens: None,
                     output_tokens: Some(3),
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    cost_usd: None,
                 }),
             ),
             started("r4", Some("claude-a")),

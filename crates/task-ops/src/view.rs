@@ -983,6 +983,7 @@ mod tests {
             outcome: outcome.to_string(),
             usage: None,
             role: None,
+            metrics: None,
         }
     }
 
@@ -1010,8 +1011,12 @@ mod tests {
                 usage: Some(Usage {
                     input_tokens: Some(5),
                     output_tokens: Some(7),
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    cost_usd: None,
                 }),
                 role: Some(RunRole::Reviewer),
+                metrics: None,
             },
         ];
         let rows: Vec<EventRow> = events
@@ -1728,6 +1733,7 @@ mod tests {
                     outcome: "question: which version?".into(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 },
             )
             .expect("append worker finished");

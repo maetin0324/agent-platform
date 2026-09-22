@@ -255,6 +255,7 @@ async fn posting_a_human_comment_follows_the_effect_table() {
             outcome: "question: which db?".into(),
             usage: None,
             role: None,
+            metrics: None,
         }],
     );
     let resp = send(

@@ -4039,6 +4039,17 @@
         },
         {
           "properties": {
+            "metrics": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunMetrics"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0061（Phase 104）: harness routing 基盤のメトリクス（wall time・retry 回数）。\n`WorkerStarted.adapter`/`model` と同じ `run_id` で突き合わせる。導入前のイベント・\nこの run の起点時刻を持たない経路（無い）は `None`。"
+            },
             "outcome": {
               "type": "string"
             },
@@ -9362,6 +9373,28 @@
       ],
       "type": "object"
     },
+    "RunMetrics": {
+      "description": "ADR-0061（Phase 104）: `Event::WorkerFinished` に添える run 単位のメトリクス。\nharness・model・account は同じ `run_id` の `Event::WorkerStarted` に既にあるのでここには持たない\n（二重管理をしない）。success/failure は `WorkerFinished.outcome` の文字列を\n`task-api::stats::classify_outcome` が分類する既存の仕組みのままにする。",
+      "properties": {
+        "retries": {
+          "description": "この run が始まった時点で、同じタスクが既に消費していた試行回数（`Task.attempts`）。\n0 なら初回の試行。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "wall_ms": {
+          "description": "dispatch してからこの run が終わるまでの壁時計時間（ミリ秒）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "wall_ms",
+        "retries"
+      ],
+      "type": "object"
+    },
     "RunOutcomeKind": {
       "oneOf": [
         {
@@ -11347,8 +11380,34 @@
       "type": "object"
     },
     "Usage": {
-      "description": "DESIGN §5.3 の `usage`。取れない項目は省略可。",
+      "description": "DESIGN §5.3 の `usage`。取れない項目は省略可。\n\nADR-0061（Phase 104）: harness routing 基盤で `cache_read_tokens` / `cache_creation_tokens` /\n`cost_usd` を追加した（追加のみ。既存の `input_tokens` / `output_tokens` の意味は変えない）。\n`Eq` は落とした（`cost_usd: Option<f64>` は `Eq` を持てない）。",
       "properties": {
+        "cache_creation_tokens": {
+          "description": "prompt cache の作成（書き込み）トークン。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cache_read_tokens": {
+          "description": "prompt cache の読み取りトークン（アダプタが取得できた場合のみ）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cost_usd": {
+          "description": "`task_core::pricing` の静的単価表から推定した USD（不明なモデル・トークン欠落は `None`）。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
         "input_tokens": {
           "format": "uint64",
           "minimum": 0,

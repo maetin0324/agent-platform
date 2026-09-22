@@ -86,7 +86,9 @@ pub struct ReviewerProviderFailure {
 }
 
 /// `review_task` の結果。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ADR-0061（Phase 104）: `ReviewerRunRecord` が `Eq` を落とした（`Usage.cost_usd: Option<f64>`）
+/// ので、それを含むこの構造体も `Eq` を落とした。
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReviewOutcome {
     pub verdicts: Vec<Verdict>,
     /// `Plan` kind で検証に通った場合の出力（子タスクの生成に使う）。
@@ -98,7 +100,9 @@ pub struct ReviewOutcome {
 }
 
 /// Reviewer run 自身の終わり方（ADR-0014 D1）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// ADR-0061（Phase 104）: `Usage.cost_usd: Option<f64>` を追加したので `Eq` は落とした
+/// （`f64` は `Eq` を持てない。`PartialEq` は変わらず使える）。
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReviewerRunRecord {
     pub run_id: String,
     /// `WorkerFinished.outcome` と同じ接頭辞の規則（`done: ` / `question: ` / `error(retryable=…): ` / `requeue: `）。

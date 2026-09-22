@@ -48,6 +48,43 @@ max_runs_per_account = 2
 その adapter を指定した仕事だけに使います。対話や通常の計画が誤って調査・知識整理に流れることはありません。
 スキルの一致とプロバイダの tier は別で、ローカルモデルの tier は実際に任せられる能力に合わせて登録してください。
 
+## coding worker のハーネス routing（ADR-0061）
+
+`claude-code` / `codex`（高自律・複雑なタスク向け）、`acp`（OpenCode/Pi 等の汎用ハーネス。ADR-0026）に
+加え、**明確で局所的な少数ファイル修正**向けに `aider` アダプタがあります。
+
+```toml
+[adapters.aider]
+# command = "aider"           # 既定。PATH 上の aider（pip install aider-chat）を使うなら省略可
+
+[[providers]]
+id = "aider-1"
+adapter = "aider"
+tiers = ["standard", "cheap"]
+model = "anthropic/claude-sonnet-5"
+env = { ANTHROPIC_API_KEY = "..." }   # 本番は env_from_secrets を使う
+```
+
+`aider` はプレーンテキストの対話ツールで、celeris 独自のプロトコルもストリーム JSON も話しません。
+`claude-code`/`codex` と同じ「結果ファイル規約」（`artifacts/result.json`。ADR-0006 D3）で run の
+成否を判定します。トークン使用量は aider 自身が出す `Tokens: N sent, M received.` /
+`Cost: $X message, $Y session.` を最良努力で拾い、無ければ `None` のままです（設定例は
+`config/celeris.aider.example.toml`）。
+
+`task_core::routing`（`crates/task-core/src/routing.rs`）に、タスクの題名・目的・受け入れ条件から
+決定的に「明確で局所的な少数ファイル修正 / isolated issue solving / 通常の実装・調査・テスト反復 /
+複雑で長時間・高自律」を分類し、対応するハーネス（`aider` / `mini-swe-agent`〈未導入〉/ `acp` /
+`claude-code`）を選ぶ固定ルール（`StaticRoutingPolicy`）と、将来メトリクスから成功率を差し込んで
+候補を並べ替えられる薄いラッパー（`MetricsAwareRoutingPolicy`）があります。**現時点ではこの routing
+判断をタスク作成経路（`task-ops::add`）へ配線していません**（未導入ハーネスへの fallback/retry policy
+と一緒に設計する必要があるため。Phase 2。詳細は ADR-0061 D4）。運用側が使うには、今のところ
+タスク作成時に `worker_hint.adapter = "aider"` を明示するか、`[[providers]] adapter = "aider"` だけを
+登録して他のハーネスと同様に残量ベースの自動選択に任せる、のどちらかです。
+
+`Event::WorkerFinished.metrics`（`wall_ms`/`retries`）と `Usage`（`cache_read_tokens`/
+`cache_creation_tokens`/`cost_usd`）で、run ごとの success/failure・token・推定コスト・wall time・
+harness・model・retry 回数が揃います（harness/model は同じ `run_id` の `Event::WorkerStarted` から）。
+
 ## Codex の残量
 
 `codex app-server` の `account/read` と `account/rateLimits/read` から取得します。

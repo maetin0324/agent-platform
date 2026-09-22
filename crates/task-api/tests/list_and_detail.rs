@@ -319,6 +319,7 @@ async fn inbox_returns_the_task_ops_inbox_as_json() {
             outcome: "question: which db?".into(),
             usage: None,
             role: None,
+            metrics: None,
         }],
     );
 

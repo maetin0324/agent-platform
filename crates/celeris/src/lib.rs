@@ -37,9 +37,9 @@ use task_dispatch::{
 use task_ops::daemon::{ProviderCheckView, ProviderLive};
 use task_ops::view::ViewContext;
 use task_worker::{
-    AcpAdapter, AcpConfig, ClaudeCodeAdapter, ClaudeCodeConfig, CodexAdapter, CodexConfig,
-    FakeAdapter, LangMemAdapter, LangMemConfig, LdrAdapter, LdrConfig, PaperQaAdapter,
-    PaperQaConfig, WorkerAdapter, Workspace,
+    AcpAdapter, AcpConfig, AiderAdapter, AiderConfig, ClaudeCodeAdapter, ClaudeCodeConfig,
+    CodexAdapter, CodexConfig, FakeAdapter, LangMemAdapter, LangMemConfig, LdrAdapter, LdrConfig,
+    PaperQaAdapter, PaperQaConfig, WorkerAdapter, Workspace,
 };
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
@@ -210,6 +210,24 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     resume_mode: base.resolved_resume_mode(),
                 }))
             }
+            AiderAdapter::ID => {
+                let base = &config.adapters.aider;
+                Arc::new(AiderAdapter::new(AiderConfig {
+                    command: base.command.clone(),
+                    extra_args: base.extra_args.clone(),
+                    model: effective_model(&p.model, &base.model),
+                    env: merged_env_with_secrets(
+                        &base.env,
+                        &base.env_from_secrets,
+                        &p.env,
+                        &p.env_from_secrets,
+                        secrets_dir,
+                    ),
+                    // ADR-0043 D3（Phase 56）: コンテナで走らせるかはタスクごとに決まるので、ここでは常に `None`
+                    // （ディスパッチャが `with_container` で包んだ複製を作る）。
+                    container: None,
+                }))
+            }
             AcpAdapter::ID => {
                 let base = &config.adapters.acp;
                 Arc::new(AcpAdapter::new(AcpConfig {
@@ -313,8 +331,8 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     ),
                 }))
             }
-            // `Config::validate` が fake / claude-code / codex / acp / paperqa / local-deep-research /
-            // langmem 以外を拒否している。
+            // `Config::validate` が fake / claude-code / codex / aider / acp / paperqa /
+            // local-deep-research / langmem 以外を拒否している。
             _ => {
                 let mut fake = FakeAdapter::new(config.adapters.fake.command.clone());
                 fake.set_env(merged_env_with_secrets(
@@ -362,12 +380,13 @@ pub fn secret_usage(config: &Config) -> HashMap<String, Vec<task_api::types::Sec
     }
 
     let mut map: HashMap<String, Vec<task_api::types::SecretUse>> = HashMap::new();
-    let adapters: [(&str, &HashMap<String, String>); 7] = [
+    let adapters: [(&str, &HashMap<String, String>); 8] = [
         (
             ClaudeCodeAdapter::ID,
             &config.adapters.claude_code.env_from_secrets,
         ),
         (CodexAdapter::ID, &config.adapters.codex.env_from_secrets),
+        (AiderAdapter::ID, &config.adapters.aider.env_from_secrets),
         (FakeAdapter::ID, &config.adapters.fake.env_from_secrets),
         (AcpAdapter::ID, &config.adapters.acp.env_from_secrets),
         (
@@ -421,6 +440,7 @@ pub fn effective_models(config: &Config) -> HashMap<ProviderId, String> {
             let adapter_model = match p.adapter.as_str() {
                 ClaudeCodeAdapter::ID => config.adapters.claude_code.model.clone(),
                 CodexAdapter::ID => config.adapters.codex.model.clone(),
+                AiderAdapter::ID => config.adapters.aider.model.clone(),
                 // ADR-0026 D3 / ADR-0027 D3: acp / paperqa には `[adapters.<種別>].model` が無い。
                 // 行の `model` が空なら `None` になる。
                 _ => None,
@@ -2726,6 +2746,41 @@ args = ["acp"]
         assert_eq!(
             cfg.providers[1].args.as_deref(),
             Some(&["acp".to_string()][..])
+        );
+    }
+
+    /// ADR-0061: `aider` プロバイダの行は `[adapters.aider]` の env に重ね、`model` は行の値が
+    /// `[adapters.aider]` の既定を上書きする（`codex` と同じ規則）。
+    #[test]
+    fn build_adapters_wires_an_aider_provider_with_merged_env_and_row_model() {
+        let text = r#"
+[adapters.aider]
+env = { SHARED = "base" }
+model = "anthropic/claude-haiku-4"
+
+[[providers]]
+id = "aider-1"
+adapter = "aider"
+tiers = ["standard"]
+model = "anthropic/claude-sonnet-5"
+env = { ANTHROPIC_API_KEY = "sk-x" }
+"#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        cfg.validate().unwrap();
+        let adapters = build_adapters(&cfg);
+        assert_eq!(adapters.len(), 1);
+        assert_eq!(adapters["aider-1"].id(), "aider");
+
+        let models = effective_models(&cfg);
+        assert_eq!(models["aider-1"], "anthropic/claude-sonnet-5");
+
+        let merged = merged_env(&cfg.adapters.aider.env, &cfg.providers[0].env);
+        assert_eq!(
+            merged,
+            vec![
+                ("ANTHROPIC_API_KEY".to_string(), "sk-x".to_string()),
+                ("SHARED".to_string(), "base".to_string()),
+            ]
         );
     }
 

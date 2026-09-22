@@ -143,6 +143,17 @@ struct ResultFile {
     evidence: serde_json::Value,
 }
 
+/// ADR-0061（Phase 104）: model が分かる時だけ静的単価表から USD を推定して埋める
+/// （`claude_code::terminal_from_result` と同じやり方。不明なモデル・token 欠落は `None` のまま）。
+fn with_estimated_cost(usage: Option<Usage>, model: Option<&str>) -> Option<Usage> {
+    usage.map(|mut u| {
+        if let Some(model) = model {
+            u.cost_usd = task_core::estimate_cost_usd(model, &u);
+        }
+        u
+    })
+}
+
 fn lenient_evidence(value: serde_json::Value) -> Vec<Evidence> {
     match value {
         serde_json::Value::Array(items) => items
@@ -603,10 +614,16 @@ async fn run_codex(
                 Terminal::Done {
                     summary,
                     evidence: Vec::new(),
-                    usage: *usage,
+                    usage: with_estimated_cost(*usage, config.model.as_deref()),
                 }
             } else {
-                terminal_from_result(&req.artifacts_dir, &artifacts_rel, *usage).await
+                terminal_from_result(
+                    &req.artifacts_dir,
+                    &artifacts_rel,
+                    *usage,
+                    config.model.as_deref(),
+                )
+                .await
             };
             (terminal, None)
         }
@@ -674,9 +691,18 @@ fn handle_line(
             }
         }
         "turn.completed" => {
+            // ADR-0061（Phase 104）: cache tokens のフィールド名は実機で確認していない
+            // （OpenAI Responses API の `input_tokens_details.cached_tokens` を想定した best-effort。
+            // 無ければ `None` のまま。`cost_usd` はここでは埋めない。model 文字列は呼び出し元でしか
+            // 分からない — `claude_code::terminal_from_result` と同じ構造。ADR-0008 D3）。
             let usage = value.get("usage").map(|u| Usage {
                 input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
                 output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
+                cache_read_tokens: u
+                    .pointer("/input_tokens_details/cached_tokens")
+                    .and_then(|v| v.as_u64()),
+                cache_creation_tokens: None,
+                cost_usd: None,
             });
             *last_signal = Some(TurnSignal::Completed { usage });
         }
@@ -800,7 +826,9 @@ async fn terminal_from_result(
     artifacts_dir: &std::path::Path,
     artifacts_rel: &str,
     usage: Option<Usage>,
+    model: Option<&str>,
 ) -> Terminal {
+    let usage = with_estimated_cost(usage, model);
     let result_path = artifacts_dir.join("result.json");
     let text = match tokio::fs::read_to_string(&result_path).await {
         Ok(t) => t,
@@ -1025,7 +1053,10 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
                     usage,
                     Some(Usage {
                         input_tokens: Some(10),
-                        output_tokens: Some(20)
+                        output_tokens: Some(20),
+                        cache_read_tokens: None,
+                        cache_creation_tokens: None,
+                        cost_usd: None,
                     })
                 );
             }

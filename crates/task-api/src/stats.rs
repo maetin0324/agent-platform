@@ -307,6 +307,7 @@ mod tests {
             outcome: outcome.into(),
             usage,
             role: None,
+            metrics: None,
         }
     }
 
@@ -344,6 +345,9 @@ mod tests {
             Some(Usage {
                 input_tokens: Some(i),
                 output_tokens: o,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                cost_usd: None,
             })
         };
         stats.apply(&row(
@@ -419,8 +423,12 @@ mod tests {
                 usage: Some(Usage {
                     input_tokens: Some(3),
                     output_tokens: Some(4),
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    cost_usd: None,
                 }),
                 role,
+                metrics: None,
             },
         ));
         let today = Date::from_calendar_date(2026, time::Month::September, 14).unwrap_or(Date::MIN);
@@ -452,6 +460,9 @@ mod tests {
             Some(Usage {
                 input_tokens: Some(i),
                 output_tokens: o,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                cost_usd: None,
             })
         };
         stats.apply(&row(

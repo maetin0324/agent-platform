@@ -957,7 +957,13 @@ async fn run_claude_code(
                 )
             }
             (None, Some(meta)) => {
-                terminal_from_result(&req.artifacts_dir, &artifacts_rel, meta).await
+                terminal_from_result(
+                    &req.artifacts_dir,
+                    &artifacts_rel,
+                    meta,
+                    config.model.as_deref(),
+                )
+                .await
             }
         };
 
@@ -1087,9 +1093,15 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
                 .get("is_error")
                 .and_then(|b| b.as_bool())
                 .unwrap_or(subtype != "success");
+            // ADR-0061（Phase 104）: claude-code CLI の `result.usage` は Anthropic API と同じ形
+            // （`cache_creation_input_tokens` / `cache_read_input_tokens` を含む）。`cost_usd` はここでは
+            // 計算しない（model 文字列は呼び出し元でしか分からない。`terminal_from_result` が埋める）。
             let usage = value.get("usage").map(|u| Usage {
                 input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
                 output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
+                cache_read_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
+                cache_creation_tokens: u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
+                cost_usd: None,
             });
             let result = value
                 .get("result")
@@ -1146,6 +1158,7 @@ async fn terminal_from_result(
     artifacts_dir: &Path,
     artifacts_rel: &str,
     last_result: &ResultMeta,
+    model: Option<&str>,
 ) -> (Terminal, Option<ProviderFailure>) {
     if last_result.is_error || last_result.subtype != "success" {
         let text_for_classification = last_result
@@ -1185,10 +1198,18 @@ async fn terminal_from_result(
             if let Some(question) = rf.question {
                 Terminal::Question { text: question }
             } else if let Some(summary) = rf.summary {
+                // ADR-0061（Phase 104）: model が分かる時だけ静的単価表から USD を推定して埋める
+                // （不明なモデル・token 欠落は `None` のまま。ここでは断定しない）。
+                let usage = last_result.usage.map(|mut u| {
+                    if let Some(model) = model {
+                        u.cost_usd = task_core::estimate_cost_usd(model, &u);
+                    }
+                    u
+                });
                 Terminal::Done {
                     summary,
                     evidence: lenient_evidence(rf.evidence),
-                    usage: last_result.usage,
+                    usage,
                 }
             } else {
                 Terminal::Error {
@@ -1584,7 +1605,10 @@ echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_toke
                     usage,
                     Some(Usage {
                         input_tokens: Some(10),
-                        output_tokens: Some(20)
+                        output_tokens: Some(20),
+                        cache_read_tokens: None,
+                        cache_creation_tokens: None,
+                        cost_usd: None,
                     })
                 );
             }

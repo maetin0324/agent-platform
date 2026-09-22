@@ -97,6 +97,7 @@ pub fn post_human_comment_as(
                     outcome: INTERRUPTED_OUTCOME.to_string(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 }],
                 None => Vec::new(),
             };
@@ -548,6 +549,7 @@ mod tests {
                         outcome: outcome.to_string(),
                         usage: None,
                         role: None,
+                        metrics: None,
                     }],
                 )
                 .expect("requeue");
@@ -590,6 +592,7 @@ mod tests {
                     outcome: "done: 直した".into(),
                     usage: None,
                     role: None,
+                    metrics: None,
                 }],
             )
             .expect("worker_done");

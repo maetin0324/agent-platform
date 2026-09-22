@@ -198,6 +198,7 @@ mod tests {
             outcome: outcome.into(),
             usage: None,
             role,
+            metrics: None,
         };
         let events: Vec<(u64, Event)> = vec![
             started("run-1", None),
@@ -520,6 +521,7 @@ mod tests {
                 outcome: "question: which version?".into(),
                 usage: None,
                 role: None,
+                metrics: None,
             },
         )];
         assert_eq!(latest_question(&events), "which version?");

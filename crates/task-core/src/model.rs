@@ -600,10 +600,36 @@ pub fn artifact_entry_description(entry: &str) -> Option<&str> {
 }
 
 /// DESIGN §5.3 の `usage`。取れない項目は省略可。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+///
+/// ADR-0061（Phase 104）: harness routing 基盤で `cache_read_tokens` / `cache_creation_tokens` /
+/// `cost_usd` を追加した（追加のみ。既存の `input_tokens` / `output_tokens` の意味は変えない）。
+/// `Eq` は落とした（`cost_usd: Option<f64>` は `Eq` を持てない）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// prompt cache の読み取りトークン（アダプタが取得できた場合のみ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// prompt cache の作成（書き込み）トークン。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
+    /// `task_core::pricing` の静的単価表から推定した USD（不明なモデル・トークン欠落は `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// ADR-0061（Phase 104）: `Event::WorkerFinished` に添える run 単位のメトリクス。
+/// harness・model・account は同じ `run_id` の `Event::WorkerStarted` に既にあるのでここには持たない
+/// （二重管理をしない）。success/failure は `WorkerFinished.outcome` の文字列を
+/// `task-api::stats::classify_outcome` が分類する既存の仕組みのままにする。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RunMetrics {
+    /// dispatch してからこの run が終わるまでの壁時計時間（ミリ秒）。
+    pub wall_ms: u64,
+    /// この run が始まった時点で、同じタスクが既に消費していた試行回数（`Task.attempts`）。
+    /// 0 なら初回の試行。
+    pub retries: u32,
 }
 
 /// run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。
@@ -798,6 +824,11 @@ pub enum Event {
         /// ADR-0014 D1: `WorkerStarted.role` と同じ（`None` はワーカー run）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         role: Option<RunRole>,
+        /// ADR-0061（Phase 104）: harness routing 基盤のメトリクス（wall time・retry 回数）。
+        /// `WorkerStarted.adapter`/`model` と同じ `run_id` で突き合わせる。導入前のイベント・
+        /// この run の起点時刻を持たない経路（無い）は `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metrics: Option<RunMetrics>,
     },
     ReviewVerdict {
         run_id: String,

@@ -14681,3 +14681,162 @@ before/after・測定値は `gui/docs/PROGRESS.md`「Phase G47」を参照。
 - `release.sh main` → exit 0、`sha12=c22d7dcfa445 schema_version=25`、`changes.json: base=9b43a211e6fd commits=3 files=7 sensitive=0`。ゲート 10 段すべて exit 0（cargo-test 125.0s、cargo-clippy 37.5s）。`verify.sh c22d7dcfa445` → exit 0、check 1〜4, 4b, 5（N-1 = 9b43a211e6fd）, 6（smoke 6.4s）すべて true、`ok=true live_ok=true`。
 - **Phase 103 の受け入れ（ssh master が昇格で切れない）**: 人が 19:15Z 頃 GUI から pegasus に接続 → master は `celeris-ssh-master-pegasus-4D76X42X.scope`（`systemctl --user list-units`、active running）に居て、`GET /clusters` pegasus `connected=true`。19:21:15Z に `promote.sh c22d7dcfa445`（live）→ 旧 unit `celeris@9b43a211e6fd` は約 10 秒で消えた。**その後も** `celeris-ssh-master-pegasus-4D76X42X.scope` は active running、`ssh -M -N pegasus`（pid 3015753）は同じ pid で生存、`GET /clusters` pegasus `connected=true`、`tunnel_login_needed=false`、昇格後の `cluster_unavailable` イベント 0 件。これまで 3 回の昇格で毎回切れていた接続が維持された。
 - 本番で新たに有効になったもの: Phase 96（cooldown の「年・か月」表示、inbox タイルの高さ、深い組織の木の字下げと省略、org-detail の skill リンクの省略記号バグ修正、ダークモードの surface を 1 段明るく）。見た目は人が実機で確認する。
+
+## Phase 104 — coding worker のハーネス routing 基盤（Phase 1: adapter層 + routing 骨格 + メトリクス記録。ADR-0061。完了日 2026-09-22）
+
+自己改善タスク（人間の依頼「coding worker のハーネスをタスク特性に応じて自動選択・routing できる機能」）
+の Phase 1。全体像・調査結果・設計判断は `docs/adr/0061-coding-harness-routing-foundation.md` を見よ。
+ここには受け入れ条件ごとの証跡だけ書く。
+
+### 条件 0（現状調査・差し替えポイントの特定）
+
+- ADR-0061 §1 に記載。要点: `trait WorkerAdapter`（`crates/task-worker/src/adapter.rs`）が唯一の
+  境界で、差し替えポイントは (1) `task-worker` に新しい `impl WorkerAdapter`、(2)
+  `crates/celeris/src/config.rs` の `[adapters.<id>]` 設定型と `Config::validate` の既知アダプタ一覧、
+  (3) `crates/celeris/src/lib.rs::build_adapters` の match の 3 か所。タスクからアダプタを選ぶ経路は
+  `Task.worker_hint.adapter: Option<String>` の 1 点だけ。OpenCode/Pi 相当は ADR-0026 の `acp` アダプタで
+  既にカバーされていることも調査で判明（新規実装は不要、`[adapters.acp] command` の差し替えだけで良い）。
+
+### 条件 1（既存 2 ハーネスに加え、共通アダプタ経由でもう 1 つ実行できる）
+
+- `crates/task-worker/src/aider.rs`（新規、`AiderAdapter`/`AiderConfig`）。`claude-code`/`codex` と同じ
+  「結果ファイル規約」で `RunOutcome` を合成する。`crates/celeris/src/config.rs`
+  （`AiderAdapterConfig`、`Config::validate` の既知アダプタ一覧に追加）と
+  `crates/celeris/src/lib.rs::build_adapters`（`AiderAdapter::ID` の分岐）で配線。設定例
+  `config/celeris.aider.example.toml`。
+- **実行したコマンド**: `cargo test -p task-worker aider::`
+- **出力の要点**: exit 0、**7 passed**（成功時の Done + トークン解析、result.json 欠落時の
+  retryable Error、question の伝播、wall-clock timeout の Error のそれぞれを確認）。
+- **実行したコマンド**: `cargo test -p celeris aider`
+- **出力の要点**: exit 0、**2 passed**（`loads_aider_example_config`、
+  `build_adapters_wires_an_aider_provider_with_merged_env_and_row_model`）。
+- **実機確認（新ハーネス）**: `aider-chat` 0.86.2 を `uv venv`（隔離環境。システム Python は無変更）に
+  導入し、ローカルの OpenAI 互換モック HTTP サーバ（Python の `http.server` 相当、`127.0.0.1:8931`。
+  外部ネットワークには出ない）に向けて `--edit-format diff --message "..."` で実行 → exit 0、
+  `artifacts/result.json` が実際に作られ、`Tokens: 123 sent, 45 received.` を stdout に確認
+  （`aider.rs::parse_aider_usage` の実装根拠）。
+- **実機確認（Rust アダプタ経由・コードに残す形）**:
+  `cargo test -p task-worker aider::tests::real_aider_binary_end_to_end -- --ignored --nocapture`
+  （`AIDER_TEST_BIN=/tmp/aider-venv/bin/aider`。テスト自身がローカルの生ソケット HTTP モックを立てる。
+  `cargo test --workspace` の既定では走らない `#[ignore]` テストとしてリポジトリに残した）
+  → **exit 0、1 passed**。実際の `aider` バイナリを `AiderAdapter::run()` 経由で起動し、
+  実プロセスの stdout から `Tokens:` 行を解析し、実バイナリが書いた `artifacts/result.json` を読んで
+  `Terminal::Done` を得ることを確認した（adapter のグルーコード全体を実バイナリで検証）。
+
+### 条件 2（タスク特性に基づく routing policy。将来メトリクスから更新できる構造）
+
+- `crates/task-core/src/routing.rs`（新規）: `RoutingSignals::from_task`（純粋関数）、
+  `trait RoutingPolicy`、`StaticRoutingPolicy`（元の依頼の分類表を固定ルール化）、
+  `MetricsAwareRoutingPolicy<F>`（成功率関数で候補列を並べ替える薄いラッパー。「将来メトリクスから
+  更新できる構造」の実演）。設計根拠は ADR-0061 D3。
+- **実行したコマンド**: `cargo test -p task-core routing::`
+- **出力の要点**: exit 0、**8 passed**（`routing::` 部分一致で無関係な既存の `model_routing::tests::` 2 件
+  も一緒に拾われる。`task_core::routing` 自体は **6 件**: 局所修正→aider、isolated issue→
+  mini-swe-agent、複雑/frontier→claude-code、それ以外→acp、`RoutingSignals::from_task` の決定的な抽出、
+  `MetricsAwareRoutingPolicy` の並べ替え）。
+- **設計上の判断（ADR-0061 D4）**: この Phase では `routing.rs` を **意図的に** ライブのタスク作成経路
+  （`task-ops::add`）へ配線していない。理由: 元の依頼が「fallback/retry policy の設計は後続 Phase の
+  範囲外」と明示しており、fallback 抜きで配線すると、対応する `[[providers]]` 行が無い環境
+  （大半の既存デプロイ）で routing が選んだタスクが永久に dispatch されない退行を production に
+  持ち込む。CLAUDE.md「今回のPhaseだけをやる」に従い、配線は Phase 2（fallback/retry policy と
+  同時設計）に残した。
+
+### 条件 3（run ごとのメトリクス記録）
+
+- `task_core::model::Usage` に `cache_read_tokens`/`cache_creation_tokens`/`cost_usd: Option<f64>` を
+  追加（既存フィールドの意味は変えない）。`task_core::pricing::estimate_cost_usd`（新規、純粋関数、
+  静的単価表の前方一致）。`claude_code.rs`/`codex.rs` の usage 解析に cache tokens の best-effort 抽出と
+  `estimate_cost_usd` 呼び出しを追加。`aider.rs` は aider 自身が報告する実測コスト（`Cost:` 行）を
+  優先し、無ければ同じ静的単価表にフォールバックする。
+- `Event::WorkerFinished` に `metrics: Option<RunMetrics>{wall_ms, retries}` を追加。
+  `task-dispatch::Dispatcher`（`RunEntry.since`/`ReviewEntry.since` から `wall_ms`、`Task.attempts` から
+  `retries`）が埋める。harness/model は既存の `Event::WorkerStarted{adapter, model}` から
+  （二重管理をしない）。success/failure は既存の `outcome` 文字列分類のまま。
+- **実行したコマンド**: `cargo test -p task-core pricing::`
+- **出力の要点**: exit 0、**5 passed**（既知モデルの 4 種トークンからの計算、バージョン付きモデル名の
+  前方一致、未知モデルは `None`、トークン皆無は既知モデルでも `None`、欠落フィールドは 0 扱い）。
+
+### 条件 4（テスト・新旧ハーネスでの動作確認）
+
+- 新ハーネス（aider）: 条件 1 の単体テスト 7 件（stub CLI）+ 実機（本物の `aider-chat` 0.86.2 バイナリ、
+  ローカルの HTTP モック LLM）。
+- 旧ハーネス（claude-code）: cache tokens/cost 付加以外は既存の解析ロジックを変えていない。単体テストの
+  回帰に加え、**この worktree の外に立てたスクラッチな celeris 環境**（本番の `~/.config/celeris` /
+  DB とは無関係。`/tmp/celeris-claude-demo/`、確認後に削除）で、実際に認証済みの `claude` CLI
+  （`~/.local/bin/claude`、`claude --version` → `2.1.280`）を使い `celerisctl worker run --adapter
+  claude-code` で coding task を 1 件、最初から最後まで実行して成功することを確認した。
+  - **実行したコマンド**（要点。db/config/task はすべてこのスクラッチディレクトリの中だけ）:
+    `cargo build -p celerisctl` →
+    `celerisctl add --db .../celeris-demo.sqlite3 --title "NOTES.mdに1行要約を追記" --objective
+    "ws1/NOTES.md の末尾に、このリポジトリが何をするものかの1行要約を追記してください。それ以外の
+    ファイルは変更しないでください。" --accept "NOTES.md に要約の1行が追記されている" --workspace ws1`
+    → `celerisctl worker run --config .../config.toml --db .../celeris-demo.sqlite3 --task <id>
+    --adapter claude-code`（`[[providers]] id = "claude-1" adapter = "claude-code"` の 1 行だけの
+    config）。
+  - **出力の要点**: `worker run` の標準出力に
+    `result: {"type":"done","summary":"Appended a one-line summary to NOTES.md describing the repo as
+    a celeris demo workspace where AI coding agents execute queued tasks and report via artifacts/. No
+    other files were modified (besides this result.json).","evidence":[{"criterion":0,"command":"tail
+    -n 1 NOTES.md","exit":0,"stdout_tail":"Summary: A celeris demo workspace where AI coding agents
+    (e.g. Claude Code) pick up queued tasks, do the work in this directory, and report
+    results/delegations via artifacts/."}],"usage":{"input_tokens":10,"output_tokens":994,
+    "cache_read_tokens":93177,"cache_creation_tokens":11971}}`。`cat workspaces/ws1/NOTES.md` で実際に
+    その 1 行が追記されていることを目視確認した。**`cache_read_tokens`/`cache_creation_tokens` が実際の
+    `claude` CLI の出力から非ゼロで取れており、条件 3 のキャッシュトークン解析コードが本物の CLI で
+    動くことも同時に確認できた**。
+  - スクラッチ環境（`/tmp/celeris-claude-demo`）は確認後に削除した。本番 `~/.config/celeris` の
+    DB・設定・実行中のタスクには一切触れていない。
+
+### 条件 5（ドキュメント更新）
+
+- `docs/adr/0061-coding-harness-routing-foundation.md`（新規）。
+- `docs/providers.md`「coding worker のハーネス routing（ADR-0061）」節を追加。
+- `config/celeris.aider.example.toml`（新規）。
+- 本節（`docs/PROGRESS.md` Phase 104）。
+
+### ゲート（ワークスペース全体）
+
+- **実行したコマンド**: `cargo test --workspace --no-fail-fast`
+- **出力の要点**: exit 0、**1863 passed / 0 failed**（+4 ignored: 既存の doctest 3 件 + 新規の
+  `aider::tests::real_aider_binary_end_to_end`）。
+- **実行したコマンド**: `cargo clippy --workspace --all-targets -- -D warnings`
+- **出力の要点**: exit 0（warning 0）。
+- **実行したコマンド**: `UPDATE_SCHEMA=1 cargo test -p task-api schema::tests::committed_schema_matches_generated && UPDATE_SCHEMA=1 cargo test -p task-core store::tests::event_row_schema_matches_committed && UPDATE_SCHEMA=1 cargo test -p task-worker protocol::tests::committed_schema_matches_generated`
+- **出力の要点**: `Usage`/`Event::WorkerFinished` にフィールドを足したことに伴うスキーマ差分
+  （`docs/api/v1/api-v1.schema.json`、`docs/api/v1/event.schema.json`、
+  `docs/protocol/worker-protocol.schema.json`）を再生成してコミット。以後 `UPDATE_SCHEMA` 無しの
+  `cargo test --workspace` は上の green な結果のとおり。
+- GUI（`gui/`）は無変更のため `pnpm` 系ゲートはこの Phase のスコープ外（`gui/CLAUDE.md` が定める
+  別 Phase 系列。`ADAPTER_OPTIONS` への `"aider"` 追加は未実施、§5「提案」参照）。
+
+### 触った副作用（見つけて直した既存コードの前提のズレ）
+
+- このタスクの直前の試行（同一 run の前回試行）が `Usage`/`Event::WorkerFinished` の型を変更した
+  まま、テストコード側の構造体リテラルを追随させておらず、`cargo build --workspace --tests` が
+  6 か所（`crates/task-dispatch/src/dispatcher.rs`）+ 4 か所（`crates/task-api/tests/*.rs`）で
+  コンパイルエラーになっていた。すべて `metrics: None,`／`cache_read_tokens: None,
+  cache_creation_tokens: None, cost_usd: None,` を補って修正した（振る舞いは変えていない、
+  型に足りなかったフィールドを埋めただけ）。
+
+### 未解決事項
+
+- routing.rs はライブ配線されていない（条件 2 の設計判断、意図的。Phase 2 で fallback/retry policy と
+  同時に配線する）。
+- `mini-swe-agent` アダプタは未実装（ADR-0061 D5「見送った候補」。次点）。
+- GUI のプロバイダ追加フォーム（`gui/app/routes/providers.tsx::ADAPTER_OPTIONS`）に `"aider"` が
+  無い。`config.toml` の直接編集では使える。
+- フルの celeris デーモンを介した新ハーネスでの実タスク実行（GUI からタスクを作り、`aider` プロバイダ
+  が実際に dispatch されて `done` になるところまで）は、この worktree の環境制約
+  （本番設定・実クレデンシャルへの書き込み権限がない）により未確認。アダプタ単体（`WorkerAdapter::run()`）
+  の実機確認（本節「条件 4」）で代替した。
+
+### 提案
+
+- P-104-1: `docs/DESIGN.md` §5.4 のアダプタ表に `aider` を追加する（DESIGN.md 直接編集は禁止のため
+  ここに提案として残す。ADR-0026 の `acp` 追加時の P-63 と同じ扱い）。
+- P-104-2: `gui/` 側の別 Phase で `ADAPTER_OPTIONS` に `"aider"` を追加する（GUI からプロバイダ登録
+  できるようにする）。
+- P-104-3: Phase 2 で、`RoutingDecision.candidates` のうち「このビルドに実装済み」かつ「このデプロイの
+  config.toml に対応する provider 行がある」の両方を満たす最初の候補だけを `WorkerHint.adapter` に
+  採用する fallback 込みの配線を `task-ops::add` に足す（ADR-0061 D4 の引き継ぎ）。
+- P-104-4: `mini-swe-agent` アダプタを次点として実装する（`aider.rs` とほぼ同じパターンで書ける見込み）。
