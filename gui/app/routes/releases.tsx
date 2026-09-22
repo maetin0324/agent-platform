@@ -28,11 +28,13 @@ import {
   promoteNeedsTypedSha,
   releaseGateBadgeLabel,
   releaseGateLabel,
+  releaseGateStepRows,
   releaseModeWord,
   releasePositionLabel,
   releaseSubtitle,
   releaseVerifyBadgeLabel,
   releaseVerifyCheckGroups,
+  releaseVerifyCheckRows,
   releaseVerifyIcon,
   releaseVerifyLabel,
   releaseVerifyTone,
@@ -236,6 +238,8 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
   const shaInputId = useId();
   const modeWord = releaseModeWord(item);
   const checkGroups = releaseVerifyCheckGroups(item);
+  const checkRows = releaseVerifyCheckRows(item);
+  const gateSteps = releaseGateStepRows(item);
 
   return (
     <Card
@@ -361,6 +365,83 @@ function ReleaseCard({ item }: { item: ReleaseItem }) {
             </li>
           ))}
         </ul>
+
+        {/* ADR-0058（Phase 94、P-G38-1）: `verify.checks[]` があれば検査ごとに 1 行。celeris が既に
+            決めた `ok`/`detail` をそのまま出すだけ（GUI 側で合否を再計算しない）。`checks` が無い
+            リリース（Phase 94 より前）は上の 2 グループのままで、この一覧は出ない（後方互換）。 */}
+        {checkRows.length > 0 && (
+          <details
+            className="rounded-lg border border-border bg-surface-2/40"
+            data-testid="release-verify-check-details"
+          >
+            <summary className="cursor-pointer list-none px-3 py-2 text-sm text-fg-muted hover:text-fg">
+              <Icon name="check" className="mr-1.5 inline size-4" />
+              検査の内訳（{checkRows.length} 件）
+            </summary>
+            <ul className="space-y-1.5 px-3 pb-3 text-sm" data-testid="release-verify-check-list">
+              {checkRows.map((row) => (
+                <li
+                  key={row.id}
+                  data-testid="release-verify-check-row"
+                  data-check-id={row.id}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1"
+                >
+                  <Mono className="text-xs text-fg-subtle">検査 {row.id}</Mono>
+                  <Badge
+                    tone={row.word === "通過" ? "success" : "danger"}
+                    data-status-badge="release-check-detail"
+                    data-testid="release-verify-check-row-word"
+                  >
+                    {row.word}
+                  </Badge>
+                  <span className="text-fg-muted">{row.name}</span>
+                  {row.elapsedS != null && row.elapsedS > 0 && (
+                    <Mono className="text-xs text-fg-subtle">{row.elapsedS.toFixed(1)}s</Mono>
+                  )}
+                  <span
+                    className="w-full break-all text-xs text-fg-subtle"
+                    data-testid="release-verify-check-row-detail"
+                  >
+                    {row.detail}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+
+        {/* ADR-0058（Phase 94、P-G38-1）: `gate.steps[]` があればゲート各段を 1 行。落ちた段
+            （`gate.failed_step` と一致）だけ danger トーンで強調する。 */}
+        {gateSteps.length > 0 && (
+          <details className="rounded-lg border border-border bg-surface-2/40" data-testid="release-gate-step-details">
+            <summary className="cursor-pointer list-none px-3 py-2 text-sm text-fg-muted hover:text-fg">
+              <Icon name="list" className="mr-1.5 inline size-4" />
+              gate の内訳（{gateSteps.length} 段）
+            </summary>
+            <ul className="space-y-1.5 px-3 pb-3 text-sm" data-testid="release-gate-step-list">
+              {gateSteps.map((step) => (
+                <li
+                  key={step.step}
+                  data-testid="release-gate-step-row"
+                  data-gate-step={step.step}
+                  className="flex flex-wrap items-center gap-x-2 gap-y-1"
+                >
+                  <Badge
+                    tone={step.failed ? "danger" : "success"}
+                    data-status-badge="release-gate-step"
+                    data-testid="release-gate-step-row-word"
+                  >
+                    {step.failed ? "失敗" : "通過"}
+                  </Badge>
+                  <span className="text-fg-muted">{step.step}</span>
+                  <Mono className="text-xs text-fg-subtle">
+                    exit {step.exit} · {step.secs.toFixed(1)}s
+                  </Mono>
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
 
         {notOnMain && (
           <Alert tone="warning" title="main に戻っていません" data-testid="release-not-on-main">

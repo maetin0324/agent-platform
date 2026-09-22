@@ -29,9 +29,11 @@ import type {
   ProjectLifecycle,
   ProjectRepo,
   ReleaseChanges,
+  ReleaseGate,
   ReleaseItem,
   ReleasePromoteAccepted,
   Releases,
+  ReleaseVerifyCheck,
   RepoChangesView,
   RepoList,
   SkillDetailView,
@@ -69,6 +71,101 @@ export const defaultHealth: Health = {
 };
 
 /**
+ * `verify.json` の `checks[]`（ADR-0058、Phase 94）。既定は検査 1〜6・4b が全部通過。
+ * `failing` に検査 id を渡すとその検査だけ `ok: false` にする（`releaseVerifyState` の `ng` の
+ * fixture 用。実際の `verify.sh` の record 呼び出しと同じ id/name の組を使う）。
+ */
+export function releaseVerifyChecks(failing: string[] = []): ReleaseVerifyCheck[] {
+  const isOk = (id: string) => !failing.includes(id);
+  return [
+    {
+      id: "1",
+      name: "start-and-migrate",
+      ok: isOk("1"),
+      detail: isOk("1")
+        ? "health 200, schema_version=11, mode=verify, release=aaaaaaaaaaaa"
+        : "no 200 from staging health within 60s",
+      elapsed_s: 0.8,
+    },
+    {
+      id: "2",
+      name: "counts-match",
+      ok: isOk("2"),
+      detail: isOk("2")
+        ? "snapshot (pre-migration, sqlite3) == staging API (post-migration): tasks, projects, milestones"
+        : "migration changed the data: tasks 41 != 40",
+      elapsed_s: 1.2,
+    },
+    {
+      id: "3",
+      name: "main-gets",
+      ok: isOk("3"),
+      detail: isOk("3")
+        ? "inbox, org/.../memory, notify, clusters, providers, config all 200 + JSON"
+        : "failing: /api/v1/clusters",
+      elapsed_s: 0.6,
+    },
+    {
+      id: "4",
+      name: "gui",
+      ok: isOk("4"),
+      detail: isOk("4") ? "healthz release=aaaaaaaaaaaa, pages 200" : "pages are 200 but /healthz reports release=dev",
+      elapsed_s: 5.1,
+    },
+    {
+      id: "4b",
+      name: "gui-e2e",
+      ok: isOk("4b"),
+      detail: isOk("4b") ? "pnpm e2e:staging ok" : "exit 1; see e2e-staging.log",
+      elapsed_s: 22.4,
+    },
+    {
+      id: "5",
+      name: "n-1-compat",
+      ok: isOk("5"),
+      detail: isOk("5")
+        ? "old celeris (aaaaaaaaaaaa) reads the migrated snapshot: schema_version=11, counts match"
+        : "old celeris (aaaaaaaaaaaa) is not compatible: schema=10(want 11)",
+      elapsed_s: 4.0,
+    },
+    {
+      id: "6",
+      name: "smoke",
+      ok: isOk("6"),
+      detail: isOk("6") ? "done in 3.2s (worker_finished r1)" : "the smoke task is running after 60.3s (want 'done')",
+      elapsed_s: isOk("6") ? 3.2 : 60.3,
+    },
+  ];
+}
+
+/**
+ * `gate.json` の `steps[]`（ADR-0058、Phase 94）。既定は `release.sh` の gate（9 段）が全部通過。
+ * `failAt` を渡すとその段で止まる（`GATE_OK` が偽になった後の段は走らないので、それ以降は含めない。
+ * `release.sh::run_step` の実際の挙動と同じ）。
+ */
+export function releaseGateSteps(failAt: string | null = null): ReleaseGate {
+  const order = [
+    { step: "cargo-workspace-clean", secs: 0.4 },
+    { step: "cargo-test", secs: 42.5 },
+    { step: "cargo-clippy", secs: 12.1 },
+    { step: "cargo-build", secs: 38.9 },
+    { step: "pnpm-install", secs: 6.2 },
+    { step: "pnpm-typecheck", secs: 9.7 },
+    { step: "pnpm-test", secs: 21.3 },
+    { step: "pnpm-build", secs: 14.6 },
+    { step: "pnpm-mobile-audit", secs: 93.3 },
+    { step: "pnpm-e2e-mock", secs: 18.0 },
+  ];
+  const steps: ReleaseGate["steps"] = [];
+  for (const { step, secs } of order) {
+    const failed = step === failAt;
+    steps.push({ step, exit: failed ? 1 : 0, secs });
+    if (failed) break;
+  }
+  return { ok: failAt == null, failed_step: failAt, steps };
+}
+
+/**
  * `GET /releases` の 1 件（ADR-0040 D6、docs/celeris-api-v1.md §3.66）。検証済み・ライブ引き継ぎ可・
  * current ではない（＝昇格できる）状態が既定。テストは `releaseItem({...})` で上書きする。
  */
@@ -79,7 +176,8 @@ export function releaseItem(overrides: Partial<ReleaseItem> = {}): ReleaseItem {
     built_at: "2026-09-19T00:00:00Z",
     schema_version: 11,
     gate_ok: true,
-    verify: { ok: true, live_ok: true, at: "2026-09-19T01:00:00Z" },
+    gate: releaseGateSteps(),
+    verify: { ok: true, live_ok: true, at: "2026-09-19T01:00:00Z", checks: releaseVerifyChecks() },
     promoted_at: null,
     on_main: true,
     changes: null,
@@ -137,15 +235,23 @@ export const defaultReleases: Releases = {
     // Phase 86（ADR-0055 ラウンド 11）: mobile-audit / e2e:mock がスマホの新しい状態
     // （mode バッジ "stop-start"、検証チェックの一覧の「失敗」）も描画するように、`ok_stop_start` と
     // `ng` の 2 状態を fixture に足す（既存の 2 件は `unverified`/`ok_live` のまま）。
+    // Phase 94（ADR-0058）: `cccccccccccc` は**あえて** `checks`/`gate` を持たない Phase 94 より前の
+    // リリースの形のまま残す（`releaseVerifyCheckGroups`/`releaseGateLabel` の後方互換フォールバック
+    // を mobile-audit/e2e:mock でも描画させる）。
     releaseItem({
       sha12: "cccccccccccc",
       built_at: "2026-09-18T00:00:00Z",
+      gate: undefined,
       verify: { ok: true, live_ok: false, at: "2026-09-18T01:00:00Z" },
     }),
+    // `dddddddddddd` は検査の内訳・gate の内訳の**失敗**表示を監査対象にする（検査 6 が失敗、
+    // gate は cargo-test で止まる）。
     releaseItem({
       sha12: "dddddddddddd",
       built_at: "2026-09-17T00:00:00Z",
-      verify: { ok: false, live_ok: false, at: "2026-09-17T01:00:00Z" },
+      gate_ok: false,
+      gate: releaseGateSteps("cargo-test"),
+      verify: { ok: false, live_ok: false, at: "2026-09-17T01:00:00Z", checks: releaseVerifyChecks(["6"]) },
     }),
   ],
 };

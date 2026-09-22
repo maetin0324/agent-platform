@@ -4049,6 +4049,11 @@ export interface ReleaseItem {
    */
   changes?: ReleaseChanges | null;
   /**
+   * ADR-0058: `gate.json` の内訳（`ok`/`failed_step`/`steps[]`）。`gate.json` が読めない・壊れて
+   * いるときは `null`（そのときも `gate_ok` は `false` のまま出る。既存の挙動を変えない）。
+   */
+  gate?: ReleaseGate | null;
+  /**
    * `gate.json` の `ok`（`release.sh` の gate が全段 exit 0 だったか）。読めなければ `false`。
    */
   gate_ok: boolean;
@@ -4141,6 +4146,33 @@ export interface ReleaseCommit {
   subject: string;
 }
 /**
+ * `gate.json` の内訳（ADR-0058）。`release.sh` の `write_gate_json` がそのまま書いたもの。
+ */
+export interface ReleaseGate {
+  /**
+   * 最初に非 0 で終わった段の名前。全段成功なら `null`。
+   */
+  failed_step?: string | null;
+  /**
+   * gate の全段が exit 0 だったか（`ReleaseItem.gate_ok` と同じ値）。
+   */
+  ok: boolean;
+  /**
+   * `gate.json` の `steps[]`。`run_step` が呼ばれた順（`GATE_OK` が偽になった後の段は
+   * 走らないので、`failed_step` 以降は含まれない）。
+   */
+  steps?: ReleaseGateStep[];
+}
+/**
+ * `gate.json` の `steps[]` の 1 件。ログのファイル名（`log`）は本番ホストのローカルパスで
+ * GUI から読めないため運ばない（ADR-0058 D2）。
+ */
+export interface ReleaseGateStep {
+  exit: number;
+  secs: number;
+  step: string;
+}
+/**
  * `<release>/promote_failed.json` の中身（`promote.sh` が非 0 で終わったときだけ書く）。
  */
 export interface ReleasePromoteFailure {
@@ -4162,12 +4194,37 @@ export interface ReleaseVerify {
    */
   at?: string | null;
   /**
+   * ADR-0058: `verify.json` の `checks[]` をそのまま運んだもの（検査ごとの合否・詳細）。
+   * `verify.json` にこのキーが無い（この Phase 以前に作られたリリース）ときは空配列。
+   */
+  checks?: ReleaseVerifyCheck[];
+  /**
    * N-1 互換（旧バイナリが新スキーマを読める）。偽なら昇格は停止 → 起動になる。
    */
   live_ok: boolean;
   /**
-   * 検査 1〜4 が全部真。`promote.sh` はこれが真でなければ拒否する。
+   * 検査 1〜4・4b・6 が全部真。`promote.sh` はこれが真でなければ拒否する
+   * （ADR-0041 追記「検査 4b」）。
    */
+  ok: boolean;
+}
+/**
+ * `verify.json` の `checks[]` の 1 件（ADR-0058）。`scripts/selfdeploy/verify.sh` の
+ * `record <id> <name> <ok> <detail> [task_id] [elapsed_s]` がそのまま書いたもの。
+ * `task_id`（検査 6 の煙試験タスク id）は運ばない — GUI に使い道が無い（ADR-0058 D1）。
+ */
+export interface ReleaseVerifyCheck {
+  detail: string;
+  /**
+   * 検査 6（煙試験）だけが埋める。他の検査は `0.0` のまま record されるので、値としては
+   * 常に `Some`（`verify.json` が `elapsed_s` を省略しない）。
+   */
+  elapsed_s?: number | null;
+  /**
+   * `"1"`〜`"6"`、`"4b"`。文字列（数値専用にできない。ADR-0041 追記）。
+   */
+  id: string;
+  name: string;
   ok: boolean;
 }
 /**

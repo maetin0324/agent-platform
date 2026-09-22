@@ -126,6 +126,61 @@ export function releaseVerifyCheckGroups(item: Pick<ReleaseItem, "verify">): Rel
   ];
 }
 
+/**
+ * 検査ごとの個別の内訳（ADR-0058、Phase 94。P-G38-1）。
+ *
+ * `GET /releases` の `ReleaseVerify.checks[]` が celeris 側で足された（`verify.json` の `checks[]` を
+ * そのまま運ぶ）ので、`releaseVerifyCheckGroups`（上、2 グループの集計）に加えてこちらを出せる。
+ * **celeris が書いた `ok`/`detail` をそのまま表示するだけ**（GUI 側で合否を再計算しない）。
+ * `checks` が無い（Phase 94 より前に作られたリリース）ときは空配列 — 呼び出し側はその場合
+ * 何も描画しない（`releaseVerifyCheckGroups` の 2 行だけになる。後方互換）。
+ */
+export interface ReleaseVerifyCheckRow {
+  id: string;
+  name: string;
+  word: ReleaseCheckWord;
+  detail: string;
+  elapsedS: number | null;
+}
+
+export function releaseVerifyCheckRows(item: Pick<ReleaseItem, "verify">): ReleaseVerifyCheckRow[] {
+  const checks = item.verify?.checks ?? [];
+  return checks.map((c) => ({
+    id: c.id,
+    name: c.name,
+    word: c.ok ? "通過" : "失敗",
+    detail: c.detail,
+    elapsedS: c.elapsed_s ?? null,
+  }));
+}
+
+/**
+ * ゲート（`release.sh` の各段）の個別の内訳（ADR-0058、Phase 94。P-G38-1）。
+ *
+ * `GET /releases` の `ReleaseItem.gate.steps[]` をそのまま行にする。`failed` は
+ * `gate.failed_step` と `step` が一致する行だけ真にする（celeris が既に決めた「どの段で
+ * 落ちたか」をそのまま反映するだけで、`exit` から再計算しない）。`gate` が無い（`gate.json` が
+ * 読めない、または Phase 94 より前）ときは空配列。
+ */
+export interface ReleaseGateStepRow {
+  step: string;
+  exit: number;
+  secs: number;
+  failed: boolean;
+}
+
+export function releaseGateStepRows(item: Pick<ReleaseItem, "gate">): ReleaseGateStepRow[] {
+  const gate = item.gate;
+  const steps = gate?.steps ?? [];
+  const failedStep = gate?.failed_step ?? null;
+  return steps.map((s) => ({
+    step: s.step,
+    exit: s.exit,
+    secs: s.secs,
+    failed: failedStep != null && failedStep === s.step,
+  }));
+}
+
 /** gate（`release.sh` の 7 段）の一言。 */
 export function releaseGateLabel(item: Pick<ReleaseItem, "gate_ok">): string {
   return item.gate_ok ? "gate ✓" : "gate ✗";

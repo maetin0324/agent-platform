@@ -997,6 +997,10 @@ pub struct ReleaseItem {
     pub schema_version: Option<u32>,
     /// `gate.json` の `ok`（`release.sh` の gate が全段 exit 0 だったか）。読めなければ `false`。
     pub gate_ok: bool,
+    /// ADR-0058: `gate.json` の内訳（`ok`/`failed_step`/`steps[]`）。`gate.json` が読めない・壊れて
+    /// いるときは `null`（そのときも `gate_ok` は `false` のまま出る。既存の挙動を変えない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<ReleaseGate>,
     /// `verify.json`。無ければ `null`（＝未検証。昇格できない）。
     pub verify: Option<ReleaseVerify>,
     /// ADR-0041 D3: `promoted.json` の `promoted_at`（`promote.sh` が昇格に成功したときだけ書く）。
@@ -1038,12 +1042,55 @@ pub struct ReleasePromoteFailure {
 /// `verify.json` の要約（ADR-0040 D3）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ReleaseVerify {
-    /// 検査 1〜4 が全部真。`promote.sh` はこれが真でなければ拒否する。
+    /// 検査 1〜4・4b・6 が全部真。`promote.sh` はこれが真でなければ拒否する
+    /// （ADR-0041 追記「検査 4b」）。
     pub ok: bool,
     /// N-1 互換（旧バイナリが新スキーマを読める）。偽なら昇格は停止 → 起動になる。
     pub live_ok: bool,
     /// RFC 3339。
     pub at: Option<String>,
+    /// ADR-0058: `verify.json` の `checks[]` をそのまま運んだもの（検査ごとの合否・詳細）。
+    /// `verify.json` にこのキーが無い（この Phase 以前に作られたリリース）ときは空配列。
+    #[serde(default)]
+    pub checks: Vec<ReleaseVerifyCheck>,
+}
+
+/// `verify.json` の `checks[]` の 1 件（ADR-0058）。`scripts/selfdeploy/verify.sh` の
+/// `record <id> <name> <ok> <detail> [task_id] [elapsed_s]` がそのまま書いたもの。
+/// `task_id`（検査 6 の煙試験タスク id）は運ばない — GUI に使い道が無い（ADR-0058 D1）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseVerifyCheck {
+    /// `"1"`〜`"6"`、`"4b"`。文字列（数値専用にできない。ADR-0041 追記）。
+    pub id: String,
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+    /// 検査 6（煙試験）だけが埋める。他の検査は `0.0` のまま record されるので、値としては
+    /// 常に `Some`（`verify.json` が `elapsed_s` を省略しない）。
+    #[serde(default)]
+    pub elapsed_s: Option<f64>,
+}
+
+/// `gate.json` の内訳（ADR-0058）。`release.sh` の `write_gate_json` がそのまま書いたもの。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseGate {
+    /// gate の全段が exit 0 だったか（`ReleaseItem.gate_ok` と同じ値）。
+    pub ok: bool,
+    /// 最初に非 0 で終わった段の名前。全段成功なら `null`。
+    pub failed_step: Option<String>,
+    /// `gate.json` の `steps[]`。`run_step` が呼ばれた順（`GATE_OK` が偽になった後の段は
+    /// 走らないので、`failed_step` 以降は含まれない）。
+    #[serde(default)]
+    pub steps: Vec<ReleaseGateStep>,
+}
+
+/// `gate.json` の `steps[]` の 1 件。ログのファイル名（`log`）は本番ホストのローカルパスで
+/// GUI から読めないため運ばない（ADR-0058 D2）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ReleaseGateStep {
+    pub step: String,
+    pub exit: i32,
+    pub secs: f64,
 }
 
 /// `changes.json` の要約（ADR-0041 D4）。`release.sh` が**ビルド時の `current`**（`base`）から
