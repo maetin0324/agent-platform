@@ -14861,3 +14861,10 @@ untracked ファイルとして毎回の worktree に残っていたこと。前
 - **実行したコマンド**: `cargo clippy --workspace -- -D warnings` → exit 0、warning 0。
 - **コミット**: `.gitignore` の 1 行修正のみを別コミットとして追加（`git commit -m "phase 104:
   delivery-repair — .celeris/ を .gitignore に追加（未コミット扱いの誤検出を修正）"`）。
+
+### 2026-09-22 21:55 UTC: GUI からの昇格（4fff25348ed6、Phase 104 = celeris の自己改善）が途中で止まった件と復旧
+
+- 経過: 人が GUI の「昇格」で 4fff25348ed6（ADR-0061、coding worker のハーネス routing 基盤）を昇格。`promote.sh` は 21:55:43Z に `systemctl --user start celeris@4fff25348ed6` まで進み、新デーモンが active になった直後の 21:55:44Z に旧 `celeris@c22d7dcfa445` が「active -> draining」→ 在庫 run 無しで即「drained; exiting 0」。systemd が旧 unit の cgroup を回収し、`setsid` で切り離しただけで**同じ cgroup に残っていた `promote.sh` も殺された**（`promote.log` は `systemctl --user start` の行で途切れ、`promote.lock` の pid は死亡）。結果: 新デーモンは active、`current` は旧、GUI は旧、`promoted.json` 無し。`GET /releases` は `running=4fff… / current=c22d7…` のまま約 1.5 時間。
+- 復旧（23:28Z）: 親が `promote.sh 4fff25348ed6` を素のコマンドで再実行 → `promote.sh` の再開ロジック「celeris already took over; resuming the incomplete GUI/link handoff」が働き、GUI 切替 3 秒、`current -> releases/4fff25348ed6`、`promoted.json` 作成。`GET /health` release=4fff25348ed6 role=active schema_version=25。pegasus の ssh master（`celeris-ssh-master-pegasus-4D76X42X.scope`）はこの昇格でも生存（Phase 103 の効果、2 回目の確認）。
+- main: 自己改善 run は local main に 2 コミット（`ac974ed` phase 104、`4fff253` delivery-repair）を積んでいたが origin へは push されていなかった。本番が既に走っているので親が `git push origin main`（fast-forward、3ed0acc → 4fff253）。
+- 根本原因は Phase 103（ADR-0060）の ssh master と同じ（`setsid` は cgroup を抜けない）。Phase 105（`start_promote` を `systemd-run --user --scope` で起こす、`GET /releases` に途中停止の可視化）を Sonnet で起動済み。
