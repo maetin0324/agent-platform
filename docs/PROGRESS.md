@@ -13592,3 +13592,14 @@ celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。mobile-
   何も起きていません」の 1 枚にまとめる設計変更が要り、今回のスコープでは見送った。提案 P-G46 参照）。
 - 本番 = Phase 65〜93。実装中: Phase 95（このワークトリー。GUI のみ。Phase 94〈releases.tsx 等〉とは
   別ワークトリーで並行）。
+
+### Phase 95 の本番反映（2026-09-22、ライブ切替）
+
+- merge: `worktree-agent-aa784a9089e210f52` → main `b8f6000`（`docs/PROGRESS.md` と `gui/docs/PROGRESS.md` の append 衝突を両方残して解決。Phase 94 と並行だったため 2 ファイル）。GUI ゲート（main 上）: `pnpm gen:types` 差分ゼロ、`pnpm typecheck` exit 0、`pnpm lint` exit 0、`pnpm test` 68 files / 1036 passed。push 済み。
+- `scripts/selfdeploy/release.sh main` → exit 0、`sha12=b8f600099790 schema_version=24`、`changes.json: base=486920518d94 commits=3 files=17 sensitive=0`。ゲート 10 段すべて exit 0（cargo-test 126.7s、cargo-clippy 26.0s、pnpm-mobile-audit 92.5s、pnpm-e2e-mock 9.4s）。
+- `verify.sh b8f600099790` → exit 0、check 1〜4, 4b, 5（N-1 = 486920518d94）, 6（smoke done in 6.46s）すべて true、`ok=true live_ok=true`。
+- `promote.sh b8f600099790` → mode=live、DB バックアップ 14M、新 celeris が 2 秒で active（5/5）、GUI 切替 1 秒、`current -> releases/b8f600099790`。
+- 直後の確認: `GET /health` release=b8f600099790 role=active schema_version=24、GUI `/healthz` release=b8f600099790。
+- 本番で新たに有効になったもの: スクリーンショット総点検の修正 9 件（`PageToc` 目次、`/board` 絞り込みの折りたたみ、タスク概要の `compact` 空状態、「左の」文言除去、`WorkTree` 高さ 3 段階、タブ右端フェード、ワークスペースパスの省略、`text-pretty`、skills の `LocalTime`）。`pnpm screenshots:mobile` が追加された（52 枚、約 47 秒）。実機の見た目は人が確認する（ADR-0009 P-34）。
+- 運用メモ: Phase 95 のエージェントは点検を fork に分担したところ fork 側が実装・コミットまで進めた。成果はエージェント本体がゲートを再実行して検証済みだが、以後の指示書では fork を「読むだけ・報告だけ」に限定する文を入れた（Phase 96 から）。
+- 次: Phase 96（G46 の残り所見、GUI）と Phase 97（P-94-1 と P-G46-5、Rust）を Sonnet で並行起動済み。
