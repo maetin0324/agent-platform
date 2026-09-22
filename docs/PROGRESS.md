@@ -14232,3 +14232,10 @@ CoS へ「pegasus で pegasusinfo を実行して」と頼んだところ、CoS 
 ### 提案
 
 - なし（今回の指示の範囲で閉じた）。
+
+### ADR-0059 の実機確認（2026-09-22、pegasus 上でコマンド実行だけのタスクが完走）
+
+- 人が GUI から pegasus に再接続（TOTP）→ 13:32:31Z に待機中のタスク 01M34MB6XEB3F68568A7A1FS9S（cluster-hpc、`workspace = {remote, pegasus, path:"", mode:"shared"}`）が dispatch。写し（`workspace_root/<task>`）は `.celeris/remote-exec`・`artifacts/`・`inputs/`・`runs/` だけで、git worktree は切っていない（`.taskd/` 無し）。
+- worker run 01M34N2TW62SB725JYS9N6M9Y0（claude-code、sonnet、5 分 18 秒）: `.celeris/remote-exec "bash -lc 'pegasusinfo; …'"` と `rbudgetcheck` を実行。実体は `ssh pegasus` 経由で pegasus03 上の実行（reviewer がヘルパの中身と stdout.jsonl の生出力で検証）。両コマンド exit 0、`pegasusinfo` のキュー表と `rbudgetcheck` の GROUP/REMAIN/ESTIMATE/INITIAL 表（NBB 2319.91 / 1664.00 / 13200.00）を summary に全文で載せた。
+- reviewer run 01M34NCHT25WDDT7FC833HSFXH: 受け入れ条件 4 件すべて pass（review_pass、13:39:37Z）→ task done。`reports` に cluster-hpc の `result` 報告 1 件（headline は summary の 1 行目）。それ以前の 3 件は CoS の `bad_news`「pegasus に接続できない」（接続待ちの間、5 分おき）。
+- これで人の依頼「pegasus のログインノードで pegasusinfo, rbudgetcheck を実行して結果を教えて」は、CoS → cluster-hpc → pegasus 実行 → reviewer → 報告、の経路で完結した。前提となった修正: Phase 98（CoS が断らず流す）、Phase 99（`mode: shared`・`~` 展開・work_dir・`.celeris/`）。
