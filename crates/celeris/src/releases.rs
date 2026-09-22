@@ -343,9 +343,13 @@ fn read_verify_checks(verify: &serde_json::Value) -> Vec<ReleaseVerifyCheck> {
 fn read_gate(gate: &Option<serde_json::Value>) -> Option<ReleaseGate> {
     let gate = gate.as_ref()?;
     let ok = gate.get("ok")?.as_bool()?;
+    // P-94-1: `release.sh` はゲート成功時に `failed_step: ""` を書く。トリムして空なら `None`
+    // に正規化する（キー欠落も同じく `None`）。
     let failed_step = gate
         .get("failed_step")
         .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
         .map(str::to_string);
     let steps = gate
         .get("steps")
@@ -1242,6 +1246,77 @@ mod tests {
         assert!(!broken.gate_ok, "壊れた gate.json は gate_ok=false のまま");
         assert!(broken.gate.is_none(), "壊れた gate.json は gate も None");
         assert!(broken.verify.is_none(), "verify.json が無ければ verify は None");
+    }
+
+    /// P-94-1: `release.sh` はゲート成功時に `gate.json` に `failed_step: ""` を書く
+    /// （本番で確認済み）。空文字（トリム後に空でも）は `None` に正規化する。失敗時の非空文字列は
+    /// そのまま運び、キー自体が無いときも（既存の後方互換どおり）`None` になる。
+    #[test]
+    fn gate_failed_step_empty_string_is_normalized_to_none() {
+        let (_dir, root) = env();
+        // 成功時: `failed_step: ""`。
+        release(
+            &root,
+            "aaaaaaaaaaaa",
+            Some(r#"{"built_at":"2026-09-22T00:00:00Z"}"#),
+            Some(r#"{"ok":true,"failed_step":"","steps":[]}"#),
+            None,
+        );
+        // 空白のみ（トリム後に空）。
+        release(
+            &root,
+            "bbbbbbbbbbbb",
+            Some(r#"{"built_at":"2026-09-22T00:00:01Z"}"#),
+            Some(r#"{"ok":true,"failed_step":"   ","steps":[]}"#),
+            None,
+        );
+        // 失敗時: 非空文字列はそのまま `Some`。
+        release(
+            &root,
+            "cccccccccccc",
+            Some(r#"{"built_at":"2026-09-22T00:00:02Z"}"#),
+            Some(r#"{"ok":false,"failed_step":"cargo-test","steps":[]}"#),
+            None,
+        );
+        // キー自体が無い（従来どおり `None`）。
+        release(
+            &root,
+            "dddddddddddd",
+            Some(r#"{"built_at":"2026-09-22T00:00:03Z"}"#),
+            Some(r#"{"ok":true,"steps":[]}"#),
+            None,
+        );
+
+        let scanned = scan(&root, None);
+        let gate_of = |sha: &str| {
+            scanned
+                .items
+                .iter()
+                .find(|i| i.sha12 == sha)
+                .and_then(|i| i.gate.clone())
+                .expect("gate")
+        };
+
+        assert_eq!(
+            gate_of("aaaaaaaaaaaa").failed_step,
+            None,
+            "空文字は None に正規化される"
+        );
+        assert_eq!(
+            gate_of("bbbbbbbbbbbb").failed_step,
+            None,
+            "空白のみもトリム後に空なので None"
+        );
+        assert_eq!(
+            gate_of("cccccccccccc").failed_step,
+            Some("cargo-test".to_string()),
+            "非空文字列はそのまま運ぶ"
+        );
+        assert_eq!(
+            gate_of("dddddddddddd").failed_step,
+            None,
+            "キー欠落は従来どおり None"
+        );
     }
 
     /// ADR-0041 D3: `on_main` は `git merge-base --is-ancestor <sha> main`。
