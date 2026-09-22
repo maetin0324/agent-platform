@@ -13107,3 +13107,11 @@ Phase のスコープ外（実行していない。Phase 80/82/83/84/86/87 と�
   （このサンドボックスには本物の celeris が無いため）。
 - Phase 87 の未解決事項のうち P-G39-2（`cssPathRef` 等の単体テスト化の是非）は変化なし。
 - 本番 = Phase 65〜87。実装中: Phase 88（このワークトリー。GUI のみ）。
+
+### Phase 88 の本番反映（2026-09-22 00:1x UTC。`4c7b5d724aca`、ライブ切替）
+
+- main `4c7b5d7` = Phase 88（`focus-order` フレークの根本原因 = perf 計測の CPU ×4 スロットリングがフォーカス走査中も効いていた → 計測後に解除、
+  `waitForPageIdle`、連番による要素同一性、失敗時の経路記録。`/inbox` の残りの題材（draft-group / attention-item / approval-parent-title /
+  question-approval-link）を fixture で描画して違反を修正。`--routes` / `--repeat`）。GUI ゲート: typecheck / lint exit 0、`pnpm test` 1004 passed、
+  `pnpm mobile-audit` 違反 0（merge 後 1 回で 0。エージェント側では通算 8 回連続 0）、`pnpm e2e:mock` ok。
+  `release.sh` → `4c7b5d724aca`（schema 24）。`verify.sh` `ok=true live_ok=true` → `promote.sh` mode=live。本番 = Phase 65〜88。
