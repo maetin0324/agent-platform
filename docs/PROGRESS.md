@@ -13712,3 +13712,13 @@ GUI 側の仮説（「frontmatter の `tags` と LangMem/整理 run の付与タ
 ### 提案
 
 - なし（今回の 2 件は既存の指示の範囲で閉じた）。
+
+### Phase 97 の本番反映（2026-09-22、ライブ切替。97b を含む）
+
+- merge: `worktree-agent-aa7ab2e70749197e4` → main `770c4f5`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1792 / failed 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0。push 済み。
+- 1 回目の `release.sh main`（770c4f556d38）は cargo-test で失敗（exit 101、118.6s）: `task-worker::probe::tests::a_refused_connection_is_unreachable` が「応答を読めない: Connection reset by peer」で落ちた。手放した直後の一時ポートを別プロセス（並走テストや GUI の偽 celeris）が取ると、拒否ではなく接続後 reset になる競合。Phase 97 の変更とは無関係。
+- Phase 97b（`e0806ca`）: このテストの assert を「接続できない」または「応答を読めない」のどちらでも到達不可として受け入れる形にした（`cargo test -p task-worker --lib probe::` 9 passed、clippy exit 0）。push 済み。
+- 2 回目の `release.sh main` → exit 0、`sha12=e0806ca2ff3f schema_version=24`、`changes.json: base=b8f600099790 commits=4 files=5 sensitive=1`（sensitive は `crates/celeris/src/releases.rs`。差分は `failed_step` の trim/filter 2 行とテスト 1 件のみと確認）。ゲート 10 段すべて exit 0（cargo-test 124.7s、cargo-clippy 57.6s、pnpm-mobile-audit 89.7s、pnpm-e2e-mock 9.3s）。
+- `verify.sh e0806ca2ff3f` → exit 0、check 1〜4, 4b, 5（N-1 = b8f600099790）, 6（smoke done in 5.07s）すべて true、`ok=true live_ok=true`。
+- `promote.sh e0806ca2ff3f` → mode=live、DB バックアップ 14M、新 celeris が 2 秒で active（5/5）、GUI 切替 1 秒、`current -> releases/e0806ca2ff3f`。
+- 実機確認（P-94-1 の受け入れ）: `GET /health` release=e0806ca2ff3f role=active schema_version=24。`GET /releases` の現行と直前の 2 件で `gate.failed_step` が `null`（Phase 94 時点は `""`）、`verify.checks` 7 件のまま。知識 inbox のタグ重複除去（P-G46-5）は保存時の処理なので、次に整理 run が候補を書いたときに効く。
