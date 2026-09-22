@@ -13537,3 +13537,58 @@ GUI の実装詳細は gui 側に書く）。
 - 実機確認（ADR-0058 の受け入れ）: `GET /health` release=486920518d94 role=active schema_version=24。`GET /releases`（本番、items 4 件）で現行を含む 3 リリースに `verify.checks` 7 件（id 1,2,3,4,4b,5,6 すべて ok=true）と `gate.steps` 10 段（ok=true）が載ることを確認。
 - 気づき（軽微）: ゲート成功時の `gate.failed_step` は `null` ではなく空文字 `""` で返る（`gate.json` が `failed_step: ""` を書くため）。GUI の `releaseGateStepRows` は step 名との一致で失敗段を決めるので表示に影響はないが、型が `Option<String>` である以上 celeris 側で空文字を `None` に正規化するのが自然。次の Rust ラウンドで直す（提案 P-94-1）。
 - 本番 `/releases` 画面の見た目（検査内訳・gate 内訳の `<details>`）はスマホ実機で人が確認する（ADR-0009 P-34）。
+## Phase 95 — スマホ画面のスクリーンショット総点検と磨き込み（ADR-0055 ラウンド 19。2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。mobile-audit が機械的な違反（タップ領域・
+コントラスト・a11y・固定要素の重なり等）を 0 に保っている状態で、次の段階として「人が見て分かる粗さ」を
+洗い出し、優先度の高いものから直した。詳細・所見一覧・証跡は `gui/docs/PROGRESS.md`「Phase G46」を参照
+（GUI の実装詳細は gui 側に書く、このリポジトリの慣例どおり）。
+
+要点:
+
+1. **`gui/scripts/mobile-screenshots.mjs`（新規）**: 偽の celeris と `MOBILE_DEVICE`（Nothing Phone 2a
+   相当、393×851）を使い、26 route × light/dark = 52 枚のフルページ screenshot を
+   `gui/test/mobile-screenshots/` に撮る。`pnpm screenshots:mobile` として `package.json` に追加。
+   ディレクトリは `.gitignore` に追加済み（画像はコミットしない）。
+2. **52 枚を目視点検**して所見を出した（高 5・中 4・低 6、詳細は gui 側 Phase G46）。
+3. **直した内容（高すべて・中は上位を優先）**:
+   - 案件詳細（`/projects/:id`）・アカウント（`/accounts`）に `/help` と同じ「目次から飛ぶ」パターン
+     （`PageToc`、共通部品として新設）を追加。どちらも性質の違う節が縦に並ぶ長い 1 ページ（前者は
+     約 6.6 画面分、後者は約 4 画面分）で、目次が無かった。
+   - ボード（`/board`）の絞り込みフォームを `<details>` で折りたたみ、条件が 1 つも選ばれていないときは
+     既定で閉じるようにした（開いたままだと本題〈状態ピル・タスク一覧〉が画面外に押し出されていた）。
+   - タスク詳細の「概要」タブで、まだ何も起きていないタスクだと 6 つの大きな空状態カード（受け入れ
+     条件と判定・run 一覧・委譲・prior_review・answers・操作）が連続してページの大半が空白になっていた
+     ものを、`EmptyState` に `compact` を追加して縮小した。
+   - 組織（`/org`）・知識（`/knowledge`・`/knowledge/skills`）・案件の文書（`/projects/:id/docs`）の
+     空状態の文言が「左の◯◯を選んでください」だったのを「◯◯を選んでください」に直した（スマホでは
+     一覧は上、詳細は下に積むので「左の」という位置の説明がそもそも成立していなかった）。
+   - 仕事の木（`WorkTree`、`/projects/:id` の下部）の高さがノード数に関わらず固定 28rem だったのを、
+     ノード数に応じて 3 段階に変えた（ノードが少ない案件で無駄な空白キャンバスができていた）。
+   - タスク詳細のタブ行（5 タブが横スクロール、Phase 71 から）の右端に、まだ隠れているタブがあることを
+     示す `pointer-events-none` のフェードを追加した（構造・スクロール自体は変えていない）。
+   - `task-files` のワークスペース絶対パス表示を、末尾省略＋`title`（全文）に変えた（長いパスが
+     `break-all` で読みにくく複数行に折り返していた）。
+4. **直さなかった中・低は提案として残した**（`gui/docs/PROGRESS.md` Phase G46 の P-G46-n）。特に
+   `clusters`/`accounts` の cooldown 表示（fixture が常に未来の固定日時を使うため「1196日20時間」の
+   ように非現実的に大きい日数になる）は、`formatDuration`（経過時間・resets_at 等、他の多くの画面が
+   共有する純関数）への変更が要り、影響範囲の見極めが必要と判断して今回は見送った。
+5. **ゲート**: `pnpm install --frozen-lockfile`（exit 0）/ `pnpm lint`（exit 0、254 files）/
+   `pnpm typecheck`（exit 0）/ `pnpm test`（exit 0、**1030 passed**、Phase 93 と同数。DOM を描画する
+   unit テストが無い慣例〈G10-U1〉のため、見た目の変更に対応する新規テストは追加していない）/
+   `pnpm build`（exit 0、既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件のみ）/ `pnpm gen:types &&
+   git diff --exit-code app/celeris/types.ts`（差分ゼロ）/ `pnpm mobile-audit` ×2（**exit 0、
+   `{"ok":true,"total":0}`、`routes=26 schemes=2 violations=0`、実測 **92.98 秒 / 89.90 秒**）/
+   `pnpm e2e:mock`（**`{"ok":true,"mode":"mock","failures":[]}`**）/ `pnpm screenshots:mobile`（
+   **exit 0、`{"ok":true,"routes":26,"schemes":2,"saved":52}`、実測 47.23 秒**）すべて exit 0。
+   `crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings`
+   はこのフェーズのスコープ外（実行していない。Phase 80 以降と同じ扱い）。
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。ヘッドレス Chromium でのスクリーンショットと監査に留まる。
+- clusters/accounts の cooldown 表示（上記 4.）は提案 P-G46 として残した。
+- タスク詳細「概要」タブの空状態は縮小したが、6 枚並ぶこと自体は変えていない（より踏み込むなら「まだ
+  何も起きていません」の 1 枚にまとめる設計変更が要り、今回のスコープでは見送った。提案 P-G46 参照）。
+- 本番 = Phase 65〜93。実装中: Phase 95（このワークトリー。GUI のみ。Phase 94〈releases.tsx 等〉とは
+  別ワークトリーで並行）。

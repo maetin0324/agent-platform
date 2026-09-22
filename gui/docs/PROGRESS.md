@@ -6779,6 +6779,135 @@ celeris 側が P-G38-1（Phase G38 の提案。`ReleaseVerify` は `ok`/`live_ok
   `failed_step` と一致する段だけ `failed: true`、全段通過なら全部 `failed: false`）を追加。
 
 ### ゲート（証拠コマンドと出力の要点）
+## Phase G46 — スマホ画面のスクリーンショット総点検と磨き込み（ADR-0055 ラウンド 19、celeris Phase 95。2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。mobile-audit（機械検査）は 26 route ×
+light/dark で違反 0 を維持したまま Phase G42〜G44 まで来た。ここからは機械では判定できない「人が見て
+分かる粗さ」を、実際に `MOBILE_DEVICE`（Nothing Phone 2a 相当、393×851、`deviceScaleFactor 2.75`）で
+撮ったスクリーンショットを目で見て洗い出す番（G-Phase 番号は G45〈Phase 94 が並行して使用中〉を飛ばし
+G46 とした）。
+
+### 1. `gui/scripts/mobile-screenshots.mjs`（新規、受け入れ条件 1）
+
+`gui/scripts/mobile-audit.mjs`・`gui/scripts/lib/celeris-fixture.mjs` と同じ起動の流儀（偽の celeris、
+`MOBILE_DEVICE`、`pnpm build` 省略の `MOBILE_SCREENSHOTS_SKIP_BUILD=1`）を再利用し、26 route × light/dark
+= 52 枚のフルページ screenshot を `gui/test/mobile-screenshots/<route>-<scheme>.png` に保存するだけの
+スクリプト（違反判定はしない。exit code は撮影自体が成功したかどうかのみ）。`package.json` に
+`screenshots:mobile` として追加した。`gui/.gitignore` に `test/mobile-screenshots/` を追加済み（画像は
+コミットしない）。実測 **47.23 秒**（60 秒以内）。
+
+### 2. 所見一覧（受け入れ条件 2）
+
+52 枚（26 route × light/dark。dark はほぼ色以外に light と同じ粗さが出るため、行は route 単位でまとめ、
+scheme 固有の差異があるものだけ分けた）を目視点検した所見:
+
+| route | scheme | 何が粗いか | 重さ |
+| --- | --- | --- | --- |
+| home | 両方 | 特になし（情報の優先順位・吹き出しの階層とも良好） | 低 |
+| org | 両方 | 深い階層（CoS→部→課→班→…）で最深ノードの名前が折り返し、カウント数字の位置が揃いにくい | 低 |
+| org | 両方 | 空状態「左の組織の木から 1 人選ぶと…」の「左の」がスマホでは成立しない（一覧は上、詳細は下） | 高 |
+| org-node | 両方 | 同上（深い階層の折り返し） | 低 |
+| org-detail | 両方 | 同上（「左の組織の木」の文言） | 高 |
+| org-detail | 両方 | mount された skill のリンク文言が長く、末尾の省略され方が縮小画像では判別しづらかった（解像度限界、要実機確認） | 低 |
+| projects | 両方 | 案件を投げるフォームの案内文で文末の句点だけが行末に孤立して折り返すことがあった | 低 |
+| project-detail | 両方 | 依頼・作業場所・リポジトリ・PR と取り込み・途中目標・この方針で進める・仕事の木・報告・成果物・文書の 9 節が縦に並ぶ約 6.6 画面分の 1 ページに、`/help` のような目次が無い | 高 |
+| project-detail | 両方 | 「仕事の木」（`WorkTreeGraph`）の高さがノード数に関わらず固定 28rem で、ノードが 1〜2 個の小さな案件でも空白の多いキャンバスになる | 中 |
+| project-docs | 両方 | 空状態「左のページを選んでください」の「左の」 | 高（org と同根） |
+| board | 両方 | 絞り込みフォーム（案件・担当・途中目標・ラベル・検索・種類・優先度・レベル…）が常に全展開で、状態ピル・タスクカードという本題が画面外に押し出される | 高 |
+| approvals | 両方 | 特になし（「今後ずっと」「認めない」の色分け、note 欄の位置とも良好） | 低 |
+| inbox | 両方 | 上部 2×2 の統計タイルで「受け入れ待ちの draft」だけラベルが 2 行になり、タイルの高さが 1 つだけ揃わない | 低 |
+| reports | 両方 | 特になし | 低 |
+| releases | 両方 | （Phase 94 が並行して触るためスコープ外。所見は取らなかった） | - |
+| knowledge | 両方 | 空状態「左のページを選んでください」の「左の」 | 高（org と同根） |
+| knowledge-inbox | 両方 | 候補のタグ一覧で同じタグ（`environment`）が 2 回並ぶことがある（mock fixture 側のデータの可能性が高い） | 低 |
+| knowledge-skills | 両方 | 空状態「左の skill を選んでください」の「左の」 | 高（org と同根） |
+| knowledge-skill-create | 両方 | 特になし | 低 |
+| knowledge-skill-detail | 両方 | 特になし | 低 |
+| knowledge-skill-edit | 両方 | 特になし | 低 |
+| clusters | 両方 | アカウントの cooldown が「1196日20時間」のように非現実的に大きい日数で表示され、スキャンしにくい（mock fixture が「常に未来」にするため固定した 2030-01-01 が原因。実運用の cooldown は通常分〜時間） | 中 |
+| accounts | 両方 | アカウント一覧 → LLM source → MCP クライアント → API キーの性質の異なる節が縦に並ぶ約 4 画面分の 1 ページに、`/help` のような目次が無い | 高 |
+| accounts | 両方 | clusters と同じ cooldown の非現実的な日数表示（claude-a/claude-b） | 中 |
+| task-overview | 両方 | 何も起きていないタスクだと、受け入れ条件と判定・run 一覧・委譲・prior_review・answers・操作の 6 節が連続して大きな空状態カードになり、ページの大半が空白 | 高 |
+| task-timeline | 両方 | 特になし | 低 |
+| task-changes | 両方 | 特になし | 低 |
+| task-files | 両方 | ワークスペースの絶対パス（`/home/mock/.local/celeris/workspaces/<ULID>/repos/<name>`）が `break-all` で複数行に折り返され、見出し直下が読みにくい | 中 |
+| task-artifacts | 両方 | 特になし | 低 |
+| help | 両方 | 特になし（既に `/help` 自身が目次パターンを実装済み。これを他画面に広げる側の参考にした） | 低 |
+| （横断） task-overview〜artifacts の 5 タブ | light | タブ行（横スクロール、Phase 71）の右端で「成果物」が「成果」で文字の途中で切れているのに、まだ続きがあるという手がかりが無い | 中 |
+
+集計: **高 5 件・中 5 件・低 12 件**（「（横断）」の 1 行は 5 route にまたがるが 1 件として数えた。
+releases は Phase 94 のスコープのため対象外）。
+
+### 3. 直した内容（受け入れ条件 3）
+
+高 5 件すべてと、中 5 件のうち上位 3 件（案件詳細の仕事の木の高さ・タスクタブの横スクロール手がかり・
+task-files のパス折り返し）を直した。残り中 2 件（clusters/accounts の cooldown 表示）は下記「提案」へ
+回した。
+
+1. **`PageToc`（`~/components/ui/misc.tsx`、新規の共通部品）**: `/help` が Phase 65 から使っていた
+   「目次から `#id` へ飛ぶ」横並びリンク行（`data-touch-ok`）を汎用化した。`project-detail`（10 節）・
+   `accounts`（LLM source / MCP クライアント / API キーの 3 節）に追加した。節自体（`SectionTitle` の
+   `id`）には触れていない。
+2. **`board.tsx` の絞り込みを `<details>` で折りたたみ**: `boardFilterIsEmpty(filter)` が真（条件が
+   1 つも選ばれていない）のときは既定で閉じ、既に絞り込み中なら開いたままにする。フォームの DOM・
+   `name` 属性・送信先は変えていない（機能は落とさない）。`<summary>` に適用中バッジと開閉シェブロン
+   （`transition-transform group-open:rotate-180`）を付けた。
+3. **`EmptyState`（`~/components/ui/misc.tsx`）に `compact` プロパティを追加**: `tasks.$id.tsx` の
+   概要タブの 6 か所（受け入れ条件と判定・run 一覧・委譲・prior_review・answers・操作）に適用し、
+   パディングとアイコンを縮小した（既定 `compact=false` は他の全画面で従来どおり）。
+4. **空状態の文言から「左の」を除去**: `app/routes/org.tsx`・`app/routes/knowledge.tsx`・
+   `app/routes/knowledge.skills.tsx`・`app/routes/projects.$id.docs.tsx` の 4 か所。スマホでは一覧
+   （左）と詳細（右）が横に並ばず縦に積むので、「左の」という位置の説明がそもそも成立していなかった。
+5. **`~/components/WorkTree.tsx` の高さをノード数に応じた 3 段階に**: `nodes.length <= 2` は `h-40`、
+   `<= 5` は `h-64`、それ以上は従来の `h-[28rem]`。`@xyflow/react` の `fitView` は箱の高さに追随する
+   ため、レイアウトの計算方法自体は変えていない。
+6. **タスクタブ行の右端にフェード**: `tasks.$id.tsx::TaskTabs` の `<nav>` に `relative -mx-4 lg:mx-0`
+   を持たせ（フェードの基準をスクロール箱の実際の bleed 済みの右端に一致させるため）、
+   `pointer-events-none` な `bg-gradient-to-l from-bg to-transparent`（`lg:hidden`）を重ねた。タップ
+   領域・DOM 構造・スクロールの実装は変えていない。
+7. **`task-files.tsx` のワークスペースパスを末尾省略**: `shortId(dir, 40)` ＋ `title={dir}`（全文は
+   ホバー/長押しで見える。ADR-0055 D2 の id/パス省略の規律を踏襲）。
+8. **`projects.tsx` の案内文に `text-pretty`**: 文末の句点だけが行末に孤立する widow を防いだ。
+
+各修正は変更前後でスクリーンショットを撮り直して確認した（`pnpm screenshots:mobile` を修正前・
+修正後で実行し、該当 route の `-light.png`/`-dark.png` を読み比べた）。例:
+board は絞り込みが既定で閉じて `board-light.png` の高さが 5613px→3391px（デバイス比 2.75 込みの実測
+raw px）に、task-overview は空状態縮小で 9677px→8951px に、それぞれ縮んだことを確認した。project-detail・
+accounts は TOC 追加で高さはわずかに増えた（目次自体の分。project-detail 15395→15186px はほぼ横ばい、
+accounts 10175→10538px は目次 1 行分の増加）が、ページ内ジャンプができるようになった。
+
+### 4. 直さなかった中・低（受け入れ条件 4、提案）
+
+- **P-G46-1**: `clusters`/`accounts` の cooldown 表示（例: `cooldown 1196日20時間`）。原因は
+  `gui/scripts/lib/celeris-fixture.mjs` が cooldown を「常に未来」にするため固定日時 `2030-01-01`
+  （`1_893_456_000`）を使っていること（テストの安定性のための意図的な設計）。表示側の
+  `formatDuration`（`~/lib/time-delta.ts`）は経過時間・resets_at 等、他の多くの画面が共有する純関数で、
+  実運用の cooldown は通常分〜時間のオーダーのため「上位 2 単位まで」の設計で困らない想定
+  （Phase 75、P-G30-1）。この 1 画面の見た目のためだけに共有関数の丸め方を変えると、他の画面（進捗の
+  経過時間表示等）への影響範囲の見極めが必要になるため、今回は見送った。次にこの関数を触る Phase が
+  あれば、「n 日を超えたら週/月単位に丸める」といった追加の分岐を検討する。
+- **P-G46-2**: タスク詳細「概要」タブの空状態は `compact` で縮小したが、6 枚並ぶこと自体は残っている。
+  より踏み込むなら、「まだ何も起きていません」の 1 枚の空状態にまとめ、run が実際に走り始めてから
+  節ごとの表示に切り替える設計変更が要る（`detail.criteria`/`detail.runs`/`detail.delegated`/
+  `detail.prior_review`/`detail.answers`/`detail.actions` のうち **全部が空**のときだけ 1 枚にする、
+  という条件分岐だけなら小さく済むかもしれない）。今回のスコープ（小さく確実に直す）では見送った。
+- **P-G46-3**: 深い階層の組織の木（`org`/`org-node`/`org-detail`）で最深ノードの名前が折り返る。
+  インデント幅を階層が深いほど狭める、または一定の深さを超えたら折りたたむ、といった対応が考えられる
+  が、組織の木の表示ロジック自体に触れる変更になるため、この Phase の「小さく確実に」の範囲を超えると
+  判断した。
+- **P-G46-4**: `inbox` の 2×2 統計タイルで「受け入れ待ちの draft」ラベルだけ 2 行になりタイルの高さが
+  揃わない。ラベルを「受け入れ待ち」に短縮する、またはタイルを `grid-rows` で高さを揃えるなどの対応が
+  考えられるが、影響が軽微なため見送った。
+- **P-G46-5**: `knowledge-inbox` の候補で同じタグ（`environment`）が 2 回表示されることがある。
+  mock fixture（`test/mock-celeris/fixtures.ts`）側のデータに重複がある可能性が高く、実際の celeris
+  がタグを重複させて返すのかは未確認。GUI 側で表示直前に重複を除く（`Array.from(new Set(...))`）のは
+  簡単だが、「celeris の API 仕様外の値に頼らない」（GUI CLAUDE.md 禁止事項）の観点で、celeris が本当に
+  重複を返しうるのか確認せずに見た目だけ直すのは早計と判断し、見送った。celeris 側で `/knowledge/inbox`
+  のタグに重複が入りうるか確認できたら、次のラウンドで対応する。
+- **P-G46-6**: `org-detail` の mount された skill のリンク文言（説明文の末尾の省略のされ方）が、
+  縮小したスクリーンショットでは判別しづらかった。実機または等倍のスクリーンショットで確認要。
+
+### 5. ゲート（受け入れ条件 5、証拠コマンドと出力の要点）
 
 | 条件 | コマンド | 出力の要点 |
 | --- | --- | --- |
@@ -6807,6 +6936,35 @@ Rust 側のゲートは celeris 側の PROGRESS に書く）。
 - `test/unit/releases.test.ts`（新規テスト 2 ブロック）
 - `docs/celeris-api-v1.md`・`docs/adr/0058-release-verify-breakdown.md` は celeris 側の変更（このリポジトリ
   では読むだけ。celeris 側のコミットに含まれる）
+| lint | `pnpm lint`（`biome check .`） | exit 0。`Checked 254 files … No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（`react-router typegen && tsc -b`、出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 68 passed (68) / Tests 1030 passed (1030)**（Phase G44 と同数。DOM 描画テストが無い慣例〈G10-U1〉のため見た目の変更に新規テストは追加していない） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件のみ、変化なし |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ |
+| mobile-audit（1 回目） | `pnpm mobile-audit` | exit 0。**`{"ok":true,"total":0,"by_rule":{},"by_scheme":{"light":0,"dark":0}}`**、`routes=26 schemes=2 violations=0 perf_worst=project-detail 556.0KB`。実測 **92.98 秒**（`pnpm build` 込み） |
+| mobile-audit（2 回目） | `MOBILE_AUDIT_SKIP_BUILD=1 pnpm mobile-audit` | exit 0、同じ `{"ok":true,"total":0}`。実測 **89.90 秒** |
+| e2e:mock | `E2E_SKIP_BUILD=1 pnpm e2e:mock` | **`{"ok":true,"mode":"mock","failures":[]}`** |
+| screenshots:mobile | `MOBILE_SCREENSHOTS_SKIP_BUILD=1 pnpm screenshots:mobile` | exit 0。**`{"ok":true,"routes":26,"schemes":2,"saved":52}`**。実測 **47.23 秒**（60 秒以内） |
+
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` は
+このフェーズのスコープ外（実行していない。Phase 80 以降と同じ扱い）。
+
+### 変更したファイル
+
+- `gui/scripts/mobile-screenshots.mjs`（新規）
+- `gui/package.json`（`screenshots:mobile` を追加）
+- `gui/.gitignore`（`test/mobile-screenshots/` を追加）
+- `gui/app/components/ui/misc.tsx`（`PageToc` 新設、`EmptyState` に `compact` を追加）
+- `gui/app/routes/projects.$id.tsx`（`PageToc` を追加）
+- `gui/app/routes/accounts.tsx`（`PageToc` を追加）
+- `gui/app/routes/board.tsx`（絞り込みを `<details>` で折りたたみ、既定で閉じるように）
+- `gui/app/routes/tasks.$id.tsx`（`EmptyState compact` を 6 か所、`TaskTabs` に右端フェード）
+- `gui/app/routes/org.tsx`・`gui/app/routes/knowledge.tsx`・`gui/app/routes/knowledge.skills.tsx`・
+  `gui/app/routes/projects.$id.docs.tsx`（空状態の文言から「左の」を除去）
+- `gui/app/components/WorkTree.tsx`（高さをノード数に応じた 3 段階に）
+- `gui/app/components/task-files.tsx`（ワークスペースパスを末尾省略 + `title`）
+- `gui/app/routes/projects.tsx`（案内文に `text-pretty`）
+- `docs/PROGRESS.md`（`## Phase 95` を追加）
 - `gui/docs/PROGRESS.md`（本節）
 
 ### 未解決事項
@@ -6823,3 +6981,10 @@ Rust 側のゲートは celeris 側の PROGRESS に書く）。
 ### 提案
 
 - なし（P-G38-1 はこの Phase で実施した）。
+- **実機未確認**（ADR-0009 P-34）。ヘッドレス Chromium でのスクリーンショットと監査に留まる。
+- P-G46-1〜P-G46-6（上記「4.」）は未対応のまま残した。
+- Phase G42/G43 の未解決事項（`.animate-fade-in` 実行中の一過性ずれの残余可能性など）は変化なし。
+
+### 提案
+
+- P-G46-1〜P-G46-6（上記「4.」に記載）。

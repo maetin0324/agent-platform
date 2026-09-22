@@ -7,6 +7,7 @@ import { loadSkills, readSkillsQuery, type SkillsData } from "~/celeris/skills";
 import { deleteSkill, putSkill, readSkillName, readSkillPutBody } from "~/celeris/skills-admin.server";
 import type { SkillSummaryView } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
+import { LocalTime } from "~/components/LocalTime";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
@@ -162,7 +163,7 @@ export default function KnowledgeSkillsRoute({ loaderData }: Route.ComponentProp
             ) : detail ? (
               <SkillView detail={detail} submitting={submitting} fetcher={fetcher} />
             ) : (
-              <EmptyState icon="sparkles" title="左の skill を選んでください">
+              <EmptyState icon="sparkles" title="skill を選んでください">
                 <Link to={skillsHref({ create: true })} className={buttonClass({ variant: "secondary", size: "sm" })}>
                   <Icon name="plus" />
                   新しい skill
@@ -280,8 +281,11 @@ function SkillView({
       />
       <CardBody className="space-y-4">
         {detail.updated && (
+          // Phase 95（目視点検の所見）: 生の ISO 8601 文字列がそのまま出ていた。`LocalTime`（ADR-0055
+          // ラウンド 14、タイムゾーンに安全な時刻表示）に揃える。`mode="datetime"` は視聴者のタイムゾーンで
+          // 絶対日時を出す（`fetchedAtIso` は相対表示専用なのでここでは不要）。
           <p className="text-sm text-fg-subtle lg:text-xs">
-            最終更新: <Mono>{detail.updated}</Mono>
+            最終更新: <LocalTime iso={detail.updated} mode="datetime" />
           </p>
         )}
 

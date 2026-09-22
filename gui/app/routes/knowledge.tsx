@@ -180,7 +180,7 @@ export default function KnowledgePageRoute({ loaderData }: Route.ComponentProps)
             ) : page ? (
               <PageView page={page} q={q} scope={scope} />
             ) : (
-              <EmptyState icon="database" title="左のページを選んでください">
+              <EmptyState icon="database" title="ページを選んでください">
                 <Link
                   to={knowledgeHref({ path: "user/new-page.md", q, scope, edit: true })}
                   className={buttonClass({ variant: "secondary", size: "sm" })}

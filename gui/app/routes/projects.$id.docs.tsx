@@ -186,7 +186,7 @@ export default function ProjectDocsPage({ loaderData }: Route.ComponentProps) {
             ) : page ? (
               <PageView projectId={projectId} page={page} q={q} submitting={submitting} fetcher={fetcher} />
             ) : (
-              <EmptyState icon="book" title="左のページを選んでください">
+              <EmptyState icon="book" title="ページを選んでください">
                 <Link
                   to={docsHref(projectId, { path: `${tree.root}/new-page.md`, q })}
                   className={buttonClass({ variant: "secondary", size: "sm" })}
