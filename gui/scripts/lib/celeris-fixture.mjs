@@ -508,6 +508,12 @@ export async function setupMockCeleris() {
   // `isEmpty` が `inbox.counts.approvals` を読むので、実際にこの画面を開くと `inbox.counts` が `undefined`
   // になり例外で落ちていたはずのバグ）。承認待ち・質問を 1 件ずつ持つ、型どおりの `Inbox` にした
   // （受け入れ条件「カードが描画される状態を fixture に作る」）。
+  //
+  // Phase 88（P-G39-1）: Phase 87 の未解決事項（`draft-group`・`attention-item`・`approval-parent-title`・
+  // `question-approval-link` が fixture に無く、機械検査を通っていなかった）を解消するため、承認 1 件に
+  // 親タスクを付け、質問 1 件に `approval_id` を付け、draft グループ 1 件（draft タスク 2 件）と
+  // attention 1 件（`failed`）を足した。`counts` はそれぞれの配列の実件数と一致させる
+  // （`docs/celeris-api-v1.md` §5.1: `drafts` は draft タスクの件数でグループ数ではない）。
   mock.on("GET", "/api/v1/inbox", (_req, res) =>
     sendJson(res, 200, {
       approvals: [
@@ -525,17 +531,115 @@ export async function setupMockCeleris() {
           evidence: [],
           last_run: null,
           other_verdicts: [],
-          parent: null,
+          // Phase 88（P-G39-1）: `approval-parent-title` を機械検査対象にする（承認待ちの元になった親タスク）。
+          parent: {
+            actions: [],
+            id: "01INBOXAPPROVALPARENT0001",
+            kind: "execute",
+            status: "running",
+            title: "本番運用への移行 Plan",
+          },
           previous_decisions: [],
           requested_at: "2026-09-20T23:40:00Z",
         },
       ],
-      attention: [],
-      counts: { approvals: 1, attention: 0, by_status: {}, drafts: 0, questions: 1 },
-      drafts: [],
+      // Phase 88（P-G39-1）: `attention-item`（`AttentionRow`。`cluster_unavailable` 以外の分岐）を
+      // 機械検査対象にする。
+      attention: [
+        {
+          at: "2026-09-20T22:00:00Z",
+          reason: "run failed: exit 1",
+          task: {
+            actions: ["retry", "cancel"],
+            id: "01INBOXATTENTIONTASK00001",
+            kind: "execute",
+            status: "failed",
+            title: "依存パッケージの更新確認",
+          },
+          type: "failed",
+        },
+      ],
+      counts: { approvals: 1, attention: 1, by_status: {}, drafts: 2, questions: 1 },
+      // Phase 88（P-G39-1）: `draft-group`（`DraftGroupRow`、`draft-item` 2 件）を機械検査対象にする。
+      drafts: [
+        {
+          parent: {
+            actions: [],
+            id: "01INBOXDRAFTPARENT0000001",
+            kind: "plan",
+            status: "ready",
+            title: "関連研究サーベイの Plan",
+          },
+          plan_summary: "3 本の論文を読んで比較する",
+          drafts: [
+            {
+              actions: ["cancel"],
+              adapter: null,
+              assignee: null,
+              attempts: 0,
+              backoff_until: null,
+              category: "research",
+              children: 0,
+              conversation: false,
+              created_at: "2026-09-20T21:00:00Z",
+              depends_on: [],
+              genre: null,
+              id: "01INBOXDRAFTTASK000000001",
+              kind: "execute",
+              labels: [],
+              lease_expires_at: null,
+              max_retries: 2,
+              milestone_id: null,
+              parent_id: "01INBOXDRAFTPARENT0000001",
+              pending_children: 0,
+              priority: 10,
+              priority_label: "P2",
+              project_id: null,
+              role: null,
+              status: "draft",
+              support: null,
+              tier: "standard",
+              title: "論文 A を読む",
+              updated_at: "2026-09-20T21:00:01Z",
+            },
+            {
+              actions: ["cancel"],
+              adapter: null,
+              assignee: null,
+              attempts: 0,
+              backoff_until: null,
+              category: "research",
+              children: 0,
+              conversation: false,
+              created_at: "2026-09-20T21:05:00Z",
+              depends_on: [],
+              genre: null,
+              id: "01INBOXDRAFTTASK000000002",
+              kind: "execute",
+              labels: [],
+              lease_expires_at: null,
+              max_retries: 2,
+              milestone_id: null,
+              parent_id: "01INBOXDRAFTPARENT0000001",
+              pending_children: 0,
+              priority: 10,
+              priority_label: "P2",
+              project_id: null,
+              role: null,
+              status: "draft",
+              support: null,
+              tier: "standard",
+              title: "論文 B を読む",
+              updated_at: "2026-09-20T21:05:01Z",
+            },
+          ],
+        },
+      ],
       questions: [
         {
-          approval_id: null,
+          // Phase 88（P-G39-1）: `approval_id` を付け、`question-approval-link`（「認可」の画面で答える）を
+          // 機械検査対象にする（`approval_id` が無い分岐は Phase 87 から既に監査対象）。
+          approval_id: "01INBOXAPPROVAL000000002",
           asked_at: "2026-09-20T23:30:00Z",
           previous: [],
           question: "この案件のスコープに含めてよいですか",

@@ -5957,3 +5957,158 @@ fixture.mjs` の `gpu2` フィクスチャを Phase G38 の回避前（`auth: "p
 - **P-G39-2**: `cssPathRef`（および `isNotVisible` 等の DOM 依存の純関数群）を単体テストしたくなったら、
   jsdom 相当の軽量 DOM 実装を devDependency に足すかどうかを判断する（`package.json` の版固定・
   「新しい依存を足すときは理由を書く」の運用に従う）。
+
+## Phase G40 — スマホ UX ラウンド 13: focus-order のフレーク解消と /inbox の残り（ADR-0055、celeris Phase 88。2026-09-21）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。Phase G39 が本番反映されたあとに 1 回だけ観測された
+`focus-order` のフレーク（`home` light、「composer に 32 Tab で届かない」）の原因を突き止めて直し、Phase G39 の
+提案 P-G39-1（`/inbox` の残りの題材を fixture に足す）を実装した。
+
+### 1. `focus-order` のフレークの原因調査と修正
+
+**調査**: `docs/PROGRESS.md` Phase 87 の本番反映の記録によると、merge 後の 1 回目の `pnpm mobile-audit` で
+`focus-order` が 1 件（`home`、light、「composer (console-text) not reached … within 32 Tab presses
+(22 focusable elements on page)」）出て、再実行では 0 件だった。まず `checkFocusOrder`（`scripts/mobile-audit.mjs`）
+自体の Tab 予算は既に `focusableCount + 10`（最低 20）と動的だったので（「固定 32」ではなく、たまたま
+22 + 10 = 32 だっただけ）、予算不足ではなく**タイミング依存の何か**だと当たりを付けた。
+
+- まず「ハイドレーション中・クライアント限定描画の途中に歩き始めると、予算計算時と実際に歩く時点で
+  focusable 要素数がずれるのでは」という仮説で、`document.fonts.ready` と DOM ノード総数の安定待ち
+  （`waitForPageIdle`。最大 5 秒、100ms 間隔で 3 回連続同じ件数になったら抜ける）を追加した。加えて、
+  要素の同一性判定を `cssPathRef` の再構築だけに頼らず、歩き始めに全 focusable 要素へ割り振る一意な連番
+  （`data-mobile-audit-focus-id`）で行うようにし（skip link・固定タブバー・disclosure トグルのように
+  フォーカス時の状態で class 構成が変わりうる要素を踏んでも誤判定しないため）、予算内に届かなかったときに
+  実際に辿った経路（selector の列）を違反 `detail` に残す診断強化もした。この段階で `pnpm mobile-audit` を
+  再実行したところ、`/inbox` の fixture 拡張（後述の 2.）が晒した別の違反（`project-detail` の
+  `WorkTreeGraph`＝react-flow の overflow・タップ領域）が新たに出た。これは `waitForPageIdle` を `runChecks`
+  （D1-1〜D1-6 等の全画面共通の検査）の前にも入れてしまい、dagre レイアウトが `useEffect` で非同期に確定する
+  のを待ってしまったことが原因だと分かったので、**`waitForPageIdle` は `checkFocusOrder` の中だけに限定**し、
+  `runChecks` 側は従来どおり `load` 直後の DOM をそのまま見る作りに戻した（このスコープ外の潜在バグを新たに
+  検出・破壊しないため。CLAUDE.md「今回の Phase だけをやる」）。
+- この時点で `pnpm mobile-audit` を再実行すると、`home` light で `focus-order` が 1 件（今回追加した診断強化
+  のおかげで、実際に辿った経路が violation の `detail` に残った）。経路を見ると、Console の「育つ返事」
+  ブロック（`console-block-reply`、`console-reply-step-toggle` を 2 つ）まで進んだあと、次の Tab で
+  `document.activeElement` が `<body>` になっていた（＝ DOM 順としては直後にあるはずの `composer`
+  （`console-text`）に届く前に、フォーカスが失われていた）。**単体の切り分けスクリプト**（`checkFocusOrder`
+  と同じ手順を celeris fixture・Playwright で直接 15 回連続実行し、`document.activeElement` の遷移を都度
+  記録するもの。CPU スロットリングは掛けない）を書いて実行したところ、15/15 回とも `composer` に正しく届き
+  （実際の歩数は 16〜17 手で、`focusableCount` が数えた 22 とは食い違っていた＝この数え方自体は祖先の
+  `display:none` を見ないので過大に数える既知の粗さがあるが、予算が十分あるので実害は無い）、フレークは
+  一切再現しなかった。単体スクリプトと `mobile-audit.mjs` フルランの違いを洗い出したところ、**`perf`
+  （Phase 77）が light scheme に掛ける CPU x4 スロットリング（`Emulation.setCPUThrottlingRate`）が、
+  `checkFocusOrder` の実行中もそのまま有効なまま**という違いに行き着いた。スロットリング下では、Tab で
+  フォーカスが `console-stream`（Console の内側スクロール領域）の奥の要素へ移るたびにブラウザが自動で
+  発火するスクロール（focus のための `scrollIntoView` 相当）に連動して走る「最新へ」ボタン
+  （`console-jump-to-latest`）の表示判定（React の再描画）が 4 倍遅れ、次の Tab 押下のタイミングと衝突して
+  `document.activeElement` が一瞬 `<body>` に落ちることがある、という仮説を立てた。
+- **修正**: `main()` の中で、perf 計測（`PERF_SETTLE_MS` の待ちと `readPerfMetrics`・JS/CSS 転送量の集計・
+  `checkPerfBudget`）が終わった直後に `cdpSession.send("Emulation.setCPUThrottlingRate", { rate: 1 })` で
+  スロットリングを解除してから `checkFocusOrder` を呼ぶ順序に変更した（以前は `checkFocusOrder` → perf 計測
+  → `cdpSession.detach()` の順で、スロットリングは `checkFocusOrder` の間ずっと有効だった）。`focus-order`
+  は実際のキー入力への応答性を見る検査なので、ミッドレンジ機の近似（`perf`）とは切り離して素の速度で
+  行うのが筋でもある。修正後、`pnpm mobile-audit`（フルビルドを含む）を 1 回、`MOBILE_AUDIT_SKIP_BUILD=1`
+  での再実行を複数回、新設の `--repeat 3` で 1 回（下記 3.）実行し、通算 8 回連続で `violations=0` を確認した
+  （途中、`waitForPageIdle` を `runChecks` にも掛けていた段階で 1 回だけ `focus-order` が出たのは上記のとおり
+  診断強化が機能した結果で、スロットリング解除後は一度も再現していない）。
+
+### 2. P-G39-1: `/inbox` の残りの題材を機械検査対象に
+
+- `scripts/lib/celeris-fixture.mjs` の `GET /inbox` fixture に以下を足した（`docs/celeris-api-v1.md` §5.1 の
+  型どおり）:
+  - 承認 1 件に `parent`（`approval-parent-title`）を追加。
+  - 質問 1 件に `approval_id`（`question-approval-link`。既存の `approval_id` が無い分岐は Phase 87 から
+    監査対象済みなので、これで両分岐とも通る）。
+  - draft グループ 1 件（`draft-group`）×draft タスク 2 件（`draft-item` ×2）を追加。`counts.drafts` は
+    celeris の契約どおり「draft タスクの件数」（グループ数ではない）なので `2` にした。
+  - attention 1 件（`type: "failed"`、`attention-item`。`cluster_unavailable` 以外の分岐＝`AttentionRow`）。
+- 上記が実際に描画されるようになったことで機械検査が新たに検出した違反（Phase 87 の `approval-title` と
+  同じ「テキストだけの `<a>`/`<label>`」構造・`size="xs"` ボタンの `text-xs` 固定）を直した
+  （`app/routes/inbox.tsx`）:
+  - `tap-target` ×2: `approval-parent-title` 内の `<Link>`、`AttentionRow` の「受け入れ済み（ready）で
+    始める」チェックボックスの `<label>`（`app/routes/projects.$id.tsx` の同じチェックボックスと同じ
+    `flex min-h-11 items-center` を付けた）。
+  - `tap-target`（fixture 拡張で追加した `draft-group`/`draft-item`/`question-approval-link` の
+    `<Link>` にも同じ `flex min-h-11 items-center` を先回りで付けた。監査は通っていたが、直さなければ
+    fixture 次第で踏む形だったため、Phase 87 の `approval-title` と同じ規律で一緒に直した）。
+  - `font-size` ×5: `draft-approve`/`draft-cancel`（draft 2 件分）・`draft-approve-all` の `Button`
+    （`size="xs"` は `text-xs`＝12px 固定で、アイコンを伴わない文字だけのボタンだと本文扱いになる）。
+    `StatCard`/`Badge` と同じ「モバイルは `text-sm`、デスクトップは `lg:text-xs`」で `className` から
+    上書きした（`cn()` は `tailwind-merge` ベースなので、`Button` に渡す `className` が `SIZES[size]` の
+    `text-xs` に競合して勝つ）。
+  - 修正後は `pnpm mobile-audit` が 26 route × light/dark で引き続き **0 件**。
+
+### 3. 任意（受け入れ条件 3）: `--routes <glob>` と `--repeat <N>`
+
+- `scripts/mobile-audit.mjs` に簡易な CLI 引数解析（`parseCliArgs`）を足した。`--routes <pattern>`（または
+  `--routes=<pattern>`）はカンマ区切りで、各要素は `*` だけをワイルドカードとして扱う単純な正規表現に変換して
+  `route` id（`scripts/lib/celeris-fixture.mjs::buildRoutes` の `route`）に前方一致ではなく完全一致もどきで
+  当てる（`filterRoutes`。一致が 0 件ならエラーで即終了、ブラウザ・偽の celeris は起動しない）。
+  `--repeat <N>`（または `--repeat=<N>`）は route/scheme の歩み全体を N 回繰り返す。
+- ブラウザ・偽の celeris・ビルド済み GUI サーバは（`--repeat` のときも）1 回だけ起動し、繰り返すのは
+  route/scheme のループだけにした（`allViolations`/`routeReports`/`perfRecords` を繰り返しの内側で作り直す）。
+  `report.json` は繰り返しのたびに上書きするので最終回の内容が残り、標準エラーへの JSON・1 行要約は
+  `--repeat` 指定時だけ `rep`/`repeat` を添えて回ごとに出す。既定（`--routes`/`--repeat` を渡さない）は
+  これまでの「全 26 route を 1 回だけ」と 1 バイトも変わらない。
+- 実測: `MOBILE_AUDIT_SKIP_BUILD=1 node scripts/mobile-audit.mjs --routes home,inbox --repeat 2` が
+  2 route × light/dark × 2 回を数秒で終える（フルビルド・フル 26 route の `pnpm mobile-audit` は数十秒〜
+  1 分規模）。`--routes nonexistent-route` はブラウザを起動せず `exit 1` で即エラーになることを確認した。
+  `gui/docs/PROGRESS.md`（この節）に使い方を記録した（ドキュメントは他に無いため、ここが唯一の記述）。
+
+### テスト（新規・変更）
+
+新しいユニットテストは足していない（`mobile-audit.mjs`/`celeris-fixture.mjs` は Phase G39 から続く理由と
+同じく、vitest からは重すぎる・DOM 依存のため、`pnpm mobile-audit`/`e2e:mock` の実行そのものを回帰検査に
+した）。`app/routes/inbox.tsx` の変更は見た目（クラス名）だけで、`test/unit/inbox.loader.test.ts`/
+`test/unit/inbox.action.test.ts` が検査するデータの形・action の挙動には触れていないため、既存テストは
+無変更のまま通る。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ |
+| lint | `pnpm lint`（`biome check .`） | exit 0。`Checked 243 files … No fixes applied.` |
+| typecheck | `pnpm typecheck` | exit 0（出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 65 passed (65) / Tests 1004 passed (1004)**（Phase G39 と同数） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は変化なし |
+| mobile-audit（原因特定前、`waitForPageIdle` を `runChecks` にも掛けていた段階） | `pnpm mobile-audit` | exit 1。`focus-order` 1 件（`home` light、`detail` に実際の focus 経路を出力） |
+| mobile-audit（`waitForPageIdle` を `focus-order` だけに限定した直後、スロットリング解除前） | `pnpm mobile-audit` | exit 1。`focus-order` 1 件（`home` light、`console-block-reply` の後で `<body>` に落ちる経路） |
+| mobile-audit（スロットリング解除後、`pnpm mobile-audit` 1 回 + `MOBILE_AUDIT_SKIP_BUILD=1` 再実行複数回 + `--repeat 3` 1 回） | 通算 8 回 | **すべて exit 0、`{"ok":true,"total":0}`、`routes=26 schemes=2 violations=0`** |
+| e2e:mock | `pnpm e2e:mock` | **`{"ok": true, "mode": "mock", "failures": []}`** |
+| `--routes`/`--repeat`（任意の受け入れ条件 3） | `node scripts/mobile-audit.mjs --routes home,inbox --repeat 2`（`MOBILE_AUDIT_SKIP_BUILD=1`） | exit 0。2 route × light/dark を 2 回、`rep=1/2`・`rep=2/2` それぞれ `violations=0` |
+
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` はこの
+Phase のスコープ外（実行していない。Phase 80/82/83/84/86/G39 と同じ扱い）。
+
+### 変更したファイル
+
+- `scripts/mobile-audit.mjs`（`waitForPageIdle` の追加（`checkFocusOrder` 専用）、`checkFocusOrder` の
+  一意な連番ベースの同一性判定・診断強化（`detail` に focus 経路）、CPU スロットリング解除の順序変更
+  （perf 計測後・`checkFocusOrder` 前）、`--routes`/`--repeat` の CLI 引数解析と、それに伴う route/scheme
+  ループの繰り返し対応）
+- `scripts/lib/celeris-fixture.mjs`（`/inbox` fixture に `approval.parent`・`question.approval_id`・
+  `drafts`（1 グループ×2 件）・`attention`（1 件）を追加）
+- `app/routes/inbox.tsx`（`approval-parent-title`/`draft-group` の親・`draft-item`/
+  `question-approval-link`/attention の「受け入れ済み」チェックボックスに `flex min-h-11 items-center`、
+  `draft-approve`/`draft-cancel`/`draft-approve-all` に `text-sm lg:text-xs`）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34。このサンドボックスに本物の celeris・本物のブラウザ・外向きネットワークが
+  無い）。`focus-order` のフレークの機構（CPU スロットリングとスクロール連動の再描画の競合）は特定・解消
+  したが、Console 自体（`useConsoleStream`・`console-jump-to-latest` の表示判定）は変更していない。実機・
+  実 celeris（SSE が実際に `console.block` を流し続ける環境）で同種の競合が別の形で起きないかは未確認。
+- `focusableCount`（`checkFocusOrder` が Tab 予算を決めるための数え方）は要素自身の `display`/`visibility`
+  しか見ておらず、祖先が非表示のケースを数に入れてしまう既知の粗さがある（実測で 22 と数えたが実際に
+  歩けたのは 16〜17 手だった）。予算は十分に余裕があるため実害は無いが、正確に数えるなら `isNotVisible`
+  と同じ祖先を辿る判定に揃えるべき（次ラウンド候補。今回は「フレークの原因ではない」と切り分けが付いた
+  ので手を付けていない）。
+- P-G39-2（`cssPathRef` 等の単体テスト化の是非）は変化なし。
+
+### 提案
+
+- **P-G40-1**: `checkFocusOrder` の `focusableCount` を `isNotVisible`（祖先の `display:none`/`visibility:hidden`
+  ・閉じた `<details>` を辿る）に揃えて正確に数える（現状は要素自身の可視性しか見ないので過大に数える）。
+- **P-G40-2**: `perf` の CPU スロットリングを `checkFocusOrder` 以外の重い検査（`runChecks` 全体）にも
+  意図的に掛けて「ミッドレンジ機での操作性」を見る監査を足すかどうか検討する（今回はスコープ外として
+  むしろ外す方向にしたが、別ルールとして足す価値はあるかもしれない）。

@@ -587,50 +587,116 @@ function runChecks() {
 }
 
 /**
+ * Phase 88（`focus-order` のフレーク解消）: `load` イベント直後はまだ CSR のハイドレーションや、
+ * サーバでは出せない値をクライアントだけで確定させる描画（例: hydration mismatch を避けるための
+ * 相対時刻表示、`app/lib/reports.ts::relativeTimeLabel` 参照）が終わっていないことがある。この間に
+ * focusable な要素が増減すると、`checkFocusOrder` が数えた要素数（Tab 予算の元）と、実際に Tab キーで
+ * 辿る時点の要素数がずれ、`composer` に予算内で届かなくなる（Phase 87 merge 後に 1 回だけ踏んだ
+ * `home` light のフレーク。`docs/PROGRESS.md` Phase 87 参照。再実行では通っていた = タイミング依存で
+ * あることの傍証）。
+ *
+ * フォント読み込み（`document.fonts.ready`）を待ち、加えて DOM のノード総数が一定回数連続で変化しなく
+ * なる（= ハイドレーション後の再レンダーが収まった）ことを確認してから検査を始める。SSE（`/events`）は
+ * 接続を張ったまま意図的に閉じない作りなので `page.waitForLoadState("networkidle")` はここでは使えない
+ * （`e2e/g0.spec.ts` が同じ理由で固定の猶予に頼っているのと同じ制約）。DOM 安定待ちは `timeoutMs` で
+ * 打ち切るので、何らかの理由で本当に揺れ続けるページでもハングしない（その場合は従来どおり計測時点の
+ * 値で進む）。
+ */
+async function waitForPageIdle(page, { timeoutMs = 5000, intervalMs = 100, stableRounds = 3 } = {}) {
+  await page.evaluate(() => document.fonts.ready).catch(() => {});
+  const start = Date.now();
+  let lastCount = -1;
+  let stable = 0;
+  while (Date.now() - start < timeoutMs) {
+    const count = await page.evaluate(() => document.querySelectorAll("*").length);
+    if (count === lastCount) {
+      stable += 1;
+      if (stable >= stableRounds) return;
+    } else {
+      stable = 0;
+      lastCount = count;
+    }
+    await page.waitForTimeout(intervalMs);
+  }
+}
+
+/**
  * D1 拡張その 3（Phase 76、`focus-order`）: 文書の先頭から実際に Tab キーを送り、フォーカスが
  * 罠にはまらず（= 同じ要素から動かなくなったら罠）進むかを見る。Console 画面（`console-text` を持つ画面。
  * `/`・`/org/:id`）だけは、下部固定の入力欄（composer）まで、画面上の操作可能な要素数を上回らない歩数で
  * 辿り着けることまで確かめる（辿り着けない＝ DOM 順が入力欄より手前で行き止まっている）。
  * それ以外の画面は「罠が無い」ことだけを見る（`console-text` が無いので composer の到達は対象外）。
  *
- * 罠の判定: Tab を押しても `window.__cssPathRef(document.activeElement)` が直前と全く同じ文字列のまま
- * なら、そのキー入力はフォーカスを動かせていない（=罠）。フォーカスがドキュメント外（ブラウザ chrome 等）
- * へ抜けたら `null` が返るので、単に「その画面の残りの要素を辿り終えた」として歩みを止める（罠ではない）。
+ * Phase 88: 罠の判定・到達判定は、この関数の冒頭で全ての focusable 要素に割り振った一意な連番
+ * （`data-mobile-audit-focus-id`）を主に使う。以前は `window.__cssPathRef(document.activeElement)` の
+ * 再構築だけに頼っていたが、これは「タグ名 + class 名の先頭 2 語 + 兄弟内の位置」から組み立てる**構造的な
+ * 署名**なので、skip link（フォーカス時だけ見た目が変わる `sr-only focus:not-sr-only`）・下部固定タブバー
+ * （選択中タブに `aria-current` が付いて class が変わる）・disclosure トグル（`aria-expanded` の
+ * 開閉で兄弟の構成が変わる）のように、**同じ論理要素でもフォーカス時の状態で class 構成が変わりうる**
+ * ものを踏むと、たまたま別の要素と同じ署名になったり、同じ要素が別の署名に見えたりしうる。連番は
+ * DOM ノードの同一性に直接紐づく属性なので、こうした揺れの影響を受けない（歩いている途中で新しく
+ * 現れた要素だけは連番を持たないので、その場合に限り従来の構造的な署名にフォールバックする）。
+ * また、実際に辿った経路（`data-testid` があればそれ、無ければ構造的な署名）を `path` として集め、
+ * 予算内に composer へ届かなかったときの違反 `detail` に含める（将来のフレーク調査を高速化する）。
+ *
+ * 罠の判定: Tab を押しても署名が直前と全く同じままなら、そのキー入力はフォーカスを動かせていない
+ * （=罠）。フォーカスがドキュメント外（ブラウザ chrome 等）へ抜けたら `null` が返るので、単に
+ * 「その画面の残りの要素を辿り終えた」として歩みを止める（罠ではない）。
  */
 async function checkFocusOrder(page, route) {
   const violations = [];
   const hasComposer = await page.evaluate(() => document.querySelector('[data-testid="console-text"]') !== null);
+  // Phase 88: `runChecks`（D1-1〜D1-6 等）を読み終えたあとにここで初めて待つ。他の画面のチェックは
+  // `load` 直後の DOM のままにして、`focus-order` の予算計算と実際に歩く時点の DOM だけをそろえる。
+  await waitForPageIdle(page);
   const focusableCount = await page.evaluate(() => {
     const selector = 'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])';
-    return Array.from(document.querySelectorAll(selector)).filter((el) => {
+    const els = Array.from(document.querySelectorAll(selector)).filter((el) => {
       const style = getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden") return false;
       const rect = el.getBoundingClientRect();
       return !(rect.width === 0 && rect.height === 0);
-    }).length;
+    });
+    // Phase 88: この時点で見えている focusable 要素に一意な連番を振り、以後の Tab 追跡はこれで
+    // 要素の同一性を判定する（cssPathRef の構造的な署名の揺れに左右されないように）。
+    els.forEach((el, i) => {
+      el.setAttribute("data-mobile-audit-focus-id", String(i));
+    });
+    return els.length;
   });
-  const maxSteps = Math.max(focusableCount + 10, 20);
+  // Phase 88: 焦点可能要素数 + 余裕（12。以前は 10）を基本に、最低 24 歩は許す。
+  const maxSteps = Math.max(focusableCount + 12, 24);
+  const path = [];
   let prevSig = null;
   let reachedComposer = false;
   for (let i = 0; i < maxSteps; i += 1) {
     await page.keyboard.press("Tab");
-    const sig = await page.evaluate(() => {
+    const info = await page.evaluate(() => {
       const el = document.activeElement;
       if (!el || el === document.body) return null;
-      return `${el.getAttribute("data-testid") ?? ""}::${window.__cssPathRef(el)}`;
+      const markerId = el.getAttribute("data-mobile-audit-focus-id");
+      return {
+        markerId,
+        testid: el.getAttribute("data-testid") ?? "",
+        structural: window.__cssPathRef(el),
+      };
     });
-    if (sig === null) break; // ドキュメント外へ出た = 辿り終えた
+    if (info === null) break; // ドキュメント外へ出た = 辿り終えた
+    // 連番があればそれを同一性の判定に使う（無ければ＝歩いている途中で新しく現れた要素。従来どおりの
+    // 構造的な署名にフォールバック）。
+    const sig = info.markerId !== null ? `id:${info.markerId}` : `struct:${info.testid}::${info.structural}`;
+    path.push(info.testid ? `${info.testid}(${info.structural})` : info.structural);
     if (sig === prevSig) {
       violations.push({
         rule: "focus-order",
-        selector: sig.split("::")[1] ?? sig,
+        selector: info.structural,
         box: {},
-        detail: `Tab did not move focus away from this element after step ${i + 1} (trap)`,
+        detail: `Tab did not move focus away from this element after step ${i + 1} (trap). path=${JSON.stringify(path)}`,
       });
       break;
     }
     prevSig = sig;
-    if (sig.startsWith("console-text::") || sig.startsWith("console-send::")) {
+    if (info.testid === "console-text" || info.testid === "console-send") {
       reachedComposer = true;
       break;
     }
@@ -640,7 +706,9 @@ async function checkFocusOrder(page, route) {
       rule: "focus-order",
       selector: route,
       box: {},
-      detail: `composer (console-text) not reached from document start within ${maxSteps} Tab presses (${focusableCount} focusable elements on page)`,
+      detail:
+        `composer (console-text) not reached from document start within ${maxSteps} Tab presses ` +
+        `(${focusableCount} focusable elements on page). focus sequence: ${JSON.stringify(path)}`,
     });
   }
   return violations;
@@ -748,7 +816,61 @@ function gitShortSha() {
   return res.stdout.trim() || "unknown";
 }
 
+/**
+ * Phase 88（受け入れ条件 3、任意）: `--routes <glob>` と `--repeat <N>` を読む。どちらも既定値のままなら
+ * これまでどおり全 26 route を 1 回だけ回る（既存の `pnpm mobile-audit` の挙動に影響しない）。
+ * `--routes` はカンマ区切りで複数指定でき、各要素は `route` id（`scripts/lib/celeris-fixture.mjs::buildRoutes`
+ * の `route`。例: `home`、`task-overview`）に対する `*` ワイルドカード付きの前方一致もどき（単純な
+ * `RegExp` 変換）。1 画面だけ直しているときに 26 route × light/dark をフルで回さずに済むようにする
+ * （反復のたびに `pnpm build` からやり直す必要はないので、`MOBILE_AUDIT_SKIP_BUILD=1` と組み合わせて使う
+ * 想定）。
+ */
+function parseCliArgs(argv) {
+  let routes = null;
+  let repeat = 1;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--routes" || arg === "--repeat") {
+      const value = argv[i + 1];
+      if (value === undefined) throw new Error(`mobile-audit: ${arg} には値が要ります`);
+      if (arg === "--routes") routes = value;
+      else repeat = Number.parseInt(value, 10);
+      i += 1;
+    } else if (arg.startsWith("--routes=")) {
+      routes = arg.slice("--routes=".length);
+    } else if (arg.startsWith("--repeat=")) {
+      repeat = Number.parseInt(arg.slice("--repeat=".length), 10);
+    }
+  }
+  if (!Number.isFinite(repeat) || repeat < 1) throw new Error("mobile-audit: --repeat は 1 以上の整数にしてください");
+  return { routes, repeat };
+}
+
+/** `--routes` のカンマ区切りパターン（`*` だけをワイルドカードとして扱う）に一致する route を選ぶ。 */
+function filterRoutes(routes, pattern) {
+  if (!pattern) return routes;
+  const patterns = pattern
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0);
+  const regexes = patterns.map((p) => new RegExp(`^${p.split("*").map(escapeRegExp).join(".*")}$`));
+  const selected = routes.filter((r) => regexes.some((re) => re.test(r.route)));
+  if (selected.length === 0) {
+    throw new Error(
+      `mobile-audit: --routes "${pattern}" に一致する route が無い（${routes.map((r) => r.route).join(", ")}）`,
+    );
+  }
+  return selected;
+}
+
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 async function main() {
+  const { routes: routesPattern, repeat } = parseCliArgs(process.argv.slice(2));
+  const selectedRoutes = filterRoutes(ROUTES, routesPattern);
+
   fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const name of fs.readdirSync(OUT_DIR)) fs.rmSync(path.join(OUT_DIR, name), { force: true });
 
@@ -773,9 +895,11 @@ async function main() {
     stdio: ["ignore", guiLog, guiLog],
   });
 
-  const allViolations = [];
-  const routeReports = [];
-  const perfRecords = [];
+  // Phase 88（受け入れ条件 3、任意）: `--repeat` はブラウザ・偽の celeris・ビルドした GUI サーバを
+  // 使い回したまま（下で 1 回だけ起動する）、route/scheme の歩みだけを N 回繰り返す（`focus-order` の
+  // ようなフレークを手元で再現・確認するとき、毎回 `pnpm build` からやり直すより速い）。既定の
+  // `repeat=1` ではこれまでの「1 回だけ回る」挙動と 1 バイトも変わらない。
+  let anyFailed = false;
   let browser;
   try {
     await waitForHealth(`http://${guiBind}/healthz`);
@@ -836,163 +960,193 @@ async function main() {
     ].join("\n");
     await context.addInitScript(auditSource);
 
-    // Phase 75（ADR-0055 D1、P-G30-1 の一環でダークモードも監査対象に）: 各画面を light / dark の
-    // 両方の `prefers-color-scheme` で開く。`page.emulateMedia` は `goto` 前に設定すれば初回描画から
-    // 反映される（`app/app.css` の `@media (prefers-color-scheme: dark)` がトークンを切り替える作り）。
-    for (const { route, path: routePath } of ROUTES) {
-      for (const scheme of /** @type {const} */ (["light", "dark"])) {
-        // Phase 87（監査レポートの証跡強化）: どのルートが監査の実行時間を食っているかを見えるようにする。
-        const routeStartedAt = Date.now();
-        const page = await context.newPage();
-        await page.emulateMedia({ colorScheme: scheme });
-        const pageErrors = [];
-        page.on("pageerror", (err) => pageErrors.push(err.message));
+    // Phase 88（受け入れ条件 3、任意）: `--repeat` の回数だけ、この route/scheme の歩みをまるごと
+    // 繰り返す（ブラウザ・偽の celeris・GUI サーバは上で 1 回起動したものを使い回す）。各回の集計は
+    // 独立させる（`allViolations` 等をループの内側で作り直す）。既定の `repeat=1` なら 1 回だけ回る。
+    for (let rep = 1; rep <= repeat; rep += 1) {
+      const allViolations = [];
+      const routeReports = [];
+      const perfRecords = [];
+      // Phase 75（ADR-0055 D1、P-G30-1 の一環でダークモードも監査対象に）: 各画面を light / dark の
+      // 両方の `prefers-color-scheme` で開く。`page.emulateMedia` は `goto` 前に設定すれば初回描画から
+      // 反映される（`app/app.css` の `@media (prefers-color-scheme: dark)` がトークンを切り替える作り）。
+      for (const { route, path: routePath } of selectedRoutes) {
+        for (const scheme of /** @type {const} */ (["light", "dark"])) {
+          // Phase 87（監査レポートの証跡強化）: どのルートが監査の実行時間を食っているかを見えるようにする。
+          const routeStartedAt = Date.now();
+          const page = await context.newPage();
+          await page.emulateMedia({ colorScheme: scheme });
+          const pageErrors = [];
+          page.on("pageerror", (err) => pageErrors.push(err.message));
 
-        // Phase 77（`perf`）: light だけ CPU x4 スロットリング（ミッドレンジ機の近似）を掛け、この
-        // ページが読み込む JS/CSS の転送量を数える。dark はここを飛ばす（色だけが変わるので、転送量・
-        // DOM 数・LCP は light とほぼ同じと見なして、実行時間を抑える。D1 のこれまでのラウンドと同じ判断）。
-        const perfResponses = [];
-        let cdpSession;
-        /** @param {import("@playwright/test").Response} res */
-        function onPerfResponse(res) {
-          const resourceType = res.request().resourceType();
-          if (resourceType !== "script" && resourceType !== "stylesheet") return;
-          const lenHeader = res.headers()["content-length"];
-          const bytes = lenHeader ? Number.parseInt(lenHeader, 10) : Number.NaN;
-          if (!Number.isFinite(bytes)) return; // Content-Length が無い応答（SSE 等）は数えない
-          perfResponses.push({ resourceType, bytes });
-        }
-        if (scheme === "light") {
-          cdpSession = await context.newCDPSession(page);
-          await cdpSession.send("Emulation.setCPUThrottlingRate", { rate: CPU_THROTTLING_RATE });
-          page.on("response", onPerfResponse);
-        }
-
-        const response = await page.goto(`http://${guiBind}${routePath}`, { waitUntil: "load" });
-        // `load` が発火した時点で数え終える（「初回ナビゲーションの転送量」の境界。`load` は寄稿元 HTML が
-        // 参照する静的なリソースの完了を待つが、ハイドレーション中に React.lazy が発行する動的 import() の
-        // 応答は待たない。ここで listener を外さないと、あとの `checkFocusOrder`/`PERF_SETTLE_MS` の待ちの
-        // 間に届くその種の遅延チャンクまで数えてしまい、遅延読み込みで減らしたはずの初回転送量が見かけ上
-        // 減らない）。
-        page.off("response", onPerfResponse);
-        const status = response?.status() ?? 0;
-        if (status !== 200) {
-          allViolations.push({
-            route,
-            scheme,
-            rule: "http-status",
-            selector: routePath,
-            box: {},
-            detail: `GET ${routePath} -> ${status}`,
-          });
-        } else {
-          const violations = await page.evaluate(() => window.__runMobileAudit());
-          for (const v of violations) allViolations.push({ route, scheme, ...v });
-          // Phase 76: フォーカス順（`focus-order`）はページごとに実際の Tab キーで確かめる必要があるので
-          // `page.evaluate` 単体の `runChecks` には入れず、ここで別枠として呼ぶ。
-          const focusViolations = await checkFocusOrder(page, route);
-          for (const v of focusViolations) allViolations.push({ route, scheme, ...v });
-
-          if (scheme === "light") {
-            // スロットリング下のハイドレーション・LCP 確定を待つ（`load` の時点ではまだのことがある）。
-            await page.waitForTimeout(PERF_SETTLE_MS);
-            const metrics = await readPerfMetrics(page);
-            const jsBytes = perfResponses.filter((r) => r.resourceType === "script").reduce((a, r) => a + r.bytes, 0);
-            const cssBytes = perfResponses
-              .filter((r) => r.resourceType === "stylesheet")
-              .reduce((a, r) => a + r.bytes, 0);
-            const jsChunks = perfResponses.filter((r) => r.resourceType === "script").length;
-            const record = {
-              route,
-              js_bytes: jsBytes,
-              css_bytes: cssBytes,
-              js_chunks: jsChunks,
-              dom_nodes: metrics.domNodes,
-              fcp_ms: metrics.fcpMs,
-              lcp_ms: metrics.lcpMs,
-            };
-            perfRecords.push(record);
-            for (const v of checkPerfBudget(record)) allViolations.push({ route, scheme: "light", ...v });
+          // Phase 77（`perf`）: light だけ CPU x4 スロットリング（ミッドレンジ機の近似）を掛け、この
+          // ページが読み込む JS/CSS の転送量を数える。dark はここを飛ばす（色だけが変わるので、転送量・
+          // DOM 数・LCP は light とほぼ同じと見なして、実行時間を抑える。D1 のこれまでのラウンドと同じ判断）。
+          const perfResponses = [];
+          let cdpSession;
+          /** @param {import("@playwright/test").Response} res */
+          function onPerfResponse(res) {
+            const resourceType = res.request().resourceType();
+            if (resourceType !== "script" && resourceType !== "stylesheet") return;
+            const lenHeader = res.headers()["content-length"];
+            const bytes = lenHeader ? Number.parseInt(lenHeader, 10) : Number.NaN;
+            if (!Number.isFinite(bytes)) return; // Content-Length が無い応答（SSE 等）は数えない
+            perfResponses.push({ resourceType, bytes });
           }
+          if (scheme === "light") {
+            cdpSession = await context.newCDPSession(page);
+            await cdpSession.send("Emulation.setCPUThrottlingRate", { rate: CPU_THROTTLING_RATE });
+            page.on("response", onPerfResponse);
+          }
+
+          const response = await page.goto(`http://${guiBind}${routePath}`, { waitUntil: "load" });
+          // `load` が発火した時点で数え終える（「初回ナビゲーションの転送量」の境界。`load` は寄稿元 HTML が
+          // 参照する静的なリソースの完了を待つが、ハイドレーション中に React.lazy が発行する動的 import() の
+          // 応答は待たない。ここで listener を外さないと、あとの `checkFocusOrder`/`PERF_SETTLE_MS` の待ちの
+          // 間に届くその種の遅延チャンクまで数えてしまい、遅延読み込みで減らしたはずの初回転送量が見かけ上
+          // 減らない）。
+          page.off("response", onPerfResponse);
+          const status = response?.status() ?? 0;
+          if (status !== 200) {
+            allViolations.push({
+              route,
+              scheme,
+              rule: "http-status",
+              selector: routePath,
+              box: {},
+              detail: `GET ${routePath} -> ${status}`,
+            });
+          } else {
+            // `runChecks`（D1-1〜D1-6、a11y-name/structure）は Phase 76 以来、`load` 直後の DOM をそのまま見る
+            // 作り（他のラウンドの既存の挙動）。ここに `waitForPageIdle` を挟むと、`focus-order` とは無関係な
+            // 別の画面（例: `/projects/:id` の `WorkTreeGraph`、`@xyflow/react` の dagre レイアウトが
+            // `useEffect` で非同期に確定する）まで待たせてしまい、Phase 88 のスコープ外の潜在バグ
+            // （レイアウト確定後にグラフが 393px を飛び出す、ズームボタンが 44×44 未満）を新たに検出・
+            // 破壊してしまう（実際に試して確認した）。`focus-order` の修正は `checkFocusOrder` の中だけに
+            // 閉じる（下記）。
+            const violations = await page.evaluate(() => window.__runMobileAudit());
+            for (const v of violations) allViolations.push({ route, scheme, ...v });
+
+            if (scheme === "light") {
+              // スロットリング下のハイドレーション・LCP 確定を待つ（`load` の時点ではまだのことがある）。
+              await page.waitForTimeout(PERF_SETTLE_MS);
+              const metrics = await readPerfMetrics(page);
+              const jsBytes = perfResponses.filter((r) => r.resourceType === "script").reduce((a, r) => a + r.bytes, 0);
+              const cssBytes = perfResponses
+                .filter((r) => r.resourceType === "stylesheet")
+                .reduce((a, r) => a + r.bytes, 0);
+              const jsChunks = perfResponses.filter((r) => r.resourceType === "script").length;
+              const record = {
+                route,
+                js_bytes: jsBytes,
+                css_bytes: cssBytes,
+                js_chunks: jsChunks,
+                dom_nodes: metrics.domNodes,
+                fcp_ms: metrics.fcpMs,
+                lcp_ms: metrics.lcpMs,
+              };
+              perfRecords.push(record);
+              for (const v of checkPerfBudget(record)) allViolations.push({ route, scheme: "light", ...v });
+              // Phase 88（`focus-order` のフレーク解消）: perf 計測が終わったら CPU スロットリングを元に
+              // 戻してから `checkFocusOrder` に入る。スロットリング下のままだと、Tab でフォーカスが
+              // `console-stream`（内側スクロール領域）の奥へ動くたびに走る「最新へ」ボタンの表示判定
+              // （スクロールに連動する React の再描画）が 4 倍遅れ、次の Tab 押下と衝突して
+              // `document.activeElement` が一瞬 `<body>` に落ちる（＝「歩き終えた」と誤認する）ことがある
+              // （Phase 87 merge 後に 1 回だけ踏んだ `home` light のフレークの再現に成功。単体の
+              // デバッグスクリプトでスロットリング無しなら 15/15 回とも `composer` に届き、スロットリング
+              // 有りだと崩れることを確認した）。`focus-order` は実際のキー入力の応答性を見る検査なので、
+              // ミッドレンジ機の近似（`perf`）とは切り離して素の速度で行うのが筋でもある。
+              await cdpSession?.send("Emulation.setCPUThrottlingRate", { rate: 1 }).catch(() => {});
+            }
+            // Phase 76: フォーカス順（`focus-order`）はページごとに実際の Tab キーで確かめる必要があるので
+            // `page.evaluate` 単体の `runChecks` には入れず、ここで別枠として呼ぶ。
+            const focusViolations = await checkFocusOrder(page, route);
+            for (const v of focusViolations) allViolations.push({ route, scheme, ...v });
+          }
+          await cdpSession?.detach().catch(() => {});
+          if (pageErrors.length > 0) {
+            allViolations.push({
+              route,
+              scheme,
+              rule: "page-error",
+              selector: routePath,
+              box: {},
+              detail: pageErrors.join(" / "),
+            });
+          }
+          // light は既存どおり `<route>.png`、dark は `<route>.dark.png`（目視差分用。git には入れない）。
+          const shotName = scheme === "dark" ? `${route}.dark.png` : `${route}.png`;
+          const shotPath = path.join(OUT_DIR, shotName);
+          await page.screenshot({ path: shotPath, fullPage: true }).catch(() => {});
+          routeReports.push({ route, path: routePath, scheme, status, duration_ms: Date.now() - routeStartedAt });
+          await page.close();
         }
-        await cdpSession?.detach().catch(() => {});
-        if (pageErrors.length > 0) {
-          allViolations.push({
-            route,
-            scheme,
-            rule: "page-error",
-            selector: routePath,
-            box: {},
-            detail: pageErrors.join(" / "),
-          });
-        }
-        // light は既存どおり `<route>.png`、dark は `<route>.dark.png`（目視差分用。git には入れない）。
-        const shotName = scheme === "dark" ? `${route}.dark.png` : `${route}.png`;
-        const shotPath = path.join(OUT_DIR, shotName);
-        await page.screenshot({ path: shotPath, fullPage: true }).catch(() => {});
-        routeReports.push({ route, path: routePath, scheme, status, duration_ms: Date.now() - routeStartedAt });
-        await page.close();
       }
+
+      // Phase 88（受け入れ条件 3、任意）: `--repeat` のときはレポート・要約を回ごとに出す（`report.json`
+      // は毎回上書きするので最後の回の中身が残る。`rep`/`repeat` を JSON と 1 行要約の両方に足す）。
+      fs.writeFileSync(
+        REPORT_PATH,
+        JSON.stringify(
+          {
+            generated_at: new Date().toISOString(),
+            // Phase 87（監査レポートの証跡強化）: どの HEAD に対する監査結果かをレポート自身に残す
+            // （`docs/PROGRESS.md`/`gui/docs/PROGRESS.md` に貼るときにコミットとの対応が一目で分かるように）。
+            git_sha: gitSha,
+            routes: routeReports,
+            violations: allViolations,
+            perf: perfRecords,
+            perf_budget: PERF_BUDGET,
+          },
+          null,
+          2,
+        ),
+      );
+
+      const byRule = {};
+      const byScheme = { light: 0, dark: 0 };
+      for (const v of allViolations) {
+        byRule[v.rule] = (byRule[v.rule] ?? 0) + 1;
+        if (v.scheme) byScheme[v.scheme] = (byScheme[v.scheme] ?? 0) + 1;
+      }
+      // Phase 87: 性能予算表の中で最も重い（js+css 転送量が最大の）ルートを 1 つ拾い、一行まとめに出す
+      // （`perf` は light scheme だけで計るので、ここも light の合計で比べる）。
+      let perfWorst = null;
+      for (const r of perfRecords) {
+        const totalKb = (r.js_bytes + r.css_bytes) / 1024;
+        if (!perfWorst || totalKb > perfWorst.totalKb) perfWorst = { route: r.route, totalKb };
+      }
+      // `gui/biome.json` は `console.log` を禁止している（`error`/`warn` だけ許可）ので `console.error` で出す。
+      console.error(formatPerfTable(perfRecords));
+      console.error(
+        JSON.stringify(
+          {
+            ok: allViolations.length === 0,
+            total: allViolations.length,
+            by_rule: byRule,
+            by_scheme: byScheme,
+            git_sha: gitSha,
+            report: REPORT_PATH,
+            ...(repeat > 1 ? { rep, repeat } : {}),
+          },
+          null,
+          2,
+        ),
+      );
+      // Phase 87（監査スクリプトの堅牢化）: JSON を読まなくても目で追える 1 行の要約。
+      console.error(
+        `routes=${selectedRoutes.length} schemes=2 violations=${allViolations.length} ` +
+          `perf_worst=${perfWorst?.route ?? "-"} ${perfWorst ? perfWorst.totalKb.toFixed(1) : "0.0"}KB` +
+          (repeat > 1 ? ` rep=${rep}/${repeat}` : ""),
+      );
+      if (allViolations.length > 0) anyFailed = true;
     }
   } finally {
     await browser?.close();
     gui.kill("SIGTERM");
     await mock.close();
   }
-
-  fs.writeFileSync(
-    REPORT_PATH,
-    JSON.stringify(
-      {
-        generated_at: new Date().toISOString(),
-        // Phase 87（監査レポートの証跡強化）: どの HEAD に対する監査結果かをレポート自身に残す
-        // （`docs/PROGRESS.md`/`gui/docs/PROGRESS.md` に貼るときにコミットとの対応が一目で分かるように）。
-        git_sha: gitSha,
-        routes: routeReports,
-        violations: allViolations,
-        perf: perfRecords,
-        perf_budget: PERF_BUDGET,
-      },
-      null,
-      2,
-    ),
-  );
-
-  const byRule = {};
-  const byScheme = { light: 0, dark: 0 };
-  for (const v of allViolations) {
-    byRule[v.rule] = (byRule[v.rule] ?? 0) + 1;
-    if (v.scheme) byScheme[v.scheme] = (byScheme[v.scheme] ?? 0) + 1;
-  }
-  // Phase 87: 性能予算表の中で最も重い（js+css 転送量が最大の）ルートを 1 つ拾い、一行まとめに出す
-  // （`perf` は light scheme だけで計るので、ここも light の合計で比べる）。
-  let perfWorst = null;
-  for (const r of perfRecords) {
-    const totalKb = (r.js_bytes + r.css_bytes) / 1024;
-    if (!perfWorst || totalKb > perfWorst.totalKb) perfWorst = { route: r.route, totalKb };
-  }
-  // `gui/biome.json` は `console.log` を禁止している（`error`/`warn` だけ許可）ので `console.error` で出す。
-  console.error(formatPerfTable(perfRecords));
-  console.error(
-    JSON.stringify(
-      {
-        ok: allViolations.length === 0,
-        total: allViolations.length,
-        by_rule: byRule,
-        by_scheme: byScheme,
-        git_sha: gitSha,
-        report: REPORT_PATH,
-      },
-      null,
-      2,
-    ),
-  );
-  // Phase 87（監査スクリプトの堅牢化）: JSON を読まなくても目で追える 1 行の要約。
-  console.error(
-    `routes=${ROUTES.length} schemes=2 violations=${allViolations.length} ` +
-      `perf_worst=${perfWorst?.route ?? "-"} ${perfWorst ? perfWorst.totalKb.toFixed(1) : "0.0"}KB`,
-  );
-  process.exit(allViolations.length === 0 ? 0 : 1);
+  process.exit(anyFailed ? 1 : 0);
 }
 
 // Phase 87（監査スクリプトの堅牢化）: `pnpm mobile-audit`（`node scripts/mobile-audit.mjs`）として直接

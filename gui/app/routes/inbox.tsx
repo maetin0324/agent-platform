@@ -259,8 +259,8 @@ function ApprovalRow({ item, fetchedAt }: { item: ApprovalItem; fetchedAt: strin
       </p>
       {item.parent && (
         <p className="mt-1 flex flex-wrap items-center gap-1.5 text-fg-muted" data-testid="approval-parent-title">
-          親:{" "}
-          <Link to={`/tasks/${item.parent.id}`} className="hover:underline">
+          親: {/* ADR-0055 D1-2（Phase 88、`/inbox` の fixture 拡張で発見）: approval-title と同じタップ領域不足。 */}
+          <Link to={`/tasks/${item.parent.id}`} className="flex min-h-11 items-center hover:underline">
             {item.parent.title}
           </Link>
           （{item.parent.status}）
@@ -360,15 +360,17 @@ function QuestionRow({ item, fetchedAt }: { item: QuestionItem; fetchedAt: strin
         {item.question}
       </p>
       {approvalId !== null ? (
-        <p className="mt-3 border-t border-border pt-3">
+        <p className="mt-3 flex flex-wrap items-center gap-2 border-t border-border pt-3">
+          {/* ADR-0055 D1-2（Phase 88、`/inbox` の fixture 拡張で発見）: approval-title/question-title と
+              同じ、テキストだけの `<Link>` のタップ領域不足。 */}
           <Link
             to={`/approvals#approval-${approvalId}`}
             data-testid="question-approval-link"
-            className="font-medium underline underline-offset-2"
+            className="flex min-h-11 items-center font-medium underline underline-offset-2"
           >
             「認可」の画面で答える
           </Link>
-          <span className="ml-2 text-fg-subtle">
+          <span className="text-fg-subtle">
             （「今回だけ」か「今後ずっと」で答えます。同じ問いへの答えはそちらに集まります）
           </span>
         </p>
@@ -409,8 +411,9 @@ function DraftGroupRow({ group }: { group: DraftGroup }) {
   return (
     <li data-testid="draft-group" className="rounded-lg border border-border bg-surface p-4 text-sm shadow-xs">
       <p className="font-semibold text-fg">
+        {/* ADR-0055 D1-2（Phase 88、`/inbox` の fixture 拡張で発見）: approval-title と同じタップ領域不足。 */}
         {group.parent ? (
-          <Link to={`/tasks/${group.parent.id}`} className="hover:underline">
+          <Link to={`/tasks/${group.parent.id}`} className="flex min-h-11 items-center hover:underline">
             {group.parent.title}
           </Link>
         ) : (
@@ -425,12 +428,16 @@ function DraftGroupRow({ group }: { group: DraftGroup }) {
             data-testid="draft-item"
             className="flex flex-wrap items-center justify-between gap-2 pt-2 first:pt-0"
           >
-            <Link to={`/tasks/${draft.id}`} className="hover:underline">
+            {/* ADR-0055 D1-2（Phase 88、`/inbox` の fixture 拡張で発見）: approval-title と同じタップ領域不足。 */}
+            <Link to={`/tasks/${draft.id}`} className="flex min-h-11 items-center hover:underline">
               {draft.title}
             </Link>
             <fetcher.Form method="post" action="/inbox" className="flex gap-2">
               <input type="hidden" name="task_id" value={draft.id} />
               <input type="hidden" name="expected_status" value="draft" />
+              {/* ADR-0055 D1-4（Phase 88、`/inbox` の fixture 拡張で発見）: `size="xs"` は `text-xs`
+                  （12px）固定で、アイコンを伴わない文字だけのボタンだと本文扱いになる。`StatCard` 等と
+                  同じ「モバイルは text-sm、デスクトップは lg:text-xs」で上書きする。 */}
               <Button
                 type="submit"
                 name="intent"
@@ -439,6 +446,7 @@ function DraftGroupRow({ group }: { group: DraftGroup }) {
                 size="xs"
                 disabled={submitting}
                 data-testid="draft-approve"
+                className="text-sm lg:text-xs"
               >
                 受け入れ
               </Button>
@@ -450,6 +458,7 @@ function DraftGroupRow({ group }: { group: DraftGroup }) {
                 size="xs"
                 disabled={submitting}
                 data-testid="draft-cancel"
+                className="text-sm lg:text-xs"
               >
                 取り消し
               </Button>
@@ -471,7 +480,7 @@ function DraftGroupRow({ group }: { group: DraftGroup }) {
             size="xs"
             disabled={submitting}
             data-testid="draft-approve-all"
-            className="w-fit"
+            className="w-fit text-sm lg:text-xs"
           >
             この Plan の子を全部受け入れ
           </Button>
@@ -503,7 +512,8 @@ function AttentionRow({ item }: { item: Exclude<AttentionItem, { type: "cluster_
       className="rounded-lg border border-danger-border bg-danger-soft p-4 text-sm shadow-xs"
     >
       <p className="font-semibold text-danger-soft-fg">
-        <Link to={`/tasks/${item.task.id}`} className="hover:underline">
+        {/* ADR-0055 D1-2（Phase 88、`/inbox` の fixture 拡張で発見）: approval-title と同じタップ領域不足。 */}
+        <Link to={`/tasks/${item.task.id}`} className="flex min-h-11 items-center hover:underline">
           {item.task.title}
         </Link>
       </p>
@@ -526,7 +536,9 @@ function AttentionRow({ item }: { item: Exclude<AttentionItem, { type: "cluster_
           className="mt-3 flex flex-col gap-2 border-t border-danger-border/60 pt-3"
         >
           <input type="hidden" name="intent" value="retry" />
-          <label className="flex items-center gap-2 text-fg">
+          {/* ADR-0055 D1-2（Phase 88、`/inbox` の fixture 拡張で発見）: `app/routes/projects.$id.tsx`
+              の同じチェックボックスと同じ、タップ領域 44 以上の `min-h-11`。 */}
+          <label className="flex min-h-11 items-center gap-2 text-fg">
             <input type="checkbox" name="accept" value="true" className={checkboxClass} />
             受け入れ済み（ready）で始める
           </label>

@@ -13049,3 +13049,61 @@ GUI のみ（`crates/`・`docs/DESIGN.md`・`docs/SPEC.md`・ADR は無変更）
   （`home`: composer に 32 Tab で届かない）が出たが、再実行で **0 件**（`routes=26 schemes=2 violations=0`）。既知のフレーク（Phase 83 でも 1 回）。
   提案: `focus-order` の Tab 上限を焦点可能要素数 + 余裕に自動で合わせるか、1 回リトライする（次ラウンド候補）。
 - `release.sh` → `27e01218ed38`（schema 24）。`verify.sh` `ok=true live_ok=true` → `promote.sh` mode=live。本番 = Phase 65〜87。
+
+## Phase 88 — スマホ UX ラウンド 13（focus-order のフレーク解消と /inbox の残り。ADR-0055。2026-09-21）
+
+GUI のみ（`crates/`・`docs/DESIGN.md`・`docs/SPEC.md`・ADR は無変更）。Phase 87 の本番反映で観測された `focus-order`
+のフレーク（`home` light、`composer` に届かない）の根本原因を特定して解消し、Phase 87 の未解決事項（P-G39-1、
+`/inbox` の `draft-group`・`attention-item`・`approval-parent-title`・`question-approval-link` が fixture に無く
+機械検査を通っていない）を解消した。詳細・証跡は `gui/docs/PROGRESS.md`「Phase G40」を参照（GUI の実装詳細は
+gui 側に書く、このリポジトリの慣例どおり）。要点:
+
+1. **`focus-order` のフレークの根本原因と修正**: `gui/scripts/mobile-audit.mjs::checkFocusOrder` を単体で
+   （実 celeris ではなく Playwright を直接叩く手元スクリプトで）15 回連続実行しても再現しなかった一方、
+   `pnpm mobile-audit` フルランでは稀に再現する、という差から、`perf`（Phase 77）が light scheme に掛ける
+   CPU x4 スロットリング（`Emulation.setCPUThrottlingRate`）が `checkFocusOrder` の実行中もそのまま有効な
+   ことが原因だと特定した。スロットリング下では、Tab でフォーカスが Console の内側スクロール領域
+   （`console-stream`）の奥へ動くたびに走る「最新へ」ボタンの表示判定（スクロール連動の再描画）が 4 倍
+   遅れ、次の Tab 押下と衝突して `document.activeElement` が一瞬 `<body>` に落ちる（＝「歩き終えた」と
+   誤認され、`composer` 未到達の違反になる）ことがある。perf 計測（`PERF_SETTLE_MS` の待ちと LCP/JS/CSS の
+   読み取り）が終わった直後にスロットリングを `rate: 1` に戻してから `checkFocusOrder` を呼ぶ順序に変更した。
+   合わせて、Tab の予算計算と実際に歩く時点の DOM をそろえるための `waitForPageIdle`（`document.fonts.ready`
+   と DOM ノード総数の安定待ち。最大 5 秒）、要素の同一性を cssPathRef の再構築ではなく歩き始めに割り振る
+   一意な連番（`data-mobile-audit-focus-id`）で判定する堅牢化、予算内に届かなかったときに実際に辿った経路
+   （selector の列）を違反 `detail` に残す診断強化も行った。**`waitForPageIdle` は `focus-order` の検査
+   だけに閉じ**、D1-1〜D1-6 等の他の検査（`runChecks`）には掛けていない（`/projects/:id` の `WorkTreeGraph`
+   ＝ react-flow の dagre レイアウトが非同期に確定する画面まで待たせると、この Phase のスコープ外の別の
+   潜在バグ（レイアウト確定後にグラフが 393px を飛び出す等）を新たに検出・破壊してしまうことを実際に
+   試して確認したため）。修正後、`pnpm mobile-audit` を通算 8 回（うち `--repeat 3` の 1 回を含む）連続実行し、
+   すべて `violations=0` を確認した（下記ゲート参照）。
+2. **P-G39-1（`/inbox` の残りの題材を機械検査対象に）**: `scripts/lib/celeris-fixture.mjs` の `/inbox` fixture に
+   承認の親タスク（`approval-parent-title`）・`approval_id` 付きの質問（`question-approval-link`）・draft
+   グループ 1 件×draft 2 件（`draft-group`/`draft-item`）・attention 1 件（`attention-item`、`failed`）を足した。
+   これで描画されるようになった要素が新たに晒した違反（`tap-target` 2 種・`font-size` 5 種）を Phase 87 の
+   `approval-title` と同じ規律で直した（`app/routes/inbox.tsx` の該当リンク・ラベル・ボタンに
+   `flex min-h-11 items-center`／`text-sm lg:text-xs` を付けた）。
+3. **任意（受け入れ条件 3）**: `mobile-audit.mjs` に `--routes <glob>` と `--repeat <N>` を足した。ブラウザ・
+   偽の celeris・ビルド済み GUI サーバは 1 回だけ起動し、指定した route（`*` ワイルドカード、カンマ区切り）
+   だけを、指定回数繰り返す。1 画面だけ直しているときや `focus-order` のようなフレークを手元で再現・確認
+   するときに、毎回 `pnpm build` からフル 26 route を回すより大幅に速い。
+
+### ゲート（証拠コマンドと出力の要点。詳細は gui/docs/PROGRESS.md Phase G40）
+
+`pnpm gen:types && git diff --exit-code app/celeris/types.ts`（差分ゼロ）/ `pnpm lint`（exit 0、243 files、fix 無し）/
+`pnpm typecheck`（exit 0）/ `pnpm test`（exit 0、**Test Files 65 passed / Tests 1004 passed**、Phase 87 から件数
+不変）/ `pnpm build`（exit 0、既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件は変化なし）/ `pnpm mobile-audit`
+を通算 8 回連続実行し**すべて `exit 0`、`{"ok":true,"total":0}`、`routes=26 schemes=2 violations=0`**（原因
+特定前の 1 回だけ `focus-order` 1 件で失敗したことは上記本文のとおり。原因を直した後の 8 回はすべて 0 件）/
+`pnpm e2e:mock`（**`{"ok": true, "mode": "mock", "failures": []}`**）すべて exit 0。
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings` はこの
+Phase のスコープ外（実行していない。Phase 80/82/83/84/86/87 と同じ扱い）。
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34。サンドボックスに外向きネットワークが無い）。
+- `focus-order` のフレークは「CPU スロットリングと Console のスクロール連動の再描画の競合」という具体的な
+  機構まで特定・解消したが、Console 自体（`useConsoleStream`・「最新へ」ボタンの表示判定）は今回変更して
+  いない。実機・実 celeris（SSE が実際に `console.block` を流す環境）で同種の競合が起きないかは未確認
+  （このサンドボックスには本物の celeris が無いため）。
+- Phase 87 の未解決事項のうち P-G39-2（`cssPathRef` 等の単体テスト化の是非）は変化なし。
+- 本番 = Phase 65〜87。実装中: Phase 88（このワークトリー。GUI のみ）。
