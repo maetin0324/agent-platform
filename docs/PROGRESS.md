@@ -13603,3 +13603,112 @@ celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。mobile-
 - 本番で新たに有効になったもの: スクリーンショット総点検の修正 9 件（`PageToc` 目次、`/board` 絞り込みの折りたたみ、タスク概要の `compact` 空状態、「左の」文言除去、`WorkTree` 高さ 3 段階、タブ右端フェード、ワークスペースパスの省略、`text-pretty`、skills の `LocalTime`）。`pnpm screenshots:mobile` が追加された（52 枚、約 47 秒）。実機の見た目は人が確認する（ADR-0009 P-34）。
 - 運用メモ: Phase 95 のエージェントは点検を fork に分担したところ fork 側が実装・コミットまで進めた。成果はエージェント本体がゲートを再実行して検証済みだが、以後の指示書では fork を「読むだけ・報告だけ」に限定する文を入れた（Phase 96 から）。
 - 次: Phase 96（G46 の残り所見、GUI）と Phase 97（P-94-1 と P-G46-5、Rust）を Sonnet で並行起動済み。
+## Phase 97 — 小さな仕上げ 2 件: `gate.failed_step` の空文字正規化と知識 inbox タグ重複の源での除去（P-94-1、P-G46-5。2026-09-22）
+
+celeris のみ（Rust）。`docs/adr/0058-release-verify-breakdown.md`、Phase 94 の「気づき」P-94-1、Phase 95、
+`gui/docs/PROGRESS.md` Phase G46 の提案 P-G46-5 を前提に、2 つの小さな仕上げを行った。
+
+### 1. P-94-1: `ReleaseGate.failed_step` の空文字を `None` に正規化
+
+**条件**: 本番で確認された「ゲート成功時に `gate.json` が `failed_step: ""` を書き、`GET /releases` が
+それをそのまま `Some("")` として返す」を直し、`failed_step: ""` → `None`、`failed_step: "cargo-test"` →
+`Some("cargo-test")`、キー欠落 → `None` の 3 ケースが揃っていることをテストで示す。
+
+**実装**: `crates/celeris/src/releases.rs::read_gate` で、`failed_step` を読んだあと `str::trim` して空
+なら `None` に落とす（`.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)`）。`gate_ok`・
+`steps[]` の扱いは変えていない。`gui/docs/celeris-api-v1.md` の `GET /releases` 節（ADR-0058 の
+「増えた 2 つ」の `gate` の説明）に「`gate.failed_step` は成功時は `null`（Phase 97、P-94-1 で正規化）」
+と一行追記した（既存の記述は書き換えていない）。`scripts/selfdeploy/*` は触っていない。
+
+**テスト**（`crates/celeris/src/releases.rs`）: 新規 `gate_failed_step_empty_string_is_normalized_to_none`
+で 4 リリース分（`failed_step: ""` → `None`、`"   "`（トリム後に空）→ `None`、`"cargo-test"`（失敗）→
+`Some("cargo-test")`、キー自体が無い → `None`）を確認。既存の `verify_checks_and_gate_steps_are_carried_through`
+（`"cargo-test"` → `Some` を既にカバー）と `missing_checks_and_gate_default_to_empty_without_breaking_the_scan`
+（`{"ok":true}`＝キー欠落 → `None` を既にカバー）は変更していない（既に該当ケースを持っていたため）。
+
+**実行コマンドと出力の要点**:
+
+| コマンド | 出力の要点 |
+| --- | --- |
+| `cargo test -p celeris --lib releases::` | exit 0。**15 passed**（新規 1 件を含む。他 14 件は既存） |
+
+### 2. P-G46-5: 知識 inbox 候補のタグ重複を源で除く
+
+**調査**: `crates/task-api/src/knowledge.rs::inbox`（`GET /knowledge/inbox`）→
+`task_ops::knowledge::inbox_list`/`inbox_get` → `task_core::knowledge::front_matter` の経路をたどった。
+GUI 側の仮説（「frontmatter の `tags` と LangMem/整理 run の付与タグの合流」）は**celeris のコードには無い**
+と確認した: `crates/task-ops/src/knowledge.rs` を全数調べたところ、`tags` を**複数の出どころから合流**
+させる箇所は無い（`sources` は `commit_candidate_directly`/`write_inbox_candidate` で既存ページの
+`sources` と新しい `sources` を `!sources.contains(&s)` で重複排除しながら合流させているが、同じ関数の
+`tags` は候補の値をそのまま `candidate.tags.clone()` で使うだけで、既存ページの tags とは一切混ぜていない）。
+
+一方で、**タグそのものに重複が入りうる経路が 3 つ**あることが分かった。いずれも「同じ入力元が重複した値を
+渡してきたときにそのまま素通りする」という形（celeris が合流させて重複を作るのではなく、除去する場所が
+どこにも無かった）:
+
+1. `record()`（`celerisctl knowledge record --tags a,a` / API 経由。人・ワーカーの入力）
+2. `commit_candidate_directly()`（LangMem 整理 run が書く `artifacts/knowledge-candidates.json` の
+   `Candidate.tags` を `confidence=high` の `create`/`update` で KB へ直接コミットする経路）
+3. `write_inbox_candidate()`（同じ `Candidate.tags` を `_inbox/` へ書く経路。GUI の `knowledge-inbox` 画面
+   が表示する候補はここを通る）
+
+`Candidate.tags`（LangMem アダプタの JSON 出力）は celeris の外（LLM）が組み立てる値で、同じタグを 2 回
+書いてくることを止める仕組みがどこにも無かった。これが P-G46-5 で観測された「同じタグが 2 回表示される」
+の実際に起こりうる経路と判断した（mock fixture 由来の可能性もゼロではないが、celeris 側にも独立した経路
+がある以上、celeris 側を直すのが筋）。
+
+**実装**: `crates/task-ops/src/knowledge.rs` に `dedup_tags_preserve_order`（`HashSet` で見た値を弾きながら
+順序を保って集める。大文字小文字は区別する＝正規化はしない）を追加し、上記 3 箇所（`record`・
+`commit_candidate_directly`・`write_inbox_candidate`）の `tags` 組み立てに適用した。**保存時（`_inbox/*.md`
+または KB ページへ書き込む直前）に重複を除く**ことで、`GET /knowledge/inbox` や `GET /knowledge/page` が
+読む front matter そのものに重複が入らないようにした（読み取り側では何もしていない＝1 か所で直せば
+どの読み取り経路からも重複が見えない）。
+
+**テスト**（`crates/task-ops/src/knowledge.rs`）:
+- `record_deduplicates_tags_preserving_order`: `["environment","hpc","environment","Environment"]` を渡すと
+  `["environment","hpc","Environment"]`（`Environment` は大文字が違うので別タグとして残る）。
+- `apply_candidates_deduplicates_candidate_tags_on_both_write_paths`: `candidate.tags` に
+  `["hpc","tool","hpc"]` を持たせ、`confidence=high`（直接コミット）と `confidence=medium`（`_inbox/`）の
+  両方の書き込み結果ファイルが `tags: [hpc, tool]`（重複無し）になることを確認。
+
+**実行コマンドと出力の要点**:
+
+| コマンド | 出力の要点 |
+| --- | --- |
+| `cargo test -p task-ops --lib knowledge::` | exit 0。**20 passed**（新規 2 件を含む） |
+
+### ゲート（証拠コマンドと出力の要点、両方の受け入れ条件に共通）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（全 `test result: ok` 行の passed 合計 **1792**、failed 合計 0） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+
+`crates/task-api/src/types.rs` は変更していない（`ReleaseGate.failed_step` は元から `Option<String>` で
+型は変わらず、知識 inbox の型も変えていない）ため、`UPDATE_SCHEMA=1` でのスキーマ再生成・GUI の
+`pnpm gen:types` はどちらも不要（`git status` で `docs/api/v1/api-v1.schema.json` に差分が無いことを確認）。
+
+### 変更したファイル
+
+- `crates/celeris/src/releases.rs`（`read_gate` の `failed_step` 正規化、テスト 1 件追加）
+- `crates/task-ops/src/knowledge.rs`（`dedup_tags_preserve_order` 追加、`record`/`commit_candidate_directly`/
+  `write_inbox_candidate` に適用、テスト 2 件追加）
+- `gui/docs/celeris-api-v1.md`（`GET /releases` の `gate.failed_step` の説明に 1 行追記）
+- `docs/PROGRESS.md`（本節）
+
+### 未解決事項
+
+- 本番での確認（`GET /releases` の `failed_step` が成功リリースで `null` になること）は、指示書のとおり
+  親エージェントが昇格後に行う。
+- P-G46-5 について: mock fixture（GUI 側、`gui/test/mock-celeris/fixtures.ts`）に重複タグがあるかどうかは
+  この Phase では見ていない（celeris 側の触ってよい範囲外。`gui/app/**` は Phase 96 と競合するため未触）。
+  celeris 側の経路を塞いだので、次に GUI 側で表示確認するときに mock fixture 側も直っているべきなら
+  GUI 側の Phase で見る。
+- 既存の `_inbox/` にすでに重複タグを持つファイルがある場合（この Phase 以前に record/整理 run で書かれた
+  もの）は、保存時の重複排除では遡って直らない（読み取ったときの front matter をそのまま返す設計 = ADR-0058
+  と同じ「celeris が書いた値をそのまま出す」方針を踏襲したため）。実害が見つかれば、次のラウンドで
+  `inbox_get`/`page` の読み取り側にも防御的な重複排除を足すことを検討する。
+
+### 提案
+
+- なし（今回の 2 件は既存の指示の範囲で閉じた）。

@@ -79,6 +79,14 @@ fn author_args(name: &str, email: &str) -> (String, String) {
     (format!("user.name={name}"), format!("user.email={email}"))
 }
 
+/// P-G46-5: タグの重複を**源で**除く（`celerisctl knowledge record --tags a,a` の人手入力や、
+/// LangMem 整理 run が書く `Candidate.tags` に同じ値が並んでいた場合の保険）。順序を保ち、
+/// 大文字小文字は区別する（正規化はしない）。
+fn dedup_tags_preserve_order(tags: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    tags.into_iter().filter(|t| seen.insert(t.clone())).collect()
+}
+
 fn commit_paths(
     root: &Path,
     message: &str,
@@ -832,12 +840,14 @@ pub fn record(root: &Path, request: &RecordRequest) -> Result<RecordOutcome, Rec
     let page = kb::render_page(
         &FrontMatter {
             title: Some(title.to_string()),
-            tags: request
-                .tags
-                .iter()
-                .map(|t| t.trim().to_string())
-                .filter(|t| !t.is_empty())
-                .collect(),
+            tags: dedup_tags_preserve_order(
+                request
+                    .tags
+                    .iter()
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect(),
+            ),
             scope: Some(scope.to_string()),
             sources,
             created: Some(today()),
@@ -1259,7 +1269,7 @@ fn commit_candidate_directly(
         .unwrap_or_else(today);
     let front = FrontMatter {
         title: Some(candidate.title.trim().to_string()),
-        tags: candidate.tags.clone(),
+        tags: dedup_tags_preserve_order(candidate.tags.clone()),
         scope: Some(candidate.scope.trim().to_string()).filter(|s| !s.is_empty()),
         sources,
         created: Some(created),
@@ -1318,7 +1328,7 @@ fn write_inbox_candidate(
     }
     let front = FrontMatter {
         title: Some(candidate.title.trim().to_string()),
-        tags: candidate.tags.clone(),
+        tags: dedup_tags_preserve_order(candidate.tags.clone()),
         scope: Some(candidate.scope.trim().to_string()).filter(|s| !s.is_empty()),
         sources,
         created: Some(today()),
@@ -1801,6 +1811,36 @@ mod tests {
         assert_eq!(inbox_list(&root).len(), 1);
     }
 
+    /// P-G46-5: `celerisctl knowledge record --tags a,a` のように人が同じタグを重ねて渡しても、
+    /// `_inbox/` に書く時点（保存時）で順序を保ったまま重複を除く。大文字小文字は区別する。
+    #[test]
+    fn record_deduplicates_tags_preserving_order() {
+        let (_dir, root) = kb_dir();
+        let ok = record(
+            &root,
+            &RecordRequest {
+                title: "重複タグ".into(),
+                scope: "environment".into(),
+                tags: vec![
+                    "environment".into(),
+                    "hpc".into(),
+                    "environment".into(),
+                    "Environment".into(),
+                ],
+                sources: vec!["human".into()],
+                body: "本文。".into(),
+                ..RecordRequest::default()
+            },
+        )
+        .expect("record");
+        let item = inbox_get(&root, &ok.id).expect("inbox item");
+        assert_eq!(
+            item.tags,
+            vec!["environment".to_string(), "hpc".to_string(), "Environment".to_string()],
+            "順序を保ったまま重複だけ除く。大文字小文字は別のタグとして残る"
+        );
+    }
+
     /// ADR-0047 D5: accept は正本へ移してコミットし、reject は捨てる。
     #[test]
     fn inbox_accept_and_reject_commit_to_git() {
@@ -2061,6 +2101,35 @@ mod tests {
         assert!(raw2.contains("task:01J1"), "{raw2}");
         assert!(raw2.contains("task:01J2"), "{raw2}");
         assert_eq!(history(&root, "environment/tools/newtool.md").len(), 2);
+    }
+
+    /// P-G46-5: LangMem 整理 run が書く `Candidate.tags` に同じ値が並んでいても、直接コミット
+    /// （`commit_candidate_directly`）と `_inbox/` 行き（`write_inbox_candidate`）のどちらでも
+    /// 保存時に順序を保ったまま重複を除く。
+    #[test]
+    fn apply_candidates_deduplicates_candidate_tags_on_both_write_paths() {
+        let (_dir, root) = kb_dir();
+        let mut direct = candidate(
+            kb::CandidateOp::Create,
+            "environment/tools/newtool.md",
+            Confidence::High,
+        );
+        direct.tags = vec!["hpc".into(), "tool".into(), "hpc".into()];
+        let out = apply_candidates(&root, "01JTASK", &[direct]);
+        assert_eq!(out.committed, vec!["environment/tools/newtool.md"]);
+        let raw = std::fs::read_to_string(root.join("environment/tools/newtool.md")).expect("read");
+        assert!(raw.contains("tags: [hpc, tool]"), "{raw}");
+
+        let mut inboxed = candidate(
+            kb::CandidateOp::Create,
+            "environment/tools/other.md",
+            Confidence::Medium,
+        );
+        inboxed.tags = vec!["hpc".into(), "tool".into(), "hpc".into()];
+        let out2 = apply_candidates(&root, "01JTASK2", &[inboxed]);
+        assert_eq!(out2.inboxed.len(), 1, "{out2:?}");
+        let raw2 = std::fs::read_to_string(root.join(&out2.inboxed[0])).expect("read");
+        assert!(raw2.contains("tags: [hpc, tool]"), "{raw2}");
     }
 
     /// ADR-0047 D4: `merge`/`retire` は常に `_inbox/` へ（`confidence = high` でも直接コミットしない）。

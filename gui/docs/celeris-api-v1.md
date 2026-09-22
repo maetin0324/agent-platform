@@ -1732,6 +1732,8 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
   `steps[]` の各段は `{step, exit, secs}`（`gate.json` にある `log`＝ログのファイル名は運ばない。
   本番ホストのローカルパスで GUI からは読めないため）。`gate.json` が読めない・壊れているときは
   `gate: null`（そのときも `gate_ok` は従来どおり `false` のまま出る。一覧は落ちない）。
+  `gate.failed_step` は**成功時は `null`**（`release.sh` が書く `gate.json` の `failed_step: ""` は
+  celeris がトリムして空なら `None` に正規化してから運ぶ。Phase 97、P-94-1）。
 
 #### 3.67 `POST /releases/{sha12}/promote` → 202 `ReleasePromoteAccepted`（**管理系: `token_file` 未設定でも 401**）
 
