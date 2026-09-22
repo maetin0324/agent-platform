@@ -7232,3 +7232,165 @@ to submit to it. To fix this, please add an `action` function to the route"）�
 ### 提案
 
 - なし（今回の指示の範囲で閉じた）。
+## Phase G47 — G46 の残り所見を直す（ADR-0055 ラウンド 20、celeris Phase 97 と並行。2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。Phase G46 が提案のまま残した所見のうち、
+P-G46-1・3・4・6 と、ダークモードの面の区別（提案のみだった件）を扱った。P-G46-5（`knowledge-inbox` の
+タグ重複）は celeris 側 Phase 97 がタグ重複を源で直すため、このフェーズでは触っていない。P-G46-2
+（タスク詳細「概要」タブの空状態を 1 枚にまとめる設計変更）も Phase G46 と同じ理由（今回のスコープを
+超える）で見送り、提案として残した。
+
+### 1. P-G46-1 — cooldown 表示（`gui/app/lib/time-delta.ts::formatDuration`）
+
+**原因の再確認**: `/accounts`（`LlmSourcesSection`、`app/routes/accounts.tsx:576`）が
+`cooldownRemainingLabel` → `formatDuration` 経由でこの表示を出している。**`/clusters` は対象外**
+だった: `app/routes/clusters.tsx` は `item.cooldown_until` を生の RFC 3339 文字列（または `-`）で
+そのまま表示するだけで（`formatDuration` を呼んでいない）、fixture（`celeris-fixture.mjs`）にも
+cooldown 付きのクラスタが無い。Phase G46 の所見表が「clusters」の行に、本来 accounts 側の話である
+「アカウントの cooldown」を書いていたための取り違えとみられる（次の行の「accounts」に同じ所見が
+別記されている）。**前提のずれ**として報告に明記し、実装は accounts 側で実際に問題を起こしている
+共有関数（`formatDuration`）を直すことで対応した（両方の表示先が同じ関数を使うため、今後どちらの
+画面が同じ値を表示することになっても同じ恩恵を受ける）。
+
+**変更**: `formatDuration` に月（30 日以上）・年（365 日以上）の単位を追加した。上位 2 単位までに
+丸める既存の規律は維持（例: `"2か月3日"`、`"3年3か月"`）。fixture の固定 cooldown 日時
+（`1_893_456_000` = 2030-01-01T00:00:00Z）は変えていない（ADR-0055 で意図された「常に未来」の
+テスト安定性を壊さないため）。
+
+境界値のテスト（`gui/test/unit/time-delta.test.ts`）を 7 件追加: 29 日（従来どおり日のみ）・
+ちょうど 30 日（月の境界、日を出さない）・32 日（月+日）・364 日（365 日未満は年に切り替えない）・
+ちょうど 365 日（年の境界、月を出さない）・400 日（年+月）・実際の fixture 値相当
+（1196 日 20 時間 → `"3年3か月"`）。
+
+**確認**: `pnpm screenshots:mobile` の `accounts-light.png`/`accounts-dark.png` で
+`cooldown 1196日20時間` → `cooldown 3年3か月` になったことを確認した。
+
+### 2. P-G46-4 — inbox の統計タイル（`gui/app/routes/inbox.tsx`）
+
+2×2 の `StatCard` のうち「受け入れ待ちの draft」だけラベルが 2 行になり、その行（下段）だけ他の行
+（上段）より高くなっていた（CSS Grid は行ごとに最大の子の高さに揃えるため、行同士の高さは独立に
+決まる）。ラベルを「受け入れ待ち」に短縮し、他 3 枚と同じ 1 行に収めた。「draft」であることは
+直下の見出し（`受け入れ待ちの draft（n）`、`SectionCard`）で分かるため、情報は失っていない。
+`StatCard` 自体（`app/components/ui/misc.tsx`）・`/daemon` 等の他の利用箇所は変えていない。
+
+**確認**: `pnpm screenshots:mobile` の `inbox-light.png` で 4 枚のタイルの高さが揃ったことを確認した。
+
+### 3. P-G46-3 — 深い組織の木（`gui/app/routes/org.tsx::OrgTreeItem`）
+
+fixture（`test/mock-celeris/fixtures.ts::orgList`）には既に depth 5 のノード
+（`cos`(0) → `coding`(1) → `coding-poc`(2) → `coding-poc-alpha`(3) → `coding-poc-alpha-1`(4) →
+`coding-poc-alpha-1-x`(5)）があり、追加は不要だった。
+
+**変更**: 木の開閉・入れ子の構造（`hasChildren`/`expanded`/再帰呼び出し）は変えず、2 点だけ調整した。
+
+1. 字下げ幅（行の `marginLeft`）を、depth 3 まで従来どおり 14px 刻み、depth 4 以降は半分の
+   7px 刻みに緩めた（`indentStep`/`indentTaperDepth` の定数を追加）。
+2. ノード名の `<span>` に `truncate`（+ `min-w-0`）と `title`（全文）を追加した。名前を含む行
+   （`flex flex-wrap`）内で、名前が最初の flex item のため、名前だけが単独で先に折り返り判定の
+   対象になり、種別マーク（部/課等）や実行モードのバッジは名前の後で改行される（狙いどおり、
+   名前自体は折り返らずに省略されるようになった）。
+
+**確認**: `pnpm screenshots:mobile` の `org-light.png`/`org-dark.png`/`org-detail-*.png` で、
+最深ノード `alpha・第 1 陣・x` の名前が 1 行に収まり、種別マーク「課」だけが次の行に回ることを確認した
+（字下げが緩んだ分、名前自体は省略が要らない幅になっていた。より深いノードや長い名前では `truncate`
+が効く）。
+
+### 4. P-G46-6 — org-detail の skill リンク（`gui/app/routes/org.tsx`）
+
+指示は「等倍で確認して問題なければ変更なしと記録」だったが、**等倍・拡大スクリーンショットで確認した
+ところ実際のバグを見つけた**ため、変更した。
+
+**原因**: mount された skill の説明文リンクが
+`<Link className="flex min-h-11 min-w-0 flex-1 items-center truncate underline ...">` という形で、
+`truncate`（`overflow:hidden; text-overflow:ellipsis; white-space:nowrap`）を **`<Link>` 自身
+（`display:flex` のコンテナ）** に直接付けていた。`text-overflow: ellipsis` はブロック化された
+ボックスの内容には効くが、flex コンテナ自身が生成する匿名ボックスの中身には効かない実装がブラウザに
+共通しており、結果として省略記号「…」が出ずに文字がただ途中で切れていた（Playwright で
+`getComputedStyle(...).textOverflow` を見ると `"ellipsis"` が返るのに、実際の描画は素の `clip` と
+同じだった）。
+
+検証: 一時的な Playwright スクリプト（`deviceScaleFactor` 4 倍の要素スクリーンショット）で、修正前は
+「Rust のコードレビューの手」のように文字の最後がグリフの途中で切れているのを確認し、`title` 属性も
+付いていないことを確認した（このスクリプトはリポジトリの外〈スクラッチパッド〉に置き、コミットには
+含めていない）。
+
+**変更**: 省略を内側の `<span className="min-w-0 flex-1 truncate">` に持たせ（span は flex item として
+自動でブロック化されるため `text-overflow` が正しく効く）、`<Link>` 自体には `title`（全文）を追加した
+（ADR-0055 D2 の id/パス省略の規律〈全文は `title` で〉と同じ）。
+
+**確認**: 修正後、同じ検証スクリプトで「Rust のコードレビュー…」と正しく省略記号が出ることを確認した
+（light/dark 両方）。inherited（継承）側の skill 一覧（同ファイル内、`<span>` 単体に `truncate` を
+付けている実装）は元から正しく動いていた実装で、今回はそちらのパターンに揃えた形になる。
+
+### 5. ダークモードの面の区別（Phase G46 で提案化のみだった件）
+
+`gui/app/app.css` のダーク用トークンで、`--bg`（`#0a0c12`）と `--surface`（`#11141c`）の WCAG
+相対輝度比を計算すると約 **1.06**（ほぼ同じ明るさ）だった。カードが背景から浮いて見えにくい原因は
+ここにあると判断した。
+
+| トークン | 旧 | 新 | 相対輝度 (旧→新) |
+| --- | --- | --- | --- |
+| `--bg` | `#0a0c12` | （変更なし） | 0.00371 |
+| `--surface` | `#11141c` | **`#141826`** | 0.00703 → 0.00942 |
+| `--surface-2` | `#171b25` | （変更なし） | 0.01100 |
+
+- `bg` 対 `surface` の相対輝度比: **1.062 → 1.106**（約 4 割コントラストが広がった）。
+- `surface` 対 `surface-2` の比は 1.010（`surface` は依然として `surface-2` より暗く、
+  `bg < surface < surface-2 < surface-3` の順序を保持）。
+- 文字コントラスト（`--fg` 対 `--surface`）は **15.32:1 → 14.70:1**（AA の 4.5:1 に対して十分な余裕、
+  axe-core の `contrast` ルールに抵触する水準ではない）。
+- light 側・`--surface-2` 以降・`--border` 系は指示どおり変えていない（light も同程度に比が低い
+  〈約 1.07〉が、今回の指示の範囲外）。
+
+**確認**: `pnpm mobile-audit` を変更後に 2 回実行し、両方 `{"ok":true,"total":0}`（`contrast` ルールを
+含めて違反 0 を維持）。`pnpm screenshots:mobile` の `dark` 系を数枚（`home`・`approvals`・`org`・
+`board`）目視し、カードの縁（`border`）と面（`surface`）が背景から心持ち浮いて見えるようになったことを
+確認した（劇的な変化ではない。「1 段だけ」の指示どおり最小の変更に留めた）。悪化・新規違反は無かった
+ため、この変更のまま採用した。
+
+### 6. ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| install | `pnpm install --frozen-lockfile` | exit 0 |
+| lint | `pnpm lint` | exit 0。`Checked 254 files` |
+| typecheck | `pnpm typecheck` | exit 0（出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 68 passed (68) / Tests 1043 passed (1043)**（Phase G46 の 1036 から +7: `formatDuration` の境界値テスト） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件のみ、変化なし |
+| gen:types | `pnpm gen:types && git diff --exit-code app/celeris/types.ts` | 差分ゼロ |
+| mobile-audit（1 回目） | `pnpm mobile-audit`（`pnpm build` 込み） | exit 0。**`{"ok":true,"total":0,"by_scheme":{"light":0,"dark":0}}`**、`routes=26 schemes=2 violations=0 perf_worst=project-detail 556.2KB`。実測 **122.8 秒** |
+| mobile-audit（2 回目） | `MOBILE_AUDIT_SKIP_BUILD=1 pnpm mobile-audit` | exit 0、同じ `{"ok":true,"total":0}`。実測 **91.3 秒** |
+| e2e:mock | `E2E_SKIP_BUILD=1 pnpm e2e:mock` | **`{"ok":true,"mode":"mock","failures":[]}`**、9.0 秒 |
+| screenshots:mobile | `MOBILE_SCREENSHOTS_SKIP_BUILD=1 pnpm screenshots:mobile` | exit 0。**`{"ok":true,"routes":26,"schemes":2,"saved":52}`**、実測 **49.0 秒** |
+
+`crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings`
+は celeris 側 Phase 97（並行、docs/PROGRESS.md）のスコープ。このリポジトリの慣例どおり実行していない。
+
+### 変更したファイル
+
+- `gui/app/lib/time-delta.ts`（`formatDuration` に月・年の単位、コメント追記）
+- `gui/test/unit/time-delta.test.ts`（境界値テスト 7 件）
+- `gui/app/routes/inbox.tsx`（統計タイルのラベル短縮）
+- `gui/app/routes/org.tsx`（`OrgTreeItem` の字下げを depth 3 以降半分に、ノード名に `truncate`+`title`、
+  mount された skill リンクの省略を内側 `<span>` に移し `title` を追加）
+- `gui/app/app.css`（ダーク `--surface` を `#141826` に）
+- `docs/PROGRESS.md`（`## Phase 96` を追加）
+- `gui/docs/PROGRESS.md`（本節）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34。このサンドボックスに本物の celeris・本物のブラウザ・外向きネットワークが
+  無い）。
+- **P-G46-5**（`knowledge-inbox` のタグ重複）は celeris 側 Phase 97 待ち（GUI 側は未対応のまま）。
+- **P-G46-2**（タスク詳細「概要」タブの空状態を 1 枚にまとめる設計変更）は Phase G46 と同じ理由
+  （スコープ超過）で見送ったまま。
+- ダークモードの面の区別は「surface のみ 1 段」の最小変更。人の目でさらに強めたいなら
+  `--surface-2`/`--surface-3`/`--border` も含めた段階の引き直しが要るが、今回のスコープを超える
+  （提案として次項に残す）。
+- Phase G46・G42/G43 の未解決事項（`.animate-fade-in` 実行中の一過性ずれの残余可能性など）は変化なし。
+
+### 提案
+
+- ダークモードの面の区別をさらに強めるなら、`--surface-2`/`--surface-3`/`--border` も含めた段階を
+  引き直す（今回は `--surface` のみの最小変更）。
+- P-G46-2・P-G46-5 は上記「未解決事項」のとおり次のラウンド・celeris Phase 97 待ち。
