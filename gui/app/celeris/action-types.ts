@@ -7,6 +7,7 @@ import type {
   ApprovalDecideResult,
   ClusterConnectResult,
   ClusterConnectStart,
+  ClusterSettingsView,
   CommentResult,
   ConsoleInstructAccepted,
   DocPageResult,
@@ -176,6 +177,20 @@ export type ClusterConnectOutcome =
       id: string;
       error: ActionError;
     };
+
+/**
+ * クラスタの作業ディレクトリの登録・変更（ADR-0059 D6、docs/celeris-api-v1.md §3.107。**管理系**）:
+ * `PUT /clusters/{id}/settings` の結果。`work_dir: null` を送ると DB の上書きを消す（設定ファイルの値に
+ * 戻る）。celeris のエラーは例外にせず `{ok:false, error}` にする（404 `cluster_not_found` / 422
+ * `validation`＝絶対パスか `~` で始まらない / 401 `unauthorized` を含む）。**`POST /reload` は呼ばない**
+ * （3.107 に reload の記述が無く、`GET /clusters` にそのまま反映されるため。ADR-0032 の接続と同じ扱い）。
+ */
+export type ClusterSettingsOutcome =
+  | { ok: true; op: "cluster_settings"; id: string; settings: ClusterSettingsView }
+  | { ok: false; op: "cluster_settings"; id: string; error: ActionError };
+
+/** `/clusters` の action が返す全体（ADR-0032 の接続 + ADR-0059 D6 の作業ディレクトリ編集）。 */
+export type ClusterActionOutcome = ClusterConnectOutcome | ClusterSettingsOutcome;
 
 /**
  * 組織の木の編集（ADR-0033 D1、docs/celeris-api-v1.md §3.43〜3.45。**管理系**、`token_file` 未設定でも 401）:

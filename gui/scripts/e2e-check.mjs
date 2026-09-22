@@ -297,6 +297,21 @@ async function main() {
             const skillsPage = await page.locator('[data-testid="knowledge-skills"]').count();
             if (skillsPage === 0) failures.push("knowledge-skills: [data-testid=knowledge-skills] is not rendered");
           }
+          // Phase 100（ADR-0059 D6、ADR-0055 ラウンド 21）: 作業ディレクトリの表示（実効値/未登録 + 出どころ
+          // バッジ）がクラスタごとに出ること。mock フィクスチャは gpu1=未登録/pegasus=config/gpu2=settings の
+          // 3 通りを持つ（`celeris-fixture.mjs`）ので、mock モードでは 3 通りのバッジ語がすべて出ることも見る。
+          if (route === "clusters") {
+            const sections = await page.locator('[data-testid="cluster-work-dir"]').count();
+            if (sections === 0) failures.push("clusters: no [data-testid=cluster-work-dir] rendered");
+            if (mode === "mock") {
+              const badgeWords = await page.locator('[data-testid="cluster-work-dir-source"]').allTextContents();
+              for (const word of ["settings", "config", "unregistered"]) {
+                if (!badgeWords.includes(word)) failures.push(`clusters: no work_dir source badge "${word}" found`);
+              }
+              const empty = await page.locator('[data-testid="cluster-work-dir-empty"]').count();
+              if (empty === 0) failures.push("clusters: no [data-testid=cluster-work-dir-empty] (unregistered) found");
+            }
+          }
           // Phase 87（P-G38-3）: `/inbox` を検査対象に加えた。承認待ち・質問の節と、それぞれ最低 1 件の
           // カード（fixture が用意する）が描画されることを確かめる（mock モードだけ。staging では
           // スナップショットの中身次第で 0 件のこともあるため、節の有無だけ見る）。

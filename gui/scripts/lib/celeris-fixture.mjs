@@ -277,6 +277,10 @@ export async function setupMockCeleris() {
           has_setup: false,
           rsync_excludes: [],
           sync: "rsync",
+          // ADR-0059 D6（Phase 99/100）: 作業ディレクトリが未登録のクラスタ（work_dir/work_dir_source とも
+          // null）。mobile-audit / e2e:mock がこの状態の「未登録」案内を検査対象にする。
+          work_dir: null,
+          work_dir_source: null,
         },
         {
           id: "pegasus",
@@ -290,6 +294,9 @@ export async function setupMockCeleris() {
           auth: "totp",
           connected: false,
           tunnel_login_needed: true,
+          // ADR-0059 D6（Phase 99/100）: 設定ファイル（`[[clusters]] work_dir`）由来の実効値。
+          work_dir: "/work/NBB/rmaeda",
+          work_dir_source: "config",
           // Phase 85（ADR-0053 追記）の実機と同じ形: listener はあるが target が応答しない
           // （"unreachable" の 1 語バッジ + 理由の文を mobile-audit / e2e:mock に描画させる）。
           tunnel_forwards: [
@@ -323,10 +330,59 @@ export async function setupMockCeleris() {
           auth: "publickey",
           connected: false,
           tunnel_login_needed: false,
+          // ADR-0059 D6（Phase 99/100）: 画面から登録した DB の上書き（「上書きを消す」ボタンの
+          // 監査対象。gpu1=未登録・pegasus=config の 2 通りと合わせ、settings/config/null の 3 通りが揃う）。
+          work_dir: "/work/NBB/rmaeda-gui",
+          work_dir_source: "settings",
         },
       ],
     }),
   );
+
+  // ADR-0059 D6（Phase 100）: `PUT /clusters/{id}/settings`（§3.107）。この偽 celeris はパスの完全一致で
+  // ルーティングするので（`createFakeCeleris` の `on`）、動的な `:id` は持てず、フィクスチャが知っている
+  // 3 つの id ごとに登録する。バリデーションは celeris 本体（`crates/task-api/src/handlers.rs::put_cluster_settings`）
+  // と同じ規則（絶対パスか `~`/`~/…`。空文字・それ以外は 422）にして、e2e:mock / mobile-audit が本番と
+  // 同じ挙動を確認できるようにする。
+  for (const clusterId of ["gpu1", "pegasus", "gpu2"]) {
+    mock.on("PUT", `/api/v1/clusters/${clusterId}/settings`, (req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => {
+        raw += chunk;
+      });
+      req.on("end", () => {
+        /** @type {{work_dir?: string | null}} */
+        let body;
+        try {
+          body = raw ? JSON.parse(raw) : {};
+        } catch {
+          sendJson(res, 400, { code: "bad_request", detail: "invalid JSON" });
+          return;
+        }
+        const workDir = body.work_dir ?? null;
+        if (workDir !== null) {
+          const trimmed = String(workDir).trim();
+          const ok = trimmed !== "" && (trimmed.startsWith("/") || trimmed === "~" || trimmed.startsWith("~/"));
+          if (!ok) {
+            sendJson(res, 422, {
+              type: "urn:celeris:problem:validation",
+              title: "validation",
+              status: 422,
+              code: "validation",
+              detail: "work_dir must be an absolute path or ~ / ~/…",
+              errors: [{ field: "work_dir", message: "work_dir must be an absolute path or ~ / ~/…" }],
+            });
+            return;
+          }
+        }
+        sendJson(res, 200, {
+          cluster_id: clusterId,
+          work_dir: workDir,
+          updated_at: "2026-09-22T12:00:00Z",
+        });
+      });
+    });
+  }
 
   mock.on("GET", "/api/v1/llm/sources", (_req, res) =>
     sendJson(res, 200, {

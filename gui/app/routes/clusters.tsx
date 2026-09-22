@@ -1,16 +1,18 @@
 import { data, type FetcherWithComponents, isRouteErrorResponse, useFetcher } from "react-router";
-import type { ClusterConnectOutcome } from "~/celeris/action-types";
+import type { ClusterActionOutcome } from "~/celeris/action-types";
 import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
 import {
   cancelClusterConnect,
+  putClusterSettings,
   readClusterConnectCode,
   readClusterId,
+  readClusterWorkDir,
   startClusterConnect,
   submitClusterConnectCode,
 } from "~/celeris/clusters-admin.server";
 import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
 import type { ClusterForwardView, Clusters, ClusterView } from "~/celeris/types";
-import { ErrorFlash } from "~/components/Flash";
+import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
@@ -55,9 +57,10 @@ export function meta(_: Route.MetaArgs) {
 }
 
 /**
- * クラスタへの接続の中継（ADR-0032 D5/D6）。`clusters-admin.server.ts` に判断ロジックは無く、
- * フォームの `intent` を対応する呼び出しに写すだけ。**`POST /reload` は呼ばない**（接続を張っても
- * `config.toml` の設定は変わらないので不要。プロバイダ・秘密の管理とはここが違う）。
+ * クラスタへの接続の中継（ADR-0032 D5/D6）と作業ディレクトリの登録・変更（ADR-0059 D6 §3.107）。
+ * `clusters-admin.server.ts` に判断ロジックは無く、フォームの `intent` を対応する呼び出しに写すだけ。
+ * **`POST /reload` は呼ばない**（接続を張っても・`work_dir` を変えても `config.toml` の設定は変わらないので
+ * 不要。プロバイダ・秘密の管理とはここが違う）。
  */
 export async function action({ request }: Route.ActionArgs) {
   const form = await request.formData();
@@ -65,7 +68,7 @@ export async function action({ request }: Route.ActionArgs) {
   const client = getCelerisClient();
   const id = readClusterId(form);
 
-  let outcome: ClusterConnectOutcome;
+  let outcome: ClusterActionOutcome;
   switch (intent) {
     case "cluster_connect":
       outcome = await startClusterConnect(client, id, request.signal);
@@ -76,6 +79,14 @@ export async function action({ request }: Route.ActionArgs) {
     case "cluster_connect_cancel":
       outcome = await cancelClusterConnect(client, id, request.signal);
       break;
+    // ADR-0059 D6: 「保存」は入力欄の値をそのまま送る（空欄なら celeris の 422 `validation` をそのまま
+    // 出す）。「上書きを消す」は入力欄を見ず、明示的に `work_dir: null` を送る（設定ファイルの値に戻る）。
+    case "cluster_work_dir_save":
+      outcome = await putClusterSettings(client, id, readClusterWorkDir(form), request.signal);
+      break;
+    case "cluster_work_dir_clear":
+      outcome = await putClusterSettings(client, id, null, request.signal);
+      break;
     default:
       throw data({ error: `unknown intent: ${String(intent)}` }, { status: 400 });
   }
@@ -84,7 +95,7 @@ export async function action({ request }: Route.ActionArgs) {
 
 export default function ClustersPage({ loaderData }: Route.ComponentProps) {
   const { clusters } = loaderData;
-  const fetcher = useFetcher<ClusterConnectOutcome>();
+  const fetcher = useFetcher<ClusterActionOutcome>();
   const submitting = fetcher.state !== "idle";
 
   return (
@@ -166,13 +177,35 @@ export function clusterConnectPanelState(input: {
   return { showCodeForm, showPendingElsewhere, showConnectButton };
 }
 
+/**
+ * ADR-0059 D6: 実効の作業ディレクトリの出どころを 1 語のバッジ語にする。`/clusters` は裏方の画面
+ * （`app/lib/labels.ts` の対象外）なので、celeris の値（`"settings"` / `"config"`）をそのまま出す
+ * （`auth` バッジと同じ流儀）。どちらでも無ければ `"unregistered"`（値を捏造しない。`clusterStatusWord`
+ * の `"unknown"` と同じ考え方）。
+ */
+export type ClusterWorkDirWord = "settings" | "config" | "unregistered";
+
+export function clusterWorkDirWord(source: string | null | undefined): ClusterWorkDirWord {
+  if (source === "settings") return "settings";
+  if (source === "config") return "config";
+  return "unregistered";
+}
+
+/**
+ * 「上書きを消す」ボタンは DB の上書き（`work_dir_source === "settings"`）があるときだけ出す
+ * （設定ファイルの値・未登録には「消すもの」が無いため）。
+ */
+export function showClusterWorkDirClear(source: string | null | undefined): boolean {
+  return source === "settings";
+}
+
 function ClusterCard({
   item,
   fetcher,
   submitting,
 }: {
   item: ClusterView;
-  fetcher: FetcherWithComponents<ClusterConnectOutcome>;
+  fetcher: FetcherWithComponents<ClusterActionOutcome>;
   submitting: boolean;
 }) {
   const statusWord = clusterStatusWord(item);
@@ -251,6 +284,8 @@ function ClusterCard({
             <span data-testid="cluster-delete-on-push">{String(item.delete_on_push)}</span>
           </DataItem>
         </dl>
+
+        <ClusterWorkDirSection item={item} fetcher={fetcher} submitting={submitting} />
 
         {item.tunnel_login_needed && (
           <Alert tone="danger" title="ログインが必要（TOTP）" data-testid="cluster-tunnel-login-needed">
@@ -412,6 +447,116 @@ function ClusterCard({
         )}
       </CardBody>
     </Card>
+  );
+}
+
+/**
+ * 作業ディレクトリ節（ADR-0059 D6、ADR-0055 ラウンド 21）: 実効値 + 出どころの 1 語バッジ + 編集フォーム。
+ * `<details>` で折りたたむのは「接続」節の流儀（ADR-0032）ではなくトンネルの「これは何を意味しますか？」
+ * （Phase 66）に倣った。**編集フォームは常時開いていない**（作業ディレクトリは滅多に変えないので、
+ * 通常は実効値の表示だけで十分。ADR-0055 D2「一度に 1 画面ずつ直し」の精神で画面を騒がしくしない）。
+ * 「上書きを消す」は `work_dir_source === "settings"` のときだけ出す（消すものが無ければボタン自体が無い方が
+ * 状態を素直に表す。無効化したボタンより「無い」を選ぶ）。
+ */
+function ClusterWorkDirSection({
+  item,
+  fetcher,
+  submitting,
+}: {
+  item: ClusterView;
+  fetcher: FetcherWithComponents<ClusterActionOutcome>;
+  submitting: boolean;
+}) {
+  const actionData = fetcher.data;
+  const own = actionData && actionData.op === "cluster_settings" && actionData.id === item.id ? actionData : undefined;
+  const error = own && !own.ok ? own.error : undefined;
+  const saved = own?.ok ? own.settings : undefined;
+
+  const word = clusterWorkDirWord(item.work_dir_source);
+  const tone: Tone = word === "settings" ? "success" : word === "config" ? "neutral" : "warning";
+  const showClear = showClusterWorkDirClear(item.work_dir_source);
+
+  return (
+    <div
+      className="space-y-2 rounded-lg border border-border bg-surface-2/40 px-3 py-2.5"
+      data-testid="cluster-work-dir"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-medium text-fg-muted">作業ディレクトリ</p>
+        <Badge tone={tone} data-testid="cluster-work-dir-source">
+          {word}
+        </Badge>
+      </div>
+
+      {item.work_dir ? (
+        <Mono className="block break-all text-sm text-fg" data-testid="cluster-work-dir-value">
+          {item.work_dir}
+        </Mono>
+      ) : (
+        <p className="text-sm text-fg-subtle" data-testid="cluster-work-dir-empty">
+          未登録。コマンド実行だけのタスクはここで動きます
+        </p>
+      )}
+
+      {saved && (
+        <Alert
+          tone="success"
+          title={saved.work_dir ? "保存しました" : "上書きを消しました"}
+          data-testid="cluster-work-dir-saved"
+        >
+          {saved.work_dir ? <p className="break-all">{saved.work_dir}</p> : <p>設定ファイルの値に戻ります。</p>}
+        </Alert>
+      )}
+      {error && <ErrorFlash error={error} />}
+
+      <details className="text-sm">
+        <summary className="cursor-pointer select-none font-medium text-fg" data-testid="cluster-work-dir-toggle">
+          変更する
+        </summary>
+        <div className="mt-2 space-y-3">
+          <fetcher.Form method="post" className="space-y-1.5">
+            <input type="hidden" name="intent" value="cluster_work_dir_save" />
+            <input type="hidden" name="id" value={item.id} />
+            <label htmlFor={`cluster-work-dir-input-${item.id}`} className={labelClass}>
+              パス
+            </label>
+            <input
+              id={`cluster-work-dir-input-${item.id}`}
+              name="work_dir"
+              type="text"
+              defaultValue={item.work_dir ?? ""}
+              placeholder="/work/NBB/rmaeda"
+              autoComplete="off"
+              className={`${inputClass} mt-1.5`}
+              data-testid="cluster-work-dir-input"
+            />
+            <p className={hintClass}>絶対パスか ~ で始めてください。</p>
+            <FieldErrors error={error} field="work_dir" />
+            <Button type="submit" variant="primary" size="sm" disabled={submitting} data-testid="cluster-work-dir-save">
+              <Icon name="check" />
+              保存
+            </Button>
+          </fetcher.Form>
+
+          {showClear && (
+            <fetcher.Form method="post">
+              <input type="hidden" name="intent" value="cluster_work_dir_clear" />
+              <input type="hidden" name="id" value={item.id} />
+              <Button
+                type="submit"
+                variant="ghost"
+                size="sm"
+                disabled={submitting}
+                data-testid="cluster-work-dir-clear"
+              >
+                <Icon name="x" />
+                上書きを消す
+              </Button>
+            </fetcher.Form>
+          )}
+        </div>
+      </details>
+    </div>
   );
 }
 

@@ -1,15 +1,16 @@
-import type { ClusterConnectOutcome } from "./action-types";
+import type { ClusterConnectOutcome, ClusterSettingsOutcome } from "./action-types";
 import { toActionError } from "./actions.server";
 import type { CelerisClient } from "./client.server";
 import { formString } from "./forms";
-import type { ClusterConnectResult, ClusterConnectStart } from "./types";
+import type { ClusterConnectResult, ClusterConnectStart, ClusterSettingsPutBody, ClusterSettingsView } from "./types";
 
 /**
- * 「クラスタ」画面からの接続の中継（ADR-0032、docs/celeris-api-v1.md §3.39〜3.41）。
+ * 「クラスタ」画面からの接続の中継（ADR-0032、docs/celeris-api-v1.md §3.39〜3.41）と、作業ディレクトリの
+ * 登録・変更の中継（ADR-0059 D6、§3.107）。
  * GUI 側では検証しない（`id` の有無だけ見る）。celeris の 404 / 409 / 422 / 502 / 401 の文言をそのまま画面に出す。
- * `accounts-admin.server.ts` のログイン中継と同じ作りだが、**`POST /reload` は呼ばない**（接続を張っても
- * `config.toml` の設定は変わらない。プロバイダや秘密の管理とはここが違う。`secrets-admin.server.ts` / `providers-admin.server.ts`
- * とは対照的に `reload` を呼ばないことをテストで確認する）。
+ * `accounts-admin.server.ts` のログイン中継と同じ作りだが、**`POST /reload` は呼ばない**（接続を張っても・
+ * `work_dir` を変えても `config.toml` の設定は変わらない。プロバイダや秘密の管理とはここが違う。
+ * `secrets-admin.server.ts` / `providers-admin.server.ts` とは対照的に `reload` を呼ばないことをテストで確認する）。
  */
 
 /** `POST /clusters/{id}/connect`（ADR-0032 D5 3.39）。 */
@@ -62,6 +63,28 @@ export async function cancelClusterConnect(
   }
 }
 
+/**
+ * `PUT /clusters/{id}/settings`（ADR-0059 D6 §3.107）。`workDir` に `null` を渡すと DB の上書きを消す
+ * （設定ファイルの値に戻る）。空文字は `null` にしない（celeris が 422 `validation` で拒む「それ以外・
+ * 空文字」の経路をそのまま画面に出すため。「上書きを消す」ボタンだけが明示的に `null` を送る）。
+ */
+export async function putClusterSettings(
+  client: CelerisClient,
+  id: string,
+  workDir: string | null,
+  signal?: AbortSignal,
+): Promise<ClusterSettingsOutcome> {
+  try {
+    const body: ClusterSettingsPutBody = { work_dir: workDir };
+    const settings = await client.put<ClusterSettingsView>(`/clusters/${encodeURIComponent(id)}/settings`, body, {
+      signal,
+    });
+    return { ok: true, op: "cluster_settings", id, settings };
+  } catch (e) {
+    return { ok: false, op: "cluster_settings", id, error: toActionError(e) };
+  }
+}
+
 /** フォームから `id` を読む（無ければ空文字。celeris の 404 に任せる。GUI 側で検証しない）。 */
 export function readClusterId(form: FormData): string {
   return formString(form, "id") ?? "";
@@ -70,4 +93,14 @@ export function readClusterId(form: FormData): string {
 /** フォームから検証コードを読む。 */
 export function readClusterConnectCode(form: FormData): string {
   return formString(form, "code") ?? "";
+}
+
+/**
+ * フォームから作業ディレクトリの入力欄を読む（「保存」ボタン用）。`formString` と違い**空文字を `null` に
+ * しない**（空欄のまま保存を押したら celeris の 422 `validation` をそのまま見せるため。「消す」は別ボタン
+ * が明示的に呼ぶ `putClusterSettings(client, id, null)`）。前後の空白だけ落とす。
+ */
+export function readClusterWorkDir(form: FormData): string {
+  const v = form.get("work_dir");
+  return typeof v === "string" ? v.trim() : "";
 }
