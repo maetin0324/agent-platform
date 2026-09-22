@@ -14484,3 +14484,13 @@ celeris 側は無変更（`crates/` 無変更、`docs/celeris-api-v1.md` 無変�
 ### 提案
 
 - なし（今回の指示の範囲で閉じた）。
+
+### Phase 102 の本番反映（2026-09-22、ライブ切替。ホームからの CoS 送信 405 の修正）
+
+- 人がスマホ実機（`home-dev:7700`）のホーム画面から CoS に送信し `405 Route "root" does not have an action` を報告（Phase 92 の回帰。`/` はインデックスルートなので送信先は `/?index` が要る）。
+- merge: `worktree-agent-a4e836fbf163aeb82` → main `cd18773`（衝突なし）。GUI ゲート（main 上）: `pnpm gen:types` 差分ゼロ、`pnpm typecheck` / `pnpm lint` exit 0、`pnpm test` 68 files / 1054 passed。push 済み。
+- `release.sh main` → exit 0、`sha12=cd18773d6341 schema_version=25`。ゲート 10 段すべて exit 0（cargo-test 185.3s、cargo-clippy 18.8s、他は従来どおり）。
+- `verify.sh cd18773d6341` → exit 0、check 1〜4, 4b, 5（N-1 = 72936a6c37ed）, 6（smoke 6.68s）すべて true、`ok=true live_ok=true`。
+- `promote.sh cd18773d6341` → mode=live、DB バックアップ 14M、新 celeris が 2 秒で active、GUI 切替 2 秒、`current -> releases/cd18773d6341`。`GET /health` release=cd18773d6341 role=active schema_version=25、GUI `/healthz` 同 release。
+- 回帰の検査: `pnpm e2e:mock` に composer の実送信検査（home@mobile / org-node@mobile / home@desktop。偽 celeris に `POST /console/instruct`）を追加。修正前のコードで実際に 405 を検出したことを Phase 102 節に記録。`mobile-audit` の `tap` ルールは 404 だけを無視し 405 等は違反に数えるようにした。
+- 実機（Nothing Phone）でホーム画面から送信して 405 が再発しないことは人が確認する。
