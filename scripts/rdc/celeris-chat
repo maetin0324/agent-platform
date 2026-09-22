@@ -10,15 +10,29 @@
 # 使い方: celeris-chat <TOOL> [JSON_ARGS]
 #         celeris-chat --list
 #
-# 運用上の注意（親が決める）: 専用ユーザー（chatgpt-rdc）には `celerisctl` バイナリを**読める**必要が
-# ある。既定の `$HOME/.local/celeris/current/bin/celerisctl` は rmaeda のホーム下にあるため、
-# 専用ユーザーからは直接読めない（ホームディレクトリのパーミッション次第）。バイナリを専用ユーザーの
-# ホーム配下にコピーするか、`$HOME/.local/celeris` に対して専用ユーザーへの読み取り権を与えるか、
-# `CELERIS_BIN` で別の場所を指すかは、この Phase では決めていない（`docs/PROGRESS.md` の提案節）。
-# 同様に token ファイル（`CELERIS_MCP_TOKEN_FILE` の既定 `$HOME/.config/celeris/mcp-token`）も
-# 専用ユーザーから読める場所に、専用ユーザーだけが読める権限（0400 等）で置くこと。
+# 運用（`scripts/rdc/setup-chatgpt-rdc.sh` が整える）: 専用ユーザー（chatgpt-rdc）は rmaeda のホーム下の
+# `~/.local/celeris/current/bin/celerisctl` を読めないので、setup スクリプトが現行リリースの `celerisctl` を
+# このスクリプトと同じディレクトリ（`~chatgpt-rdc/.local/bin/`）にコピーする。`CELERIS_BIN` が無いときの
+# 探し順: (1) このスクリプトと同じディレクトリの `celerisctl`、(2) `$HOME/.local/bin/celerisctl`、
+# (3) `$HOME/.local/celeris/current/bin/celerisctl`（rmaeda 自身が使うとき）、(4) PATH 上の `celerisctl`。
+# token ファイル（`CELERIS_MCP_TOKEN_FILE` の既定 `$HOME/.config/celeris/mcp-token`）は専用ユーザーだけが
+# 読める権限（0600）で置く（setup スクリプトが置く。値は表示しない）。
 
-exec "${CELERIS_BIN:-$HOME/.local/celeris/current/bin/celerisctl}" mcp call \
+if [ -z "${CELERIS_BIN:-}" ]; then
+  here=$(cd "$(dirname "$0")" && pwd)
+  for candidate in \
+    "$here/celerisctl" \
+    "$HOME/.local/bin/celerisctl" \
+    "$HOME/.local/celeris/current/bin/celerisctl"; do
+    if [ -x "$candidate" ]; then
+      CELERIS_BIN=$candidate
+      break
+    fi
+  done
+  : "${CELERIS_BIN:=celerisctl}"
+fi
+
+exec "$CELERIS_BIN" mcp call \
   --base-url "${CELERIS_MCP_URL:-http://127.0.0.1:18200}" \
   --token-file "${CELERIS_MCP_TOKEN_FILE:-$HOME/.config/celeris/mcp-token}" \
   "$@"
