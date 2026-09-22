@@ -13447,3 +13447,13 @@ celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。指示�
   celeris 側で次に Phase を起こす前に `gui/docs/PROGRESS.md` の最新節を突き合わせる運用にすることを
   `gui/docs/PROGRESS.md` Phase G44 の提案 P-G44-1 として記録した。
 - 本番 = Phase 65〜92。実装中: Phase 93（このワークトリー。GUI のみ）。
+
+### Phase 93 の本番反映（2026-09-22、ライブ切替）
+
+- 経緯: 指示書の前提（`/inbox` が未監査）が古く、実際は Phase 87/88 で完了済みだった。エージェントは二重実装を避け、未実施の P-G40-1（`focusableCount` を `isNotVisible` に揃える）と ADR-0055 への決定追記（P-G38-3: `/inbox` を D1 の監査対象に含める）だけを行った。運用改善として P-G44-1（Phase を起こす前に `gui/docs/PROGRESS.md` の最新 G 節を突き合わせる）を採用する。
+- merge: `worktree-agent-abced2c0e2c9f9979` → main `20a2392`（`docs/PROGRESS.md` の append 衝突 1 件は両方残して解決）。GUI ゲート（main 上）: `pnpm gen:types` 差分ゼロ、`pnpm typecheck` exit 0、`pnpm lint` exit 0、`pnpm test` 68 files / 1030 passed。push 済み。
+- `scripts/selfdeploy/release.sh main` → exit 0、`sha12=20a239226879 schema_version=24`、`changes.json: base=de0402e4f414 commits=4 files=6 sensitive=0`。ゲート 10 段すべて exit 0（cargo-test 124.1s、cargo-clippy 25.0s、cargo-build 30.8s、pnpm-mobile-audit 90.5s、pnpm-e2e-mock 9.4s）。
+- `verify.sh 20a239226879` → exit 0、check 1〜4, 4b, 5（N-1 = de0402e4f414）, 6（smoke done in 5.08s）すべて true、`ok=true live_ok=true`。
+- `promote.sh 20a239226879` → mode=live、DB バックアップ 14M（`backups/20260922-034721-pre-20a239226879.sqlite3`）、新 celeris が 2 秒で active（5/5）、GUI 切替 6 秒、`current -> releases/20a239226879`。
+- 直後の確認: `GET /health` release=20a239226879 role=active schema_version=24、GUI `/healthz` release=20a239226879。
+- 次: Phase 94（ADR-0058、`/releases` に検証・ゲート内訳、Rust+GUI）と Phase 95（スマホ画面のスクリーンショット総点検、GUI のみ）を Sonnet で並行起動済み。
