@@ -1,6 +1,9 @@
 # celeris HTTP API v1 仕様
 
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
+- 改訂: 2026-09-22 Phase 94（ADR-0058、P-G38-1）— **追加のみ。v1 のまま**。`GET /releases` の
+  `items[].verify.checks[]`（検査ごとの合否・詳細。§3.66）と `items[].gate`（ゲート各段の内訳。§3.66）を追加。
+  既存の `gate_ok`・`verify.ok`/`live_ok`/`at` は変えていない。
 - 改訂: 2026-09-21 Phase 82（ADR-0056 D3 続き、skills を GUI から見る・作る・mount する）
   — **追加のみ。v1 のまま**。エンドポイント 101〜106: `GET /skills`・`GET /skills/{name}`・
   `PUT /skills/{name}`・`DELETE /skills/{name}`・`POST /org/{id}/skills`・
@@ -1659,7 +1662,20 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
       "built_at": "2026-09-19T08:00:00Z",
       "schema_version": 11,
       "gate_ok": true,                // gate.json の ok（cargo test / clippy / build / pnpm … が全部 exit 0）
-      "verify": { "ok": true, "live_ok": true, "at": "2026-09-19T08:30:00Z" },  // null = 未検証
+      "gate": {                       // gate.json の内訳（ADR-0058、Phase 94）。gate.json が読めなければ null
+        "ok": true,                   // gate_ok と同じ値
+        "failed_step": null,          // 最初に非 0 で終わった段。全段成功なら null
+        "steps": [                    // run_step が呼ばれた順（GATE_OK が偽になった後の段は含まれない）
+          { "step": "cargo-test", "exit": 0, "secs": 42.5 }
+        ]
+      },
+      "verify": {                     // null = 未検証
+        "ok": true, "live_ok": true, "at": "2026-09-19T08:30:00Z",
+        "checks": [                   // verify.json の checks[]（ADR-0058、Phase 94）。無ければ空配列
+          { "id": "1", "name": "boot", "ok": true, "detail": "started", "elapsed_s": 0.4 },
+          { "id": "6", "name": "smoke", "ok": true, "detail": "done in 3.2s", "elapsed_s": 3.2 }
+        ]
+      },
       "promoted_at": null,            // promoted.json（昇格に成功したときだけ）。null = 一度も昇格していない
       "on_main": false,               // git merge-base --is-ancestor <sha> main。null = 分からない
       "changes": {                    // changes.json（ADR-0041 D4）。null = Phase 48 以前のリリース
@@ -1703,6 +1719,19 @@ webhook の URL は**秘密**で、`[secrets]`（§3.36〜3.38 / ADR-0030）に 
   `crates/task-core/migrations/`、`CLAUDE.md`、`gui/CLAUDE.md`、`.claude/`、`config/`、`docs/adr/0040-`、
   `docs/adr/0041-`）に**前方一致**したファイル。**判定は `release.sh` の側で済んでいて、API も GUI も
   その結果を運ぶだけ**（パターンを 2 か所に置かない）。`changes.json` が無いリリース（Phase 48 以前）は `null`。
+
+**ADR-0058（Phase 94）で増えた 2 つ:**
+
+- **`verify.checks`**: `verify.json` の `checks[]`（`scripts/selfdeploy/verify.sh` の
+  `record <id> <name> <ok> <detail> [task_id] [elapsed_s]` がそのまま書いたもの）をそのまま運ぶ。
+  `id` は `"1"`〜`"6"`、`"4b"`（文字列。数値専用にはできない）。`task_id`（検査 6 の煙試験タスク id）は
+  運ばない — GUI に使い道が無い判断（ADR-0058 D1）。`verify.json` にこのキーが無い（Phase 94 より前に
+  作られたリリース）ときは空配列。個別の検査の合否は**celeris がすでに `verify.json` に書いた値を
+  そのまま出すだけ**で、`ok`（集計値）との整合はここでは検査しない（celeris 側の record の責任）。
+- **`gate`**: `gate.json` をほぼそのまま運ぶ（`ok` は既存の `gate_ok` と同じ値、`failed_step`、`steps[]`）。
+  `steps[]` の各段は `{step, exit, secs}`（`gate.json` にある `log`＝ログのファイル名は運ばない。
+  本番ホストのローカルパスで GUI からは読めないため）。`gate.json` が読めない・壊れているときは
+  `gate: null`（そのときも `gate_ok` は従来どおり `false` のまま出る。一覧は落ちない）。
 
 #### 3.67 `POST /releases/{sha12}/promote` → 202 `ReleasePromoteAccepted`（**管理系: `token_file` 未設定でも 401**）
 

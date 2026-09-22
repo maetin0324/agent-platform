@@ -13457,3 +13457,73 @@ celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。指示�
 - `promote.sh 20a239226879` → mode=live、DB バックアップ 14M（`backups/20260922-034721-pre-20a239226879.sqlite3`）、新 celeris が 2 秒で active（5/5）、GUI 切替 6 秒、`current -> releases/20a239226879`。
 - 直後の確認: `GET /health` release=20a239226879 role=active schema_version=24、GUI `/healthz` release=20a239226879。
 - 次: Phase 94（ADR-0058、`/releases` に検証・ゲート内訳、Rust+GUI）と Phase 95（スマホ画面のスクリーンショット総点検、GUI のみ）を Sonnet で並行起動済み。
+## Phase 94 — `/releases` に検証・ゲートの内訳（ADR-0058、P-G38-1。2026-09-22）
+
+指示の前提（`docs/adr/0040-*.md`・`0041-*.md`、`gui/docs/celeris-api-v1.md` の `GET /releases` 節、
+`gui/docs/PROGRESS.md` の Phase G38 の提案 P-G38-1、最新の Phase G44）を確認: `ReleaseVerify` が
+`ok`/`live_ok`/`at` の集計値しか運ばず、`ReleaseItem` に `gate` の内訳が無いことは現状のままで、
+前提は現状と一致していた。
+
+### 決定（ADR-0058）
+
+`docs/adr/0058-release-verify-breakdown.md` を追加。`ReleaseVerify.checks: Vec<ReleaseVerifyCheck>`
+（`verify.json` の `checks[]` をそのまま運ぶ。`id`/`name`/`ok`/`detail`/`elapsed_s`。`task_id` は運ばない）
+と `ReleaseItem.gate: Option<ReleaseGate>`（`gate.json` の `ok`/`failed_step`/`steps[]`。`steps` の
+`log` は運ばない）を足す。既存の `gate_ok` は残す（後方互換）。GUI は表示の分解だけを行い、判断ロジックの
+再実装はしない。
+
+### 実装
+
+- `crates/task-api/src/types.rs`: `ReleaseVerify` に `checks: Vec<ReleaseVerifyCheck>`（`#[serde(default)]`）
+  を追加、`ReleaseVerifyCheck`（`id, name, ok, detail, elapsed_s`）・`ReleaseGate`（`ok, failed_step, steps`）・
+  `ReleaseGateStep`（`step, exit, secs`）を新設。`ReleaseItem.gate: Option<ReleaseGate>` を追加（`#[serde(default,
+  skip_serializing_if = "Option::is_none")]`）。
+- `crates/celeris/src/releases.rs`: `read_verify_checks`（`verify.json` の `checks[]` を
+  `Vec<ReleaseVerifyCheck>` に写す。無い・壊れていれば空配列）と `read_gate`（`gate.json` を
+  `ReleaseGate` に写す。`ok` が読めなければ `None`）を追加し、`read_release` から呼ぶ。
+- `crates/task-api/tests/task_management.rs`: 手組みの `ReleaseItem` リテラルに `gate: None` を追加
+  （新しいフィールドで構文エラーになるのを直しただけ。ふるまいは変えていない）。
+- テスト（`crates/celeris/src/releases.rs`）: `verify_checks_and_gate_steps_are_carried_through`
+  （`checks[]`/`steps[]` がそのまま写ること）、`missing_checks_and_gate_default_to_empty_without_breaking_the_scan`
+  （`checks` キーが無い verify.json は空配列、壊れた gate.json は `gate: None` かつ `gate_ok: false` のまま、
+  一覧全体は落ちない）。
+- `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::` でコミット済み JSON Schema
+  （`docs/api/v1/api-v1.schema.json`）を再生成（`Releases` は既に `ApiV1Schema` に含まれているので、新しい
+  型は自動でスキーマに載った）。
+- `gui/docs/celeris-api-v1.md`: `GET /releases` の応答例に `items[].gate` と `items[].verify.checks[]` を
+  追記し、「ADR-0058（Phase 94）で増えた 2 つ」の節を追加。冒頭の改訂履歴に Phase 94 の行を足した。
+  既存の記述（`gate_ok`・`verify.ok`/`live_ok`/`at` の説明）は書き換えていない。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。FAILED 0（`task-api --lib` の `schema::tests::committed_schema_matches_generated` を含め全 target green。スキーマ再生成後に確認） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| build | `cargo build --workspace` | exit 0 |
+
+GUI 側の実装・ゲートは `gui/docs/PROGRESS.md` の「Phase G45」を参照（このリポジトリの慣例どおり、
+GUI の実装詳細は gui 側に書く）。
+
+### 変更したファイル
+
+- `docs/adr/0058-release-verify-breakdown.md`（新規）
+- `crates/task-api/src/types.rs`（`ReleaseVerify.checks`、`ReleaseVerifyCheck`、`ReleaseItem.gate`、
+  `ReleaseGate`、`ReleaseGateStep`）
+- `crates/celeris/src/releases.rs`（`read_verify_checks`、`read_gate`、テスト 2 件）
+- `crates/task-api/tests/task_management.rs`（`release_item` ヘルパーに `gate: None`）
+- `docs/api/v1/api-v1.schema.json`（`UPDATE_SCHEMA=1` で再生成）
+- `gui/docs/celeris-api-v1.md`（`GET /releases` 節への追記、改訂履歴）
+- `gui/app/lib/releases.ts`・`gui/app/routes/releases.tsx`・`gui/test/unit/releases.test.ts`・
+  `gui/test/mock-celeris/fixtures.ts`・`gui/app/celeris/types.ts`（gen:types。詳細は gui 側 PROGRESS）
+- `docs/PROGRESS.md`（本節）
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。本番の `/releases` での表示確認は、指示書のとおり親エージェントが
+  昇格後に行う。
+- `ReleaseVerifyCheck.task_id`・`ReleaseGateStep.log` は意図的に API に載せていない（ADR-0058 D1/D2。
+  本番ホストのローカル情報で GUI から使い道が無いため）。将来 GUI 側でログの中身を見せたくなったら、
+  別途「ログの末尾を返す」読み取り専用エンドポイントを検討する（このリポジトリの慣例で `promote_failed.json`
+  の `error` が末尾 20 行だけを運ぶのと同じ形にできる）。
+- 本番 = Phase 65〜93。実装中: Phase 94（このワークトリー）。

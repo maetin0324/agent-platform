@@ -31,8 +31,8 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use task_api::types::{
-    ReleaseChanges, ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleasePromoteFailure,
-    ReleaseVerify,
+    ReleaseChanges, ReleaseCommit, ReleaseGate, ReleaseGateStep, ReleaseItem,
+    ReleasePromoteAccepted, ReleasePromoteFailure, ReleaseVerify, ReleaseVerifyCheck,
 };
 use task_api::{ReleasePromoteError, ReleaseSource, ReleasesFs};
 use time::OffsetDateTime;
@@ -305,6 +305,73 @@ fn read_changes(dir: &Path, current: Option<&str>) -> Option<ReleaseChanges> {
     })
 }
 
+/// ADR-0058: `verify.json` の `checks[]` を `ReleaseVerifyCheck` に写す。無い・壊れているときは
+/// 空配列（Phase 94 以前に作られたリリースは `checks` を持たない）。
+fn read_verify_checks(verify: &serde_json::Value) -> Vec<ReleaseVerifyCheck> {
+    verify
+        .get("checks")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| {
+                    Some(ReleaseVerifyCheck {
+                        id: c.get("id")?.as_str()?.to_string(),
+                        name: c
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        ok: c
+                            .get("ok")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false),
+                        detail: c
+                            .get("detail")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        elapsed_s: c.get("elapsed_s").and_then(serde_json::Value::as_f64),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+/// ADR-0058: `gate.json` を `ReleaseGate` に写す。`ok` が読めない（壊れている）ときは `None`
+/// （`gate_ok` は従来どおり `false` のまま出る。一覧は落ちない）。
+fn read_gate(gate: &Option<serde_json::Value>) -> Option<ReleaseGate> {
+    let gate = gate.as_ref()?;
+    let ok = gate.get("ok")?.as_bool()?;
+    let failed_step = gate
+        .get("failed_step")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let steps = gate
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| {
+                    Some(ReleaseGateStep {
+                        step: s.get("step")?.as_str()?.to_string(),
+                        exit: s
+                            .get("exit")
+                            .and_then(serde_json::Value::as_i64)
+                            .and_then(|v| i32::try_from(v).ok())?,
+                        secs: s.get("secs").and_then(serde_json::Value::as_f64)?,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(ReleaseGate {
+        ok,
+        failed_step,
+        steps,
+    })
+}
+
 fn read_release(
     dir: &Path,
     sha12: &str,
@@ -346,6 +413,7 @@ fn read_release(
         gate_ok: field(&gate, "ok")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+        gate: read_gate(&gate),
         verify: verify.as_ref().map(|v| ReleaseVerify {
             ok: v
                 .get("ok")
@@ -359,6 +427,7 @@ fn read_release(
                 .get("at")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
+            checks: read_verify_checks(v),
         }),
         promoted_at: as_string(field(&promoted, "promoted_at")),
         on_main: repo.and_then(|r| on_main(r, &full_sha)),
@@ -1072,6 +1141,107 @@ mod tests {
             .expect("symlink");
         let stale = scan(&root, None).items[0].changes.clone().expect("changes");
         assert!(stale.stale);
+    }
+
+    /// ADR-0058: `verify.json` の `checks[]` と `gate.json` の `steps[]` が `ReleaseVerify.checks` /
+    /// `ReleaseItem.gate` にそのまま写る。
+    #[test]
+    fn verify_checks_and_gate_steps_are_carried_through() {
+        let (_dir, root) = env();
+        release(
+            &root,
+            "aaaaaaaaaaaa",
+            Some(r#"{"built_at":"2026-09-22T00:00:00Z"}"#),
+            None,
+            None,
+        );
+        std::fs::write(
+            root.join("aaaaaaaaaaaa").join("gate.json"),
+            r#"{"ok":false,"failed_step":"cargo-test",
+                "steps":[{"step":"cargo-workspace-clean","exit":0,"secs":1.2,"log":".gate-x.log"},
+                         {"step":"cargo-test","exit":101,"secs":42.5,"log":".gate-y.log"}]}"#,
+        )
+        .expect("write");
+        std::fs::write(
+            root.join("aaaaaaaaaaaa").join("verify.json"),
+            r#"{"ok":false,"live_ok":false,"at":"2026-09-22T01:00:00Z",
+                "checks":[{"id":"1","name":"boot","ok":true,"detail":"started","task_id":"","elapsed_s":0},
+                          {"id":"6","name":"smoke","ok":false,"detail":"timed out","task_id":"01K…","elapsed_s":60.3}]}"#,
+        )
+        .expect("write");
+
+        let scanned = scan(&root, None);
+        let item = scanned.items.first().expect("item");
+
+        let gate = item.gate.as_ref().expect("gate");
+        assert!(!gate.ok);
+        assert_eq!(gate.failed_step.as_deref(), Some("cargo-test"));
+        assert_eq!(gate.steps.len(), 2);
+        assert_eq!(gate.steps[0].step, "cargo-workspace-clean");
+        assert_eq!(gate.steps[0].exit, 0);
+        assert!((gate.steps[0].secs - 1.2).abs() < f64::EPSILON);
+        assert_eq!(gate.steps[1].step, "cargo-test");
+        assert_eq!(gate.steps[1].exit, 101);
+
+        let verify = item.verify.as_ref().expect("verify");
+        assert_eq!(verify.checks.len(), 2);
+        assert_eq!(verify.checks[0].id, "1");
+        assert_eq!(verify.checks[0].name, "boot");
+        assert!(verify.checks[0].ok);
+        assert_eq!(verify.checks[1].id, "6");
+        assert!(!verify.checks[1].ok);
+        assert_eq!(verify.checks[1].detail, "timed out");
+        assert_eq!(verify.checks[1].elapsed_s, Some(60.3));
+    }
+
+    /// ADR-0058 D3: `checks`/`steps` が無い（この Phase 以前に作られたリリース、または壊れた
+    /// `gate.json`）ときは、一覧を落とさずに空配列 / `None` になる。
+    #[test]
+    fn missing_checks_and_gate_default_to_empty_without_breaking_the_scan() {
+        let (_dir, root) = env();
+        // 検証済みだが `checks` を持たない古い形の verify.json。
+        release(
+            &root,
+            "aaaaaaaaaaaa",
+            Some(r#"{"built_at":"2026-09-18T00:00:00Z"}"#),
+            Some(r#"{"ok":true}"#),
+            Some(r#"{"ok":true,"live_ok":true,"at":"2026-09-18T01:00:00Z"}"#),
+        );
+        // 壊れた gate.json（`ok` が読めない）。
+        release(
+            &root,
+            "bbbbbbbbbbbb",
+            Some(r#"{"built_at":"2026-09-19T00:00:00Z"}"#),
+            Some("{ not json"),
+            None,
+        );
+
+        let scanned = scan(&root, None);
+        let by = |sha: &str| {
+            scanned
+                .items
+                .iter()
+                .find(|i| i.sha12 == sha)
+                .expect("item")
+                .clone()
+        };
+
+        let old = by("aaaaaaaaaaaa");
+        assert!(
+            old.verify.as_ref().expect("verify").checks.is_empty(),
+            "checks キーが無い verify.json は空配列"
+        );
+        // gate.json 自体（`{"ok":true}`）は壊れていない（`steps` キーが無いだけ）ので、
+        // `gate` は Some のまま、`steps` だけが空配列になる。
+        let old_gate = old.gate.as_ref().expect("gate.json の ok は読める");
+        assert!(old_gate.ok);
+        assert!(old_gate.steps.is_empty());
+        assert_eq!(old_gate.failed_step, None);
+
+        let broken = by("bbbbbbbbbbbb");
+        assert!(!broken.gate_ok, "壊れた gate.json は gate_ok=false のまま");
+        assert!(broken.gate.is_none(), "壊れた gate.json は gate も None");
+        assert!(broken.verify.is_none(), "verify.json が無ければ verify は None");
     }
 
     /// ADR-0041 D3: `on_main` は `git merge-base --is-ancestor <sha> main`。

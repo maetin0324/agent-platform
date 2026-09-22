@@ -6714,3 +6714,112 @@ Phase 88 で足した +12 の余裕があるため、より正確な〈小さい
 - **P-G44-1**: celeris 側で Phase を起こす前に `gui/docs/PROGRESS.md` の最新 G-Phase 節（および
   「提案」節）を読んで、指示書の前提（route 数・fixture の状態など）が現状と一致しているかを確認する
   運用にする（今回のような、既に完了した作業を前提にした指示のやり直しを防ぐ）。
+
+## Phase G45 — `/releases` に検証・ゲートの内訳（ADR-0058、celeris Phase 94、P-G38-1。2026-09-22）
+
+celeris 側が P-G38-1（Phase G38 の提案。`ReleaseVerify` は `ok`/`live_ok`/`at` の集計値しか運ばないため
+「検査 1〜6・4b の一覧」を個別結果に分解できなかった問題）に応え、`GET /releases` の `items[].verify.checks[]`
+（検査ごとの `id`/`name`/`ok`/`detail`/`elapsed_s`）と `items[].gate`（`ok`/`failed_step`/`steps[]`）を
+足した（celeris Phase 94、ADR-0058）。既存の `gate_ok`・`verify.ok`/`live_ok`/`at` は変えていない
+（追加のみ、後方互換）。このフェーズは GUI 側でその内訳を表示に足す。
+
+着手前に `docs/celeris-api-v1.md` の `GET /releases` 節・celeris の
+`crates/task-api/src/types.rs`/`crates/celeris/src/releases.rs` を読み、`ReleaseVerify.checks`・
+`ReleaseItem.gate` が実際に追加されていること（`pnpm gen:types` で `app/celeris/types.ts` に
+`ReleaseGate`/`ReleaseGateStep`/`ReleaseVerifyCheck` が生成されること）を確認してから着手した。
+
+### 1. `app/lib/releases.ts`（純粋関数を追加。既存は変えない）
+
+- **`releaseVerifyCheckRows`**（新規）: `verify.checks` があれば検査ごとに 1 行
+  （`{id, name, word, detail, elapsedS}`）を返す。`word` は `c.ok` をそのまま `"通過"`/`"失敗"` に
+  写すだけ（celeris の判定を GUI で再計算しない）。`checks` が無い（Phase 94 より前のリリース）
+  ときは空配列 — 呼び出し側（`releases.tsx`）はそのとき何も描画しない。既存の
+  `releaseVerifyCheckGroups`（2 グループの集計）はそのまま残す（後方互換のフォールバック）。
+- **`releaseGateStepRows`**（新規）: `gate.steps` があれば段ごとに 1 行
+  （`{step, exit, secs, failed}`）を返す。`failed` は `gate.failed_step === step` の一致だけで決める
+  （`exit` から再計算しない）。`gate` が無ければ空配列。
+
+### 2. `app/routes/releases.tsx`（`ReleaseCard` に 2 つの `<details>` を追加）
+
+- 既存の「検査 1〜4・4b・6」「検査 5」の 2 行一覧（`data-testid="release-verify-checks"`）の**下**に、
+  `checkRows.length > 0` のときだけ `<details data-testid="release-verify-check-details">` を追加。
+  各行は `検査 <id>`（`Mono`）→ バッジ（`通過`/`失敗` の 1 語のみ。ADR-0055 D1-3）→ 検査名 → 経過秒
+  （`elapsed_s > 0` のときだけ）→ 詳細文（`detail`、折り返し）。
+  **バグを 1 回作って直した**: 最初バッジの中に「検査 1 通過」のように id を含めていたら、
+  `pnpm mobile-audit` の `status-badge` 検査（バッジは空白を含まない 1 語。ADR-0055 D1-3）に
+  28 件（7 検査 × 2 リリース × light/dark）落ちた。id は `Mono` の別要素に出し、バッジは `word` だけに
+  した後は 0 件になった。celeris が書いた合否をそのまま出すことと、GUI の表示規約（バッジ 1 語）を
+  両立させる必要があった、という教訓。
+- 同様に `gateSteps.length > 0` のときだけ `<details data-testid="release-gate-step-details">` を追加。
+  各行は バッジ（`通過`/`失敗`、`failed` が真の段だけ danger）→ 段名 → `exit <n> · <secs>s`（`Mono`）。
+  celeris がまだ実行していない段（`GATE_OK` が偽になった後）は `gate.steps` に含まれないので、
+  そのまま描画すれば「失敗した段で止まっている」ことが行数からも分かる。
+- どちらも `promoteAvailability`/`canPromote` の判定には触れていない（昇格できるかどうかのロジックは
+  無変更）。
+
+### 3. fixture（`test/mock-celeris/fixtures.ts`、`pnpm mobile-audit`/`pnpm e2e:mock`/`pnpm test` が共有）
+
+- **`releaseVerifyChecks(failing?: string[])`**（新規）: `verify.sh` の実際の record 呼び出しと同じ
+  id/name（`1 start-and-migrate` / `2 counts-match` / `3 main-gets` / `4 gui` / `4b gui-e2e` /
+  `5 n-1-compat` / `6 smoke`）で検査 7 件を作る。`failing` に id を渡すとその検査だけ `ok: false` にする。
+- **`releaseGateSteps(failAt?: string | null)`**（新規）: `release.sh` の gate 9 段の順で `steps[]` を
+  作り、`failAt` を渡すとその段で打ち切る（`run_step` が `GATE_OK` が偽になった後は走らないのと同じ
+  挙動）。
+- `releaseItem()` の既定に `gate: releaseGateSteps()`（全段通過）と `verify.checks: releaseVerifyChecks()`
+  （全検査通過）を追加。
+- `defaultReleases.items`: `cccccccccccc`（`ok_stop_start`）は**あえて** `gate: undefined` のまま・
+  `verify` に `checks` を含めない形にして、Phase 94 より前のリリースの後方互換（詳細一覧が出ない）を
+  mobile-audit/e2e:mock でも監査対象にした。`dddddddddddd`（`ng`）は検査 6 が失敗・gate が
+  `cargo-test` で止まる形にし、失敗表示（危険トーンのバッジ、`failed_step` の強調）を監査対象にした。
+
+### テスト（新規・変更）
+
+- `test/unit/releases.test.ts`: `releaseVerifyCheckRows`（`checks` 無しは空配列、`ok` を再計算せず
+  `word` に写す、バッジが空白無し・12 字以内）・`releaseGateStepRows`（`gate` 無しは空配列、
+  `failed_step` と一致する段だけ `failed: true`、全段通過なら全部 `failed: false`）を追加。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| install | `pnpm install --frozen-lockfile` | exit 0 |
+| gen:types | `pnpm gen:types` | `app/celeris/types.ts` に `ReleaseGate`/`ReleaseGateStep`/`ReleaseVerifyCheck` が追加された差分が出る（**この Phase では差分があってよい**指示どおり。コミットに含めた） |
+| lint | `pnpm lint`（`biome check .`、1 回 `--write` で自動整形） | exit 0。`Checked 253 files` |
+| typecheck | `pnpm typecheck` | exit 0（出力なし） |
+| test | `pnpm test` | exit 0。**Test Files 68 passed (68) / Tests 1036 passed (1036)**（Phase G44 の 1030 から +6: `releaseVerifyCheckRows` 3・`releaseGateStepRows` 3） |
+| build | `pnpm build` | exit 0（client・server とも）。既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件のみ、変化なし |
+| mobile-audit（1 回目） | `pnpm mobile-audit` | 最初 `{"ok":false,"total":28,"by_rule":{"status-badge":28}}`（上記のバグ）。バッジ修正後に再実行し **`{"ok":true,"total":0}`**、`routes=26 schemes=2 violations=0`、実測 **93.32 秒** |
+| mobile-audit（2 回目） | `pnpm mobile-audit` | **`{"ok":true,"total":0}`**、実測 **93.93 秒**（単発 120 秒予算内、Phase G44 の約 93 秒からの変化なし） |
+| e2e:mock | `pnpm e2e:mock` | **`{"ok":true,"mode":"mock","failures":[]}`**、12.6 秒 |
+
+celeris 側のゲート（`cargo test --workspace --no-fail-fast`・`cargo clippy --workspace --all-targets
+-- -D warnings`）は celeris 側の Phase 94（`docs/PROGRESS.md`）を参照（このリポジトリの慣例どおり、
+Rust 側のゲートは celeris 側の PROGRESS に書く）。
+
+### 変更したファイル
+
+- `app/lib/releases.ts`（`releaseVerifyCheckRows`・`releaseGateStepRows` 新規）
+- `app/routes/releases.tsx`（`ReleaseCard` に検査・gate の内訳 `<details>` 2 つを追加）
+- `app/celeris/types.ts`（`pnpm gen:types` の差分。`ReleaseGate`/`ReleaseGateStep`/`ReleaseVerifyCheck`
+  など）
+- `test/mock-celeris/fixtures.ts`（`releaseVerifyChecks`・`releaseGateSteps` 新規、`releaseItem`/
+  `defaultReleases` の既定を拡張）
+- `test/unit/releases.test.ts`（新規テスト 2 ブロック）
+- `docs/celeris-api-v1.md`・`docs/adr/0058-release-verify-breakdown.md` は celeris 側の変更（このリポジトリ
+  では読むだけ。celeris 側のコミットに含まれる）
+- `gui/docs/PROGRESS.md`（本節）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34。このサンドボックスに本物の celeris・本物のブラウザ・外向きネットワークが
+  無い）。本番の `/releases` での確認は、指示書のとおり親エージェントが昇格後に行う。
+- **個別の検査の粒度は celeris の `verify.sh` の record 呼び出しに従属する**: `verify.json` に無い
+  検査（将来検査が増減した場合）はそのまま行数に反映される。GUI 側はその変化に追従するだけで
+  スキーマの変更は不要（`checks[]` は配列なので、要素数が変わってもそのまま描画できる）。
+- `release-verify-check-details`/`release-gate-step-details` の実機でのタップ挙動
+  （`<details>`/`<summary>` の開閉）は Phase G15 の `release-changes` と同じ実装パターンなので
+  新規のリスクは無いと判断しているが、実機での確認はしていない。
+
+### 提案
+
+- なし（P-G38-1 はこの Phase で実施した）。

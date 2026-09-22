@@ -803,6 +803,7 @@ async fn the_timeline_lists_the_releases_that_contain_this_tasks_commits() {
             built_at: Some(built_at.into()),
             schema_version: None,
             gate_ok: true,
+            gate: None,
             verify: None,
             promoted_at: None,
             on_main: None,

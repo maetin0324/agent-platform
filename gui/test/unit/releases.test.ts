@@ -18,11 +18,13 @@ import {
   promoteNeedsTypedSha,
   releaseGateBadgeLabel,
   releaseGateLabel,
+  releaseGateStepRows,
   releaseModeWord,
   releasePositionLabel,
   releaseSubtitle,
   releaseVerifyBadgeLabel,
   releaseVerifyCheckGroups,
+  releaseVerifyCheckRows,
   releaseVerifyIcon,
   releaseVerifyLabel,
   releaseVerifyState,
@@ -33,7 +35,14 @@ import {
   typedShaMatches,
 } from "~/lib/releases";
 import { loadReleases } from "~/routes/releases";
-import { defaultReleasePromoteAccepted, defaultReleases, releaseChanges, releaseItem } from "../mock-celeris/fixtures";
+import {
+  defaultReleasePromoteAccepted,
+  defaultReleases,
+  releaseChanges,
+  releaseGateSteps,
+  releaseItem,
+  releaseVerifyChecks,
+} from "../mock-celeris/fixtures";
 import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
 /**
@@ -184,6 +193,64 @@ describe("releaseVerifyCheckGroups", () => {
         expect(group.word.length).toBeLessThanOrEqual(12);
       }
     }
+  });
+});
+
+/**
+ * ADR-0058（Phase 94、P-G38-1）: `verify.checks[]` があるときは検査ごとの内訳を出す。
+ * celeris が書いた `ok`/`detail` をそのまま行にするだけ（GUI 側で再計算しない）。
+ */
+describe("releaseVerifyCheckRows", () => {
+  it("is empty when checks are missing (backward compatible with pre-Phase-94 releases)", () => {
+    expect(releaseVerifyCheckRows(item({ verify: { ok: true, live_ok: true, at: null } }))).toEqual([]);
+    expect(releaseVerifyCheckRows(item({ verify: null }))).toEqual([]);
+  });
+
+  it("maps each check's ok to a 通過/失敗 word without recomputing it", () => {
+    const rows = releaseVerifyCheckRows(
+      item({ verify: { ok: true, live_ok: true, at: null, checks: releaseVerifyChecks(["6"]) } }),
+    );
+    expect(rows).toHaveLength(7);
+    const smoke = rows.find((r) => r.id === "6");
+    expect(smoke?.word).toBe("失敗");
+    expect(smoke?.name).toBe("smoke");
+    expect(smoke?.detail).toContain("60.3s");
+    const boot = rows.find((r) => r.id === "1");
+    expect(boot?.word).toBe("通過");
+  });
+
+  it("never produces a badge with whitespace or more than 12 characters", () => {
+    const rows = releaseVerifyCheckRows(
+      item({ verify: { ok: true, live_ok: true, at: null, checks: releaseVerifyChecks() } }),
+    );
+    for (const row of rows) {
+      expect(row.word).not.toMatch(/\s/);
+      expect(row.word.length).toBeLessThanOrEqual(12);
+    }
+  });
+});
+
+/**
+ * ADR-0058（Phase 94、P-G38-1）: `gate.steps[]` があればゲート各段の内訳を出す。`failed` は
+ * `gate.failed_step` と一致する段だけ真になる（celeris が決めた失敗段をそのまま反映する）。
+ */
+describe("releaseGateStepRows", () => {
+  it("is empty when gate is missing (backward compatible with pre-Phase-94 releases)", () => {
+    expect(releaseGateStepRows(item({ gate: undefined }))).toEqual([]);
+  });
+
+  it("marks only the failed_step as failed, and stops at it (run_step does not run later steps)", () => {
+    const rows = releaseGateStepRows(item({ gate: releaseGateSteps("cargo-test") }));
+    expect(rows.map((r) => r.step)).toEqual(["cargo-workspace-clean", "cargo-test"]);
+    expect(rows.find((r) => r.step === "cargo-workspace-clean")?.failed).toBe(false);
+    expect(rows.find((r) => r.step === "cargo-test")?.failed).toBe(true);
+    expect(rows.find((r) => r.step === "cargo-test")?.exit).toBe(1);
+  });
+
+  it("marks nothing as failed when the whole gate passed", () => {
+    const rows = releaseGateStepRows(item({ gate: releaseGateSteps() }));
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => !r.failed)).toBe(true);
   });
 });
 
