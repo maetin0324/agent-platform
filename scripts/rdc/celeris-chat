@@ -1,0 +1,24 @@
+#!/bin/sh
+# ADR-0056 Phase 101 追記: Remote Desktop Commander（RDC）経由の ChatGPT 向けの、たった 1 本の入口。
+#
+# 構成: ChatGPT → RDC device agent（専用 Linux ユーザー chatgpt-rdc、権限最小）→ この celeris-chat
+# → 127.0.0.1:18200/mcp（token）→ Celeris MCP。専用ユーザーのシェルからはこのスクリプトだけを
+# 呼ばせ、汎用 curl で HTTP API を直接叩かせない（MCP client の scope で許される操作だけに絞るため。
+# `docs/mcp.md` §8 参照）。中身は `celerisctl mcp call` をそのまま呼ぶだけの薄いラッパ（判断も検証も
+# 持たない）。
+#
+# 使い方: celeris-chat <TOOL> [JSON_ARGS]
+#         celeris-chat --list
+#
+# 運用上の注意（親が決める）: 専用ユーザー（chatgpt-rdc）には `celerisctl` バイナリを**読める**必要が
+# ある。既定の `$HOME/.local/celeris/current/bin/celerisctl` は rmaeda のホーム下にあるため、
+# 専用ユーザーからは直接読めない（ホームディレクトリのパーミッション次第）。バイナリを専用ユーザーの
+# ホーム配下にコピーするか、`$HOME/.local/celeris` に対して専用ユーザーへの読み取り権を与えるか、
+# `CELERIS_BIN` で別の場所を指すかは、この Phase では決めていない（`docs/PROGRESS.md` の提案節）。
+# 同様に token ファイル（`CELERIS_MCP_TOKEN_FILE` の既定 `$HOME/.config/celeris/mcp-token`）も
+# 専用ユーザーから読める場所に、専用ユーザーだけが読める権限（0400 等）で置くこと。
+
+exec "${CELERIS_BIN:-$HOME/.local/celeris/current/bin/celerisctl}" mcp call \
+  --base-url "${CELERIS_MCP_URL:-http://127.0.0.1:18200}" \
+  --token-file "${CELERIS_MCP_TOKEN_FILE:-$HOME/.config/celeris/mcp-token}" \
+  "$@"

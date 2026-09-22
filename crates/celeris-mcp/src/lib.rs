@@ -6,6 +6,7 @@
 //! （DESIGN 原則 1）。
 
 pub mod auth;
+pub mod call;
 pub mod config;
 mod http;
 pub mod ratelimit;

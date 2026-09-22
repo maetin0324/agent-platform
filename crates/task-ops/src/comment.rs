@@ -64,9 +64,24 @@ pub fn post_human_comment(
     body: String,
     now: OffsetDateTime,
 ) -> Result<CommentResult, OpsError> {
+    post_human_comment_as(store, id, None, body, now)
+}
+
+/// ADR-0056 Phase 101: `post_human_comment` と同じ効き方（`ADR-0044 D2` の表）だが、
+/// `author`（`CommentAuthorKind::Human` の `TaskComment.author`）を明示できる。MCP の
+/// `task_comment` は `Some("mcp:<client_id>")` を渡す（`knowledge_propose` の `mcp:chatgpt` と
+/// 同じ流儀）。GUI/HTTP の `POST /tasks/{id}/comments`（`post_human_comment`）は `None` のまま
+/// （挙動もフィールドの見え方も、この Phase では 1 バイトも変えない）。
+pub fn post_human_comment_as(
+    store: &dyn TaskStore,
+    id: TaskId,
+    author: Option<String>,
+    body: String,
+    now: OffsetDateTime,
+) -> Result<CommentResult, OpsError> {
     TaskComment::validate_body(&body).map_err(OpsError::Validation)?;
     let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
-    let comment = TaskComment::new(id, CommentAuthorKind::Human, None, body.clone(), None, now);
+    let comment = TaskComment::new(id, CommentAuthorKind::Human, author, body.clone(), None, now);
 
     match task.status {
         // 走っている（レビュー中も含む）run を止めて `ready` に戻す。コメントと遷移は同じトランザクション。

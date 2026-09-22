@@ -387,3 +387,84 @@ Phase 78 の PROGRESS 節が残した「GUI（skills 節）は後続の GUI Phas
 `/org` の担当詳細で mount する → `GET /skills` の `mounted_by` に現れることを見る → unmount して
 消せることを確認する）。認証・ネットワークが使える環境の人（またはエージェント）が実行し、結果を
 同節に追記すること。
+
+## Phase 101 追記（2026-09-22。外部エージェント（ChatGPT、Remote Desktop Commander 経由）向けに
+MCP へ task 操作のツールと scope、`celerisctl mcp call` を足す）
+
+背景: ChatGPT からは Remote Desktop Commander（RDC）というリモート MCP で home-dev のシェルを叩ける。
+設計: `ChatGPT → RDC device agent（専用 Linux ユーザー chatgpt-rdc、権限最小）→ celeris-chat（薄い
+入口）→ 127.0.0.1:18200/mcp（token）→ Celeris MCP`。汎用 `curl` で HTTP API を叩かせず、**MCP client
+の scope で許される操作だけ**にする。実装は決定どおり（**決定を変えた点は無い**）。ADR に書いていな
+かった細部と、あえて別のやり方にした点だけを残す。
+
+### 決めた細部（ADR が書いていなかったこと）
+
+- **P-101-a: `McpScope` に `tasks:interact` / `tasks:control` / `tasks:decide` の 3 つを足したが、
+  `celerisctl mcp client add` の既定（`McpScope::DEFAULT`）には入れていない。** D4 の「既定は read 系
+  + `knowledge:propose` + `console:instruct`」を変えない、という Phase 101 の指示どおり。RDC 向けの
+  客は `--scope` で明示する（`docs/mcp.md` §8.2）。
+- **P-101-b: `task_comment` / `task_approve` / `task_reject` は、下敷きの `task-ops` 関数
+  （`post_human_comment` / `gate::approve` / `gate::reject`）が actor を運べなかったので、**同じ判断・
+  遷移を持つ `_as` 版を新設**した（`post_human_comment_as(store, id, author: Option<String>, …)`、
+  `approve_as` / `reject_as(store, id, by: &str, …)`）。GUI/HTTP が呼ぶ既存の `post_human_comment` /
+  `approve` / `reject` はそれぞれ `_as` 版を `None` / `"human"` で呼ぶだけのラッパに書き換え、**挙動も
+  出力も 1 バイトも変えていない**（`crates/task-ops/src/comment.rs::post_human_comment_as`、
+  `crates/task-ops/src/gate.rs::{approve_as, reject_as}`）。P-78-b（`conversation::start_as`）と同じ
+  やり方（既存の公開関数の中身を `_as` 版に切り出し、元の関数はその薄いラッパにする）を踏襲した。
+- **P-101-c: `task_answer` / `task_retry` は actor を運ぶ欄が下敷きの関数に無く、`_as` 版も作らなかっ
+  た。** `gate::answer` の `Event::Answered` にはそもそも `by` の欄が無く（GUI/HTTP の
+  `POST /tasks/{id}/answer` でも人の身元は記録されない）、`retry::retry_task` も同様（複製は
+  「元のタスクと同じ」を保つ設計で、actor を持たない）。ここに actor を足すのは Phase 101 の範囲を
+  超える設計変更（イベントのスキーマに手を入れる）と判断し、見送った。この 2 つの MCP ツールの
+  「誰が呼んだか」は `mcp_calls`（`client_id`）だけが持つ。
+- **P-101-d: `task_cancel { id, reason? }` の `reason` は、`gate::cancel` 自体には運べない**
+  （`Trigger::Cancel` に付随するイベントに理由の欄が無い）ので、`reason` が非空なら**先に**
+  `task_ops::comment::post_node_comment`（`CommentAuthorKind::Node`、`author = mcp:<client_id>`、
+  「人を起こさない」効き方 — ADR-0044 D2）でコメントとして記録してから `gate::cancel` を呼ぶ、という
+  2 段の合成にした。どちらも既存の `task-ops` 関数をそのまま呼ぶだけで、ロジックの二重実装はしていない。
+  `reason` 無し（または空白のみ）なら `gate::cancel` だけを呼ぶ（コメントは残らない）。
+- **P-101-e: `task_reject` の `reason` は必須・空白不可。** D2 の表が `task_reject {id, reason}`
+  （`?` 無し）としていたのをそのまま踏襲し、`ToolError::invalid_params` で拒否する（`task_approve` の
+  `note` は表どおり任意）。
+- **P-101-f: `task_answer` の引数名は `answer`（`text` ではない）。** Phase 101 の指示にあった
+  「`answer` の既存の body 形に合わせる」を、`task-api::types::AnswerBody.answer` と同じフィールド名を
+  使う、と読んだ（`task_comment` は本文が `body`/`text` のどちらでもおかしくないため、他の tool
+  （`console_instruct` 等）に揃えて `text` のままにした）。
+- **P-101-g: `celerisctl mcp call` は DB を開かないという制約から、`crates/celeris-mcp/src/call.rs`
+  という新しいモジュールに HTTP 呼び出しのロジックを置き、`celerisctl` はその薄い呼び出し元**
+  （出力の整形と exit code だけを持つ）にした。`stdio.rs`（既存）と同じ `reqwest::blocking` を使うが、
+  `stdio` は「EOF まで繰り返す橋」、`call` は「`initialize` → `tools/call`（または `tools/list`）を
+  1 回だけ」という別物なので、`stdio.rs` を拡張するのではなく別ファイルにした。
+  `--token-file` の読み取りは `celerisctl::commands::mcp::resolve_token`（新設）に共通化し、`run_stdio`
+  もこれを使うよう書き換えた（挙動は変えていない）。
+- **P-101-h: `mcp call` の exit code は「引数不正 = 2、サーバー側のエラー = 1」を、`Result<ExitCode,
+  CliError>` の枠内で作った。** 引数不正（`JSON_ARGS` が JSON でない、`TOOL` も `--list` も無い）は
+  `run_call` 自身が stderr に書いて `Ok(ExitCode::from(2))` を返す。サーバー側のエラー（`CallError`:
+  接続不可 / HTTP 非 2xx / JSON-RPC エラー）は `Err(CliError::msg(..))` にして `main` の既存の
+  `eprintln!("error: {e}"); ExitCode::FAILURE`（= 1）に任せる（`stdio`/`client add` と同じ経路）。
+- **P-101-i: `scripts/rdc/celeris-chat` は判断を持たない 1 行の `exec`。** RDC の専用ユーザーから
+  「このスクリプトだけ呼べる」を運用で強制する前提（sudoers / 許可コマンドの制限等）は、この Phase の
+  範囲外（親が RDC 側・OS 側の設定で行う）。スクリプト自身は `celerisctl mcp call` の薄いラッパで、
+  scope による制限は Celeris MCP 側（トークンに紐づく `mcp_clients.scopes`）が担う。
+- **P-101-j: GUI（`gui/app/lib/mcp.ts` の `SCOPE_ORDER`/`SCOPE_LABEL`）に 3 つの新スコープを足した。**
+  `gui/` の `types.ts` は `McpScope` の union 型を持つ `Record<McpScope, string>`（`SCOPE_LABEL`）が
+  網羅性チェックの対象になっており、`pnpm gen:types` で型を更新すると `pnpm typecheck` がそのまま
+  失敗する（3 つのキーが無い、というコンパイルエラー）。ADR-0056 の D2/D4（MCP tools と scope）の
+  自然な帰結（新しい `McpScope` の値は GUI にも見える）と判断し、ラベルの追加だけ行った（GUI 側の
+  ADR・PROGRESS の書き換えはしていない。表示文言の追加はここに書くだけで足りると判断した）。
+
+### やっていないこと（Phase 101 のスコープ外）
+
+- `task_answer` / `task_retry` へのイベントレベルの actor 記録（P-101-c）。
+- GUI の「MCP クライアント」節（`/accounts`）に `tasks:interact`/`tasks:control`/`tasks:decide` を
+  選べるチェックボックスを追加する等の UI 変更（表示ラベルの追加のみ。scope を選んで発行する GUI
+  フローそのものが無い — ADR-0056 D4 が明記した後続 GUI Phase のまま）。
+- RDC の専用ユーザー（`chatgpt-rdc`）自体の作成・sudoers 設定・`celerisctl` バイナリの配置（親が
+  昇格後に行う。`docs/mcp.md` §8.1 に注意点だけ書いた）。
+
+### 実機（このセッションでは未実施。ADR-0009 P-34）
+
+`docs/PROGRESS.md` の「Phase 101」節に手順を書いた（専用ユーザーから `celeris-chat tasks_list` /
+`console_instruct` / `task_comment` が通ること、`GET /mcp/clients?client=chatgpt-rdc` に
+Phase 101 で発行したクライアントの監査行（`mcp_calls`）が残ること）。認証・ネットワークが使える環境の
+人（またはエージェント）が、RDC の専用ユーザーを用意したうえで実行し、結果を同節に追記すること。

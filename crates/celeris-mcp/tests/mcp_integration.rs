@@ -10,8 +10,9 @@ use celeris_mcp::config::ListenerAuth;
 use celeris_mcp::state::McpState;
 use serde_json::{Value, json};
 use task_core::{
-    GenreSpec, McpClient, McpClientStore, McpScope, OrgKind, OrgNode, RoleSpec, SqliteStore,
-    TaskStore, Tier,
+    ArtifactRef, Budget, Check, Criterion, GenreSpec, McpClient, McpClientStore, McpScope, OrgKind,
+    OrgNode, RoleSpec, SqliteStore, Status, Task, TaskKind, TaskStore, Tier, WorkerHint,
+    WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -54,6 +55,70 @@ fn roles_and_genres() -> (Vec<RoleSpec>, Vec<GenreSpec>) {
             ..GenreSpec::default()
         }],
     )
+}
+
+/// ADR-0056 Phase 101 のテスト用（`crates/task-ops/src/gate.rs` の `sample_task` と同じ形）。
+fn sample_task(kind: TaskKind, status: Status) -> Task {
+    let now = OffsetDateTime::now_utc();
+    Task {
+        mode: Default::default(),
+        skills: Vec::new(),
+        repos: Vec::new(),
+        id: task_core::TaskId::new(),
+        parent_id: None,
+        kind,
+        title: "do something".to_string(),
+        objective: "make it work".to_string(),
+        acceptance: vec![Criterion {
+            text: "tests pass".to_string(),
+            check: Check::Command {
+                cmd: "true".to_string(),
+                expect_exit: 0,
+            },
+        }],
+        inputs: vec![ArtifactRef {
+            name: "spec".to_string(),
+            path: "spec.md".to_string(),
+            sha256: "abc".to_string(),
+            kind: "doc".to_string(),
+        }],
+        depends_on: vec![],
+        status,
+        priority: 0,
+        worker_hint: WorkerHint {
+            tier: Tier::Standard,
+            adapter: None,
+        },
+        workspace: WorkspaceSpec::Local {
+            path: "/tmp/workspace".into(),
+            mode: None,
+        },
+        budget: Budget {
+            max_turns: 10,
+            max_wall_secs: 600,
+            max_retries: 2,
+        },
+        attempts: 0,
+        lease: None,
+        created_at: now,
+        updated_at: now,
+        role: None,
+        genre: None,
+        aggregate: false,
+        project_id: None,
+        milestone_id: None,
+        assignee: None,
+        conversation: None,
+        labels: Vec::new(),
+        category: Default::default(),
+    }
+}
+
+fn insert_task(store: &SqliteStore, kind: TaskKind, status: Status) -> task_core::TaskId {
+    let task = sample_task(kind, status);
+    let id = task.id;
+    store.insert(&task).expect("insert task");
+    id
 }
 
 fn seed_org(store: &SqliteStore) {
@@ -163,6 +228,34 @@ async fn initialize(client: &reqwest::Client, base_url: &str, token: Option<&str
         .to_str()
         .expect("ascii")
         .to_string()
+}
+
+/// `tools/call` を 1 回行い、応答本体（`RpcResponse` の JSON）を返す（Phase 101 のテストで多用）。
+async fn call_tool(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: Option<&str>,
+    session: &str,
+    name: &str,
+    arguments: Value,
+) -> Value {
+    let resp = rpc(
+        client,
+        base_url,
+        token,
+        Some(session),
+        json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {
+            "name": name, "arguments": arguments
+        }}),
+    )
+    .await;
+    resp.json().await.expect("json")
+}
+
+/// `tools/call` が成功した応答の `structuredContent` を返す（無ければ panic）。
+fn structured(body: &Value) -> Value {
+    assert!(body.get("error").is_none(), "unexpected error: {body}");
+    body["result"]["structuredContent"].clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +700,261 @@ async fn tools_call_is_recorded_in_mcp_calls() {
     assert_eq!(calls[0].tool, "knowledge_list");
     assert!(calls[0].ok);
     assert!(calls[0].error_kind.is_none());
+
+    server.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 101: task_comment / task_answer / task_retry / task_cancel / task_approve / task_reject
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn task_comment_requires_scope_and_is_authored_by_the_mcp_client() {
+    let server = spawn_token_server(60).await;
+    create_client(&server.store, "noscope", Some("s0"), vec![]);
+    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksInteract]);
+    let task_id = insert_task(&server.store, TaskKind::Execute, Status::Ready);
+    let client = reqwest::Client::new();
+
+    // scope 無しは tools/list に出ず、呼んでも -32601。
+    let session0 = initialize(&client, &server.base_url, Some("s0")).await;
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("s0"),
+        &session0,
+        "task_comment",
+        json!({"id": task_id.to_string(), "text": "だめ"}),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32601, "{body}");
+    assert!(server.store.comments_for(task_id).unwrap().is_empty());
+
+    // scope 有りなら効く。author は mcp:chatgpt。
+    let session = initialize(&client, &server.base_url, Some("secret")).await;
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("secret"),
+        &session,
+        "task_comment",
+        json!({"id": task_id.to_string(), "text": "見てほしい"}),
+    )
+    .await;
+    let out = structured(&body);
+    assert_eq!(out["effect"], "stored", "{out}");
+
+    let comments = server.store.comments_for(task_id).unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].author.as_deref(), Some("mcp:chatgpt"));
+    assert_eq!(comments[0].body, "見てほしい");
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn task_answer_requires_scope_and_unblocks_the_task() {
+    let server = spawn_token_server(60).await;
+    create_client(&server.store, "noscope", Some("s0"), vec![]);
+    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksInteract]);
+    let task_id = insert_task(&server.store, TaskKind::Execute, Status::Blocked);
+    let client = reqwest::Client::new();
+
+    let session0 = initialize(&client, &server.base_url, Some("s0")).await;
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("s0"),
+        &session0,
+        "task_answer",
+        json!({"id": task_id.to_string(), "answer": "pegasus"}),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32601, "{body}");
+    assert_eq!(server.store.get(task_id).unwrap().unwrap().status, Status::Blocked);
+
+    let session = initialize(&client, &server.base_url, Some("secret")).await;
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("secret"),
+        &session,
+        "task_answer",
+        json!({"id": task_id.to_string(), "answer": "pegasus"}),
+    )
+    .await;
+    let out = structured(&body);
+    assert_eq!(out["to"], "ready", "{out}");
+    assert_eq!(server.store.get(task_id).unwrap().unwrap().status, Status::Ready);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn task_retry_requires_scope_and_duplicates_the_failed_task() {
+    let server = spawn_token_server(60).await;
+    create_client(&server.store, "noscope", Some("s0"), vec![]);
+    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksControl]);
+    let task_id = insert_task(&server.store, TaskKind::Execute, Status::Failed);
+    let client = reqwest::Client::new();
+
+    let session0 = initialize(&client, &server.base_url, Some("s0")).await;
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("s0"),
+        &session0,
+        "task_retry",
+        json!({"id": task_id.to_string()}),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32601, "{body}");
+
+    let session = initialize(&client, &server.base_url, Some("secret")).await;
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("secret"),
+        &session,
+        "task_retry",
+        json!({"id": task_id.to_string()}),
+    )
+    .await;
+    let out = structured(&body);
+    let new_id: task_core::TaskId = out["task_id"].as_str().expect("task_id").parse().expect("ulid");
+    assert_ne!(new_id, task_id);
+    let new_task = server.store.get(new_id).unwrap().expect("new task exists");
+    assert_eq!(new_task.status, Status::Draft, "accept=false starts at draft");
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn task_cancel_requires_scope_and_records_an_optional_reason_comment() {
+    let server = spawn_token_server(60).await;
+    create_client(&server.store, "noscope", Some("s0"), vec![]);
+    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksControl]);
+    let task_id = insert_task(&server.store, TaskKind::Execute, Status::Ready);
+    let client = reqwest::Client::new();
+
+    let session0 = initialize(&client, &server.base_url, Some("s0")).await;
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("s0"),
+        &session0,
+        "task_cancel",
+        json!({"id": task_id.to_string()}),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32601, "{body}");
+    assert_eq!(server.store.get(task_id).unwrap().unwrap().status, Status::Ready);
+
+    let session = initialize(&client, &server.base_url, Some("secret")).await;
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("secret"),
+        &session,
+        "task_cancel",
+        json!({"id": task_id.to_string(), "reason": "もう要らない"}),
+    )
+    .await;
+    let out = structured(&body);
+    assert_eq!(out["to"], "cancelled", "{out}");
+    assert_eq!(server.store.get(task_id).unwrap().unwrap().status, Status::Cancelled);
+
+    let comments = server.store.comments_for(task_id).unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].author.as_deref(), Some("mcp:chatgpt"));
+    assert_eq!(comments[0].body, "もう要らない");
+    assert_eq!(comments[0].author_kind, task_core::CommentAuthorKind::Node);
+
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn task_approve_and_task_reject_require_scope_and_record_the_mcp_actor() {
+    let server = spawn_token_server(60).await;
+    create_client(&server.store, "noscope", Some("s0"), vec![]);
+    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksDecide]);
+    let draft_id = insert_task(&server.store, TaskKind::Execute, Status::Draft);
+    let approval_id = insert_task(&server.store, TaskKind::Approval, Status::Ready);
+    let client = reqwest::Client::new();
+
+    // scope 無しは approve/reject どちらも拒否。
+    let session0 = initialize(&client, &server.base_url, Some("s0")).await;
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("s0"),
+        &session0,
+        "task_approve",
+        json!({"id": draft_id.to_string()}),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32601, "{body}");
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("s0"),
+        &session0,
+        "task_reject",
+        json!({"id": approval_id.to_string(), "reason": "だめ"}),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32601, "{body}");
+
+    let session = initialize(&client, &server.base_url, Some("secret")).await;
+
+    // task_approve: draft -> ready。
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("secret"),
+        &session,
+        "task_approve",
+        json!({"id": draft_id.to_string(), "note": "OK"}),
+    )
+    .await;
+    let out = structured(&body);
+    assert_eq!(out["to"], "ready", "{out}");
+    assert_eq!(server.store.get(draft_id).unwrap().unwrap().status, Status::Ready);
+
+    // task_reject: reason が空だと invalid_params（-32602）。
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("secret"),
+        &session,
+        "task_reject",
+        json!({"id": approval_id.to_string(), "reason": "  "}),
+    )
+    .await;
+    assert_eq!(body["error"]["code"], -32602, "{body}");
+
+    // task_reject: approval タスクを reject → failed。`by` に mcp:<client> が入る。
+    let body = call_tool(
+        &client,
+        &server.base_url,
+        Some("secret"),
+        &session,
+        "task_reject",
+        json!({"id": approval_id.to_string(), "reason": "要件が足りない"}),
+    )
+    .await;
+    let out = structured(&body);
+    assert_eq!(out["to"], "failed", "{out}");
+
+    let events = server.store.events_for(approval_id).unwrap();
+    let decided = events.iter().find_map(|(_, e)| match e {
+        task_core::Event::ApprovalDecided { by, approved, note } => Some((by.clone(), *approved, note.clone())),
+        _ => None,
+    });
+    assert_eq!(
+        decided,
+        Some(("mcp:chatgpt".to_string(), false, Some("要件が足りない".to_string())))
+    );
 
     server.stop().await;
 }

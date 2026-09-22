@@ -14249,3 +14249,165 @@ CoS へ「pegasus で pegasusinfo を実行して」と頼んだところ、CoS 
 - **実機確認（Phase 99b）**: 継続中の CoS セッション（resume=true、claude-code）に「pegasus と sirius の作業ディレクトリはどこに登録されていますか」と質問（対話タスク 01M34NSF2F34ZDJ7GBBJ06VJD0、20 秒で done、actions 無し）。`request.json` の `context.clusters` に fern03 / pegasus / sirius の 3 件（work_dir 付き）が入り、前置きに `## クラスタ (clusters)` 節が描かれ、返事は「pegasus: /work/NBB/rmaeda、sirius: /work/NBB/rmaeda に登録されています（いずれも未接続状態）。fern03 は作業ディレクトリ未登録です」。Phase 99 で見つけた穴は閉じた。
 - **実機確認（Phase 100）**: `GET /clusters` は pegasus / sirius に `work_dir=/work/NBB/rmaeda work_dir_source=settings`、fern03 は null を返し、GUI のクラスタ画面はこれを「作業ディレクトリ」と出どころバッジ（settings / config / unregistered）で表示し、`<details>` のフォームから `PUT /clusters/{id}/settings` で保存・上書き消去できる。本番 GUI はログインが要るため親は API 側と staging の `pnpm e2e:staging`（check 4b、clusters 画面の `cluster-work-dir` 節を検査）で確認した。画面の見た目は人が確認する。
 - **気づき（提案 P-100-1）**: 昇格（ライブでも停止→起動でも）のたびに pegasus の ssh ControlMaster が切れ、`connected=false` に戻る（13:18 の停止→起動、13:44 のライブ切替の両方で観測）。master プロセスがデーモンの子として起きているためと思われる。TOTP が要るクラスタでは人手の再接続が毎回必要になるので、master を celeris のプロセス寿命から切り離す（`setsid` + `ControlPersist`、または `systemd-run --user` の一時 unit）ことを次の Rust ラウンドの候補にする。
+
+## Phase 101 — MCP に task 操作のツールと scope、`celerisctl mcp call`（ADR-0056 追記。RDC 経由の ChatGPT 向け、完了日 2026-09-22）
+
+Rust のみ（GUI は `types.ts` 再生成と、それに伴う `gui/app/lib/mcp.ts` のラベル追加だけ）。ChatGPT が
+Remote Desktop Commander（RDC）経由で home-dev のシェルを叩けるようになったのを受け、`celeris-chat`
+という薄い入口 1 本だけを専用ユーザーに与え、MCP の scope で許した操作だけをさせるための土台を作った。
+
+### 条件と実装
+
+**条件 1: `McpScope` に `tasks:interact` / `tasks:control` / `tasks:decide` を追加（既定は変えない）**
+
+- `crates/task-core/src/mcp.rs`: 3 バリアントを追加（`as_str`/`parse`/`JsonSchema` の enum 列）。
+  `McpScope::DEFAULT` は変更していない（ADR-0056 D4 のまま）。`celerisctl mcp client add --scope` は
+  `McpScope::parse` を経由しているので、コード変更なしで新 scope を受け付ける。
+- **実行したコマンド**: `cargo test -p task-core --lib mcp::`
+- **出力の要点**: exit 0。9 passed（`scope_as_str_and_parse_round_trip` に 3 バリアントを追加、
+  `scopes_string_round_trips_and_ignores_unknown_words` は既存のまま）。
+
+**条件 2: 6 つの MCP tools（`task_comment`/`task_answer`/`task_retry`/`task_cancel`/`task_approve`/
+`task_reject`）を `crates/celeris-mcp/src/tools/tasks.rs` に追加**
+
+- 各ツールは HTTP ハンドラ（`task-api::handlers::{create_comment,answer,retry,cancel,approve,reject}`）と
+  **同じ** `task-ops` の関数を呼ぶ。書き込みの主体は `mcp:<client_id>`（`task_comment` は
+  `post_human_comment_as`（新設）、`task_approve`/`task_reject` は `gate::approve_as`/`reject_as`
+  （新設）。いずれも既存の公開関数はこれらの `_as` 版を呼ぶ薄いラッパに書き換え、挙動は変えていない
+  — ADR-0056 の Phase 101 追記 P-101-b/c/d 参照）。`task_answer`/`task_retry` は下敷きの関数に actor
+  を運ぶ欄が無いため、監査は `mcp_calls` に任せる（P-101-c）。
+- `crates/celeris-mcp/src/tools/mod.rs::all()` に 6 つを登録。
+- **実行したコマンド**: `cargo test -p celeris-mcp` / `cargo test -p task-ops -p task-core --lib`
+- **出力の要点**: `celeris-mcp` は exit 0（lib 24 passed + `tests/mcp_integration.rs` 15 passed、うち
+  Phase 101 の新規 6 件 — `task_comment_requires_scope_and_is_authored_by_the_mcp_client`、
+  `task_answer_requires_scope_and_unblocks_the_task`、
+  `task_retry_requires_scope_and_duplicates_the_failed_task`、
+  `task_cancel_requires_scope_and_records_an_optional_reason_comment`、
+  `task_approve_and_task_reject_require_scope_and_record_the_mcp_actor`、いずれも「scope 無しは
+  `tools/call` が `-32601`」「scope 有りで `task_ops` の効果が出る（コメント行が増える・status が変わる
+  ・`ApprovalDecided.by` に `mcp:<client>` が入る）」の両方を確認）。`task-ops`/`task-core` は
+  exit 0、488 passed（既存テストは 1 件も壊していない）。
+
+**条件 3: `celerisctl mcp client add --scope` が新 scope を受け付ける（確認のみ）**
+
+- `crates/celerisctl/src/commands/mcp.rs::parse_scopes` は `McpScope::parse` をそのまま呼ぶだけなので、
+  条件 1 のコード変更だけで通る（celerisctl 側の変更は無し）。
+- **実行したコマンド**:
+  ```
+  ./target/debug/celerisctl --db /tmp/p101-smoke.sqlite3 mcp client add rdc-smoke \
+    --scope tasks:interact,tasks:control,tasks:decide
+  ```
+- **出力の要点**: `scopes: tasks:interact,tasks:control,tasks:decide`（トークンは表示のみ、破棄済み）。
+
+**条件 4: `celerisctl mcp call <TOOL> [JSON_ARGS]`（DB は開かない）**
+
+- `crates/celeris-mcp/src/call.rs`（新規）: `initialize` → `tools/call`（または `--list` で
+  `tools/list`）を 1 回。`reqwest::blocking`（`stdio.rs` と同じクライアント種別）を使うが、橋渡し
+  （EOF まで繰り返す）ではなく 1 回きりの呼び出しなので別モジュールにした。
+- `crates/celerisctl/src/commands/mcp.rs`: `McpCommand::Call(CallArgs)`、`run_call`、
+  `--token-file`/`CELERIS_MCP_TOKEN` の読み取りを `resolve_token`（新設）に共通化し `run_stdio` もこれを
+  使うよう書き換え（挙動は変えていない）。`crates/celerisctl/src/main.rs` に配線（`stdio`と同じく DB を
+  開かない経路）。
+- 出力: `structuredContent` があれば整形 JSON、無ければ `content[0].text`（JSON なら整形）。
+  エラー: JSON-RPC error / HTTP 非 2xx / 接続不可 → stderr + **exit 1**。引数不正（`JSON_ARGS` が JSON
+  でない、`TOOL` も `--list` も無い）→ **exit 2**。
+- **実行したコマンドと出力の要点**（実機の celeris-mcp は起動していないため、偽サーバー相手のユニット
+  テストと、手元での実際の CLI 呼び出しの両方で確認）:
+
+  | 確認 | コマンド | 結果 |
+  | --- | --- | --- |
+  | 偽サーバーでの往復（`--list`/`structuredContent`/scope無しエラー/401/接続不可） | `cargo test -p celeris-mcp --lib call::` | exit 0。**5 passed**（`list_tools_returns_names_and_descriptions_filtered_by_scope`、`call_tool_returns_structured_content_as_pretty_json`、`call_tool_without_the_scope_is_a_rpc_error`（`-32601` を確認）、`missing_or_wrong_token_is_a_http_error`（HTTP 401 を確認）、`unreachable_server_is_a_transport_error`） |
+  | JSON_ARGS が不正 → exit 2 | `./target/debug/celerisctl mcp call tasks_list "{"` | stderr `error: JSON_ARGS is not valid JSON: …`、**exit 2** |
+  | TOOL も --list も無し → exit 2 | `./target/debug/celerisctl mcp call` | stderr `error: TOOL is required (or pass --list)`、**exit 2** |
+  | 接続不可 → exit 1 | `./target/debug/celerisctl mcp call --base-url http://127.0.0.1:1 tasks_list` | stderr `error: MCP サーバーに届きませんでした: …`、**exit 1** |
+  | `--help` の表示確認 | `./target/debug/celerisctl mcp call --help` | 使い方・オプション（`--base-url`/`--token-file`/`--list`）が表示される |
+
+**条件 5: `scripts/rdc/celeris-chat`（新規、`sh`、実行可能）**
+
+- `sh -n scripts/rdc/celeris-chat` で構文確認（exit 0）。`chmod +x` 済み（`-rwxrwxr-x`）。中身は
+  `celerisctl mcp call --base-url "$CELERIS_MCP_URL" --token-file "$CELERIS_MCP_TOKEN_FILE" "$@"` を
+  既定値付きで `exec` するだけ（判断・検証は持たない）。先頭コメントに用途（RDC の専用ユーザーから呼ぶ
+  1 本の入口）と、専用ユーザーに `celerisctl` バイナリを読める権限が要ること（`~/.local/celeris/current`
+  は rmaeda のホーム下なので、コピーか読み取り権の付与か `CELERIS_BIN` での差し替えが要る。運用は
+  親が決める）を書いた。
+
+**条件 6: `docs/api` のスキーマ再生成と GUI**
+
+- `McpScope` は `task-api::mcp_admin::McpClientList`（`GET /mcp/clients` の応答）に出ているため再生成が
+  必要だった。**実行したコマンド**: `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::`。
+  **出力の要点**: exit 0（2 passed）。`git diff --stat docs/api/v1/api-v1.schema.json` は
+  `+3 -0`（`McpScope` の enum 列に 3 値追加のみ）。
+- GUI: `pnpm install --frozen-lockfile`（exit 0）→ `pnpm gen:types`（`app/celeris/types.ts` に
+  `McpScope` の union が 3 件増える、`+3 -0`）→ `pnpm typecheck` は当初 **失敗**
+  （`gui/app/lib/mcp.ts` の `SCOPE_LABEL: Record<McpScope, string>` が網羅性チェックに引っかかり
+  `TS2739: … is missing … "tasks:control", "tasks:decide", "tasks:interact"`）。`gui/app/lib/mcp.ts`
+  の `SCOPE_ORDER`/`SCOPE_LABEL` に 3 つを足して解消（表示ラベルの追加のみ。判断ロジックは無い。
+  `docs/mcp.md` §4 と同じ並び順）。以降 `pnpm typecheck` exit 0、`pnpm test` exit 0（**1052 passed**、
+  68 files。Phase 101 用の新規テストは追加していない — 既存の `test/unit/mcp.test.ts` が
+  `sortMcpScopes`/`mcpScopeLabel` を純関数レベルで検査しており、新 scope はラベル辞書の値としてしか
+  関わらないため、既存ケースが通れば十分と判断した）、`pnpm lint`（`biome check .`）exit 0。
+  `pnpm gen:types && git diff --exit-code app/celeris/types.ts` は **差分あり**（今回の変更そのもの
+  なので想定どおり。差分をコミットに含めた）。
+
+### テスト（受け入れ条件 a/b/c）
+
+| 対象 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| (a) 6 ツールの scope 拒否 + `task_ops` の効果 | `cargo test -p celeris-mcp --test mcp_integration` | exit 0。15 passed（Phase 101 の 6 件は上記条件 2 参照） |
+| (b) `celerisctl mcp call` の偽サーバー往復・エラー | `cargo test -p celeris-mcp --lib call::` | exit 0。5 passed（上記条件 4 参照） |
+| (c) scope の往復（parse/as_str） | `cargo test -p task-core --lib mcp::scope_as_str_and_parse_round_trip` | exit 0。1 passed（3 バリアントを追加して確認） |
+
+### ゲート
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（`test result: ok` 79 ブロックすべて、passed 合計 **1834**、Phase 100 の 1824 + Phase 99b の 1 + Phase 101 の新規 9 = 1834） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| workspace build | `cargo build --workspace` | exit 0 |
+
+### 変更したファイル
+
+- `crates/task-core/src/mcp.rs`（`McpScope` に 3 バリアント、テスト更新）
+- `crates/task-ops/src/comment.rs`（`post_human_comment_as` 新設、`post_human_comment` はその薄いラッパ）
+- `crates/task-ops/src/gate.rs`（`approve_as`/`reject_as` 新設、`approve`/`reject` はその薄いラッパ）
+- `crates/celeris-mcp/src/tools/tasks.rs`（6 tools 追加、`map_ops_err`/`parse_task_id` ヘルパ）
+- `crates/celeris-mcp/src/tools/mod.rs`（`all()` に 6 tools 登録）
+- `crates/celeris-mcp/src/call.rs`（新規。`list_tools`/`call_tool`、偽サーバーでのユニットテスト 5 件）
+- `crates/celeris-mcp/src/lib.rs`（`pub mod call;`）
+- `crates/celeris-mcp/tests/mcp_integration.rs`（`sample_task`/`insert_task`/`call_tool`/`structured`
+  ヘルパ、Phase 101 の新規テスト 6 件）
+- `crates/celerisctl/src/commands/mcp.rs`（`CallArgs`、`run_call`、`resolve_token` 共通化）
+- `crates/celerisctl/src/main.rs`（`McpCommand::Call` の配線）
+- `scripts/rdc/celeris-chat`（新規、実行可能）
+- `docs/api/v1/api-v1.schema.json`（`McpScope` の enum 再生成）
+- `gui/app/celeris/types.ts`（`McpScope` の union 再生成）
+- `gui/app/lib/mcp.ts`（`SCOPE_ORDER`/`SCOPE_LABEL` に 3 scope のラベル追加）
+- `docs/mcp.md`（§4 スコープ表、§5 タスクの操作、§7.5 `mcp call`、新 §8 RDC 経由（ChatGPT）、旧 §8 を
+  §9 に繰り下げ）
+- `docs/adr/0056-mcp-server.md`（`## Phase 101 追記` を追加。既存本文は書き換えていない）
+- `docs/PROGRESS.md`（この節）
+
+### 未解決事項
+
+- **実機未確認**（ADR-0009 P-34、CLAUDE.md）。本番の celeris-mcp（`127.0.0.1:18200`）と RDC の専用
+  ユーザー（`chatgpt-rdc`）はこのセッションでは用意していない。親が昇格後に行うこと:
+  1. `chatgpt-rdc` ユーザーを作る（sudo 無し、鍵無し。`docs/mcp.md` §8.1）。
+  2. `celerisctl mcp client add chatgpt-rdc --scope knowledge:read,knowledge:propose,tasks:read,tasks:interact,console:instruct` でトークンを発行し、`chatgpt-rdc` だけが読める token ファイルに置く。
+  3. `celerisctl` バイナリを `chatgpt-rdc` から読める場所に用意する（コピー or 読み取り権 or `CELERIS_BIN`）。
+  4. `chatgpt-rdc` のシェルから `scripts/rdc/celeris-chat tasks_list`、`celeris-chat console_instruct '{"text":"..."}'`、`celeris-chat task_comment '{"id":"...","text":"..."}'` が通ることを確認。
+  5. `GET /mcp/calls?client=chatgpt-rdc` に監査行が残ること、`tasks:control`/`tasks:decide` 系のツールが scope 不足で `-32601` になることを確認。
+  結果は本節に追記すること。
+- `task_answer`/`task_retry` は actor（`mcp:<client_id>`）を運べない（下敷きの `task-ops` 関数に欄が
+  無い。ADR-0056 Phase 101 追記 P-101-c）。`mcp_calls` の監査でしか呼び出し元を追えない。イベント
+  スキーマへの `by`/`author` 追加は次の Rust ラウンドの候補（Phase 101 の範囲外と判断した）。
+- GUI の「アカウント」画面（`/accounts`）には、新 3 scope をチェックボックスで選んで発行する UI は
+  まだ無い（ラベル表示のみ追加。ADR-0056 D4 が明記した「後続 GUI Phase」のまま）。
+- `celerisctl mcp call`/`scripts/rdc/celeris-chat` の実機（本物の `celeris` プロセス相手）での確認は
+  していない（偽サーバー相手のユニットテストのみ）。ポート 18200 に触れる実機確認は「未解決事項」の
+  1 番目とまとめて親が行う。
+
+### 提案
+
+- なし（今回の指示の範囲で閉じた。RDC の専用ユーザー・sudoers・バイナリ配置の具体的な運用手順は
+  親が決めることになっている — `scripts/rdc/celeris-chat` の先頭コメントと `docs/mcp.md` §8.1 に
+  注意点だけ残した）。

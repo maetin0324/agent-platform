@@ -86,6 +86,9 @@ token: <64+ 文字の値。この 1 回しか出ない>
 | `knowledge:read` | `knowledge_list` / `knowledge_search` / `knowledge_get` / `resources/read`（`celeris://knowledge/*`） |
 | `knowledge:propose` | `knowledge_propose`（`_inbox` に候補を置く） |
 | `tasks:read` | `tasks_list` / `tasks_get` / `projects_list` / `projects_get` |
+| `tasks:interact`（Phase 101） | `task_comment` / `task_answer`（`POST /tasks/{id}/comments` / `/answer` と同じ） |
+| `tasks:control`（Phase 101） | `task_retry` / `task_cancel`（`POST /tasks/{id}/retry` / `/cancel` と同じ） |
+| `tasks:decide`（Phase 101） | `task_approve` / `task_reject`（`POST /tasks/{id}/approve` / `/reject` と同じ） |
 | `console:instruct` | `console_instruct` / `console_reply` |
 | `org:read` | `org_list` / `org_get` |
 | `org:write` | `org_create_node` / `org_mount_skill` / `org_unmount_skill` |
@@ -107,6 +110,23 @@ token: <64+ 文字の値。この 1 回しか出ない>
   `mcp:<client_id>` を必ず足す。秘密を含む本文は拒否）。
 - **タスク・案件**（読むだけ）: `tasks_list { status?, project_id?, limit? }`、`tasks_get { id }`、
   `projects_list { status?, limit? }`、`projects_get { id }`。
+- **タスクの操作**（Phase 101。外部エージェント（ChatGPT・RDC 経由）向けに、汎用 curl で HTTP API を
+  叩かせず、scope で許した操作だけをさせる。いずれも `task-api` の HTTP ハンドラと**同じ** `task-ops` の
+  関数を呼ぶ。書き込みの主体は `mcp:<client_id>`）:
+  - `task_comment { id, text }`（scope `tasks:interact`。`POST /tasks/{id}/comments` と同じ効き方 —
+    `running`/`reviewing` は割り込んで `ready` に戻す、`blocked` は回答として渡す、それ以外は記録するだけ。
+    コメントの `author` は `mcp:<client_id>`）。
+  - `task_answer { id, answer, expected_status? }`（scope `tasks:interact`。`POST /tasks/{id}/answer` と
+    同じ。フィールド名は既存の `AnswerBody.answer` に合わせてある）。
+  - `task_retry { id }`（scope `tasks:control`。`POST /tasks/{id}/retry`（`accept=false`）と同じ。
+    `failed`/`cancelled` のタスクを複製して新しい `draft` を作る）。
+  - `task_cancel { id, reason? }`（scope `tasks:control`。`POST /tasks/{id}/cancel` と同じ。`reason` を
+    渡すと、取り消す前に「人を起こさない」コメント（`author = mcp:<client_id>`）として記録する —
+    `gate::cancel` 自体には理由を運ぶ欄が無いため）。
+  - `task_approve { id, note? }`（scope `tasks:decide`。`POST /tasks/{id}/approve` と同じ。承認タスクの
+    `Event::ApprovalDecided.by` に `mcp:<client_id>` が入る）。
+  - `task_reject { id, reason }`（scope `tasks:decide`。`POST /tasks/{id}/reject` と同じ。`reason` は
+    必須・空白不可。`by` は `mcp:<client_id>`）。
 - **Console**: `console_instruct { text, project_id? }`（人の発言と同じ経路で CoS に渡す。発言の
   `author` は `mcp:<client_id>`。返値は `message_id` / `task_id`）、
   `console_reply { task_id, wait_secs? }`（`wait_secs` 上限 60。対話 run が終わっていれば `state: "done"`
@@ -192,7 +212,99 @@ $ celerisctl mcp stdio --base-url http://127.0.0.1:18200 --token-file /tmp/celer
 `--token-file` を省略すると環境変数 `CELERIS_MCP_TOKEN` を見る。`auth = "none"` の口を橋渡しするだけ
 なら、どちらも省略してよい（例: `celerisctl mcp stdio --base-url http://127.0.0.1:18201`）。
 
-## 8. 実機での確認手順（このセッションでは未実施。ADR-0009 P-34）
+### 7.5 1 回だけの呼び出し（`celerisctl mcp call`。Phase 101）
+
+stdio の橋すら持たない、シェルから 1 コマンドだけ叩ければよい客（`scripts/rdc/celeris-chat` 経由の
+ChatGPT 等）向け。**DB は開かない**（`stdio` と同じ `reqwest::blocking` の HTTP クライアントを再利用し、
+`initialize` → `tools/call` を 1 回だけ行う）。
+
+```
+$ celerisctl mcp call --base-url http://127.0.0.1:18200 --token-file /tmp/celeris-mcp-token \
+    task_comment '{"id":"<task ulid>","text":"確認しました"}'
+```
+
+- `TOOL`（道具の名前）と `JSON_ARGS`（引数。省略時は `{}`）の 2 つの位置引数。`--list` を付けると
+  `tools/list` の名前と description の一覧だけを出す（`TOOL`/`JSON_ARGS` は不要）。
+- `--base-url`（既定 `http://127.0.0.1:18200`）、`--token-file`（省略時は環境変数 `CELERIS_MCP_TOKEN`）。
+- 出力: `structuredContent` があればそれを整形 JSON で、無ければ `content[0].text`（JSON なら整形、
+  そうでなければそのまま）を標準出力へ。
+- エラー: 引数不正（`JSON_ARGS` が JSON として読めない、`TOOL` も `--list` も無い）は **exit code 2**。
+  JSON-RPC のエラー・HTTP のエラー（401 等）・接続不可は理由を stderr に出して **exit code 1**。
+
+## 8. Remote Desktop Commander 経由（ChatGPT）（Phase 101）
+
+ChatGPT からは Remote Desktop Commander（RDC）というリモート MCP で home-dev のシェルを叩ける。
+汎用 `curl` で HTTP API を直接叩かせず、**MCP client の scope で許される操作だけ**をさせるための構成
+（ADR-0056 Phase 101 追記）。
+
+```
+ChatGPT
+  └─ RDC device agent（専用 Linux ユーザー chatgpt-rdc、権限最小）
+       └─ scripts/rdc/celeris-chat（薄い入口。celerisctl mcp call をそのまま呼ぶだけ）
+            └─ 127.0.0.1:18200/mcp（token 付き。auth = "token"）
+                 └─ Celeris MCP（crates/celeris-mcp）
+```
+
+### 8.1 専用 Linux ユーザーの権限最小化
+
+RDC の device agent は `chatgpt-rdc` という**専用の**ユーザーで動かす（rmaeda 本人のアカウントでは
+動かさない）。そのユーザーに与えるのは:
+
+- `scripts/rdc/celeris-chat` を実行できること（と、そのスクリプトが読む `celerisctl` バイナリ・
+  token ファイル）。
+- **それ以外は何も無い**: `sudo` 無し、SSH 鍵無し（クラスタにもどこにも入れない）、`~/.config/celeris` /
+  `~/.local/celeris` の DB（`celeris.sqlite3`）への直接アクセス無し（読み書きとも不可。celeris の状態は
+  MCP のツール経由でしか見えない・変えられない）。
+- token ファイル（`CELERIS_MCP_TOKEN_FILE`、既定 `$HOME/.config/celeris/mcp-token`）だけを、
+  `chatgpt-rdc` から読める権限（他人には読ませない。`0400` 等）で置く。
+
+`celerisctl` バイナリ自体（既定 `$HOME/.local/celeris/current/bin/celerisctl`）は rmaeda のホーム下に
+あるため、`chatgpt-rdc` からは既定では読めない。専用ユーザーのホーム配下にコピーするか、
+`~/.local/celeris` に対して専用ユーザーへの読み取り権を足すか、`CELERIS_BIN` で別の場所を指すかは
+運用側（親）が決める（`scripts/rdc/celeris-chat` の先頭コメントにも同じ注意を書いてある）。
+
+### 8.2 推奨 scope
+
+```
+$ celerisctl --db ~/.local/celeris/celeris.sqlite3 mcp client add chatgpt-rdc \
+    --scope knowledge:read,knowledge:propose,tasks:read,tasks:interact,console:instruct
+```
+
+- 与える: `knowledge:read`、`knowledge:propose`、`tasks:read`、`tasks:interact`、`console:instruct`。
+- **与えない**: `tasks:control`（やり直し・取り消し）、`tasks:decide`（承認・却下）、`org:write`、
+  `skills:write`。これらは人が GUI から行う決定的な操作で、ChatGPT に渡す理由がない（欲しくなったら
+  この節の scope を明示して広げる。既定では絞る）。
+- この口は `auth = "token"`（§2 の 18200）を使う（`auth = "none"` の 18201 は同じホストの ChatGPT の
+  Secure MCP tunnel 専用。RDC とは別経路）。
+
+### 8.3 `celeris-chat` の呼び方
+
+`chatgpt-rdc` のシェルからはこのスクリプトだけを呼ばせる（§7.5 の `celerisctl mcp call` の薄い
+ラッパ。判断や検証は持たない）:
+
+```
+$ celeris-chat --list
+$ celeris-chat tasks_list '{"status":"blocked","limit":5}'
+$ celeris-chat knowledge_search '{"query":"pegasus"}'
+$ celeris-chat console_instruct '{"text":"調査結果をタスクにして"}'
+$ celeris-chat console_reply '{"task_id":"<上の task_id>","wait_secs":30}'
+$ celeris-chat task_comment '{"id":"<task ulid>","text":"見ました。続けてください"}'
+```
+
+環境変数（`scripts/rdc/celeris-chat` が読む）: `CELERIS_BIN`（既定 `$HOME/.local/celeris/current/bin/celerisctl`）、
+`CELERIS_MCP_URL`（既定 `http://127.0.0.1:18200`）、`CELERIS_MCP_TOKEN_FILE`（既定
+`$HOME/.config/celeris/mcp-token`）。`chatgpt-rdc` の環境で上書きしてよい。
+
+### 8.4 注意
+
+`auth = "none"` の口（§2 の 18201。ChatGPT の Secure MCP tunnel 専用）は、**同じホストの任意の
+プロセスから叩ける**（loopback なら誰でも `curl http://127.0.0.1:18201/mcp` を叩ける、という意味。
+認証はトンネルの配置だけで担保している）。RDC の device agent を celeris と**同居させるホスト**では、
+この口は使わない（`chatgpt-rdc` から `18201` を直接叩けてしまうと、§8.2 で絞った scope を素通りして
+`chatgpt`（Secure MCP tunnel 用）のクライアントとして振る舞えてしまう）。RDC 経由は必ず `auth =
+"token"` の口（§2 の 18200）と、§8.2 で絞った専用クライアント（`chatgpt-rdc`）のトークンを使うこと。
+
+## 9. 実機での確認手順（このセッションでは未実施。ADR-0009 P-34）
 
 ```
 $ celerisctl --db ~/.local/celeris/celeris.sqlite3 mcp client add chatgpt
