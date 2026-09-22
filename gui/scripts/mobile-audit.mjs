@@ -716,9 +716,15 @@ async function checkFocusOrder(page, route) {
   await waitForPageIdle(page);
   const focusableCount = await page.evaluate(() => {
     const selector = 'a[href], button, input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])';
+    // Phase 93（P-G40-1）: 要素自身の `display`/`visibility` だけでなく、`window.__isNotVisible`
+    // （`addInitScript` で注入済み。祖先の `display:none`/`visibility:hidden`・閉じた `<details>` の
+    // 中身まで辿る。`checkPrimaryActionTap` 等、他の検査と同じ判定）に揃える。以前は要素自身の
+    // computed style しか見ておらず、祖先が非表示のケース（例: デスクトップ専用の `hidden lg:block`
+    // の中の focusable 要素）を数に含めてしまい、`focusableCount` を実際より大きく見積もっていた
+    // （Phase 88 の実測で 22 と数えたが実際に歩けたのは 16〜17 手だった。予算に余裕があるため実害は
+    // 無かったが、正確な数え方に揃える）。
     const els = Array.from(document.querySelectorAll(selector)).filter((el) => {
-      const style = getComputedStyle(el);
-      if (style.display === "none" || style.visibility === "hidden") return false;
+      if (window.__isNotVisible(el)) return false;
       const rect = el.getBoundingClientRect();
       return !(rect.width === 0 && rect.height === 0);
     });

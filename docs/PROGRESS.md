@@ -13411,3 +13411,39 @@ composer-layout-level.md` に書いた（React Context による登録 API を�
 - 直後の確認: `GET /health` release=de0402e4f414 role=active schema_version=24、GUI `/healthz` release=de0402e4f414（未認証の `/` は 302 でログインへ、期待どおり）。
 - 本番で新たに有効になったもの: Console 入力欄がレイアウトレベル（`root.tsx`、`MobileTabBar` と同階層）に移動（ADR-0057）。ホームと組織ノード画面で入力欄がタブバー直上に固定され、ページ遷移アニメーションの影響を受けない。実機（Nothing Phone）での見た目・キーボード表示時の挙動は人が確認する（ADR-0009 P-34）。
 - 次: Phase 93（`/inbox` を mobile-audit に追加、ADR-0055 ラウンド17）を Sonnet で起動済み。
+## Phase 93 — スマホ UX ラウンド 17: `/inbox` を mobile-audit の対象に（監査精度の仕上げ。ADR-0055。2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。指示は「`/inbox` を mobile-audit の対象に加え、
+タップ領域を先回りして直す」（P-G38-2/P-G38-3/P-G39-1/P-G40-1）だったが、着手前に `gui/docs/PROGRESS.md`
+を確認したところ、**この指示の主要部分（`/inbox` の route 追加、fixture 拡張、タップ領域修正、
+`cssPathRef` の `getAttribute("id")` 化）は Phase 87（G39）・Phase 88（G40）で既に実装・本番反映済み**
+だった。二重実装を避け、未実施のまま残っていた 1 点（P-G40-1: `checkFocusOrder` の `focusableCount` を
+`isNotVisible` に揃える）だけを実施し、決定の経緯を `docs/adr/0055-mobile-ux.md` に「## Phase 93 追記」
+として明文化した（本文は書き換えていない）。詳細・証跡は `gui/docs/PROGRESS.md`「Phase G44」を参照
+（GUI の実装詳細は gui 側に書く、このリポジトリの慣例どおり）。
+
+要点:
+
+1. **P-G38-3 への回答（ADR に追記）**: `/inbox` を ADR-0055 D1 の監査対象に含める。実装は Phase 87 済み。
+2. **P-G40-1（今回の唯一の実装）**: `gui/scripts/mobile-audit.mjs::checkFocusOrder` の `focusableCount`
+   計算を、要素自身の `display`/`visibility` だけでなく `window.__isNotVisible`（祖先の
+   `display:none`/`visibility:hidden`・閉じた `<details>` を辿る、他の検査と同じ判定）に揃えた。
+   修正前後で `pnpm mobile-audit` を 2 回実行し、いずれも 26 route × light/dark で `violations=0` の
+   まま変化しないことを確認した。
+3. **ゲート**: `pnpm install --frozen-lockfile`（exit 0）/ `pnpm lint`（exit 0、253 files）/
+   `pnpm typecheck`（exit 0）/ `pnpm test`（exit 0、**1030 passed**、Phase 92 と同数）/ `pnpm build`
+   （exit 0、既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件のみ）/ `pnpm gen:types && git diff
+   --exit-code app/celeris/types.ts`（差分ゼロ）/ `pnpm mobile-audit` ×2（**exit 0、
+   `{"ok":true,"total":0}`、`routes=26 schemes=2 violations=0`、実測 **93.32 秒 / 93.22 秒**、
+   単発 120 秒予算内）/ `pnpm e2e:mock`（**`{"ok":true,"mode":"mock","failures":[]}`**）すべて exit 0。
+   `crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings`
+   はこのフェーズのスコープ外（実行していない。Phase 80/82/83/84/86/87/88/89/90/91/92 と同じ扱い）。
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。
+- **指示書と現状の食い違い**: 今回の指示（celeris Phase 93）は「`/inbox` が未監査（25→27 route）」という
+  前提で書かれていたが、実際には Phase 87/88 で既に完了しており、現在も 26 route のまま安定している。
+  celeris 側で次に Phase を起こす前に `gui/docs/PROGRESS.md` の最新節を突き合わせる運用にすることを
+  `gui/docs/PROGRESS.md` Phase G44 の提案 P-G44-1 として記録した。
+- 本番 = Phase 65〜92。実装中: Phase 93（このワークトリー。GUI のみ）。
