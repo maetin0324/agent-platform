@@ -118,7 +118,10 @@ export default function InboxPage({ loaderData }: Route.ComponentProps) {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard label="承認待ち" value={inbox.counts.approvals} icon="checkCircle" tone="warning" />
         <StatCard label="質問" value={inbox.counts.questions} icon="message" tone="info" />
-        <StatCard label="受け入れ待ちの draft" value={inbox.counts.drafts} icon="file" tone="neutral" />
+        {/* P-G46-4（Phase 96）: フルの「受け入れ待ちの draft」だとこのタイルだけラベルが 2 行になり、
+            2x2 グリッドの行の高さが揃わなかった。他の 3 枚と同じ 1 行に収まる短いラベルにし、
+            「draft」であることは下の見出し（180 行目）で分かるので落としても意味は失わない。 */}
+        <StatCard label="受け入れ待ち" value={inbox.counts.drafts} icon="file" tone="neutral" />
         <StatCard label="注意" value={inbox.counts.attention} icon="alert" tone="danger" />
       </div>
 

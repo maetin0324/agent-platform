@@ -13592,3 +13592,59 @@ celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。mobile-
   何も起きていません」の 1 枚にまとめる設計変更が要り、今回のスコープでは見送った。提案 P-G46 参照）。
 - 本番 = Phase 65〜93。実装中: Phase 95（このワークトリー。GUI のみ。Phase 94〈releases.tsx 等〉とは
   別ワークトリーで並行）。
+
+## Phase 96 — G46 の残り所見を直す（ADR-0055 ラウンド 20、P-G46-1/3/4/6。2026-09-22）
+
+celeris 側は無変更（`crates/` 無変更。GUI だけの Phase）。Phase 95（G46）が提案のまま残した所見のうち、
+`docs/PROGRESS.md` の指示どおり P-G46-1・3・4・6 と、ダークモードの面の区別（提案のみだった件）を扱った
+（P-G46-5〈`knowledge-inbox` のタグ重複〉は celeris 側 Phase 97 が源で直すため触っていない）。詳細・
+before/after・測定値は `gui/docs/PROGRESS.md`「Phase G47」を参照。
+
+要点:
+
+1. **P-G46-1 cooldown 表示**: `formatDuration`（`gui/app/lib/time-delta.ts`）に月・年の単位を追加
+   （30 日以上は月、365 日以上は年。上位 2 単位までの既存規律は維持）。fixture の固定日時
+   （2030-01-01）は変えていない。`/accounts` の cooldown 表示が `1196日20時間` → `3年3か月` になった
+   ことをスクリーンショットで確認。**前提の補足**: 実際にこの表示を出すのは `/accounts`
+   （`LlmSourcesSection`）のみで、`/clusters` は `cooldown_until` を生の ISO 文字列（または `-`）で
+   表示するだけだった（fixture にも cooldown 付きのクラスタが無い）。Phase 95 の所見表が「clusters」
+   の行に「アカウントの cooldown」の話を書いていたための取り違えとみられる。共有関数を直したので
+   実質的な結果（読みやすい表示になる）は同じ。
+2. **P-G46-4 inbox の統計タイル**: `受け入れ待ちの draft` ラベルを `受け入れ待ち` に短縮し、他 3 枚と
+   同じ 1 行に収めた（2×2 グリッドの行の高さが揃った）。
+3. **P-G46-3 深い組織の木**: `gui/app/routes/org.tsx::OrgTreeItem` の字下げを depth 3 以降は半分の
+   刻み（7px）に緩め、ノード名にも `truncate` + `title` を追加（`min-w-0` を伴わせ、flex 行の中で
+   名前だけが先に縮み、種別マーク等が次の行へ回るようにした）。fixture には既に depth 5 のノード
+   （`coding-poc-alpha-1-x`）があり、追加は不要だった。
+4. **P-G46-6 org-detail の skill リンク**: 等倍・拡大スクリーンショットで確認したところ、
+   「確認済み・変更なし」では済まない実バグを見つけた。`truncate` を `<Link className="flex ...">`
+   （flex コンテナ自身）に直接付けていたため、`text-overflow: ellipsis` が効かず「…」が出ずに文字が
+   途中でただ切れていた（flex コンテナ自身の子テキストには `text-overflow` が効かない。flex item として
+   ブロック化される要素に付けないといけない）。内側に `<span className="min-w-0 flex-1 truncate">` を
+   追加してそこに省略を持たせ、`<Link>` に `title`（全文）を足した。修正後は「Rust のコードレビュー…」
+   と省略記号が正しく出ることを、Playwright の要素スクリーンショット（`deviceScaleFactor` 4 倍）で確認。
+5. **ダークモードの面の区別**: `--bg`（`#0a0c12`）と `--surface`（`#11141c`）の WCAG 相対輝度比が
+   約 1.06 と低く、カードが背景から浮いて見えにくかった。`--surface` だけを `#141826` に 1 段明るく
+   した（比は約 1.11、`--surface-2`〈比 1.14〉より依然として暗く、bg < surface < surface-2 < surface-3
+   の順序は保持）。文字コントラスト（fg/surface）は 14.7:1（旧 15.3:1）で AA に十分な余裕。
+   light 側・`--surface-2` 以降は指示どおり変えていない。
+6. **ゲート**: `pnpm install --frozen-lockfile`（exit 0）/ `pnpm lint`（exit 0、254 files）/
+   `pnpm typecheck`（exit 0）/ `pnpm test`（exit 0、**1043 passed**、直前の 1036 から +7:
+   `formatDuration` の境界値テスト 7 件）/ `pnpm build`（exit 0、
+   既存の `[INEFFECTIVE_DYNAMIC_IMPORT]` 警告 2 件のみ）/ `pnpm gen:types && git diff --exit-code
+   app/celeris/types.ts`（差分ゼロ）/ `pnpm mobile-audit` ×2（**exit 0、`{"ok":true,"total":0}`、
+   `routes=26 schemes=2 violations=0`、実測 **122.8 秒（`pnpm build`込み） / 91.3 秒（2 回目）**）/
+   `pnpm e2e:mock`（**`{"ok":true,"mode":"mock","failures":[]}`**、9.0 秒）/ `pnpm screenshots:mobile`
+   （**exit 0、`{"ok":true,"routes":26,"schemes":2,"saved":52}`、実測 49.0 秒**）すべて exit 0。
+   `crates/` を一切変更していないため `cargo test --workspace`/`cargo clippy --workspace -- -D warnings`
+   はこのフェーズのスコープ外（実行していない。Phase 80 以降と同じ扱い）。
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。ヘッドレス Chromium でのスクリーンショットと監査に留まる。
+- P-G46-5（`knowledge-inbox` のタグ重複）は celeris 側 Phase 97 待ち（未対応）。
+- P-G46-2（タスク詳細「概要」タブの空状態を 1 枚にまとめる設計変更）は Phase 95 と同じ理由で見送った
+  まま（提案として残置）。
+- ダークモードの面の区別は「1 段だけ」の最小変更に留めた。人の目でさらに強くしたい場合は
+  `--surface-2`/`--surface-3` も含めた段階の引き直しが要るが、今回のスコープ（小さく確実に）を超える。
+- 本番 = Phase 65〜93。実装中: Phase 95・96（Phase 94〈releases.tsx 等〉とは別ワークトリー系列）。

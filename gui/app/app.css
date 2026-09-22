@@ -63,7 +63,13 @@
   :root {
     color-scheme: dark;
     --bg: #0a0c12;
-    --surface: #11141c;
+    /* G46 所見・Phase 96（P-G46-1〜6 の 5 番）: bg（lum 0.0037）と surface（旧 #11141c, lum 0.0070）の
+       WCAG 相対輝度比が約 1.06 と低く、カードが背景から浮いて見えにくかった。surface だけを 1 段
+       明るくした（新 lum 0.0094、比は約 1.11。surface-2 の lum 0.0110 より依然として暗く、
+       bg < surface < surface-2 < surface-3 の順序は保ったまま）。fg 系の文字コントラストは
+       14.7:1（旧 15.3:1）で AA（4.5:1）に十分な余裕を残す。light 側は元から比が近い値（約 1.07）
+       だが今回の指示（surface のみ、ダーク側）の範囲外のため変えていない。 */
+    --surface: #141826;
     --surface-2: #171b25;
     --surface-3: #1f2430;
     --border: #232835;

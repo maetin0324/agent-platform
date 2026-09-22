@@ -460,9 +460,20 @@ function OrgTreeItem({
   const harnessDefault = profile?.harness_default;
   const mode = profile?.run;
 
+  // P-G46-3（Phase 96、ADR-0055 D2 ラウンド 20）: 深い組織（depth 4〜5、`coding-poc-alpha-1-x` 等）で
+  // 字下げが線形（depth * 14px）に増え続けると、狭いスマホ幅では最深ノードの名前を置く余白が足りず
+  // 折り返っていた。木の表示ロジック（開閉・入れ子の構造）自体は変えず、字下げの伸び方だけ depth 3 以降は
+  // 半分（7px刻み）に緩める。
+  const indentStep = 14;
+  const indentTaperDepth = 3;
+  const marginLeft =
+    depth <= indentTaperDepth
+      ? depth * indentStep
+      : indentTaperDepth * indentStep + (depth - indentTaperDepth) * (indentStep / 2);
+
   return (
     <li>
-      <div className="flex items-center gap-0.5" style={{ marginLeft: depth * 14 }}>
+      <div className="flex items-center gap-0.5" style={{ marginLeft }}>
         {hasChildren ? (
           <button
             type="button"
@@ -492,8 +503,10 @@ function OrgTreeItem({
               部・課の英語のバッジは出さない（木の形で分かる。必要な 1 文字だけ添える）。
               ADR-0055 D1-4: 小さい注記はモバイル text-sm、デスクトップは lg: で元の大きさのまま。 */}
           <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-baseline gap-1.5">
-              <span className="font-semibold" data-testid="org-node-name">
+            <span className="flex min-w-0 flex-wrap items-baseline gap-1.5">
+              {/* P-G46-3: 深い階層で字下げが積み重なると幅が足りず名前が折り返っていたので、
+                  最小幅を確保できないときは省略して全文は title（長押し/ホバー）に回す。 */}
+              <span className="min-w-0 truncate font-semibold" data-testid="org-node-name" title={node.name}>
                 {node.name}
               </span>
               {orgKindMark(node.kind) && (
@@ -991,11 +1004,17 @@ function MountedSkillsSection({
               data-testid="org-node-skill-own"
             >
               <Badge tone="teal">{name}</Badge>
+              {/* P-G46-6（Phase 96）: `truncate` を `<Link>`（`flex` コンテナ自身）に直接付けていたため、
+                  ブラウザが省略記号（…）を出せず、文字の途中でただ切れて読みにくかった
+                  （`text-overflow: ellipsis` はブロック化された要素には効くが、flex コンテナ自身の
+                  内容には効かない）。省略は内側の `<span>`（flex item として自動でブロック化される）に
+                  持たせ、全文は `title` で参照できるようにした（ADR-0055 D2 の id/パス省略と同じ規律）。 */}
               <Link
                 to={`/knowledge/skills?name=${encodeURIComponent(name)}`}
-                className="flex min-h-11 min-w-0 flex-1 items-center truncate underline underline-offset-2"
+                className="flex min-h-11 min-w-0 flex-1 items-center underline underline-offset-2"
+                title={descriptionOf(name) || name}
               >
-                {descriptionOf(name) || name}
+                <span className="min-w-0 flex-1 truncate">{descriptionOf(name) || name}</span>
               </Link>
               <fetcher.Form method="post">
                 <input type="hidden" name="intent" value="skill_unmount" />
