@@ -15326,3 +15326,14 @@ Phase 107 の本番反映で B1（担当に `cluster:<id>` が無い remote タ�
   `workspace` の入力を足す（`POST /tasks/{id}/retry`）。
 - P-108-2: MCP の `task_retry` ツール（`crates/celeris-mcp`）に `workspace` 引数を足す（今回は
   コンパイルを通すために `None` を渡しただけ）。
+
+### Phase 108 の本番反映（2026-09-23 05:41 UTC、ライブ切替）と BenchFS 子タスクの復旧
+
+- merge: `worktree-agent-ace074e9847e0ed9b` → main `9f16b74`。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1911 / failed 0）、偽 ssh 残り 0、`cargo clippy` exit 0、`pnpm gen:types` 差分ゼロ、`pnpm typecheck` exit 0、`pnpm test` 68 files / 1061 passed。push 済み。
+- `release.sh main` → exit 0、`sha12=9f16b74ce1d0 schema_version=25`、`changes.json: base=b5ee54757131 commits=3 files=15 sensitive=0`。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = b5ee54757131）, 6（smoke 7.01s）すべて true、`ok=true live_ok=true`。`promote.sh 9f16b74ce1d0` → mode=live、新 celeris 2 秒で active、GUI 切替 4 秒。`GET /health` release=9f16b74ce1d0 role=active schema_version=25。
+- **実機確認（Phase 108）**:
+  - `PATCH /tasks/01M35X86XTCSVMAMVM82QRM06S {"workspace":{"kind":"local",…}}`（web-research、B1 で blocked）→ 200、`fields=["workspace"]`、その場で `blocked → ready`（質問は解決として閉じた）→ 数秒後 running。
+  - `POST /tasks/01M35X86XTR4RZ6SM1TBHW2M3Q/retry {"workspace":{"kind":"local",…}}`（literature-research、failed）→ 複製 01M36CHXFWVZWZEHA6XK7APZWD（draft、local）。依存で cancelled だった framing タスク 01M35X86XTK84F97QW0CN5PGMR も draft に復帰（retry の既存挙動）。元の計画で人が Go を出した仕事なので親が両方 `approve`（note 付き）→ ready → 文献調査は running。framing（執筆、担当未定、remote を継いでいた）は matching がクラスタ持ちノードに寄らないよう `PATCH` で local に。
+  - `POST /tasks/01M35X86XTHHN9C6XDAYD2FZ7T/answer {"answer": "remote-exec を直した（Phase 108）。同じ手順で再実行して…"}`（software-engineering、codex の `Bad owner or permissions` 質問）→ `blocked → ready`。sirius 接続後に codex run が `remote-exec`（`ssh -F ~/.ssh/config`）を通せるかで確認する。
+  - 残り: systems-performance の 01M35X86XTEPXVZMBY7HSSEP7X は作業内容に関する正当な質問（scheduler / accounting データの所在）で人の回答待ち。sirius は未接続（人の再接続待ち。次の master から keepalive 付き）。
+- 提案（Phase 108 の未解決）: MCP `task_retry` に `workspace`（P-108-2）、GUI のタスク編集・やり直しに作業場所の入力（P-108-1）。
