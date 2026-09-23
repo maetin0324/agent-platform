@@ -4921,6 +4921,27 @@ out["table"] = mod.build_target_aspect_table(["A", "B"], ["x", "y"], answers)
 out["table_empty_without_targets"] = mod.build_target_aspect_table([], ["x"], answers)
 out["table_empty_without_aspects"] = mod.build_target_aspect_table(["A"], [], answers)
 
+# (f) ADR-0063 Phase 109f: 答えの先頭に質問がエコーされていても、そのエコー行を観点の値として
+# 拾わない（実測の事故 run 01M37AZ129EMB93N50MZ132S8K: 全セルに質問文がそのまま入っていた）。
+echoed_question = (
+    "Question: C について、次の観点を提示された文献の範囲で答えよ: latency、memory。"
+    "文献に無い観点は『未確認』と書け。各事実に引用を付けよ。"
+)
+answers_with_echo = [
+    {
+        "target": "C",
+        "question": echoed_question,
+        "answer": echoed_question + "\n- latency: 5ms observed (cite2)\nno further detail found",
+    },
+]
+out["table_with_echoed_question"] = mod.build_target_aspect_table(
+    ["C"], ["latency", "memory"], answers_with_echo
+)
+# 直接 _extract_aspect_line も確認（エコー行だけの答えは「未確認」になる: 拾えるものが無い）。
+out["extract_from_echo_only"] = mod._extract_aspect_line(
+    echoed_question, "latency", echoed_question
+)
+
 # 再試行の判定（is_transient_error）: 503/429/502/接続断は再試行対象、それ以外は対象外。
 out["transient"] = [
     mod.is_transient_error(Exception("HTTP Error 503: Service Unavailable")),
@@ -4990,6 +5011,20 @@ print(json.dumps(out, ensure_ascii=False))
         );
         assert_eq!(v["table_empty_without_targets"], "");
         assert_eq!(v["table_empty_without_aspects"], "");
+
+        let table_with_echo = v["table_with_echoed_question"].as_str().unwrap();
+        assert!(
+            table_with_echo.contains("| C | 5ms observed (cite2) | 未確認 |"),
+            "エコーされた質問行を観点の値として拾ってはいけない: {table_with_echo}"
+        );
+        assert!(
+            !table_with_echo.contains("Question:"),
+            "エコーされた質問文がセルに残ってはいけない: {table_with_echo}"
+        );
+        assert_eq!(
+            v["extract_from_echo_only"], "未確認",
+            "エコー行しか無い答えは拾えるものが無いので未確認: {v}"
+        );
 
         assert_eq!(
             v["transient"],

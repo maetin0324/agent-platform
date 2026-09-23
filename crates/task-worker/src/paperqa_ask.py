@@ -152,13 +152,44 @@ def flatten_contexts(contexts, question_id):
 # --------------------------------------------------------------- pure: table
 
 
-def _extract_aspect_line(answer_text, aspect):
+def _strip_echoed_question(answer_text, question_text=None):
+    """Drop a leading echo of the question PaperQA (or the underlying model)
+    was asked, so `_extract_aspect_line`'s substring fallback does not pick
+    the question's own aspect list as every cell's answer (ADR-0063 Phase
+    109f, observed run `01M37AZ129EMB93N50MZ132S8K`: every cell in
+    `target_aspect_table` held the literal question text, because the
+    question line -- built by `build_questions_for_targets` -- contains all
+    the aspect names joined by `、`, and it was the first line of
+    `answer_text`). Removes any line that starts with `Question:`/`質問:`/
+    `質問：` (case-insensitive for the ASCII form), and any line equal
+    (after stripping) to `question_text` when one is given."""
+    lines = (answer_text or "").splitlines()
+    question_text = (question_text or "").strip()
+    kept = []
+    for raw_line in lines:
+        stripped = raw_line.strip()
+        if not stripped:
+            kept.append(raw_line)
+            continue
+        if stripped.lower().startswith("question:") or stripped.startswith(
+            ("質問:", "質問：")
+        ):
+            continue
+        if question_text and stripped == question_text:
+            continue
+        kept.append(raw_line)
+    return "\n".join(kept)
+
+
+def _extract_aspect_line(answer_text, aspect, question_text=None):
     """The one line of `answer_text` that answers `aspect` (the per-target
     question asks for `- <aspect>: <fact (citation)>` lines -- ADR-0063
-    Phase 109d C3), or `"未確認"` if none is found. Tries an exact
-    line-prefix match first (`- aspect: ...` / `**aspect**: ...`), then
-    falls back to any line merely containing the aspect text."""
-    lines = (answer_text or "").splitlines()
+    Phase 109d C3), or `"未確認"` if none is found. Strips an echoed
+    question first (Phase 109f, see `_strip_echoed_question`). Tries an
+    exact line-prefix match first (`- aspect: ...` / `**aspect**: ...`),
+    then falls back to any line merely containing the aspect text."""
+    cleaned = _strip_echoed_question(answer_text, question_text)
+    lines = cleaned.splitlines()
     for raw_line in lines:
         stripped = raw_line.strip()
         if not stripped:
@@ -179,23 +210,31 @@ def build_target_aspect_table(targets, aspects, answers):
     (ADR-0063 Phase 109d C4). Empty (`""`) if there are no targets or no
     aspects -- the caller falls back to the per-target sections alone. A
     cell whose aspect does not show up in that target's answer is
-    `"未確認"` (never guessed)."""
+    `"未確認"` (never guessed). Phase 109f: also strips a leading echo of
+    the question (`answer.question`, when the answer dict/object has one)
+    out of the answer text before looking for aspect lines."""
     targets = [str(t).strip() for t in (targets or []) if str(t or "").strip()]
     aspects = [str(a).strip() for a in (aspects or []) if str(a or "").strip()]
     if not targets or not aspects:
         return ""
     by_target = {}
+    question_by_target = {}
     for answer in answers or []:
         target = _get(answer, "target")
         if target:
             by_target[str(target)] = _get(answer, "answer") or ""
+            question_by_target[str(target)] = _get(answer, "question") or ""
     lines = [
         "| 対象 | " + " | ".join(aspects) + " |",
         "| --- | " + " | ".join("---" for _ in aspects) + " |",
     ]
     for target in targets:
         answer_text = by_target.get(target, "")
-        cells = [_extract_aspect_line(answer_text, aspect) for aspect in aspects]
+        question_text = question_by_target.get(target, "")
+        cells = [
+            _extract_aspect_line(answer_text, aspect, question_text)
+            for aspect in aspects
+        ]
         lines.append("| " + target + " | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 

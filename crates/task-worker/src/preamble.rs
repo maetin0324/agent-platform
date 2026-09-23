@@ -864,9 +864,11 @@ fn actions_instructions() -> String {
      `add_milestone`。判断に必要な情報が欠けるときは `ask_human`。通常の実装判断は担当に任せます。案件・担当が分かっていれば `project` / `assignee` \
      を書いてください（`assignee` を省けば celeris が skills と harness から決定的に選びます）。\
      検証に落ちた action（知らない harness / repos / 案件など）は実行されず、理由が人に見えます。\n\
-     調査系（`literature` / `web-research`）の `create_task` を書くときは、`objective` に**対象を \
-     1 行に列挙**し（例: `CHFS / FINCHFS / GekkoFS / UnifyFS / BeeOND`）、観点を括弧で列挙してください \
-     （例: `(server/client 配置、cache/direct I/O、file semantics、replication)`）。対象が 5 を超える \
+     調査系（`literature` / `web-research`）の `create_task` を書くときは、`objective` の 1 行目を \
+     **`対象: <対象1> / <対象2> / …（観点: <観点1>、<観点2>、…）`** の明示形にしてください \
+     （例: `対象: CHFS / FINCHFS / GekkoFS / UnifyFS / BeeOND（観点: server/client 配置、\
+     cache/direct I/O、file semantics、replication）`。区切りは `/` でも `、`/`,` でも構いません）。\
+     対象が 5 を超える \
      場合は対象ごとにタスクを分けてください（ADR-0063 Phase 109c A）。受け入れ条件は、対象ごとに分ける \
      か、レビュアー条件（`acceptance` のうち `check` が reviewer のもの）に「**対象ごとに**、指定の観点 \
      が一次情報（または文献）に基づいて整理されている。確認できない観点は『未確認』と明記されていれば \

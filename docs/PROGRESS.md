@@ -16025,3 +16025,116 @@ Phase 109d C1 の「`PQA_SETTINGS_DIR=settings_dir` にしてから `from_name(s
 
 - タスク 01M37AZ129EMB93N50MZ132S8K: `targets = ["model", "server", "core"]`（スペース付き `A / B / C` を列挙と認識せず、括弧内の観点「deployment model」「server/core 利用」から識別子を拾った）、`aspects` に「観点: 目的」とラベルが残る、表のセルに質問文のエコー（「Question: model について…」）が貼られる。reviewer は「指定 8 対象ではなく model / server / core」で不合格。PaperQA 経路自体（settings、ask、contexts 由来の cited=2、insufficient=false）は正常。
 - Phase 109f に追加指示: 明示の「対象:」行は括弧を除いてから `/`・` / `・`、`・`,` のどれでも同じに読む、「観点:」ラベルを剥がす、表のセル抽出は質問のエコーを除く、この目的文そのものをテストに。以降のやり直しは 109f の昇格後に行う（1 回 10 分・codex の reviewer 2 回を消費するため、抽出が直るまで止める）。
+## Phase 109f（完了日 2026-09-23）: 対象・観点の抽出を最初の段落に限り、日付や人の付記を観点と誤認しない
+
+本番で観測（2026-09-23 14:18〜14:32 UTC、文献調査 `01M37A3JMMFXVY30SWD4EZ01JN`、Phase 109e）:
+PaperQA の Python API 経路自体は正常に動いた（settings 読込 OK、`cited=4`、対象別の節・表、
+`insufficient=false`）が reviewer 不合格。目的文の末尾に人が足した節見出し「## 方針（人の指定、
+2026-09-23）」の括弧内が `research_aspects` に観点の列挙と誤認され、`research.json.aspects` が
+`["人の指定", "2026-09-23"]` になっていた。目的文本体の「各システムの目的・semantics・deployment
+model・server/core利用・data pathを整理し」は拾われず、`targets` も「Mochi-Margo-Mercury、UCX、
+io_uring」が「(必要ならDAOS/Lustre)」の括弧に阻まれて落ちていた。加えて、作業中に親エージェントから
+追加観測（run `01M37AZ129EMB93N50MZ132S8K`）が届き、明示の「対象:」マーカー形式でも `preamble.rs` が
+例示する「`CHFS / FINCHFS / …`」（`/` の前後に空白がある書き方）が認識されず、一般走査へのフォール
+バックで観点の括弧内の `server/core` が誤検出され（`targets = ["model", "server", "core"]`）、また
+`paperqa_ask.py::build_target_aspect_table` が PaperQA の答えの先頭にエコーされた質問文をセルの値として
+拾ってしまう別の事故も見つかった。この節はその両方の直しをまとめて記録する。
+
+### 直し
+
+1. `crates/task-worker/src/research_targets.rs`:
+   - `first_paragraph(objective)`（`\n\n` または `## ` 見出しより前だけを返す）を追加し、
+     `research_targets`/`research_aspects` の抽出範囲をそこに限定した。
+   - `strip_optional_parens`: 目的文中の「(必要なら…)」「(optional …)」「（任意…）」の括弧を、中身ごと
+     跡を残さず削除する（外側の区切り文字がそのまま繋がるように）対象抽出の前段に追加。
+   - `extract_target_chain` の識別子の連なり検出に、直後が区切りなしで非 ASCII 文字（漢字・かな）に
+     繋がっている連なりを複合語の一部とみなして捨てる判定（`is_glued_to_non_ascii_word`）を追加
+     （実測: `io_uring・RDMA統合` の `RDMA` が対象に化けていた）。
+   - `research_aspects` に (1) 明示の「観点:」/「観点：」マーカー、(2) 既存の括弧列挙、(3) 「各…の
+     A・B・C を整理」の形、の優先順の抽出を追加し、候補は日付（ISO/「NNNN年」）・「人の指定」系の語・
+     `MAX_ASPECT_CANDIDATE_CHARS`（24 文字。仕様の目安「10 文字」だと `deployment model`/
+     `server/core利用` のような複合語の観点まで弾いてしまうため緩めた）超え・URL・1 文字を弾く妥当性
+     チェック（`is_valid_aspect_candidate`）を通す。
+   - `research_targets` に明示の「対象:」/「対象：」マーカーの抽出（`extract_marker_targets`）を追加。
+     マーカー行の丸括弧は中身を問わず 1 個の空白に置き換え（`strip_all_parens`。空白に置き換えるのは、
+     括弧を消しただけだと直後の文字と直前の識別子が区切りなしで繋がって複合語判定に誤って引っかかる
+     ため）、区切り文字（`/`・`、`・`，`・`,`）の前後の空白を畳む（`collapse_whitespace_around_join_chars`）
+     ことで、`preamble.rs` が例示する「`対象: CHFS / FINCHFS / …`」（空白入り）でも
+     「`対象: CHFS/FINCHFS/…`」と同じ結果になるようにした。`extract_target_chain` の区切り文字に
+     半角カンマ `,` を追加。
+   - `comparison_target` は変更なし（目的文全体を見る。ADR-0063 Phase 109d C3 のまま）。
+2. `crates/task-worker/src/paperqa_ask.py`:
+   - `_strip_echoed_question(answer_text, question_text)` を追加。`Question:`/`質問:`/`質問：` で
+     始まる行と、`question_text`（`answer.question`）と一致する行を取り除く。
+   - `_extract_aspect_line`/`build_target_aspect_table` がこれを使うよう変更（表の各セルは、答えの
+     先頭にエコーされた質問文ではなく、実際の回答本文から観点を探す。見つからなければ「未確認」）。
+3. `crates/task-worker/src/preamble.rs`: 調査系 `create_task` への指示文を、明示形
+   「`対象: <対象1> / <対象2> / …（観点: <観点1>、<観点2>、…）`」に書き換えた（新しいパーサの
+   対応形式と一致させる）。
+4. `docs/adr/0063-research-tasks-resilience.md` に「## Phase 109f 追記」を追加（本文・既存の Phase
+   追記は書き換えていない）。
+
+### 条件ごとの実施
+
+1. **実際の目的文（先頭段落）で targets/aspects が期待どおり**
+   - 実行したコマンド: `cargo test -p task-worker --lib research_targets::tests::real_objective_targets_exclude_the_optional_paren_and_the_glued_rdma_word research_targets::tests::real_objective_aspects_come_from_the_enumerate_pattern_not_the_optional_paren`
+   - 出力の要点: exit 0、2 passed。`targets = [CHFS, FINCHFS, GekkoFS, UnifyFS, BeeOND,
+     BeeGFS-on-demand, Mochi-Margo-Mercury, UCX, io_uring]`（DAOS/Lustre/RDMA を含まない）、
+     `aspects = [目的, semantics, deployment model, server/core利用, data path]`。
+2. **「## 方針（人の指定、2026-09-23）」を足しても targets/aspects が変わらない**
+   - 実行したコマンド: `cargo test -p task-worker --lib research_targets::tests::a_human_appended_heading_with_a_date_does_not_change_targets_or_aspects`
+   - 出力の要点: exit 0、1 passed。
+3. **明示形「対象: A / B（観点: x、y、z）」と、本番と同じ形（`/` の前後に空白、括弧内が観点）**
+   - 実行したコマンド: `cargo test -p task-worker --lib research_targets::tests::an_explicit_marker_form_for_both_targets_and_aspects_takes_priority research_targets::tests::production_marker_line_with_spaces_around_slashes_is_parsed_correctly research_targets::tests::production_marker_line_is_unaffected_by_an_appended_human_section`
+   - 出力の要点: exit 0、3 passed。本番と同じ目的文
+     （`対象: CHFS / FINCHFS / GekkoFS / UnifyFS / BeeOND / Mochi-Margo-Mercury / UCX /
+     io_uring（観点: 目的、file semantics、deployment model、server/core 利用、data path、BenchFS
+     との比較分類）`）で `targets`/`aspects` とも親の追加観測どおりの期待値になり、`## 方針` 節を
+     足しても変わらない。
+4. **`DEFAULT_ASPECTS` へのフォールバック**
+   - 実行したコマンド: `cargo test -p task-worker --lib research_targets::tests::aspects_fall_back_to_the_default_list_without_parens research_targets::tests::aspects_fall_back_to_default_when_only_a_date_and_a_meta_word_are_offered`
+   - 出力の要点: exit 0、2 passed。日付と「人の指定」だけの括弧書きは 2 件に満たない扱いになり既定
+     リストに落ちる。
+5. **既存テストは維持**
+   - 実行したコマンド: `cargo test -p task-worker --lib research_targets::`
+   - 出力の要点: exit 0、**20 passed**（Phase 109e までの 13 件 + 本 Phase の新規 7 件、0 failed）。
+6. **表のセルがエコーされた質問文を拾わない**
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa::tests::ask_script_pure_functions_build_questions_flatten_contexts_and_the_table`
+   - 出力の要点: exit 0、1 passed。答えの先頭に質問文がエコーされた答えでも、セルには実際の回答
+     （`5ms observed (cite2)`）が入り、観点が答えに無ければ「未確認」。質問文自体は表に残らない
+     （`assert!(!table_with_echo.contains("Question:"))`）。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（passed 合計 **1970**。Phase 109e の 1963 から +7、すべて `research_targets` の新規テスト。`paperqa` は既存テスト 1 件の内部にアサーションを追加しただけで件数は増えていない） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0。`manual_range_contains` を 1 件直した以外は新規警告なし） |
+| API/protocol | `git status --porcelain -- docs/api docs/protocol` | 出力なし（型を変えていないので差分ゼロ） |
+
+### 変更ファイル
+
+- `crates/task-worker/src/research_targets.rs`（`first_paragraph`/`strip_optional_parens`/
+  `strip_all_parens`/`collapse_whitespace_around_join_chars`/`extract_marker_targets`/
+  `extract_marker_aspects`/`extract_enumerate_aspects`/`is_valid_aspect_candidate`/
+  `filter_valid_aspects`/`strip_leaked_aspect_label`/`contains_iso_date`/`contains_year_with_kanji`/
+  `find_after_marker`/`split_by_best_delimiter` を追加。`research_targets`/`research_aspects` の
+  抽出範囲を最初の段落に制限。テスト 7 件新規）
+- `crates/task-worker/src/paperqa_ask.py`（`_strip_echoed_question` を追加、`_extract_aspect_line`/
+  `build_target_aspect_table` がそれを使うよう変更）
+- `crates/task-worker/src/paperqa.rs`（`ask_script_pure_functions_...` テストに表のエコー除去の
+  アサーションを追加。型・シグネチャの変更なし）
+- `crates/task-worker/src/preamble.rs`（調査系 `create_task` の指示文を明示形に書き換え）
+- `docs/adr/0063-research-tasks-resilience.md`（「## Phase 109f 追記」を追加）
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う）: `research_targets.rs`/
+  `research_aspects` の直しは決定的な純関数のみで LLM 呼び出しを伴わないため、単体テストの範囲で
+  確認済み。実機確認が要るのは `paperqa_ask.py` のエコー除去（ローカルモデルが実際に質問をエコーする
+  かどうかは環境依存）で、本番反映後、対象を含む文献調査を 1 回走らせて `research.json.aspects`/
+  `targets` が目的文どおりであること、`answer.md`/`report.md` の対象×観点の表に質問文が残っていない
+  ことを確認する。
+- `MAX_ASPECT_CANDIDATE_CHARS`（24 文字）は指示書の目安「10 文字」と意図的に一致させていない（複合語の
+  観点を落とさないことを優先した判断）。もし今後さらに長いプロセの混入が観測されたら、閾値の調整では
+  なく「候補が句点や助詞を含む＝文らしい」という構造的な判定に切り替えることを検討する。
