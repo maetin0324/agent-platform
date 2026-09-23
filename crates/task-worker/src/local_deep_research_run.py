@@ -2,9 +2,15 @@
 """Runner embedded in the celeris `local-deep-research` adapter (ADR-0029 D1,
 extended by ADR-0031 D1 for the evidence record).
 
+Extended by ADR-0063 D2/D3/D4 (Phase 109): a `must_read_urls` field of primary
+sources that get force-merged into `sources`/report.md/sources.json after LDR
+answers (`add_must_read_sources`), and a `"<env:NAME>"` placeholder scheme so
+a secret `settings` value (an `api_key`, say) never has to be written into
+`ldr_input.json` in the clear (`resolve_env_placeholder`).
+
 Contract with the adapter (crates/task-worker/src/local_deep_research.rs):
   argv[1]  path to a JSON file: {query, mode, settings, iterations,
-           questions_per_iteration, report_path}
+           questions_per_iteration, report_path, must_read_urls}
   stdout   one message per line: "progress: <text>" while running, and
            exactly one final line "CELERIS_RESULT {json}" with
            {"summary": <=1500 chars, single line, "sources": <int>,
@@ -53,7 +59,29 @@ import json
 import os
 import re
 import sys
+import urllib.request
 from urllib.parse import urlparse
+
+_ENV_PLACEHOLDER_RE = re.compile(r"^<env:([A-Za-z_][A-Za-z0-9_]*)>$")
+
+
+def resolve_env_placeholder(value):
+    """`"<env:LDR_LLM_OPENAI_ENDPOINT_API_KEY>"` -> that environment
+    variable's value, or `""` if it is unset. Any other string is returned
+    unchanged.
+
+    ADR-0063 D4 (Phase 109): the celeris adapter never writes a secret
+    setting value (a key ending in `api_key`/`token`/`password`/`secret`)
+    into `ldr_input.json` in the clear -- only this placeholder. The real
+    value reaches this process as an environment variable of the child
+    process (the Rust side derives the same `LDR_...` name and sets it via
+    `.envs(...)`)."""
+    if not isinstance(value, str):
+        return value
+    match = _ENV_PLACEHOLDER_RE.match(value.strip())
+    if not match:
+        return value
+    return os.environ.get(match.group(1), "")
 
 
 def convert_setting_value(value):
@@ -61,13 +89,18 @@ def convert_setting_value(value):
     real Python type (ADR-0029 D1/D3: TOML values are written as strings so
     the types don't get mixed up on the Rust side; this converts them back).
 
+    A `"<env:...>"` placeholder (ADR-0063 D4) is resolved from the
+    environment first; everything below only applies to what is left.
+
     Order: bool -> JSON (arrays/objects, for values like
     `search.engine.web.searxng.default_params.engines`) -> int -> float ->
     left as the original string if none of the above apply.
     """
     if not isinstance(value, str):
         return value
-    stripped = value.strip()
+    stripped = resolve_env_placeholder(value.strip())
+    if not isinstance(stripped, str):
+        return stripped
     lowered = stripped.lower()
     if lowered in ("true", "false"):
         return lowered == "true"
@@ -84,7 +117,10 @@ def convert_setting_value(value):
         return float(stripped)
     except ValueError:
         pass
-    return value
+    # Not `value`: a resolved `"<env:...>"` placeholder must survive even when it is not a
+    # bool/JSON/int/float (ADR-0063 D4). For every other input `stripped == value.strip()`,
+    # so this is the same behavior as before Phase 109.
+    return stripped
 
 
 def make_progress_printer():
@@ -431,6 +467,54 @@ def single_line(text, max_chars):
     return collapsed
 
 
+_TITLE_TAG_RE = re.compile(r"<title[^>]*>([^<]{1,200})</title>", re.IGNORECASE)
+
+
+def fetch_url_title(url, timeout=10):
+    """Best-effort `<title>` for a must-read URL (ADR-0063 D3). Any problem
+    (network, timeout, non-HTML response, no `<title>`) just falls back to
+    the URL itself -- this is a courtesy for a human reading sources.json /
+    report.md, never a hard requirement (LDR's own search is what must
+    succeed)."""
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "celeris-ldr/1.0"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(65536)
+        match = _TITLE_TAG_RE.search(body.decode("utf-8", errors="replace"))
+        if match:
+            return _collapse_whitespace(match.group(1))
+    except Exception:
+        pass
+    return url
+
+
+def add_must_read_sources(result, must_read_urls, fetch_title):
+    """Append the must-read URLs (ADR-0063 D2/D3: 必読の一次情報) to
+    `result["sources"]` in place, skipping any already present (matched by
+    URL). Appended at the **end** so LDR's own `[n]` citation numbers in
+    `summary`/`formatted_findings` keep pointing at the right entry.
+    `fetch_title(url) -> str` is injected so tests never touch the network.
+    Returns the number of URLs actually appended."""
+    sources = list(result.get("sources") or [])
+    existing = set()
+    for raw in sources:
+        if isinstance(raw, dict):
+            url = raw.get("link") or raw.get("url")
+        else:
+            url = str(raw)
+        if url:
+            existing.add(url)
+    added = 0
+    for url in must_read_urls or []:
+        url = str(url or "").strip()
+        if url and url not in existing:
+            sources.append({"link": url, "title": fetch_title(url), "source": "must-read"})
+            existing.add(url)
+            added += 1
+    result["sources"] = sources
+    return added
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: local_deep_research_run.py <input.json>", file=sys.stderr)
@@ -446,6 +530,10 @@ def main():
     iterations = payload.get("iterations")
     questions_per_iteration = payload.get("questions_per_iteration")
     report_path = payload["report_path"]
+    # ADR-0063 D2/D3 (Phase 109): must-read primary sources (URLs the adapter pulled out of the
+    # task's objective/inputs and the knowledge base). Forced into `sources`/report.md/sources.json
+    # after LDR answers -- LDR's own search is unaffected (this is not a search engine).
+    must_read = [u for u in (payload.get("must_read_urls") or []) if str(u or "").strip()]
 
     try:
         from local_deep_research.api import (
@@ -476,6 +564,8 @@ def main():
             if not isinstance(result, dict):
                 print(f"quick_summary returned an unexpected type: {type(result)!r}", file=sys.stderr)
                 return 1
+            if must_read:
+                add_must_read_sources(result, must_read, fetch_url_title)
             summary, _ = write_report_from_result(report_path, query, result)
             sources_list, research = build_evidence_manifest(result)
         elif mode == "detailed":
@@ -496,6 +586,8 @@ def main():
             if not isinstance(result, dict):
                 print(f"detailed_research returned an unexpected type: {type(result)!r}", file=sys.stderr)
                 return 1
+            if must_read:
+                add_must_read_sources(result, must_read, fetch_url_title)
             summary, _ = write_report_from_result(report_path, query, result)
             sources_list, research = build_evidence_manifest(result)
         elif mode == "report":
@@ -510,6 +602,8 @@ def main():
             # `quick_summary`/`detailed_research`; use it if it happens to be
             # a dict, otherwise fall back to scraping URLs out of the report.
             if isinstance(raw_result, dict):
+                if must_read:
+                    add_must_read_sources(raw_result, must_read, fetch_url_title)
                 sources_list, research = build_evidence_manifest(raw_result)
             else:
                 sources_list, research = build_evidence_manifest_from_text(text)

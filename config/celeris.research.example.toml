@@ -54,6 +54,9 @@ index_directory = "/home/u/celeris/paperqa/index"
 # （`[api] token_file` の中身と同じ値。ダミーでは通らない — 直接 Qwen を叩いていた頃と違う点）。
 # `RES_OPTIONS` は、このホストで見つかった glibc の A/AAAA 並行送信の取りこぼし対策（ADR-0031 の実機記録。
 # 取得ランナーの名前解決が 5 秒待たされる症状が出たら効く）。
+# ADR-0063 D4（Phase 109。実機の事故: `acquire_input.json` に `OPENAI_API_KEY` の値が平文で残っていた
+# — run ディレクトリはワーカー/レビュアーが読める）: ここに書いた値はプロセス環境変数としてのみ渡り、
+# アダプタは `acquire_input.json` にこの値を書かない（プレースホルダだけ）。
 env = { OPENAI_API_KEY = "<[api] token_file と同じ値>", OPENAI_BASE_URL = "http://127.0.0.1:18100/v1", RES_OPTIONS = "single-request" }
 
 # 文献の取得（ADR-0035 D1）。鍵は要らない（arXiv と OpenAlex のどちらも公開 API）。
@@ -89,13 +92,26 @@ query_timeout_secs = 300
 # 計算機科学以外の分野を調べるときだけ書き換える（例: Engineering は 22）。
 # openalex_filter = "is_oa:true,primary_topic.field.id:22"
 
-# 決定的な証拠ゲート（ADR-0035 D3。ADR-0031 D2 の literature 版）。満たさないと `Error{retryable}` になり、
-# 成果物（answer.md / papers.json / sources.json）は残る。`0` を書けばその項目は見ない。
-# 取得が 0 件のときは「検索経路の問題かもしれない」という別のメッセージになる。
+# ADR-0063 D1（Phase 109。実機の失敗から）: 本文（PDF）が 403 等で取れない候補は、OpenAlex / arXiv /
+# Unpaywall / Semantic Scholar のメタデータにある abstract で妥協する（`<key>_abstract.txt` として
+# corpus に入れる。本文でないことを明記する注記付き）。既定 true。PDF が無い候補を corpus に入れたく
+# なければ false（Phase 108 までの挙動）。
+abstract_fallback = true
+
+# 決定的な証拠ゲート（ADR-0035 D3。ADR-0031 D2 の literature 版）。`0` を書けばその項目は見ない。
+# 取得が 0 件のときは「検索経路の問題かもしれない」という別のメッセージになり、`insufficient_is_error`
+# に関わらず常に hard error（`Error{retryable}`）。成果物（answer.md / papers.json / sources.json /
+# queries.json / research.json）は残る。
 [adapters.paperqa.evidence]
 min_candidates = 5
 min_pdfs = 3
 min_cited = 2
+# ADR-0063 D1（Phase 109。実機の失敗: CHFS/UnifyFS/Mochi/BeeOND が ACM/eScholarship で 403 になり
+# 本文が取れず、周辺の arXiv 論文しか corpus に入らなかった案件）: `min_cited` 等の閾値未達を hard
+# error にするか。既定 false（証拠不足でも `Done` にし、`research.json` の `evidence` と
+# `answer.md` の「証拠の質」節に本文/アブストの内訳と代替案を書いて reviewer / 受け入れ条件に委ねる）。
+# `true` にすると Phase 108 までどおり `Error{retryable}`。
+insufficient_is_error = false
 
 [[providers]]
 id = "paperqa-qwen"

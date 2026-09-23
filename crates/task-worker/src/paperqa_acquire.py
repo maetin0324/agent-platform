@@ -23,7 +23,7 @@ Contract with the adapter (crates/task-worker/src/paperqa.rs):
                      of the network (no HTTP request is made at all)
   stdout             one message per line: "progress: <text>" while
                      running, and exactly one final line
-                     "CELERIS_ACQUIRE {"candidates": n, "pdfs": m,
+                     "CELERIS_ACQUIRE {"candidates": n, "pdfs": m, "abstracts": k,
                                      "engines": {"arxiv": a, "openalex": b},
                                      "queries": q, "excluded": x,
                                      "query_source": "llm"|"fallback"}"
@@ -46,7 +46,22 @@ INPUT (all paths absolute):
    "arxiv_categories": ["cs.DC", "cs.OS", "cs.PF", "cs.NI"],   # default
    "openalex_filter": "is_oa:true,primary_topic.field.id:17",
    "max_candidates": 30, "max_pdfs": 12, "per_query": 20,
-   "timeout_secs": 30, "mailto": "you@example.org" | null}
+   "timeout_secs": 30, "mailto": "you@example.org" | null,
+   "abstract_fallback": true,                       # ADR-0063 D1 (default true)
+   "seed_urls": [{"url": "https://arxiv.org/abs/2101.00001", "kind": "arxiv"},
+                 {"url": "https://doi.org/10.1/x", "kind": "doi"},
+                 {"url": "https://example.org/paper.pdf", "kind": "pdf"}]}
+
+ADR-0063 D1 (Phase 109): when a candidate's PDF cannot be fetched (403, not a
+PDF, no URL at all), and `abstract_fallback` is on (the default), its abstract
+is written as a plain-text document (`<key>_abstract.txt`) into the corpus
+instead, so PaperQA2 can still cite it -- clearly marked as "full text could
+not be retrieved". Before giving up, an open-access PDF is also looked for via
+Unpaywall and Semantic Scholar (`find_oa_pdf`) using the candidate's DOI. Seed
+URLs (PDF / DOI / arXiv links pulled by the adapter out of the task's
+objective/inputs) are turned into extra candidates (`candidate_from_seed`) and
+merged in ahead of the search results, so they are never dropped by
+`max_candidates` and always attempted first.
 
 OUTPUT FILES
   queries.json     {"generated_by": "llm"|"fallback", "model": ...,
@@ -55,7 +70,7 @@ OUTPUT FILES
                     "error": "<why we fell back>"}
   papers.json      [{title, authors[], year, venue, doi, arxiv_id, url,
                      pdf_url, file, pdf_downloaded, source_engine,
-                     query_text, abstract}]
+                     query_text, abstract, abstract_only}]
   sources.json     [{url, title, engine, cited}]  -- same shape as the
                    LDR runner writes (ADR-0031 D1). `cited` is always
                    false here; the adapter fills it in after `pqa`
@@ -87,6 +102,10 @@ USER_AGENT = "celeris-paperqa-acquire/1.0 (deterministic literature acquisition 
 
 ARXIV_ENDPOINT = "https://export.arxiv.org/api/query"
 OPENALEX_ENDPOINT = "https://api.openalex.org/works"
+# ADR-0063 D1 (Phase 109): open-access lookups tried when a candidate has a
+# DOI but no `pdf_url` yet (before giving up and falling back to the abstract).
+UNPAYWALL_ENDPOINT = "https://api.unpaywall.org/v2/"
+SEMANTIC_SCHOLAR_ENDPOINT = "https://api.semanticscholar.org/graph/v1/paper/DOI:"
 
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
 ARXIV_NS = "{http://arxiv.org/schemas/atom}"
@@ -126,6 +145,9 @@ class Fetcher:
                  an empty answer (the runner then falls back)
       PDF        <dir>/pdf-<basename of the url>
                  b"%PDF-1.4\\nfixture\\n"
+      Unpaywall  <dir>/unpaywall-<i>.json / <dir>/unpaywall.json / {"results": []}
+      Semantic Scholar
+                 <dir>/semanticscholar-<i>.json / <dir>/semanticscholar.json / {"results": []}
     """
 
     def __init__(self, timeout, fixture_dir=None):
@@ -214,6 +236,28 @@ Answer with exactly this shape and nothing else:
 {{"queries": [{{"text": "...", "engines": ["arxiv", "openalex"], "arxiv_categories": ["cs.DC"]}}],
  "exclude_terms": ["..."]}}
 """
+
+
+_ENV_PLACEHOLDER_RE = re.compile(r"^<env:([A-Za-z_][A-Za-z0-9_]*)>$")
+
+
+def resolve_env_placeholder(value):
+    """`"<env:OPENAI_API_KEY>"` -> the value of that environment variable, or
+    `""` if it is unset. Any other string (or non-string) is returned as is.
+
+    ADR-0063 D4 (Phase 109): a production run's `acquire_input.json` is a
+    plain file in the run directory (world/group readable, mode 664) that
+    the worker and the reviewer can both read. The adapter never writes the
+    real `OPENAI_API_KEY` into it any more -- only this placeholder -- and
+    the real value reaches this process the same way it always has: as an
+    environment variable of the child process (`.envs(config.env)` on the
+    Rust side)."""
+    if not isinstance(value, str):
+        return value
+    match = _ENV_PLACEHOLDER_RE.match(value.strip())
+    if not match:
+        return value
+    return os.environ.get(match.group(1), "")
 
 
 def build_query_messages(request):
@@ -402,7 +446,13 @@ def plan_queries(payload, fetcher, progress):
 
     model = str(config.get("model") or "").strip()
     url = chat_completions_url(config.get("base_url") or os.environ.get("OPENAI_BASE_URL"))
-    api_key = config.get("api_key") or os.environ.get("OPENAI_API_KEY") or "unused"
+    # ADR-0063 D4: `config.get("api_key")` is a `"<env:...>"` placeholder, not the real value
+    # (the adapter never writes the secret itself into acquire_input.json).
+    api_key = (
+        resolve_env_placeholder(config.get("api_key"))
+        or os.environ.get("OPENAI_API_KEY")
+        or "unused"
+    )
     if not model or not url:
         plan["error"] = "no model or no OPENAI_BASE_URL for the query LLM"
         progress("search terms: falling back to the deterministic extraction (%s)" % plan["error"])
@@ -749,6 +799,177 @@ def dedupe_candidates(candidates, limit):
     return out
 
 
+# --------------------------------------------------------- ADR-0063 D1: seeds
+
+
+_SEED_ARXIV_ID_RE = re.compile(r"(\d{4}\.\d{4,5}(?:v\d+)?)")
+_SEED_DOI_RE = re.compile(r"doi\.org/(.+)$", re.IGNORECASE)
+
+
+def seed_arxiv_id(url):
+    """The bare arXiv id out of a seed URL (`.../abs/2101.00001v1` or
+    `.../pdf/2101.00001`). Empty string if none is found."""
+    match = _SEED_ARXIV_ID_RE.search(str(url or ""))
+    return match.group(1) if match else ""
+
+
+def seed_doi(url):
+    """`https://doi.org/10.1/x` -> `10.1/x`. Empty string if this is not a
+    `doi.org` URL."""
+    match = _SEED_DOI_RE.search(str(url or ""))
+    return match.group(1).strip("/") if match else ""
+
+
+def candidate_from_seed(seed, progress):
+    """A minimal candidate dict from one classified seed URL (ADR-0063 D1:
+    "起点の資料"). Only the identifying fields (doi/arxiv_id/url/pdf_url) are
+    filled in here; title/authors/abstract are enriched later -- by
+    de-duplication against a genuine search hit for the same paper, or by
+    `find_oa_pdf` (Semantic Scholar also returns title/abstract). `None` if
+    the seed's `kind` is not one this runner can turn into a candidate
+    (celeris only ever sends `pdf`/`doi`/`arxiv`; GitHub/GitLab seeds are
+    handled by the adapter itself, as "primary sources", and never appear
+    here) or the URL carries no usable identifier.
+    """
+    kind = str((seed or {}).get("kind") or "")
+    url = str((seed or {}).get("url") or "").strip()
+    if not url:
+        return None
+    base = {
+        "title": "",
+        "authors": [],
+        "year": None,
+        "venue": "",
+        "doi": "",
+        "arxiv_id": "",
+        "url": url,
+        "pdf_url": "",
+        "abstract": "",
+        "source_engine": "seed:" + (kind or "other"),
+        "query_text": "(seed)",
+    }
+    if kind == "arxiv":
+        arxiv_id = seed_arxiv_id(url)
+        if not arxiv_id:
+            return None
+        base["arxiv_id"] = arxiv_id
+        base["pdf_url"] = "https://arxiv.org/pdf/" + arxiv_id
+        base["url"] = "https://arxiv.org/abs/" + arxiv_id
+    elif kind == "doi":
+        doi = seed_doi(url)
+        if not doi:
+            return None
+        base["doi"] = doi
+        base["url"] = "https://doi.org/" + doi
+    elif kind == "pdf":
+        base["pdf_url"] = url
+    else:
+        return None
+    progress("seed (%s): %s" % (kind, url))
+    return base
+
+
+def seed_candidates(seed_urls, progress):
+    """`payload["seed_urls"]` -> candidate dicts, skipping any seed that is
+    not usable (ADR-0063 D1)."""
+    out = []
+    for seed in seed_urls or []:
+        candidate = candidate_from_seed(seed, progress)
+        if candidate:
+            out.append(candidate)
+    return out
+
+
+# --------------------------------------------------- ADR-0063 D1: OA lookup
+
+
+def unpaywall_url(doi, mailto):
+    return UNPAYWALL_ENDPOINT + urllib.parse.quote(str(doi or ""), safe="") + "?" + urllib.parse.urlencode(
+        {"email": mailto or "unknown@example.org"}
+    )
+
+
+def parse_unpaywall(body):
+    """Unpaywall's `/v2/<doi>` response -> the best open-access PDF URL, or
+    `""` if none is listed."""
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return ""
+    best = data.get("best_oa_location")
+    if isinstance(best, dict) and best.get("url_for_pdf"):
+        return str(best["url_for_pdf"])
+    for location in data.get("oa_locations") or []:
+        if isinstance(location, dict) and location.get("url_for_pdf"):
+            return str(location["url_for_pdf"])
+    return ""
+
+
+def semantic_scholar_url(doi):
+    fields = "title,abstract,year,authors.name,openAccessPdf"
+    return SEMANTIC_SCHOLAR_ENDPOINT + urllib.parse.quote(str(doi or ""), safe="") + "?fields=" + fields
+
+
+def parse_semantic_scholar(body):
+    """Semantic Scholar's `/paper/DOI:<doi>` response ->
+    (pdf_url, title, abstract, year, authors[]). Any missing field is `""`/
+    `None`/`[]`."""
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return "", "", "", None, []
+    if not isinstance(data, dict):
+        return "", "", "", None, []
+    pdf = str(((data.get("openAccessPdf") or {}) or {}).get("url") or "")
+    title = str(data.get("title") or "")
+    abstract = str(data.get("abstract") or "")[:ABSTRACT_MAX_CHARS]
+    year = data.get("year")
+    authors = [
+        a.get("name")
+        for a in (data.get("authors") or [])
+        if isinstance(a, dict) and a.get("name")
+    ]
+    return pdf, title, abstract, year, authors
+
+
+def find_oa_pdf(candidate, fetcher, mailto, progress):
+    """Try Unpaywall, then Semantic Scholar, for an open-access PDF for
+    `candidate`'s DOI (ADR-0063 D1: "OA 探索を足す"). Also fills in
+    title/abstract/year/authors that Semantic Scholar has and the candidate
+    is missing. A no-op if there is no DOI or a `pdf_url` is already known.
+    Network/parse errors are swallowed (this is a best-effort enrichment
+    step, never fatal to the run)."""
+    doi = normalize_doi(candidate.get("doi"))
+    if not doi or candidate.get("pdf_url"):
+        return
+    try:
+        pdf = parse_unpaywall(fetcher.get("unpaywall", unpaywall_url(doi, mailto)))
+        if pdf:
+            candidate["pdf_url"] = pdf
+            progress("unpaywall: found an OA PDF for %s" % doi)
+            return
+    except Exception as exc:
+        progress("unpaywall failed for %s: %s" % (doi, exc))
+    try:
+        pdf, title, abstract, year, authors = parse_semantic_scholar(
+            fetcher.get("semanticscholar", semantic_scholar_url(doi))
+        )
+    except Exception as exc:
+        progress("semantic scholar failed for %s: %s" % (doi, exc))
+        return
+    if pdf:
+        candidate["pdf_url"] = pdf
+        progress("semantic scholar: found an OA PDF for %s" % doi)
+    if not candidate.get("title") and title:
+        candidate["title"] = title
+    if not candidate.get("abstract") and abstract:
+        candidate["abstract"] = abstract
+    if not candidate.get("year") and year:
+        candidate["year"] = year
+    if not candidate.get("authors") and authors:
+        candidate["authors"] = authors
+
+
 # ------------------------------------------------------------------ download
 
 
@@ -783,45 +1004,103 @@ def pdf_filename(candidate):
     return "%s%s_%s.pdf" % (surname, year_part, tail or "paper")
 
 
-def download_pdfs(candidates, paper_directory, max_pdfs, fetcher, progress):
+def abstract_filename(candidate):
+    """Deterministic file name for the abstract-only fallback (ADR-0063 D1).
+    Same key material as `pdf_filename` so the two never collide."""
+    surname = first_surname(candidate.get("authors")) or "anon"
+    year = candidate.get("year")
+    year_part = str(year) if year else "nd"
+    if candidate.get("arxiv_id"):
+        tail = slugify("arxiv-" + str(candidate["arxiv_id"]), 32)
+    elif candidate.get("doi"):
+        tail = slugify(normalize_doi(candidate["doi"]), 32)
+    else:
+        tail = slugify(candidate.get("title"), 32)
+    return "%s%s_%s_abstract.txt" % (surname, year_part, tail or "paper")
+
+
+def abstract_document_text(candidate):
+    """The text PaperQA2 reads in place of the PDF when only the abstract is
+    available (ADR-0063 D1: 「アブストで妥協する」). Carries enough
+    bibliographic detail for both `pqa`'s citation and a human reading the
+    corpus directly, and says plainly that this is not the full text."""
+    lines = [candidate.get("title") or "(no title)"]
+    authors = ", ".join(candidate.get("authors") or [])
+    year = candidate.get("year")
+    if authors or year:
+        lines.append("%s (%s)" % (authors or "unknown authors", year or "n.d."))
+    if candidate.get("doi"):
+        lines.append("DOI: %s" % candidate["doi"])
+    if candidate.get("url"):
+        lines.append("URL: %s" % candidate["url"])
+    lines.append("")
+    lines.append("[the full text could not be retrieved; this is the abstract only]")
+    lines.append("")
+    lines.append(candidate.get("abstract") or "(no abstract available)")
+    return "\n".join(lines) + "\n"
+
+
+def download_pdfs(candidates, paper_directory, max_pdfs, fetcher, mailto, abstract_fallback, progress):
     """Download at most `max_pdfs` open-access PDFs into `paper_directory`.
     Files that are already there are counted but **not** fetched again
-    (ADR-0035 D1 step 3). Returns the number of PDFs in the corpus for
-    this run's candidates."""
+    (ADR-0035 D1 step 3). Once `max_pdfs` full texts are in, remaining
+    candidates are **not** searched for a PDF any more, but -- unlike before
+    Phase 109 -- they are still considered for the abstract fallback
+    (ADR-0063 D1): a cheap text file, not bound by the PDF budget. Before
+    giving up on a candidate's full text, `find_oa_pdf` (Unpaywall / Semantic
+    Scholar) gets one more try. Returns `(pdfs, abstracts)`."""
     os.makedirs(paper_directory, exist_ok=True)
     have = 0
+    abstracts = 0
     for candidate in candidates:
-        if have >= max_pdfs:
-            break
+        candidate.setdefault("abstract_only", False)
         name = pdf_filename(candidate)
-        candidate["file"] = name
         path = os.path.join(paper_directory, name)
         if os.path.isfile(path) and os.path.getsize(path) > 0:
+            candidate["file"] = name
             candidate["pdf_downloaded"] = True
             have += 1
             progress("already in the corpus: %s" % name)
             continue
-        url = candidate.get("pdf_url")
-        if not url:
-            continue
-        try:
-            body = fetcher.get("pdf", url)
-        except Exception as exc:  # network / HTTP errors are per-paper, not fatal
-            progress("could not download %s: %s" % (url, exc))
-            continue
-        if body[:4] != b"%PDF":
-            progress("not a PDF, skipped: %s" % url)
-            continue
-        try:
-            with open(path, "wb") as handle:
-                handle.write(body)
-        except OSError as exc:
-            progress("could not write %s: %s" % (path, exc))
-            continue
-        candidate["pdf_downloaded"] = True
-        have += 1
-        progress("downloaded %s (%d bytes)" % (name, len(body)))
-    return have
+        downloaded = False
+        if have < max_pdfs:
+            find_oa_pdf(candidate, fetcher, mailto, progress)
+            url = candidate.get("pdf_url")
+            if url:
+                try:
+                    body = fetcher.get("pdf", url)
+                except Exception as exc:  # network / HTTP errors are per-paper, not fatal
+                    progress("could not download %s: %s" % (url, exc))
+                    body = b""
+                if body[:4] == b"%PDF":
+                    try:
+                        with open(path, "wb") as handle:
+                            handle.write(body)
+                        candidate["file"] = name
+                        candidate["pdf_downloaded"] = True
+                        have += 1
+                        downloaded = True
+                        progress("downloaded %s (%d bytes)" % (name, len(body)))
+                    except OSError as exc:
+                        progress("could not write %s: %s" % (path, exc))
+                elif body:
+                    progress("not a PDF, skipped: %s" % url)
+        if not downloaded and not candidate.get("pdf_downloaded") and abstract_fallback and candidate.get("abstract"):
+            abstract_path = os.path.join(paper_directory, abstract_filename(candidate))
+            try:
+                if not (os.path.isfile(abstract_path) and os.path.getsize(abstract_path) > 0):
+                    with open(abstract_path, "w", encoding="utf-8") as handle:
+                        handle.write(abstract_document_text(candidate))
+                    progress(
+                        "full text unavailable; added the abstract instead: %s"
+                        % os.path.basename(abstract_path)
+                    )
+                candidate["file"] = os.path.basename(abstract_path)
+                candidate["abstract_only"] = True
+                abstracts += 1
+            except OSError as exc:
+                progress("could not write %s: %s" % (abstract_path, exc))
+    return have, abstracts
 
 
 # ---------------------------------------------------------------------- main
@@ -887,6 +1166,8 @@ def acquire(payload, fetcher, progress):
     mailto = payload.get("mailto") or None
     openalex_filter = payload.get("openalex_filter") or DEFAULT_OPENALEX_FILTER
     paper_directory = payload["paper_directory"]
+    # ADR-0063 D1: abstract fallback is on unless explicitly turned off.
+    abstract_fallback = bool(payload.get("abstract_fallback", True))
 
     queries, exclude_terms, plan = plan_queries(payload, fetcher, progress)
 
@@ -900,15 +1181,21 @@ def acquire(payload, fetcher, progress):
     if excluded:
         progress("%d result(s) dropped by the exclude terms" % excluded)
 
-    candidates = dedupe_candidates(interleave(kept), max_candidates)
+    # ADR-0063 D1: seed candidates (from the task's objective/inputs) go first, so de-duplication
+    # keeps them over a search hit for the same paper and `max_candidates` never drops them.
+    seeds = seed_candidates(payload.get("seed_urls"), progress)
+    candidates = dedupe_candidates(seeds + interleave(kept), max_candidates)
     for candidate in candidates:
         candidate.setdefault("file", "")
         candidate.setdefault("pdf_downloaded", False)
         candidate.setdefault("query_text", "")
         candidate.setdefault("abstract", "")
+        candidate.setdefault("abstract_only", False)
     progress("%d candidate paper(s) after de-duplication" % len(candidates))
 
-    pdfs = download_pdfs(candidates, paper_directory, max_pdfs, fetcher, progress)
+    pdfs, abstracts = download_pdfs(
+        candidates, paper_directory, max_pdfs, fetcher, mailto, abstract_fallback, progress
+    )
 
     engines = {"arxiv": 0, "openalex": 0}
     for candidate in candidates:
@@ -928,6 +1215,7 @@ def acquire(payload, fetcher, progress):
     counts = {
         "candidates": len(candidates),
         "pdfs": pdfs,
+        "abstracts": abstracts,
         "engines": engines,
         "queries": len(queries),
         "excluded": excluded,

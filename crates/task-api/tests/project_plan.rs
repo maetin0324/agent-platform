@@ -189,6 +189,7 @@ async fn children_materialized_from_the_plan_output_stay_in_the_same_project() {
             workspace: None,
             category: None,
             labels: Vec::new(),
+            partial_ok: None,
         }],
     };
     let children = task_core::plan::materialize(

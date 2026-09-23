@@ -305,6 +305,9 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     ),
                     // ADR-0031 D2: 証拠ゲートの閾値は行ごとの上書きが無い（他の LDR 設定と同じ扱い）。
                     evidence: base.evidence,
+                    // ADR-0063 D2: 再挑戦時の mode / iterations も行ごとの上書きは無い。
+                    retry_mode: base.retry_mode,
+                    retry_iterations: base.retry_iterations,
                 }))
             }
             LangMemAdapter::ID => {

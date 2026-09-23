@@ -97,3 +97,8 @@ pegasus 経由のトンネル越しで、トンネルは人が GUI で TOTP を�
    （消したいときは `fallback = false` と明示する）。
 8. やり直しは **1 tick に 1 件**（`schedule` と同じ間引き）。`knowledge_run_retry` は
    `WHERE retried_at IS NULL` の UPDATE なので、「一度だけ」はストアが守る。
+
+## 関連（ADR-0063 追記、2026-09-23）
+
+「使えない／足りないときに機械的に迂回する」という同じ考え方を、調査系ハーネス（`paperqa`/
+`local-deep-research`）の証拠不足・再挑戦の弱さにも適用したのが **ADR-0063**（Phase 109）。

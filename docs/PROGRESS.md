@@ -15337,3 +15337,134 @@ Phase 107 の本番反映で B1（担当に `cluster:<id>` が無い remote タ�
   - `POST /tasks/01M35X86XTHHN9C6XDAYD2FZ7T/answer {"answer": "remote-exec を直した（Phase 108）。同じ手順で再実行して…"}`（software-engineering、codex の `Bad owner or permissions` 質問）→ `blocked → ready`。sirius 接続後に codex run が `remote-exec`（`ssh -F ~/.ssh/config`）を通せるかで確認する。
   - 残り: systems-performance の 01M35X86XTEPXVZMBY7HSSEP7X は作業内容に関する正当な質問（scheduler / accounting データの所在）で人の回答待ち。sirius は未接続（人の再接続待ち。次の master から keepalive 付き）。
 - 提案（Phase 108 の未解決）: MCP `task_retry` に `workspace`（P-108-2）、GUI のタスク編集・やり直しに作業場所の入力（P-108-1）。
+## Phase 109（完了日 2026-09-23）: 調査系タスクの生存率（PaperQA のアブスト妥協と OA 探索、LDR の再挑戦強化、受け入れ条件の部分達成、acquire 入力から秘密を除く）（ADR-0063）
+
+本番の案件 BenchFS で、文献調査（PaperQA2）が 2 回とも `insufficient literature evidence: cited=0/1
+(min 2)` で `failed`（主要論文が 403 で本文が取れず、周辺の arXiv 論文しか corpus に入らなかった）、
+Web 調査（LDR）も 2 回とも reviewer 不合格で `failed`（`prior_review` を受け取っていたのに 2 回目も
+`mode`/`iterations` が 1 回目のままで、CHFS の一次情報〈GitHub〉を埋められなかった）、加えて
+`acquire_input.json` に API キーが平文で残っていた。人の方針「本文が有料ならアブストまでで妥協する」を
+受け、ADR-0063 として決定を記録し実装した。
+
+### 条件 1: PaperQA — 本文が取れない候補はアブストラクトで妥協し、閾値未達を hard error にしない（既定）
+
+- **条件**: `[adapters.paperqa.acquire] abstract_fallback`（既定 `true`）で、PDF が取れない候補は
+  Unpaywall / Semantic Scholar で OA PDF をもう一段探し（`find_oa_pdf`）、それでも無ければ abstract を
+  `<key>_abstract.txt` として corpus に入れる（`abstract_only: true`、本文でないことを明記）。
+  `[adapters.paperqa.evidence] insufficient_is_error`（既定 `false`）で、取得 0 件（検索経路の問題）は
+  常に hard error のまま、それ以外の閾値未達は `Terminal::Done` にして `research.json.evidence`
+  （`cited`/`cited_fulltext`/`cited_abstract_only`/`min_cited`/`insufficient`）と `answer.md` の
+  「## 証拠の質」節に内訳と代替案を書く。目的文・`inputs` の URL（PDF/DOI/arXiv）は取得の seed に、
+  GitHub/GitLab の URL は「## 一次情報（実装）」節に載せる（corpus には入れない）。`acquire_input.json`
+  の `api_key` は実値ではなく `"<env:OPENAI_API_KEY>"` プレースホルダのみ。
+- **実行したコマンド**: `cargo test -p task-worker --lib paperqa::`
+- **出力の要点**: exit 0、**41 passed**（0 failed）。新規/更新: `evidence_gate_counts_candidates_pdfs_and_citations`
+  （`insufficient_is_error` の 3 分岐）、`gate_rejects_short_evidence_but_keeps_the_artifacts`
+  （`insufficient_is_error=true` を明示）、`acquire_runs_before_pqa_and_the_answer_gets_a_sources_section`
+  （`research.json` を含む 5 成果物）、`seed_urls_split_between_the_acquire_runner_and_the_primary_sources_section`、
+  `classify_seed_url_recognizes_pdf_doi_arxiv_and_github`、`extract_urls_pulls_http_tokens_out_of_japanese_text`、
+  `extract_seed_urls_dedupes_objective_and_inputs`、`runner_abstract_fallback_and_oa_lookup_helpers_are_deterministic`
+  （`resolve_env_placeholder`/`candidate_from_seed`/`parse_unpaywall`/`parse_semantic_scholar`/
+  `abstract_document_text` を python3 で直接確認。ネットワーク無し）、
+  `runner_falls_back_to_the_abstract_and_finds_an_oa_pdf_via_unpaywall`（`--fixture` のエンドツーエンド）、
+  `the_acquire_input_carries_the_query_llm_and_the_request`（`api_key` がプレースホルダで、秘密の文字列が
+  ファイルに出ないことを確認）。
+- **実装**: `crates/task-worker/src/paperqa.rs`（`AcquireConfig.abstract_fallback`、
+  `PaperQaEvidence.insufficient_is_error`、`Candidate.abstract_text`/`abstract_only`、
+  `SeedUrl`/`SeedUrlKind`/`classify_seed_url`/`extract_urls`/`extract_seed_urls`、`evidence_gate` を
+  `EvidenceGateResult{error, summary}` を返す形に書き換え、`write_research_json`/`render_evidence_section`/
+  `render_primary_sources_section` を追加）、`crates/task-worker/src/paperqa_acquire.py`
+  （`resolve_env_placeholder`、`candidate_from_seed`/`seed_candidates`、`unpaywall_url`/`parse_unpaywall`/
+  `semantic_scholar_url`/`parse_semantic_scholar`/`find_oa_pdf`、`abstract_filename`/`abstract_document_text`、
+  `download_pdfs` を `(pdfs, abstracts)` を返す形に書き換え）。
+
+### 条件 2: LDR — 再挑戦（`attempts >= 1`）で `mode`/`iterations` を上げ、必ず埋める項目と必読の一次情報を渡す
+
+- **条件**: `[adapters.local_deep_research] retry_mode`（既定 `detailed`）/ `retry_iterations`
+  （既定 `5`）を、前回 reviewer 不合格で再試行になった run（`task.attempts >= 1`）にだけ使う。
+  `context.prior_review` の不合格理由（`pass=false`）を問いの先頭に「## 必ず埋める項目」として置く
+  （合格した条件・空の理由は載せない）。目的文中の URL と、知識ベース索引
+  （`context.knowledge.index`）のうち `primary-sources`/`一次情報` タグを持つページの `sources` を
+  「必読の一次情報」として `ldr_input.json` に渡し、`ldr_run.py` が LDR の答えの後に `sources`/
+  report.md/sources.json の末尾へ強制的に加える（LDR 自身の `[n]` 引用番号は壊さない）。
+  `[adapters.local_deep_research].settings` の秘密らしい値（`api_key`/`token`/`password`/`secret` で
+  終わるキー）は `ldr_input.json` に平文で書かず、`LDR_<KEY>` 環境変数へ変換する。
+- **実行したコマンド**: `cargo test -p task-worker --lib local_deep_research::`
+- **出力の要点**: exit 0、**33 passed**（0 failed）。新規: `build_query_prepends_must_cover_items_from_a_failed_prior_review`、
+  `must_read_urls_collects_objective_urls_and_primary_source_tagged_knowledge_sources`、
+  `redact_secret_settings_replaces_secret_looking_values_with_env_placeholders`、
+  `retry_run_escalates_mode_and_iterations_and_redacts_secrets`（`mode=detailed`/`iterations=5`/
+  `must_read_urls`/秘密がプレースホルダのみであることを確認）、
+  `runner_convert_setting_value_resolves_env_placeholders`、
+  `runner_add_must_read_sources_appends_new_urls_without_touching_existing_citation_numbers`
+  （python3 で直接確認。ネットワーク無し）。
+- **実装**: `crates/task-worker/src/local_deep_research.rs`（`LdrConfig.retry_mode`/`retry_iterations`、
+  `must_cover_items`/`build_must_cover_section`、`must_read_urls`、`redact_secret_settings`、
+  `run_ldr` の mode/iterations 分岐と env 追加）、`crates/task-worker/src/local_deep_research_run.py`
+  （`resolve_env_placeholder`、`convert_setting_value` の解決順、`fetch_url_title`/`add_must_read_sources`、
+  `main()` の quick/detailed/report 各分岐への組み込み）。`convert_setting_value` の最終フォールバックを
+  `return value` から `return stripped` に修正（プレースホルダ解決後の値が数値変換に失敗したときに
+  元の未解決文字列へ戻ってしまうバグを本 Phase で発見・修正）。
+
+### 条件 3: 受け入れ条件の部分達成（`literature`/`web-research` に警告。拒否はしない）
+
+- **条件**: CoS の `create_task` 指示文に、調査系の子タスクは受け入れ条件を対象ごとに分けるか
+  「一次情報で確認できなかった項目は『未確認』と明記されていれば不合格の理由にしない」を含めるよう
+  追記。`NewTask.partial_ok: Option<bool>` を追加し、plan 検証（`task_core::warn_missing_partial_ok`）が
+  genre が `literature`/`web-research` に解決される子で、この一文（`未確認`/`対象ごと` のキーワード）も
+  `partial_ok: true` も無ければ**警告**（`tracing::warn!`。**拒否はしない**、plan は変更しない）。
+- **実行したコマンド**: `cargo test -p task-worker --lib preamble:: && cargo test -p task-core --lib plan::`
+- **出力の要点**: exit 0、preamble **16 passed**（`cos_conversations_show_active_projects_and_the_actions_instructions`
+  に「未確認」「literature」「web-research」の含有を追加）、plan **21 passed**（新規
+  `warn_missing_partial_ok_flags_research_children_without_the_escape_hatch`、
+  `warn_missing_partial_ok_is_quiet_when_the_escape_hatch_is_present_or_the_genre_is_not_research`）。
+- **実装**: `crates/task-worker/src/preamble.rs::actions_instructions`、`crates/task-core/src/plan.rs`
+  （`NewTask.partial_ok`、`warn_missing_partial_ok`、`RESEARCH_GENRES`）、`crates/task-core/src/lib.rs`
+  （re-export）、`crates/task-dispatch/src/dispatcher.rs::fix_plan_for_harness`（呼び出しを追加）。
+  `NewTask` に新フィールドが増えたため `docs/protocol/plan-output.schema.json` を
+  `UPDATE_SCHEMA=1 cargo test -p task-core committed_schema_matches_generated` で再生成（+7行、
+  `docs/api` には差分なし）。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（79 テストバイナリすべて `test result: ok`、passed 合計 **1925**） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| schema | `UPDATE_SCHEMA=1 cargo test -p task-core committed_schema_matches_generated` | exit 0、1 passed。`docs/protocol/plan-output.schema.json` のみ差分（`NewTask.partial_ok`）。`docs/api` は無差分（`git status` で確認） |
+| config | `cargo test -p celeris --lib config::` | exit 0、**71 passed**（`loads_research_example_config`/`loads_web_research_example_config` を含む） |
+
+### 変更ファイル
+
+- `crates/task-worker/src/paperqa.rs`・`crates/task-worker/src/paperqa_acquire.py`（条件 1）
+- `crates/task-worker/src/local_deep_research.rs`・`crates/task-worker/src/local_deep_research_run.py`（条件 2）
+- `crates/task-worker/src/preamble.rs`・`crates/task-core/src/plan.rs`・`crates/task-core/src/lib.rs`・`crates/task-dispatch/src/dispatcher.rs`（条件 3）
+- `crates/celeris/src/config.rs`（`LdrAdapterConfig.retry_mode`/`retry_iterations`、`AcquireConfig`/`PaperQaEvidence` のテスト更新）、`crates/celeris/src/lib.rs`（`LdrConfig` 構築に retry 設定を配線）
+- `crates/task-api/tests/project_plan.rs`・`crates/task-dispatch/src/dispatcher.rs`（`NewTask` リテラルに `partial_ok: None` を追加）
+- `config/celeris.research.example.toml`（`abstract_fallback`/`insufficient_is_error` の例とコメント）、`config/celeris.web-research.example.toml`（`retry_mode`/`retry_iterations` の例、秘密の扱いのコメント）
+- `docs/protocol/plan-output.schema.json`（再生成）
+- `docs/adr/0063-research-tasks-resilience.md`（新規）、`docs/adr/0035-literature-acquisition.md`・`docs/adr/0031-web-research-evidence-gate.md`・`docs/adr/0052-knowledge-run-fallback.md`（末尾に「ADR-0063 追記」の相互参照。本文は書き換えていない）
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う）:
+  1. BenchFS の文献調査タスクを再実行し、abstract 妥協で `done` になり、`answer.md` の「## 証拠の質」
+     節に本文/アブストの内訳が、`research.json` に `evidence` が入ること。
+  2. BenchFS の Web 調査タスクの再挑戦（`attempts >= 1`）で `mode=detailed`/`iterations=5` になり、
+     `sources.json`/`report.md` に CHFS の一次情報（`github.com/otatebe/chfs`）が入ること
+     （`projects/benchfs/primary-sources.md` に `primary-sources` タグと `sources` を付けておく必要が
+     ある。知識ベースにそのページが無ければ人が先に用意する）。
+  3. 既存の run ディレクトリに残っている `acquire_input.json`/`ldr_input.json` の平文の秘密は
+     celeris からは消せない。運用者が `celeris-api-token`（`[api] token_file` の値）と、LDR の
+     `settings` に直接書いていた実キー（あれば）をローテーションすること。
+- Unpaywall / Semantic Scholar は鍵不要の公開 API 前提（`mailto` は OpenAlex と共用）。実際に本番の
+  ネットワークから安定して届くかは未確認（テストは全て fixture 経由）。
+- LDR の必読URL注入（`add_must_read_sources`）は「## 出典」に載せるだけで、LLM がその内容を本文で
+  実際に論じる保証はない（`must_cover` の問いへの前置きで誘導するのみ）。
+
+### 提案
+
+- P-109-1: 知識ベースの `primary-sources`/`一次情報` タグの運用（付け方・スコープ）を `docs/knowledge.md`
+  に書く（今回は `context.knowledge.index[].sources` を読むだけで、タグの命名規則は決めていない）。
+- P-109-2: Unpaywall/Semantic Scholar のレート制限・障害時の扱い（現状は例外を握りつぶして abstract に
+  倒すだけ）を実機で観測してから、必要ならリトライ/バックオフを足す。

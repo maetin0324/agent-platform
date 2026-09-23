@@ -44,6 +44,10 @@
 # （ハーネスの決定的ゲート＝「証拠が足りているか」）、2) `--check-reviewer`（「問いに答えているか」）。
 # `web-research` の受け入れ条件には **`--check-artifact report.md` だけでなく `--check-reviewer` も必ず
 # 付けること**（`celerisctl task create --genre web-research ... --check-artifact report.md --check-reviewer`）。
+#
+# ADR-0063 D3（Phase 109）: レビュアー条件（`--check-reviewer`）の文面に「一次情報で確認できなかった
+# 項目は『未確認』と明記されていれば不合格の理由にしない」の一文を含める（CoS の plan もこの一文か
+# `partial_ok: true` が無い調査系の子タスクに警告を出す）。1 件の欠落で全体を落とさないため。
 
 db = "../celeris-web-research-demo.sqlite3"
 workspace_root = "../workspaces"
@@ -71,6 +75,11 @@ command = "/home/u/celeris/ldr/.venv/bin/python"
 mode = "quick"
 iterations = 2
 questions_per_iteration = 2
+# ADR-0063 D2（Phase 109。実機の失敗: `web-research` の 2 回目の run は `prior_review` を受け取って
+# いたが、`mode`/`iterations` は 1 回目と同じままで、結局一次情報（CHFS の GitHub）を埋められず
+# failed になった）: `attempts >= 1`（前回 reviewer 不合格）の run はここではなく下の値を使う。
+retry_mode = "detailed"
+retry_iterations = 5
 # `RES_OPTIONS = "single-request"`: glibc に A と AAAA を**順番に**問い合わせさせる。
 # 実機（2026-09-17）で判明した罠 — ルータの DNS が A/AAAA の並行送信を取りこぼすと、プロセスで
 # 最初の名前解決だけが必ず 5.01 秒かかる。LDR の DNS ピン留めは 5 秒で fail-closed するため、
@@ -95,6 +104,9 @@ env = { RES_OPTIONS = "single-request" }
 # ADR-0053 D2（Phase 65）: celeris の LLM source プロキシに向ける（Qwen が落ちていれば celeris/cheap は
 # 自動で Claude/GPT のアカウントプールに倒れる）。`api_key` は**プロキシの Bearer**（`[api] token_file`
 # と同じ値。直接 Qwen を叩いていた頃の "unused" では通らない）。
+# ADR-0063 D4（Phase 109）: ここに書いた値は `ldr_input.json` には平文で書かれない
+# （`redact_secret_settings` が `api_key` で終わるキーを自動で検出し、`LDR_LLM_OPENAI_ENDPOINT_API_KEY`
+# という環境変数名に変換して子プロセスへ渡す。JSON にはその環境変数名へのプレースホルダだけが残る）。
 "llm.openai_endpoint.url" = "http://127.0.0.1:18100/v1"
 "llm.openai_endpoint.api_key" = "<[api] token_file と同じ値>"
 "llm.model" = "celeris/cheap"
