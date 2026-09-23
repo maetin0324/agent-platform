@@ -1362,8 +1362,9 @@ pub struct PaperQaAdapterConfig {
     /// 意味は `task_worker::PaperQaEvidence` と同じ。
     #[serde(default)]
     pub evidence: task_worker::PaperQaEvidence,
-    /// ADR-0063 Phase 109d C3: 対象ごとの問い + 総括の問いの上限（`ask()` を呼ぶ回数の上限）。
-    /// 対象が多ければ先頭から。既定 8。
+    /// ADR-0063 Phase 109d C3: 対象ごとの問い + 総括の問いの上限（`ask()` を呼ぶ回数の上限）。既定
+    /// 10（Phase 109h: 8 から引き上げ）。比較先があるときは総括の問いを必ず残し、対象側を後ろから
+    /// 詰める（`task_worker::paperqa::build_questions_for_targets` 相当、`paperqa_ask.py`）。
     #[serde(default = "default_paperqa_max_asks")]
     pub max_asks: u32,
 }
@@ -1391,7 +1392,7 @@ fn default_paperqa_command() -> String {
 }
 
 fn default_paperqa_max_asks() -> u32 {
-    8
+    10
 }
 
 /// `local-deep-research` アダプタの設定（ADR-0029 D1）。フィールドの意味は
@@ -3721,7 +3722,7 @@ host = "h"
             toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n").unwrap();
         assert!(cfg.validate().is_ok());
         assert_eq!(cfg.adapters.paperqa.command, "python");
-        assert_eq!(cfg.adapters.paperqa.max_asks, 8);
+        assert_eq!(cfg.adapters.paperqa.max_asks, 10);
         assert!(cfg.adapters.paperqa.settings.is_none());
         assert!(cfg.adapters.paperqa.paper_directory.is_none());
         assert!(cfg.adapters.paperqa.index_directory.is_none());
