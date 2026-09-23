@@ -608,3 +608,148 @@ JSON-RPC メソッド（`thread/resume`）自体を実装していないこと�
 その場で復旧する）。stub codex によるテスト（`a_resume_rpc_failure_self_heals_within_the_same_run` /
 `a_non_resuming_run_is_unaffected_by_the_resume_rpc_self_heal`）で、resume 失敗 1 回・fresh セッション id
 の報告 1 回・resume していない run では何も変わらないことを確認した。実機確認は未実施（ADR-0009 P-34）。
+
+## Phase 112 追記（`codex exec resume` でも承認・サンドボックスの設定を落とさない。2026-09-23）
+
+### なぜここに追記するか（新規 ADR にしなかった理由）
+
+Phase 67/68b/68c/98 がすべて「`codex exec resume` の argv をどう組み立てるか」という同じ問題を扱っており、
+この節もその延長（ホワイトリストの中身を「削るだけ」から「翻訳できるものは翻訳する」に変える）である。
+新しい ADR を切ると、`codex exec resume` の argv に関する意思決定の経緯（`--add-dir` → `--approve-for-me` →
+`list_turns` 未実装 → 今回）が 2 つの文書に分かれ、次に同じ場所で事故が起きたときに両方を読む必要が
+出る。実装の対象ファイルも `crates/task-worker/src/codex.rs` の同じ関数（`run_codex`/`run_codex_once`）で
+あり続けている。したがって独立した意思決定（新しいコンポーネントの導入など）ではなく、この ADR の
+「同じ意思決定の第 5 段階」として追記する。
+
+### 背景（本番で確認済み。再調査はしていない）
+
+CoS チャットからのタスク作成が壊れていた。本番の `[adapters.codex] extra_args = ["--approve-for-me"]`
+（codex 0.156.1）は、Phase 68c のホワイトリストにより `exec resume` では**丸ごと**落ちる。その結果、
+resume run は codex の既定の（読み取り専用の）承認・サンドボックス設定で動き、`artifacts/result.json` を
+書けない。ADR-0049 の「対話かつ `result.json` が無ければ最終メッセージをそのまま返答にする」救済が働くが、
+モデルは結果ファイルの JSON（`summary`/`evidence`/`actions: [{"type":"create_task",…}]`）をその最終
+メッセージに吐いていたため、celeris はそれを JSON のまま返答本文として扱い、`actions` は一切読まれず
+タスクは作られなかった（実例: task 01M388G6Q6D7NPNB77MWFFQRKH / run 01M388G8HG8BJEFCD0H8WQKN0N）。
+
+### D1: `exec resume` の extra_args は「丸ごと落とす」から「翻訳できるものは `-c key=value` に翻訳する」へ
+
+Phase 68c のホワイトリスト（`--json`・`--skip-git-repo-check`・`-c/--config <key=value>`・位置引数のみ）は
+維持する（`--help` の OPTIONS 一覧より実際の受理集合が狭いという Phase 68c の教訓は覆っていない）。その上で、
+`extra_args` の個々のフラグに `-c` 経由の等価な意味があるものは、丸ごと落とさずその `-c key=value` に
+書き換えて resume の argv に乗せる。
+
+**config key 名の根拠**: このリポジトリはこのサンドボックスから実機の `codex` を起動できないため、
+今回も `codex exec resume --help`/`codex exec --help` の実行はできない。Phase 68c で既に `-c
+sandbox_mode="..."` が celeris 自身の既定値として確立しており（`crates/task-worker/src/codex.rs` が
+以前から無条件で付けている。ADR-0049「結果ファイルを書けるよう `-c sandbox_mode="workspace-write"` を
+既定値として渡す」）、`--sandbox <MODE>` フラグの `-c` 等価が `sandbox_mode` であることは既にこの
+コードベースの前提になっている。承認モードについても同じ命名規則（フラグ名の対応する設定キーは
+snake_case で、`-s/--sandbox` ↔ `sandbox_mode` と同様に `-a/--ask-for-approval` ↔ `approval_policy`）が
+成り立つという、公開されている codex-cli の config スキーマ（`approval_policy`: `untrusted` /
+`on-failure` / `on-request` / `never`、`sandbox_mode`: `read-only` / `workspace-write` /
+`danger-full-access`）の記憶に基づく。**この 0.156.1 バイナリに対して実行して確認したものではない**
+（Phase 68c 以来の「`--help` の記載と実際の受理集合は一致しないことがある」という教訓のとおり、`-c
+approval_policy=...` が実際に resume で受理されるかは実機未検証のまま。下記「未解決事項」）。
+
+翻訳表（`crates/task-worker/src/codex.rs::translate_resume_extra_args`。純粋関数、`CodexAttempt`/I/O
+に触れない）:
+
+| operator の `extra_args` | resume の `-c` への翻訳 |
+| --- | --- |
+| `--approve-for-me` | `-c approval_policy="never"` + `-c sandbox_mode="workspace-write"` |
+| `--full-auto` | `-c approval_policy="on-failure"` + `-c sandbox_mode="workspace-write"`（codex 本家の `--full-auto` の定義: 失敗時だけ確認するサンドボックス自動実行） |
+| `--sandbox <MODE>` / `-s <MODE>` | `-c sandbox_mode="<MODE>"` |
+| `--ask-for-approval <POLICY>` / `-a <POLICY>` | `-c approval_policy="<POLICY>"` |
+| それ以外（値が続くはずの `--sandbox`/`-a` の値欠落を含む） | 翻訳できないので untranslatable（下記） |
+
+翻訳した `-c key=value` は、CoS 対話に無条件で付く `-c sandbox_mode="read-only"`（ADR-0054 D2/Phase 68）
+より**後ろ**に置く（`-c` の繰り返しは後勝ちという前提。celeris 側の argv 組み立てでの前提であり、これも
+実機未検証）。したがって `--approve-for-me` を運用側が設定していれば、CoS の resume run は
+`sandbox_mode="read-only"` → `sandbox_mode="workspace-write"` の順で 2 回 `-c` が乗り、後者が効くという
+想定になる。
+
+翻訳できたフラグは `tracing::info!("... translated ...")` で、翻訳できず untranslatable のまま残った
+フラグは `tracing::warn!("... dropping ...")` で記録する（既存の「dropping codex extra_args」ログを
+置き換える）。
+
+`--dangerously-bypass-approvals-and-sandbox` は意味が広すぎる（承認とサンドボックスを両方無効化する）ため、
+既定の翻訳表には入れない。`[adapters.codex] resume_bypass = "dangerous"` を明示設定した運用でだけ、
+untranslatable なフラグが残ったときにそれを丸ごと落とす代わりに `--dangerously-bypass-approvals-and-sandbox`
+を 1 回だけ足す（`CodexResumeBypass::Dangerous`。既定は `CodexResumeBypass::Off` = 従来どおり WARN で
+落とす）。このフラグ自体は Phase 68c で確認した `--help` の OPTIONS 一覧には載っているが usage 行には
+無く、実際に resume で受理されるかは同じく実機未検証（オプトインの運用側がそのリスクを引き受ける前提）。
+
+### D2: 翻訳しきれない resume は、そもそも resume せず新規スレッドにする
+
+`config.resume_mode == CodexResumeMode::ExecResume` かつ resume が要求されていて、かつ D1 の翻訳表で
+untranslatable なフラグが残り（`resume_bypass` も設定されていない）場合、`run_codex_once` を resume
+として呼ぶ前に諦めて `resume_id` を `None` に落とす（`run_codex` の中、`run_codex_once` を呼ぶ直前）。
+新規スレッドは `is_exec_resume_subcommand` が偽になる通常の `codex exec` 経路を通るので、`extra_args` は
+（翻訳せず）そのまま全部乗る。これにより「resume したが承認・サンドボックスが既定に戻り、読み取り専用の
+まま終わる」を未然に防ぐ（D1 の翻訳が effective な限り D1 を優先し、untranslatable が残るときだけ D2）。
+
+`CodexResumeMode::ExperimentalResume`（`-c experimental_resume=<id>`）は元から通常の `codex exec` を通り
+`extra_args` を丸ごと渡すので、D1/D2 のどちらの対象にもならない（今回の変更は `ExecResume` にのみ効く）。
+
+新規スレッドになったこと自体は `sink.session_established` が新しい thread id を報告する既存の経路で
+`node_sessions` に反映される（D2 のために新しい仕組みは追加していない）。
+
+### D3: 結果ファイルが無いときの救済を、最終メッセージが JSON なら中身まで見る
+
+ADR-0049 の既存の救済（対話かつ `Execute` かつ `result.json` 不在かつ exit 0 かつ最終 `agent_message` が
+非空なら、それをそのまま `Done.summary` にする）はそのまま維持する。その手前に 1 段追加する:
+`crates/task-worker/src/result_report.rs::final_message_is_recoverable_result`（純粋関数）が、最終
+メッセージのテキストを JSON として parse し、`summary`（空でない文字列）と `actions`（配列）の両方を
+持つ形なら「recoverable」と判定する。recoverable なら、そのテキストをそのまま
+`<artifacts_dir>/result.json` として書き込んでから、既存の `terminal_from_result`（disk から読む通常
+経路）を呼び直す。こうすることで、モデルが「本当は書きたかった」結果ファイルの中身が、`result_report`/
+`task-dispatch::absorb_console_actions`/`absorb_memory`/`absorb_milestone_proposal` などの**disk から
+読むだけの既存の仕組み**にそのまま乗る（`actions` の検証・実行の経路を複製しない）。recoverable でなければ
+（壊れた JSON・`actions` が無い・ただの平文回答）従来どおり生テキストをそのまま `Done.summary` にする。
+
+採用したときは `crate::progress::emit_status`（既存の `WorkerProgress`/`kind=status` の仕組み。
+`task_core::Event::WorkerProgress` は既にスキーマに入っているので新しい `Event` バリアントは追加していない）
+で「result recovered from the final message (result.json was missing; ADR-0054 Phase 112 D3)」を 1 件
+残す。GUI のタスク詳細の進行ログに従来の `status` 節目と同じ見え方で出る。
+
+### D4: テスト
+
+`crates/task-worker/src/codex.rs`:
+- `phase_112_resume_translates_approve_for_me_to_config_overrides_and_drops_the_raw_flag`
+  （旧 `phase_68c_resume_argv_contains_no_flag_outside_the_whitelist` を書き直し）: resume run の argv に
+  `--approve-for-me` がそのまま乗らないこと、`-c approval_policy="never"`・`-c sandbox_mode="workspace-write"`
+  が乗ること、ホワイトリスト外のフラグが無いことを検査する（受け入れ条件 D4(a)）。
+- `phase_112_fresh_session_keeps_operator_extra_args_unmodified`: 新規スレッド（resume なし）の run では
+  `--approve-for-me` が翻訳されずそのまま argv に乗ることを検査する（受け入れ条件 D4(b)、既存の
+  `phase_68b_fresh_cos_run_argv_has_readonly_sandbox_and_add_dir` と対になる回帰）。
+- `phase_112_full_auto_and_sandbox_and_ask_for_approval_translate_on_resume`: `--full-auto`・
+  `--sandbox <mode>`・`--ask-for-approval <policy>` の翻訳結果を検査する。
+- `phase_112_untranslatable_extra_args_without_bypass_skip_resume_and_run_fresh`: 翻訳表に無いフラグ
+  （例 `--unknown-flag`）を仕込んだ resume 要求が、`resume_bypass` 未設定では resume を諦めて `codex exec`
+  （resume サブコマンド無し）で新規スレッドとして走ること、その新規スレッドには untranslatable な
+  フラグも含め `extra_args` が丸ごと乗ることを検査する（D2）。
+- `phase_112_resume_bypass_dangerous_uses_the_bypass_flag_for_untranslatable_extra_args`:
+  `resume_bypass = Dangerous` かつ untranslatable なフラグがあるとき、resume はそのまま行われ
+  `--dangerously-bypass-approvals-and-sandbox` が 1 回だけ乗ること・untranslatable なフラグ自体は
+  argv に乗らないことを検査する。
+- `phase_112_a_recoverable_final_message_is_written_as_result_json_and_its_summary_is_used`:
+  `result.json` を書かない stub（`agent_message` に `{"summary":...,"actions":[...]}` を返す）で、
+  `Terminal::Done.summary` が JSON の `summary`（生の JSON 文字列ではない）になること、
+  `artifacts/result.json` が書かれること、`sink.progress` に「result recovered」の行が出ることを検査する
+  （D3）。
+- `crates/task-worker/src/result_report.rs` の `recoverable_result_tests`
+  モジュール（新規）: `final_message_is_recoverable_result` の純粋関数としての判定（`summary`+`actions`
+  あり→true、`actions` 無し→false、`summary` 空→false、壊れた JSON→false）。
+
+`crates/task-dispatch/src/dispatcher.rs`:
+- `absorb_console_actions_executes_actions_recovered_from_the_final_message`（既存の
+  `absorb_console_actions_executes_the_declared_actions_for_the_cos_only` と同じ土台。ADR-0054 Phase
+  112 D3 のコメント付き）: D3 が書き込む形そのままの `result.json`（最終メッセージからの救済を模した
+  もの）を用意し、`absorb_console_actions` が `create_task` を実行してタスクが `ready` で作られることを
+  検査する（受け入れ条件 D4(c)。JSON の書き込み経路自体は codex.rs 側の単体テストで検証済みなので、
+  ここでは「書き込まれた後」の一般的な actions 実行パイプラインを検査する）。
+
+### ゲート・未解決事項・実機確認
+
+`docs/PROGRESS.md` の Phase 112 節を参照（この ADR は決定の記録に専念し、実行結果は PROGRESS に置く
+という既存の書き分けに従う）。

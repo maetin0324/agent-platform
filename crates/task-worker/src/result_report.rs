@@ -124,6 +124,26 @@ pub fn actions_from_result_json(text: &str) -> ParsedActions {
     out
 }
 
+/// ADR-0054 Phase 112 D3: 対話 run が `result.json` を書けず（`artifacts_dir` に書き込めない等）、
+/// 最終メッセージの本文にその代わりを吐いたと思われるときの判定。`codex` の「対話かつ `result.json`
+/// 不在なら最終メッセージをそのまま `Done.summary` にする」救済（ADR-0049）の**手前**で使う純粋関数
+/// （I/O をしない。判定だけ）。テキストが JSON として parse でき、空でない `summary` 文字列と
+/// `actions` 配列の両方を持つ形なら「recoverable」（`true`）。それ以外（壊れた JSON・ただの平文回答・
+/// `actions` の無い結果ファイル）は `false`（呼び出し側は従来どおり生テキストをそのまま `Done.summary`
+/// にする）。`true` のとき、呼び出し側はこの同じテキストを `<artifacts_dir>/result.json` として書き
+/// 直し、`actions`/`summary` の検証は既存の（disk から読む）経路に任せる — ここでは検証しない。
+pub fn final_message_is_recoverable_result(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let has_summary = value
+        .get("summary")
+        .and_then(|s| s.as_str())
+        .is_some_and(|s| !s.trim().is_empty());
+    let has_actions = value.get("actions").is_some_and(|a| a.is_array());
+    has_summary && has_actions
+}
+
 /// 結果ファイルの本文から `milestone_proposal` を取り出す（純粋関数）。`title` が空なら提案なし。
 pub fn milestone_proposal_from_result_json(text: &str) -> Option<MilestoneProposal> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
@@ -184,6 +204,40 @@ mod tests {
             read_result_report_kind(&artifacts).as_deref(),
             Some("proposal")
         );
+    }
+}
+
+#[cfg(test)]
+mod recoverable_result_tests {
+    use super::*;
+
+    /// ADR-0054 Phase 112 D3: `summary`（空でない文字列）と `actions`（配列）の両方があれば recoverable。
+    #[test]
+    fn a_summary_and_actions_shaped_message_is_recoverable() {
+        assert!(final_message_is_recoverable_result(
+            r#"{"summary":"やります","actions":[{"type":"create_task","title":"t","objective":"o"}]}"#
+        ));
+        // `actions` は空配列でもよい（「配列を持つ」という条件そのもの）。
+        assert!(final_message_is_recoverable_result(
+            r#"{"summary":"やります","actions":[]}"#
+        ));
+    }
+
+    /// `actions` が無い・配列でない・`summary` が空/無い・壊れた JSON・ただの平文はどれも recoverable でない。
+    #[test]
+    fn anything_else_is_not_recoverable() {
+        assert!(!final_message_is_recoverable_result(
+            r#"{"summary":"やります"}"#
+        ));
+        assert!(!final_message_is_recoverable_result(
+            r#"{"summary":"やります","actions":"nope"}"#
+        ));
+        assert!(!final_message_is_recoverable_result(
+            r#"{"summary":"  ","actions":[]}"#
+        ));
+        assert!(!final_message_is_recoverable_result(r#"{"actions":[]}"#));
+        assert!(!final_message_is_recoverable_result("not json"));
+        assert!(!final_message_is_recoverable_result("接続確認OK"));
     }
 }
 

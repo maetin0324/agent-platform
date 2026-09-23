@@ -43,6 +43,17 @@ pub enum CodexResumeMode {
     ExperimentalResume,
 }
 
+/// `[adapters.codex] resume_bypass`（ADR-0054 Phase 112 D1）: `exec resume` の翻訳表
+/// （`translate_resume_extra_args`）で `-c key=value` に翻訳できなかった operator `extra_args` が
+/// 残ったときの扱い。既定は `Off`（従来どおり WARN で落とす）。`Dangerous` を明示設定した運用でだけ、
+/// 落とす代わりに `--dangerously-bypass-approvals-and-sandbox` を 1 回足す（意味が広すぎるので既定にはしない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CodexResumeBypass {
+    #[default]
+    Off,
+    Dangerous,
+}
+
 /// `[adapters.codex]`（config.toml, ADR-0008 D4）。
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
@@ -59,6 +70,8 @@ pub struct CodexConfig {
     pub container: Option<crate::container::SharedPlan>,
     /// ADR-0054 D1（Phase 67）: `context.session` が resume を求めたときの継続手段。
     pub resume_mode: CodexResumeMode,
+    /// ADR-0054 Phase 112 D1: 翻訳しきれない `extra_args` の resume での扱い。
+    pub resume_bypass: CodexResumeBypass,
 }
 
 impl Default for CodexConfig {
@@ -70,6 +83,7 @@ impl Default for CodexConfig {
             env: Vec::new(),
             container: None,
             resume_mode: CodexResumeMode::default(),
+            resume_bypass: CodexResumeBypass::default(),
         }
     }
 }
@@ -162,6 +176,68 @@ fn lenient_evidence(value: serde_json::Value) -> Vec<Evidence> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// `translate_resume_extra_args` の結果（ADR-0054 Phase 112 D1）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ResumeArgTranslation {
+    /// `-c key=value` として `exec resume` の argv に足す値（`value` は既に quote 済み）。
+    config_overrides: Vec<String>,
+    /// 翻訳できた operator の元のフラグ表記（INFO ログ用）。
+    translated: Vec<String>,
+    /// 翻訳できなかった operator の元のフラグ表記（WARN で落とすか、`resume_bypass` があれば
+    /// `--dangerously-bypass-approvals-and-sandbox` に置き換える対象）。
+    untranslatable: Vec<String>,
+}
+
+/// `[adapters.codex] extra_args` のうち `exec resume`（ADR-0054 Phase 68c のホワイトリスト）に直接は
+/// 乗せられないフラグを、可能な限り意味を保った `-c key=value` に書き換える（ADR-0054 Phase 112 D1）。
+/// 純粋関数（I/O・ログをしない。呼び出し側がログを出す）。
+///
+/// - `--approve-for-me` → `approval_policy="never"` + `sandbox_mode="workspace-write"`
+/// - `--full-auto` → `approval_policy="on-failure"` + `sandbox_mode="workspace-write"`
+/// - `--sandbox <MODE>` / `-s <MODE>` → `sandbox_mode="<MODE>"`
+/// - `--ask-for-approval <POLICY>` / `-a <POLICY>` → `approval_policy="<POLICY>"`
+/// - それ以外（値を取るはずのフラグの値欠落を含む）は `untranslatable` に残る。
+fn translate_resume_extra_args(extra_args: &[String]) -> ResumeArgTranslation {
+    let mut out = ResumeArgTranslation::default();
+    let mut iter = extra_args.iter().peekable();
+    while let Some(flag) = iter.next() {
+        match flag.as_str() {
+            "--approve-for-me" => {
+                out.config_overrides
+                    .push("approval_policy=\"never\"".to_string());
+                out.config_overrides
+                    .push("sandbox_mode=\"workspace-write\"".to_string());
+                out.translated.push(flag.clone());
+            }
+            "--full-auto" => {
+                out.config_overrides
+                    .push("approval_policy=\"on-failure\"".to_string());
+                out.config_overrides
+                    .push("sandbox_mode=\"workspace-write\"".to_string());
+                out.translated.push(flag.clone());
+            }
+            "--sandbox" | "-s" => match iter.next() {
+                Some(mode) => {
+                    out.config_overrides
+                        .push(format!("sandbox_mode=\"{mode}\""));
+                    out.translated.push(format!("{flag} {mode}"));
+                }
+                None => out.untranslatable.push(flag.clone()),
+            },
+            "--ask-for-approval" | "-a" => match iter.next() {
+                Some(policy) => {
+                    out.config_overrides
+                        .push(format!("approval_policy=\"{policy}\""));
+                    out.translated.push(format!("{flag} {policy}"));
+                }
+                None => out.untranslatable.push(flag.clone()),
+            },
+            other => out.untranslatable.push(other.to_string()),
+        }
+    }
+    out
 }
 
 /// `turn.completed`/`turn.failed` の一度でも観測できた終端シグナル（ADR-0008 D3）。
@@ -284,18 +360,39 @@ async fn run_codex_once(
     // and keep getting `--add-dir` here.
     tokio::fs::create_dir_all(&req.artifacts_dir).await?;
     if is_exec_resume_subcommand {
-        // Operator-configured `extra_args` (e.g. `--approve-for-me`, `--sandbox ...`) are arbitrary
-        // strings celeris does not validate; Phase 68c's production incident shows `exec resume`
-        // rejects at least one of them (`--approve-for-me`) and there is no documented `-c`
-        // equivalent for arbitrary flags in general, so they are dropped wholesale on resume rather
-        // than risk another exit 2 from an unknown future flag. The resumed thread already carries
-        // whatever approval/sandbox mode was in effect on the run that created it.
-        if !config.extra_args.is_empty() {
-            warn!(
-                "run {run_id}: dropping codex extra_args on `exec resume` (not on its \
-                 accepted-flag whitelist; ADR-0054 Phase 68c): {:?}",
-                config.extra_args
+        // ADR-0054 Phase 112 D1: operator-configured `extra_args` are arbitrary strings celeris does
+        // not validate, and Phase 68c's production incident shows `exec resume` rejects at least one
+        // of them (`--approve-for-me`) outright. Rather than dropping every flag wholesale (Phase
+        // 68c), translate the ones with a documented `-c key=value` equivalent and only drop what's
+        // left (see `translate_resume_extra_args` for the table and reasoning).
+        let translation = translate_resume_extra_args(&config.extra_args);
+        for pair in &translation.config_overrides {
+            command.arg("-c").arg(pair);
+        }
+        if !translation.translated.is_empty() {
+            tracing::info!(
+                "run {run_id}: translated codex extra_args for `exec resume` (ADR-0054 Phase 112 \
+                 D1): {:?} -> {:?}",
+                translation.translated,
+                translation.config_overrides
             );
+        }
+        if !translation.untranslatable.is_empty() {
+            if config.resume_bypass == CodexResumeBypass::Dangerous {
+                command.arg("--dangerously-bypass-approvals-and-sandbox");
+                tracing::info!(
+                    "run {run_id}: using --dangerously-bypass-approvals-and-sandbox on `exec \
+                     resume` for extra_args with no -c translation (resume_bypass = \"dangerous\"; \
+                     ADR-0054 Phase 112 D1): {:?}",
+                    translation.untranslatable
+                );
+            } else {
+                warn!(
+                    "run {run_id}: dropping codex extra_args on `exec resume` (no -c translation \
+                     known and resume_bypass is not configured; ADR-0054 Phase 112 D1): {:?}",
+                    translation.untranslatable
+                );
+            }
         }
     } else {
         command.arg("--add-dir").arg(&req.artifacts_dir);
@@ -481,6 +578,30 @@ async fn run_codex(
     let resume_id = codex_session
         .filter(|s| s.resume)
         .map(|s| s.session_id.clone());
+    // ADR-0054 Phase 112 D2: if this would go through the `exec resume` whitelist (Phase 68c) and
+    // the operator's `extra_args` have flags D1 can't translate to `-c key=value` (and no
+    // `resume_bypass` is configured to cover them), don't even attempt resume — a resumed thread
+    // that silently loses its approval/sandbox settings can end up permanently read-only. Give up on
+    // resume and run fresh instead (fresh gets the full, untranslated `extra_args`; D1 is preferred
+    // whenever its translation is complete).
+    let resume_id = if resume_id.is_some() && config.resume_mode == CodexResumeMode::ExecResume {
+        let translation = translate_resume_extra_args(&config.extra_args);
+        if !translation.untranslatable.is_empty()
+            && config.resume_bypass != CodexResumeBypass::Dangerous
+        {
+            warn!(
+                "run {run_id}: skipping `exec resume` and starting a fresh codex session instead \
+                 (extra_args {:?} have no -c translation for `exec resume` and resume_bypass is \
+                 not configured; ADR-0054 Phase 112 D2)",
+                translation.untranslatable
+            );
+            None
+        } else {
+            resume_id
+        }
+    } else {
+        resume_id
+    };
 
     let stdout_log_path = run_dir.join("stdout.jsonl");
     let mut stderr_log_path = run_dir.join("stderr.log");
@@ -611,10 +732,48 @@ async fn run_codex(
                     Err(ref error) if error.kind() == std::io::ErrorKind::NotFound)
                 && let Some(summary) = conversation_reply
             {
-                Terminal::Done {
-                    summary,
-                    evidence: Vec::new(),
-                    usage: with_estimated_cost(*usage, config.model.as_deref()),
+                // ADR-0054 Phase 112 D3: the model may have meant `summary` to be the whole
+                // `result.json` body (e.g. it could not write into `artifacts_dir`, as happens when
+                // `exec resume` drops the `--add-dir` grant it would otherwise need). If it parses
+                // as that shape (a non-empty `summary` string and an `actions` array), recover it:
+                // write it to `result.json` as if the model had written it itself, and re-derive the
+                // terminal from disk through the normal path (`terminal_from_result`) so
+                // `actions`/`memory`/`milestone_proposal` all pick it up via the existing,
+                // disk-reading machinery instead of the raw JSON text being treated as inert prose.
+                if crate::result_report::final_message_is_recoverable_result(&summary) {
+                    match tokio::fs::write(&result_path, &summary).await {
+                        Ok(()) => {
+                            crate::progress::emit_status(
+                                sink,
+                                "result recovered from the final message (result.json was \
+                                 missing; ADR-0054 Phase 112 D3)",
+                            );
+                            terminal_from_result(
+                                &req.artifacts_dir,
+                                &artifacts_rel,
+                                *usage,
+                                config.model.as_deref(),
+                            )
+                            .await
+                        }
+                        Err(e) => {
+                            warn!(
+                                "run {run_id}: failed to write the result recovered from the \
+                                 final message: {e}"
+                            );
+                            Terminal::Done {
+                                summary,
+                                evidence: Vec::new(),
+                                usage: with_estimated_cost(*usage, config.model.as_deref()),
+                            }
+                        }
+                    }
+                } else {
+                    Terminal::Done {
+                        summary,
+                        evidence: Vec::new(),
+                        usage: with_estimated_cost(*usage, config.model.as_deref()),
+                    }
                 }
             } else {
                 terminal_from_result(
@@ -1584,6 +1743,7 @@ echo '{"type":"turn.completed"}'
             env: Vec::new(),
             container: None,
             resume_mode: CodexResumeMode::default(),
+            resume_bypass: CodexResumeBypass::default(),
         };
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -1989,10 +2149,19 @@ printf '%s\n' '{"type":"turn.completed"}'
     // **ホワイトリスト方式**にした: `--json`・`--skip-git-repo-check`・`-c/--config`（複数可）＋
     // session id ＋ prompt 以外は一切乗せない。
 
-    /// resume run の argv に、model・operator の `extra_args`（`--approve-for-me` 相当）を仕込んでも
-    /// ホワイトリスト外のフラグが一切乗らないこと（production の `--approve-for-me` 拒否の回帰）。
+    // ADR-0054 Phase 112 D1（本番障害 2026-09-23。Phase 68c 配備後、resume run が `--approve-for-me` を
+    // 丸ごと落とした結果、CoS の対話が result.json を書けないまま最終メッセージに生の JSON を吐いていた）:
+    // `exec resume` のホワイトリスト（`--json`・`--skip-git-repo-check`・`-c/--config`・位置引数）は
+    // 維持したまま、`extra_args` の個々のフラグを `-c key=value` に翻訳できるものは翻訳し、翻訳できない
+    // ものだけを落とす（`translate_resume_extra_args` 参照）。
+
+    /// D4(a): resume run の argv に `--approve-for-me` がそのまま乗らないこと、`-c
+    /// approval_policy="never"`・`-c sandbox_mode="workspace-write"` に翻訳されて乗ること、ホワイト
+    /// リスト外のフラグが無いこと（production の `--approve-for-me` 拒否の回帰、かつ Phase 68c の
+    /// 「丸ごと落とす」を「翻訳する」に変えたことの確認）。
     #[tokio::test]
-    async fn phase_68c_resume_argv_contains_no_flag_outside_the_whitelist() {
+    async fn phase_112_resume_translates_approve_for_me_to_config_overrides_and_drops_the_raw_flag()
+     {
         let dir = tempfile::tempdir().unwrap();
         let mut config = stub_codex(dir.path(), args_log_script());
         config.model = Some("gpt-5-codex".into());
@@ -2003,11 +2172,11 @@ printf '%s\n' '{"type":"turn.completed"}'
             Some(crate::protocol::ConversationAddressee::Secretary);
         req.context.session = Some(crate::protocol::SessionHandle {
             adapter: CodexAdapter::ID.to_string(),
-            session_id: "thread-68c".to_string(),
+            session_id: "thread-112".to_string(),
             resume: true,
         });
         let _ = adapter
-            .run(req, "run-68c-resume", default_limits(), &RecordingSink::default())
+            .run(req, "run-112-resume", default_limits(), &RecordingSink::default())
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2025,7 +2194,7 @@ printf '%s\n' '{"type":"turn.completed"}'
         }
         assert!(
             !args.contains(&"--approve-for-me".to_string()),
-            "operator extra_args must be dropped on resume: {args:?}"
+            "the raw operator flag must not reach `exec resume`: {args:?}"
         );
         assert!(!args.contains(&"--add-dir".to_string()), "{args:?}");
         assert!(!args.contains(&"--model".to_string()), "{args:?}");
@@ -2034,9 +2203,192 @@ printf '%s\n' '{"type":"turn.completed"}'
             args.contains(&"model=\"gpt-5-codex\"".to_string()),
             "{args:?}"
         );
+        // The unconditional CoS `sandbox_mode="read-only"` (ADR-0054 D2/Phase 68) is still there,
+        // but the translation of `--approve-for-me` appends its own `-c` pairs after it.
         assert!(
             args.contains(&"sandbox_mode=\"read-only\"".to_string()),
             "{args:?}"
+        );
+        assert!(
+            args.contains(&"approval_policy=\"never\"".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            args.contains(&"sandbox_mode=\"workspace-write\"".to_string()),
+            "{args:?}"
+        );
+    }
+
+    /// D4(b): 新規スレッド（resume なし）の run では `--approve-for-me` が翻訳されず、従来どおりそのまま
+    /// argv に乗ること（fresh は `exec resume` のホワイトリストの対象外なので、D1 の翻訳は resume だけの
+    /// 話であることの回帰）。
+    #[tokio::test]
+    async fn phase_112_fresh_session_keeps_operator_extra_args_unmodified() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_codex(dir.path(), args_log_script());
+        config.extra_args = vec!["--approve-for-me".into()];
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.conversation_addressee =
+            Some(crate::protocol::ConversationAddressee::Secretary);
+        // No `context.session`: this is a fresh (non-resuming) run.
+        let _ = adapter
+            .run(req, "run-112-fresh", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(!args.contains(&"resume".to_string()), "{args:?}");
+        assert!(
+            args.contains(&"--approve-for-me".to_string()),
+            "fresh runs pass extra_args through unmodified: {args:?}"
+        );
+        assert!(
+            !args.contains(&"approval_policy=\"never\"".to_string()),
+            "fresh runs don't need translation: {args:?}"
+        );
+    }
+
+    /// D1: `--full-auto`・`--sandbox <mode>`・`--ask-for-approval <policy>` も `-c` に翻訳される。
+    #[tokio::test]
+    async fn phase_112_full_auto_and_sandbox_and_ask_for_approval_translate_on_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_codex(dir.path(), args_log_script());
+        config.extra_args = vec![
+            "--full-auto".into(),
+            "--sandbox".into(),
+            "danger-full-access".into(),
+            "--ask-for-approval".into(),
+            "on-request".into(),
+        ];
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "thread-112b".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-112-translate", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        for raw in ["--full-auto", "--sandbox", "--ask-for-approval"] {
+            assert!(!args.contains(&raw.to_string()), "{raw} leaked: {args:?}");
+        }
+        assert!(
+            args.contains(&"approval_policy=\"on-failure\"".to_string()),
+            "--full-auto: {args:?}"
+        );
+        assert!(
+            args.contains(&"sandbox_mode=\"danger-full-access\"".to_string()),
+            "--sandbox danger-full-access: {args:?}"
+        );
+        assert!(
+            args.contains(&"approval_policy=\"on-request\"".to_string()),
+            "--ask-for-approval on-request: {args:?}"
+        );
+    }
+
+    /// D2: 翻訳できないフラグが残り、`resume_bypass` も設定されていないときは resume 自体を諦め、
+    /// 新規スレッド（`codex exec`、`resume` サブコマンド無し）として走る。新規スレッドには untranslatable
+    /// なフラグを含め `extra_args` が丸ごと乗る。
+    #[tokio::test]
+    async fn phase_112_untranslatable_extra_args_without_bypass_skip_resume_and_run_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_codex(dir.path(), args_log_script());
+        config.extra_args = vec!["--unknown-flag".into()];
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "thread-112c".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-112-skip-resume", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(
+            !args.contains(&"resume".to_string()),
+            "an untranslatable extra_arg without resume_bypass must not attempt resume: {args:?}"
+        );
+        assert!(
+            !args.contains(&"thread-112c".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            args.contains(&"--unknown-flag".to_string()),
+            "the fresh run gets the full, untranslated extra_args: {args:?}"
+        );
+    }
+
+    /// D1: `resume_bypass = Dangerous` かつ untranslatable なフラグが残るときは、resume はそのまま
+    /// 行われ、落とす代わりに `--dangerously-bypass-approvals-and-sandbox` を 1 回だけ足す。
+    #[tokio::test]
+    async fn phase_112_resume_bypass_dangerous_uses_the_bypass_flag_for_untranslatable_extra_args()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_codex(dir.path(), args_log_script());
+        config.extra_args = vec!["--unknown-flag".into()];
+        config.resume_bypass = CodexResumeBypass::Dangerous;
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "thread-112d".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(req, "run-112-bypass", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(args.contains(&"resume".to_string()), "{args:?}");
+        assert!(
+            args.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()),
+            "{args:?}"
+        );
+        assert!(
+            !args.contains(&"--unknown-flag".to_string()),
+            "the untranslatable flag itself must not reach `exec resume`: {args:?}"
+        );
+    }
+
+    /// D3: `result.json` を書かない（書けない）run が、最終メッセージに `result.json` と同じ形の JSON
+    /// （`summary` + `actions`）を吐いたときは、それを `result.json` として回収し、`Done.summary` には
+    /// 生の JSON 文字列ではなく JSON の `summary` を使う。回収したことが `sink.progress` に残る。
+    #[tokio::test]
+    async fn phase_112_a_recoverable_final_message_is_written_as_result_json_and_its_summary_is_used()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"echo '{"type":"item.completed","item":{"type":"agent_message","text":"{\"summary\":\"直すタスクを作りました\",\"actions\":[{\"type\":\"create_task\",\"title\":\"直す\",\"objective\":\"直して\"}]}"}}'
+echo '{"type":"turn.completed"}'
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.task.conversation = Some(task_core::MessageId::new());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-112-recover", default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Done { summary, .. } => {
+                assert_eq!(summary, "直すタスクを作りました");
+            }
+            other => panic!("expected done, got {other:?}"),
+        }
+        let result_json = std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&result_json).unwrap();
+        assert!(value.get("actions").is_some_and(|a| a.is_array()), "{value:?}");
+        let progress = sink.progress.lock().unwrap();
+        assert!(
+            progress.iter().any(|m| m.contains("result recovered")),
+            "{progress:?}"
         );
     }
 

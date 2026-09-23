@@ -210,6 +210,8 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     container: None,
                     // ADR-0054 D1（Phase 67）: `[adapters.codex] resume_mode`（既定 `exec_resume`）。
                     resume_mode: base.resolved_resume_mode(),
+                    // ADR-0054 Phase 112 D1: `[adapters.codex] resume_bypass`（既定 off）。
+                    resume_bypass: base.resolved_resume_bypass(),
                 }))
             }
             AiderAdapter::ID => {

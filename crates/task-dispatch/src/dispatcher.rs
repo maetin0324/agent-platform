@@ -15309,6 +15309,68 @@ mod tests {
         assert!(d.absorb_console_actions(&ordinary, "run-3").is_none());
     }
 
+    /// ADR-0054 Phase 112 D3（D4(c)）: `task-worker::codex` の「result.json が無いが最終メッセージが
+    /// その形（`summary`+`actions`）なら回収する」救済（`final_message_is_recoverable_result`）は、
+    /// 回収したテキストをそのまま `<artifacts_dir>/result.json` として disk に書く（task-worker 側の
+    /// 単体テスト `codex::tests::phase_112_a_recoverable_final_message_is_written_as_result_json_and_its_summary_is_used`
+    /// で確認済み）。ここでは「書かれた後」を検査する: 書かれた `result.json` に対して
+    /// `absorb_console_actions` が通常どおり動き、`create_task` action が実行されてタスクが `ready` で
+    /// 作られることを確認する（`absorb_console_actions` は disk を読むだけで、その内容が本来モデルが
+    /// 書くはずだったものか、D3 の救済で回収されたものかを区別しない — それがこの救済の狙いそのもの）。
+    #[test]
+    fn absorb_console_actions_executes_actions_recovered_from_the_final_message() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("console");
+        std::fs::create_dir_all(ws.join("artifacts")).unwrap();
+        let adapter: Arc<dyn WorkerAdapter> = Arc::new(person_adapter(Terminal::Done {
+            summary: "ok".into(),
+            evidence: vec![],
+            usage: None,
+        }));
+        let mut d = person_dispatcher(store.clone(), adapter, dir.path().to_path_buf(), None);
+        d.config.genres.push(GenreSpec {
+            id: "coding".into(),
+            description: "コードを直す".into(),
+            ..GenreSpec::default()
+        });
+
+        let mut task = work_task(
+            "対話",
+            Status::Done,
+            "secretary",
+            None,
+            OffsetDateTime::now_utc(),
+        );
+        task.workspace = WorkspaceSpec::Local {
+            path: ws.clone(),
+            mode: None,
+        };
+        task.conversation = Some(task_core::MessageId::new());
+        store.insert(&task).unwrap();
+
+        // 最終メッセージから回収された `result.json`（codex.rs が `final_message_is_recoverable_result`
+        // で判定してそのまま書き込んだものと同じ形）。
+        std::fs::write(
+            ws.join("artifacts/result.json"),
+            r#"{"summary":"直すタスクを作りました","actions":[
+                {"type":"create_task","title":"直す","objective":"直して","acceptance":["直った"],"harness":"coding"}
+            ]}"#,
+        )
+        .unwrap();
+        let outcome = d
+            .absorb_console_actions(&task, "run-1")
+            .expect("actions were declared");
+        assert_eq!(outcome.executed.len(), 1, "{:?}", outcome.executed);
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        let created = outcome.executed[0].task_id.expect("task id");
+        let stored = store.get(created).unwrap().expect("task");
+        assert_eq!(stored.status, Status::Ready);
+        assert_eq!(stored.title, "直す");
+    }
+
     /// ADR-0048 D3: `record_conversation_reply` は `done` な CoS の返事に actions を実行し、
     /// 実行できなかった action を本文に足し、実行結果を `Message.metadata` に残す。
     #[test]

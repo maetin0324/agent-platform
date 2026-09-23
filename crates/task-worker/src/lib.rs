@@ -61,7 +61,7 @@ pub use cluster_login::{
     ClusterConnectError, ClusterConnectSession, ClusterConnectStart, ClusterMaster, disconnect,
     start_connect,
 };
-pub use codex::{CodexAdapter, CodexConfig, CodexResumeMode};
+pub use codex::{CodexAdapter, CodexConfig, CodexResumeBypass, CodexResumeMode};
 pub use codex_account::{CodexLoginSession, check_account_codex, start_login_codex};
 pub use container::{
     ContainerChoice, ContainerPlan, ContainerStop, ContainerStopper, ImageSource, RepoRunInput,

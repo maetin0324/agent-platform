@@ -16909,3 +16909,122 @@ ADR-0067（`docs/adr/0067-human-deliverables-policy-and-approval-visibility.md`�
 - P-110-1: `relocate-db.sh` は「人待ちの reviewing」も in-flight に数える。lease の無い reviewing（承認待ち）は数えない方が運用に合う（次の小 Phase）。
 - P-110-2: origin が `github.com/maetin0324/celeris.git` へ移動した（push 時に案内が出る）。`git remote set-url` は人の判断で。
 - P-110-3: この環境の `~/.local/bin/pnpm`（12.4.2、9/18 に配置）は gui/ の `packageManager`（11.27.0）と合わない。実装エージェントへの指示には `corepack pnpm@11.27.0` を書く。
+
+## Phase 112 — `codex exec resume` でも承認・サンドボックスの設定を落とさない（2026-09-23）
+
+発端: 本番で CoS チャットからのタスク作成が壊れていた。`[adapters.codex] extra_args = ["--approve-for-me"]`
+（codex 0.156.1）は ADR-0054 Phase 68c のホワイトリストにより `codex exec resume` では丸ごと落ちる。
+resume run は codex の既定の（読み取り専用の）承認・サンドボックス設定で動き `artifacts/result.json` を
+書けず、ADR-0049 の「対話かつ result.json 不在なら最終メッセージをそのまま返答にする」救済で、モデルが
+結果ファイルのつもりで吐いた JSON（`summary`/`actions`）がそのまま生テキストとして返答本文になり、
+`actions`（`create_task` 等）が一切読まれずタスクが作られなかった（実例: task 01M388G6Q6D7NPNB77MWFFQRKH
+/ run 01M388G8HG8BJEFCD0H8WQKN0N）。
+
+決定は ADR-0054 に「Phase 112 追記」として書いた（新規 ADR を切らず、Phase 67/68b/68c/98 と同じ意思決定の
+延長として同じ ADR に追記した。理由は ADR 本文参照）。
+
+### 条件ごとの実施
+
+**D1（`exec resume` の `extra_args` を丸ごと落とすのではなく翻訳する）**
+- `crates/task-worker/src/codex.rs::translate_resume_extra_args`（新規・純粋関数）: `--approve-for-me`
+  → `-c approval_policy="never"` + `-c sandbox_mode="workspace-write"`、`--full-auto` →
+  `-c approval_policy="on-failure"` + `-c sandbox_mode="workspace-write"`、`--sandbox <mode>`/`-s
+  <mode>` → `-c sandbox_mode="<mode>"`、`--ask-for-approval <policy>`/`-a <policy>` →
+  `-c approval_policy="<policy>"`。翻訳できたフラグは `tracing::info!`、翻訳できず残ったフラグ
+  （`untranslatable`）は `tracing::warn!`（`resume_bypass` 未設定時）で記録する。config key 名の根拠は
+  ADR-0054 Phase 112 節参照（この 0.156.1 バイナリに対する実機確認はできていない。実機未検証、下記）。
+- `[adapters.codex] resume_bypass = "dangerous"`（`CodexAdapterConfig::resolved_resume_bypass` →
+  `task_worker::CodexResumeBypass`。既定 `Off`）: untranslatable なフラグが残るときだけ、落とす代わりに
+  `--dangerously-bypass-approvals-and-sandbox` を 1 回足す。
+- `run_codex_once` の resume 分岐（`is_exec_resume_subcommand`）を書き換え、上記の翻訳・ログ出力を配線。
+
+**D2（翻訳しきれない resume は resume 自体を諦めて新規スレッドにする）**
+- `crates/task-worker/src/codex.rs::run_codex`: `resume_mode == ExecResume` かつ resume 要求ありかつ
+  `translate_resume_extra_args` の `untranslatable` が非空かつ `resume_bypass != Dangerous` のときだけ、
+  `run_codex_once` を呼ぶ前に `resume_id` を `None` に落とす（D1 の翻訳が効く限り D1 を優先し、
+  untranslatable が残るときだけ D2）。`ExperimentalResume` は元から `extra_args` を丸ごと渡す経路なので
+  対象外。
+
+**D3（結果ファイルが無いときの救済を、最終メッセージが JSON なら中身まで見る）**
+- `crates/task-worker/src/result_report.rs::final_message_is_recoverable_result`（新規・純粋関数）:
+  最終メッセージが JSON として parse でき、空でない `summary` 文字列と `actions` 配列を両方持つかを判定。
+- `crates/task-worker/src/codex.rs::run_codex`: ADR-0049 の既存救済（対話・`Execute`・`result.json` 不在・
+  exit 0・非空の最終 `agent_message`）の中で、recoverable なら最終メッセージのテキストをそのまま
+  `<artifacts_dir>/result.json` に書き込み、既存の `terminal_from_result`（disk から読む通常経路）を
+  呼び直す。これにより `task-dispatch::absorb_console_actions`/`absorb_memory`/
+  `absorb_milestone_proposal` などの**disk を読むだけの既存の仕組み**にそのまま乗る（検証経路を複製しない）。
+  採用時は `crate::progress::emit_status`（既存の `WorkerProgress`/`kind=status`）で
+  「result recovered from the final message」を 1 件残す。新しい `Event` バリアントは追加していない
+  （`WorkerProgress` は既にスキーマに入っている。実行コマンド下記「スキーマ再生成」参照）。
+
+**D4（テスト）**
+- `crates/task-worker/src/codex.rs`（新規 6 件）:
+  `phase_112_resume_translates_approve_for_me_to_config_overrides_and_drops_the_raw_flag`
+  （旧 `phase_68c_resume_argv_contains_no_flag_outside_the_whitelist` を書き直し。受け入れ条件 D4(a)）、
+  `phase_112_fresh_session_keeps_operator_extra_args_unmodified`（D4(b)）、
+  `phase_112_full_auto_and_sandbox_and_ask_for_approval_translate_on_resume`、
+  `phase_112_untranslatable_extra_args_without_bypass_skip_resume_and_run_fresh`（D2）、
+  `phase_112_resume_bypass_dangerous_uses_the_bypass_flag_for_untranslatable_extra_args`、
+  `phase_112_a_recoverable_final_message_is_written_as_result_json_and_its_summary_is_used`（D3。
+  Terminal::Done.summary が JSON の summary になること、`artifacts/result.json` が書かれること、
+  `sink.progress` に「result recovered」が出ることを検査）。
+- `crates/task-worker/src/result_report.rs` に `recoverable_result_tests` モジュール（新規 2 件）。
+- `crates/task-dispatch/src/dispatcher.rs` に
+  `absorb_console_actions_executes_actions_recovered_from_the_final_message`（新規。D3 が書き込む形の
+  `result.json` を用意し、`absorb_console_actions` が `create_task` を実行してタスクが `ready` で
+  作られることを検査。受け入れ条件 D4(c)。既存の `absorb_console_actions_executes_the_declared_actions_
+  for_the_cos_only` と同じ土台）。
+
+### ゲート
+
+| 条件 | 実行したコマンド | 出力の要点 |
+| --- | --- | --- |
+| D1(a)/(b) の単体 | `cargo test -p task-worker --lib codex::` | exit 0。**47 passed; 0 failed**（既存 41 + Phase 112 新規 6） |
+| D3 の純粋関数 | `cargo test -p task-worker --lib result_report::` | exit 0。**11 passed; 0 failed**（既存 9 + 新規 2） |
+| D4(c) | `cargo test -p task-dispatch --lib absorb_console_actions` | exit 0。**2 passed; 0 failed**（既存 1 + 新規 1） |
+| ワークスペース全体 | `cargo build --workspace --all-targets` | exit 0（celeris/celerisctl 含め全クレートがコンパイルできることを確認。`CodexResumeBypass` を `task_worker::lib.rs` から re-export し忘れて一度 E0433 で失敗 → 追加して解消） |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（79 個の `test result:` ブロックが全て `ok`。主な内訳: task-worker 487〈+1 ignored〉、task-core 241、task-dispatch 239、task-ops 280、celerisctl 60、celeris 系合わせて多数） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| スキーマ再生成 | `UPDATE_SCHEMA=1` は使っていない（`Event` バリアントを増やしていないため）。代わりに `cargo test --workspace --no-fail-fast` の中の `protocol::tests::committed_schema_matches_generated` / `plan::tests::committed_schema_matches_generated` / `store::tests::event_row_schema_matches_committed` / `schema::tests::committed_schema_matches_generated` の 4 件が UPDATE_SCHEMA 無しで green であることを確認 | 全て ok。`git status --short docs/` はこの ADR 追記のみで `docs/api/`・`docs/protocol/` に差分なし |
+| GUI | 実行していない（スキーマ・GUI 関連ファイルへの差分が無いため。CLAUDE.md の「スキーマを変えたら」の条件に該当しない。`git status --short` で `gui/` に変更が無いことを確認） | — |
+| unwrap() | `git diff` で追加行の `unwrap()` を目視確認 | 全て `#[test]`/`#[tokio::test]` 内（テストのセットアップ・アサーションのみ）。非テストコードの追加分は `?`/`match`/`if let` のみ |
+| ディスパッチャ・ストアに LLM 呼び出しを追加していない | `git status --short` で変更ファイルを確認 | `crates/task-worker/src/{codex.rs,lib.rs,result_report.rs}`、`crates/task-dispatch/src/dispatcher.rs`（純粋関数の追加とテストのみ、LLM 呼び出しなし）、`crates/celeris/src/{config.rs,lib.rs}`（設定の配線のみ）、`docs/adr/0054-...md` |
+
+### 変更ファイル
+
+- `docs/adr/0054-stateful-sessions-and-streaming-chat.md`（Phase 112 追記）
+- `crates/task-worker/src/codex.rs`（`CodexResumeBypass` enum、`CodexConfig.resume_bypass`、
+  `translate_resume_extra_args`、`run_codex_once` の resume 分岐の書き換え、`run_codex` の D2 の
+  先読みスキップ、D3 の最終メッセージ回収、新規テスト 6 件、既存の struct リテラル 2 箇所に
+  `resume_bypass` フィールドを追記）
+- `crates/task-worker/src/result_report.rs`（`final_message_is_recoverable_result` + テスト）
+- `crates/task-worker/src/lib.rs`（`CodexResumeBypass` の re-export）
+- `crates/celeris/src/config.rs`（`CodexAdapterConfig.resume_bypass` フィールド、
+  `resolved_resume_bypass()`）
+- `crates/celeris/src/lib.rs`（`CodexConfig` 組み立てへの `resume_bypass` の配線）
+- `crates/task-dispatch/src/dispatcher.rs`（D4(c) の新規テスト 1 件）
+
+### 未解決事項
+
+- P-112-1（実機未確認。ADR-0009 P-34）: このサンドボックスから実機の `codex` を起動できないため、
+  D1 の `-c approval_policy=...`/`-c sandbox_mode=...` が実際に `exec resume` で受理されるか、
+  複数回の `-c sandbox_mode=...`（`read-only` → `workspace-write`）が「後勝ち」になるかは未検証
+  （Phase 68c 以来の「`--help` の記載と実際の受理集合は一致しないことがある」という教訓のとおり）。
+  デプロイ後、CoS の対話で fresh → resume を連続で送り、resume run が `artifacts/result.json` を
+  実際に書けること（read-only に落ちていないこと）を確認する必要がある。
+- P-112-2（実機未確認）: D3 の回収（最終メッセージ→`result.json`）そのものは production の実例
+  （task 01M388G6Q6D7NPNB77MWFFQRKH）を模したスタブテストで確認したが、実際の codex 0.156.1 が
+  同じ形の JSON を最終メッセージに吐くこと自体は実機未確認（本番の実例ログから形は分かっているので
+  蓋然性は高い）。
+- P-112-3: `--dangerously-bypass-approvals-and-sandbox` は Phase 68c で確認した `--help` の OPTIONS
+  一覧には載っているが usage 行には無かったフラグで、`resume_bypass = "dangerous"` を使う運用は
+  Phase 68c の教訓（OPTIONS 一覧より実際の受理集合が狭いことがある）のリスクを引き受けることになる。
+  既定を `Off` にしたのはこのため。
+
+### 提案
+
+- P-112-4: D2 で「翻訳しきれず resume を諦めた」ケースでは、新しいスレッドが `sink.session_established`
+  経由で `node_sessions` に反映される（既存の仕組みをそのまま使い、新しい配線は足していない）が、
+  「同じ run の中で諦めた」ことのログ以外に、運用側が「この対話は resume できていない」と気付く手段が
+  今は tracing warn しか無い。頻発するようなら `node_sessions` に「最後に resume を諦めた理由」を
+  残す仕組みを検討してよい（今回のスコープ外）。

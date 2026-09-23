@@ -1211,6 +1211,11 @@ pub struct CodexAdapterConfig {
     /// 無い古い版では `"experimental_resume"` に変えること。運用手順は `docs/PROGRESS.md` Phase 67）。
     #[serde(default = "default_codex_resume_mode")]
     pub resume_mode: String,
+    /// ADR-0054 Phase 112 D1: `exec resume` で `-c key=value` に翻訳しきれない `extra_args` が残った
+    /// ときの扱い（`"dangerous"` | 省略）。既定（省略・未知の値）は落として WARN。`"dangerous"` は
+    /// `--dangerously-bypass-approvals-and-sandbox` を使う（意味が広いので明示設定が要る）。
+    #[serde(default)]
+    pub resume_bypass: String,
 }
 
 fn default_codex_resume_mode() -> String {
@@ -1226,6 +1231,7 @@ impl Default for CodexAdapterConfig {
             env: HashMap::new(),
             env_from_secrets: HashMap::new(),
             resume_mode: default_codex_resume_mode(),
+            resume_bypass: String::new(),
         }
     }
 }
@@ -1238,6 +1244,15 @@ impl CodexAdapterConfig {
         match self.resume_mode.as_str() {
             "experimental_resume" => task_worker::CodexResumeMode::ExperimentalResume,
             _ => task_worker::CodexResumeMode::ExecResume,
+        }
+    }
+
+    /// ADR-0054 Phase 112 D1: `resume_bypass` を決定的に解決する。未知の値・省略は `Off`（既定、従来
+    /// どおり翻訳できない `extra_args` を落とす）に倒す。
+    pub fn resolved_resume_bypass(&self) -> task_worker::CodexResumeBypass {
+        match self.resume_bypass.as_str() {
+            "dangerous" => task_worker::CodexResumeBypass::Dangerous,
+            _ => task_worker::CodexResumeBypass::Off,
         }
     }
 }
