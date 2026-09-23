@@ -450,3 +450,35 @@ D1〜D4・受け入れ条件 1〜5、Phase 109b・109c 追記）は書き換え�
 `Settings.from_name(settings_name)` にフォールバックする（paperqa 自身の同梱設定名向け）。
 `PQA_SETTINGS_DIR` の設定は削除した。どちらでも見つからなければ `SettingsResolutionError` → exit 2、
 アダプタは探したパスを含むメッセージで `retryable: false` にする（設定の誤りは再試行しても直らない）。
+
+## Phase 109f 追記（2026-09-23）
+
+本番で観測（run `01M37A3JMMFXVY30SWD4EZ01JN`）: 目的文の末尾に人が足した節見出し
+「## 方針（人の指定、2026-09-23）」の括弧内が `research_aspects` に観点の列挙と誤認され、
+`research.json.aspects` が `["人の指定", "2026-09-23"]` になった。目的文本体の「各システムの目的・
+semantics・deployment model・server/core利用・data pathを整理し」は拾われず、`targets` も
+「Mochi-Margo-Mercury、UCX、io_uring」が「(必要ならDAOS/Lustre)」の括弧に阻まれて落ちていた。
+`research_targets`/`research_aspects` を**目的文の最初の段落**（`\n\n` または `## ` 見出しより前）
+だけを見るように制限し、目的文中の「(必要なら…)」「(optional …)」「（任意…）」の括弧は対象抽出前に
+取り除き、識別子の直後に区切りなしで非 ASCII 文字が続く場合（例: `io_uring・RDMA統合` の `RDMA`）は
+複合語の一部とみなして対象から外した。観点は「各…の A・B・C を整理」の形からも拾うようにし、日付・
+「人の指定」系の語・長すぎる文・URL・1 文字を弾く妥当性チェックを追加した（`MAX_ASPECT_CANDIDATE_CHARS`
+はプロセの丸ごと混入を弾く目的で緩め（24 文字）に設定。`deployment model`/`server/core利用` のような
+複合語の観点を落とさないことを優先し、仕様の目安「10 文字」とはあえて一致させていない）。
+
+追加で、明示の「対象:」/「観点:」マーカー（`preamble.rs` が調査系タスクの `objective` の 1 行目に
+指示する形式）にも対応した。親エージェントからの追加観測（run `01M37AZ129EMB93N50MZ132S8K`）で、
+`preamble.rs` が例示していた `CHFS / FINCHFS / …`（`/` の前後に空白がある書き方）が明示形でも認識
+されず、一般走査へのフォールバックで括弧内の観点の一部（`server/core`）がそれらしい鎖として誤検出
+された（`targets = ["model", "server", "core"]`）ことが分かった。マーカー行の丸括弧はまるごと
+（中身を問わず）取り除いたうえで、区切り文字（`/`・`、`・`，`・`,`）の前後の空白を畳んで正規化してから
+対象の鎖を抽出するようにした。`preamble.rs` の指示文も `対象: <対象1> / <対象2> / …（観点: <観点1>、
+<観点2>、…）` の明示形に合わせて書き換えた。
+
+さらに、`paperqa_ask.py::build_target_aspect_table`（対象×観点の表の組み立て）が、PaperQA の答え
+（`formatted_answer`）の先頭に質問文がそのままエコーされるケース（ローカルモデルでよくある挙動）で、
+質問文自体が全観点名を含んでいるために `_extract_aspect_line` の緩い代替一致（観点名を含む行をそのまま
+使う規則）がエコー行を拾ってしまい、全セルに質問文が貼られる事故が同じ観測から見つかった。
+`_extract_aspect_line`/`build_target_aspect_table` に `_strip_echoed_question` を追加し、
+`Question:`/`質問:`/`質問：` で始まる行と、その対象への質問文（`answer.question`）と一致する行を
+観点抽出の前に取り除くようにした（見つからなければ従来どおり「未確認」）。
