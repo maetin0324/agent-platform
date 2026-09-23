@@ -16014,3 +16014,9 @@ Phase 109d C1 の「`PQA_SETTINGS_DIR=settings_dir` にしてから `from_name(s
 - merge: `worktree-agent-a4f0512808c3dea6b` → main `62cc398`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1963 / failed 0）、`cargo clippy` exit 0。push 済み。
 - `release.sh main` → exit 0、`sha12=62cc3985c29a schema_version=25`、`changes.json: base=bbd5f21188b0 commits=4 files=5 sensitive=0`。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = bbd5f21188b0）, 6 すべて true、`ok=true live_ok=true`。`promote.sh 62cc3985c29a` → mode=live、新 celeris 2 秒で active、GUI 切替 1 秒。
 - 文献調査の 5 回目のやり直しを起動（settings をファイルパスから直接読む）。結果は次節に追記。
+
+### 2026-09-23 14:32 UTC: 文献調査の 5 回目（Phase 109e）は PaperQA の経路が通り、観点の抽出で不合格 → Phase 109f
+
+- タスク 01M37A3JMMFXVY30SWD4EZ01JN: Python API 経路が動いた。settings 読込 OK、対象ごとの ask（targets = CHFS / FINCHFS / GekkoFS / UnifyFS / BeeOND / BeeGFS-on-demand）、`evidence = {cited: 4（本文 2 / アブスト 2、contexts 由来 2）, insufficient: false}`、`report.md` に「# 対象別の整理」の表と対象ごとの節、「## 引用された文献（contexts）」。
+- reviewer 不合格の理由: 表の列（観点）が「人の指定」「2026-09-23」。目的文の末尾に人（親）が足した見出し「## 方針（人の指定、2026-09-23）」の括弧を `research_aspects` が観点と解釈し、本体の「目的・semantics・deployment model・server/core利用・data path」を拾わなかった。targets も同じ文の「Mochi-Margo-Mercury、UCX、io_uring」を落としていた。
+- 対処 2 本: (1) 6 回目のやり直し 01M37AZ129EMB93N50MZ132S8K は目的文を「対象: … / …（観点: 目的、file semantics、deployment model、server/core 利用、data path、BenchFS との比較分類）」の明示形に書き直して approve（現行リリースで通るかを見る）。(2) Phase 109f（Sonnet）: 抽出を目的文の最初の段落に限る、日付や「人の指定」を捨てる妥当性チェック、`、` 区切りで続く固有名詞も対象に、「(必要なら…)」は除外、明示の「対象:」「観点:」を最優先。
