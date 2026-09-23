@@ -16373,3 +16373,10 @@ Phase 109g の本番反映後、8 回目のやり直し（run `01M37FZRX8GMST4SV
   (2) 対象が削られた場合は「## 証拠の質」に「max_asks の制限で問えなかった」対象が出ること、
   (3) `research.json` の `comparison_page`/`comparison_context_chars` が実際の run の状況と一致すること、
   (4) reviewer が合格判定すること。
+
+### Phase 109h の本番反映（2026-09-23 16:46 UTC、ライブ切替）
+
+- 8 回目の見立ての訂正: 「BenchFS / benchfs の大文字小文字不一致」は誤り（探索は元から `.lower()` 済み。索引には `projects/benchfs/architecture-overview.md` が入っていた）。原因は総括の問いが `max_asks` の予算で落とされたことのみ。
+- merge: `worktree-agent-aa0da1916b39bdf7b` → main `7b7d137`。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1978 / failed 0）、`cargo clippy` exit 0。push 済み。
+- `release.sh main` → exit 0、`sha12=7b7d137b52d3 schema_version=25`、`changes.json: base=5df58158b50a commits=4 files=6 sensitive=1`（`config/celeris.research.example.toml` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 5df58158b50a）, 6 すべて true、`ok=true live_ok=true`。`promote.sh 7b7d137b52d3` → mode=live、新 celeris 2 秒で active、GUI 切替 1 秒。
+- 文献調査の 9 回目のやり直しを起動（総括の問いは必ず走る、`max_asks` 既定 10、`dropped_targets` / `comparison_page` を research.json に記録、`primary-sources` の DOI が種に入る）。結果は次節に追記。
