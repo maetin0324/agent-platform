@@ -297,12 +297,37 @@ pub fn build_question(task: &Task, context: &RunContext, artifacts: &str) -> Str
     out.push_str(&crate::preamble::render(context, artifacts));
     out.push_str(&task.objective);
     out.push('\n');
+    // ADR-0063 Phase 109c A/C（縮小版。P-109c-1）: 目的文から対象が取れているとき、答えを
+    // 「対象ごとの節 + 対象×観点の表」に構造化するよう指示する。対象ごとに `pqa ask` を複数回呼ぶ
+    // （元の ADR C2）と PaperQA の Python API への切り替え（C1）は、実機で API 面を確認できず
+    // 既存テストへの影響も大きいため Phase 109c では見送った（未解決事項として PROGRESS.md に記載）。
+    let targets = crate::research_targets::research_targets(&task.objective);
+    if !targets.is_empty() {
+        let aspects = crate::research_targets::research_aspects(&task.objective);
+        out.push_str(&render_structured_answer_instructions(&targets, &aspects));
+    }
     if !context.answers.is_empty() {
         out.push_str("\n## Answers from a human to earlier questions\n");
         for Answer { question, answer } in &context.answers {
             out.push_str(&format!("- Q: {question}\n  A: {answer}\n"));
         }
     }
+    out
+}
+
+/// ADR-0063 Phase 109c A/C: 対象が取れているときに `pqa ask` へ足す、答えの形式についての指示。
+/// 各観点は事実（出典）か「未確認」のどちらかで書かせ、対象ごとの節に加えて対象×観点の表もまとめさせる
+/// （観測された失敗: 対象別の整理が無い総論だけの答え、引用の対応不足）。
+fn render_structured_answer_instructions(targets: &[String], aspects: &[String]) -> String {
+    let mut out = String::from("\n## 回答の形式（必ず守ること）\n\n");
+    out.push_str(
+        "次の対象それぞれについて `### <対象名>` の見出しを立て、観点ごとに \
+         `- <観点>: <文献にある事実（出典）>` または `- <観点>: 未確認` の形で書け。\
+         文献に無い観点は推測せず「未確認」と書け。対象ごとの節のあとに、対象を行、観点を列とする \
+         Markdown の表でまとめよ（セルは同じく事実（出典）か「未確認」）。\n\n",
+    );
+    out.push_str(&format!("対象: {}\n", targets.join("、")));
+    out.push_str(&format!("観点: {}\n", aspects.join("、")));
     out
 }
 
@@ -1179,8 +1204,15 @@ struct EvidenceGateResult {
 }
 
 /// `artifacts/research.json` を書く（ADR-0063 D1。取得の段が動いた run では常に書く）。
-async fn write_research_json(path: &Path, summary: &EvidenceSummary, run_id: &str) {
-    let value = serde_json::json!({ "evidence": summary });
+/// ADR-0063 Phase 109c A: 目的文から取れた対象・観点も残す（監査・reviewer の参考用）。
+async fn write_research_json(
+    path: &Path,
+    summary: &EvidenceSummary,
+    targets: &[String],
+    aspects: &[String],
+    run_id: &str,
+) {
+    let value = serde_json::json!({ "evidence": summary, "targets": targets, "aspects": aspects });
     match serde_json::to_string_pretty(&value) {
         Ok(text) => {
             if let Err(e) = tokio::fs::write(path, format!("{text}\n")).await {
@@ -1240,6 +1272,10 @@ async fn run_paperqa(
     // ADR-0023 D2 / M1: この run で何を渡したかを残す。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &question, run_id).await;
+
+    // ADR-0063 Phase 109c A: `research.json` に残す（`build_question` が既に同じ関数で問いに反映済み）。
+    let research_targets = crate::research_targets::research_targets(&req.task.objective);
+    let research_aspects = crate::research_targets::research_aspects(&req.task.objective);
 
     // ADR-0063 D1: 起点の資料（目的文 + `inputs` の URL）。PDF / DOI / arXiv は取得ランナーへの seed に、
     // GitHub / GitLab は「一次情報（実装）」として答えの参照節に載せる（corpus には入れない）。
@@ -1441,7 +1477,14 @@ async fn run_paperqa(
             None
         };
         if let Some(ev) = &evidence {
-            write_research_json(&artifacts_dir.join("research.json"), &ev.summary, run_id).await;
+            write_research_json(
+                &artifacts_dir.join("research.json"),
+                &ev.summary,
+                &research_targets,
+                &research_aspects,
+                run_id,
+            )
+            .await;
         }
 
         let answer_md = if acquiring {
@@ -2493,6 +2536,30 @@ while true; do sleep 0.1; done
         assert!(build_search_queries("   ").is_empty());
     }
 
+    /// ADR-0063 Phase 109c A/C（縮小版）: 目的文から対象が取れるとき、答えの形式を
+    /// 「対象ごとの節 + 対象×観点の表」に構造化するよう指示する節が問いに足される。取れなければ
+    /// 従来どおり（節そのものが無い）。
+    #[test]
+    fn build_question_adds_structured_answer_instructions_when_targets_are_found() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.objective = "CHFS/FINCHFS/GekkoFS のデプロイモデルを比較調査する。".to_string();
+        let context = RunContext::default();
+        let question = build_question(&task, &context, "artifacts");
+        assert!(question.contains("## 回答の形式（必ず守ること）"), "{question}");
+        assert!(question.contains("対象: CHFS、FINCHFS、GekkoFS"), "{question}");
+        assert!(question.contains("観点:"), "{question}");
+        assert!(question.contains("未確認"), "{question}");
+
+        // 対象が取れない目的文では、従来どおり節そのものが付かない。
+        let mut plain_task = task.clone();
+        plain_task.objective = "BenchFS の設計方針を調べる。".to_string();
+        let plain_question = build_question(&plain_task, &context, "artifacts");
+        assert!(
+            !plain_question.contains("## 回答の形式（必ず守ること）"),
+            "{plain_question}"
+        );
+    }
+
     /// ADR-0063 D1: URL の種類分け（PDF / DOI / arXiv / GitHub / それ以外）は決定的。
     #[test]
     fn classify_seed_url_recognizes_pdf_doi_arxiv_and_github() {
@@ -3014,6 +3081,38 @@ while true; do sleep 0.1; done
         let run_result =
             std::fs::read_to_string(dir.path().join("runs/run-a2/result.json")).unwrap();
         assert!(!run_result.contains("provider_failure"), "{run_result}");
+    }
+
+    /// ADR-0063 Phase 109c A: `research.json` に目的文から取れた対象・観点が残る。対象が取れなければ
+    /// 空配列。
+    #[tokio::test]
+    async fn research_json_records_targets_and_aspects_from_the_objective() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_pqa_with_acquire(
+            dir.path(),
+            &format!("cat >/dev/null\nprintf 'Answer: {STUB_ANSWER}\\n'\n"),
+            &acquire_stub_script(5, 3),
+        );
+        let adapter = PaperQaAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.task.objective = "CHFS/FINCHFS の性能比較調査（cache 方式、file semantics）".to_string();
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-targets", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+
+        let research: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(research["targets"], serde_json::json!(["CHFS", "FINCHFS"]), "{research}");
+        assert_eq!(
+            research["aspects"],
+            serde_json::json!(["cache 方式", "file semantics"]),
+            "{research}"
+        );
     }
 
     /// ADR-0035 D3: 取得が 0 件のときだけ別メッセージ（検索経路の問題と区別する）。

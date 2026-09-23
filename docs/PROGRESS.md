@@ -15679,3 +15679,106 @@ Phase 109 の本番反映直後（2026-09-23 11:04〜11:10 UTC）にやり直し
 - Web（LDR、01M372XH925ZG12Q2P9SPP57JM、failed）: 必読の一次情報 6 件（CHFS / FINCHFS / GekkoFS ×2 / UnifyFS ×2）はすべて fetch され `primary: true, cited: true`、「証拠の質」に「6 件中 6 件が反映」。CHFS の節ができ、出典 18 件。1 回目は BeeOND の公式章（与えた URL はサイトルート）の本文が無く不合格。2 回目（detailed）は「必ず埋める項目」を先頭に置いた結果 **report が BeeOND だけになり**、他 4 システムは README の逐語ダンプのみ・観点の整理無し（FINCHFS の readthedocs 未 fetch）で不合格。
 - 文献（PaperQA、01M372XH8PP56555FMRQRMB9WT、failed）: `report.md` は書けたが答えは 35 行の総論で対象別の整理・比較分類が無く、引用マーカーも無いため `cited=0`（`pqa ask` に JSON 出力は無い。Python API の `session.contexts` が要る）。8 対象 × 6 観点を 1 問で投げるのは無理。
 - Phase 109c を Sonnet で起動: 目的文から対象と観点を抽出し `research.json` に残す。LDR は再挑戦でも元の目的文を保ち前回の報告を「改善対象」として添える、docs サイトを 1 階層深追い、最後に LLM で対象 × 観点の表と対象ごとの節を合成（推測禁止、無ければ『未確認』）。PaperQA は Python API に切り替えて contexts から cited を数え、対象ごとに小さく ask して表に組む。CoS の指示に「対象を 1 行に列挙、5 超なら分割」と受け入れ条件の形を追記。
+## Phase 109c
+
+完了日: 2026-09-23。ADR-0063 に「## Phase 109c 追記（2026-09-23）」を追加（本文・Phase 109/109b 追記は
+書き換えていない）。本番反映は親エージェントが行う（本節は worktree 内の実装・テストのみ）。
+
+### 背景（3 回目のやり直しの観測、2026-09-23 12:12〜12:26 UTC）
+
+- Web 調査（LDR）: 必読の一次情報 6 件は全て fetch・`cited: true` になったが、1 回目の不合格理由
+  （BeeOND の公式章の本文が無い）を問いの**先頭**に「## 必ず埋める項目」として足した再挑戦で、
+  report 全体が BeeOND だけの報告になった。他 4 システムは README の生テキストが末尾に貼られている
+  だけで、対象ごとの整理が無かった。
+- 文献調査（PaperQA）: `answer.md` は対象ごとの整理の無い 35 行の総論で、`cited=0` のままだった。
+
+### 条件ごとの実施
+
+1. **A（対象・観点の抽出、純関数）**
+   - 条件: `research_targets(objective)`/`research_aspects(objective)` が対象・観点を決定的に
+     取り出す（`/`・`、`・`・`・`，` 区切り、「等」「など」の除去、区切りの揺れ、URL のパス区切りとの
+     混同回避）。
+   - 実行したコマンド: `cargo test -p task-worker --lib research_targets`
+   - 出力の要点: exit 0、**11 passed**（0 failed）。新規モジュール
+     `crates/task-worker/src/research_targets.rs`。`https://github.com/otatebe/chfs` の `/` が
+     `com`/`otatebe`/`chfs` という対象列に誤認される事故を実装中に自分のテストで検出し、
+     `strip_urls` で修正済み。
+2. **B（LDR）**
+   - 条件: 再挑戦の問いは目的文を置き換えない（先に目的文、後ろに改善点・前回の報告）。docs サイト
+     （readthedocs 等）の配下ページを深追いする。対象が取れれば構造化合成で対象×観点の表を作る。
+   - 実行したコマンド: `cargo test -p task-worker --lib local_deep_research`
+   - 出力の要点: exit 0、**46 passed**（0 failed、Phase 109b の 41 から +5）。新規:
+     `build_query_appends_a_must_cover_section_after_the_objective_from_a_failed_prior_review`
+     （改名・並び順の入れ替えを確認）、`build_query_appends_the_previous_report_when_given_one`、
+     `runner_docs_site_detection_and_subpage_selection_are_deterministic`、
+     `runner_builds_primary_source_excerpts_follow_docs_subpages_within_a_budget`（予算を使い切ると
+     それ以上 fetch しないことを確認）、`runner_structured_synthesis_prepends_a_table_and_is_best_effort`
+     （2/4/8 秒の再試行・成功時に表が先頭に来て生の findings が後段に残ること・失敗時は
+     `report.md` に触れないことを確認）、`main_applies_structured_synthesis_when_targets_are_present`
+     （`main()` を実際に呼ぶエンドツーエンド。`targets` 有りで合成 LLM が 1 回呼ばれ report.md の先頭が
+     「# 対象別の整理」になること、`targets` 無しでは合成を呼ばないことを確認）。
+     `retry_run_escalates_mode_and_iterations_and_redacts_secrets` は新しい問いの並び順に合わせて
+     assertion を更新。
+   - `[adapters.local_deep_research] structured_synthesis`（既定 `true`）を追加
+     （`crates/celeris/src/config.rs`、`crates/celeris/src/lib.rs`）。`config/celeris.web-research.example.toml`
+     にコメントと明示的な `structured_synthesis = true` を追記。
+3. **C（PaperQA、縮小版）**
+   - 条件（縮小）: 対象が取れているとき、`pqa ask` への問いを「対象ごとの節 + 対象×観点の表」に
+     構造化するよう指示する。`research.json` に対象・観点を残す。
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa`
+   - 出力の要点: exit 0、**45 passed**（0 failed、Phase 109b の 43 から +2）。新規:
+     `build_question_adds_structured_answer_instructions_when_targets_are_found`（対象が取れれば
+     「## 回答の形式（必ず守ること）」節が付き、取れなければ従来どおり付かないことを確認）、
+     `research_json_records_targets_and_aspects_from_the_objective`（`run()` を実際に呼ぶ
+     エンドツーエンド。`research.json` の `targets`/`aspects` を確認）。
+   - **見送り（未解決事項 P-109c-1）**: `pqa ask` の CLI から PaperQA の Python API への切り替え（元の
+     ADR C1）と、対象ごとに `ask` を複数回呼んで `session.contexts` の和集合で `cited` を数える実装
+     （元の ADR C2）は、この開発環境から実機の `paperqa` パッケージの API 面を検証できず（未導入・
+     ネットワーク禁止）、既存の 43 件のテスト（`pqa` CLI の argv 組み立てを前提にしたスタブが多数）への
+     影響も大きいため見送った。詳細は ADR-0063 の Phase 109c 追記に記載。
+4. **D（受け入れ条件の文・CoS 指示）**
+   - 条件: CoS への指示文に「対象を 1 行に列挙し、観点を括弧で列挙する。対象が 5 を超えるなら対象
+     ごとにタスクを分ける」を追記し、受け入れ条件の一文を「対象ごとに」を明記する形に具体化する。
+   - 実行したコマンド: `cargo test -p task-worker --lib preamble`
+   - 出力の要点: exit 0、**16 passed**（0 failed。既存テストの assertion 内容は変更不要だった
+     ―― `未確認`/`literature`/`web-research` の文字列は残したまま追記したため）。
+5. **ゲート**
+   - `cargo test --workspace --no-fail-fast` → exit 0、**FAILED 0**（passed 合計 **1955**。Phase 109b
+     の 1937 から新規 18 件: A 11、B +5、C +2）。
+   - `cargo clippy --workspace --all-targets -- -D warnings` → exit 0（`research_targets.rs` の
+     `manual_pattern_char_comparison` を 1 件修正して解消。修正後クリーン）。
+   - `git status --porcelain | grep -E "docs/api|docs/protocol"` → 出力なし（差分ゼロ。API の型は
+     変えていない）。
+
+### 変更ファイル
+
+- 新規: `crates/task-worker/src/research_targets.rs`
+- `crates/task-worker/src/lib.rs`（`pub mod research_targets;` の追加）
+- `crates/task-worker/src/local_deep_research.rs`・`crates/task-worker/src/local_deep_research_run.py`
+  （B1/B2/B3）
+- `crates/task-worker/src/paperqa.rs`（C・A の research.json 反映）
+- `crates/task-worker/src/preamble.rs`（D）
+- `crates/celeris/src/config.rs`・`crates/celeris/src/lib.rs`（`structured_synthesis` の配線）
+- `config/celeris.web-research.example.toml`（`structured_synthesis` の例とコメント）
+- `docs/adr/0063-research-tasks-resilience.md`（「## Phase 109c 追記」を追加。本文は書き換えていない）
+
+### 未解決事項
+
+- P-109c-1: PaperQA の Python API 切り替え・対象ごとの複数 ask を見送った（詳細は ADR 追記）。今回の
+  縮小策（1 回の問いの中で構造化を指示する）は「対象別の整理が無い」「未確認の明記が無い」という
+  症状には対処するが、PaperQA2 自身が引用マーカーを本文に残さない場合の `cited=0`（Phase 109b A2 の
+  限界）は直っていない。
+- P-109c-2: GitHub リポジトリの `docs/` 直下の `.md` 一覧（ディレクトリ一覧に GitHub API が要る）は
+  見送った。README + docs サブページ（readthedocs 等）の深追いで今回観測した欠陥（FINCHFS）は塞がる。
+- P-109c-3: LDR の構造化合成の材料（`structured_synthesis_material`）は単純に 20000 字で切り詰める
+  だけで、対象数が多いと後半の対象の材料が削られやすい。
+- 実機未確認（ADR-0009 P-34）。本番での確認は親エージェントが行う: Web 調査（BeeOND を含む対象）を
+  やり直し、対象×観点の表が出て reviewer が通ること。文献調査（対象の取れる目的文）をやり直し、
+  `research.json`/`answer.md` に対象別の節が出ること。
+
+### 提案
+
+- P-109c-1（上記）: 実機で `paperqa`（Python API）を確認できる環境で、`pqa ask` CLI から
+  `from paperqa import ask, Settings` への切り替えと対象ごとの複数 `ask` を改めて実装する。
+- P-109c-2（上記）: GitHub の `docs/` 直下ファイル一覧を GitHub API（鍵無しの `contents` エンドポイント
+  等、レート制限に注意）で取る実装を検討する。

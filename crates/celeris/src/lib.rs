@@ -308,6 +308,8 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     // ADR-0063 D2: 再挑戦時の mode / iterations も行ごとの上書きは無い。
                     retry_mode: base.retry_mode,
                     retry_iterations: base.retry_iterations,
+                    // ADR-0063 Phase 109c B3: 構造化合成の有無も行ごとの上書きは無い。
+                    structured_synthesis: base.structured_synthesis,
                 }))
             }
             LangMemAdapter::ID => {

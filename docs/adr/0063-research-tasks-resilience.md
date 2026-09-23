@@ -227,3 +227,91 @@ Phase 109 を本番で試したら（2026-09-23 11:04〜11:10 UTC、昇格直後
 - C1: 「候補が一瞬全部消える」事象そのものの根本原因（claude-oauth の 429/cooldown から codex への
   切替の一瞬）は直していない（再走査で覆うだけ）。頻発するようなら `record_failure` 側の cooldown
   の付け方を見直す。
+
+## Phase 109c 追記（2026-09-23）
+
+Phase 109b を本番で試した 3 回目のやり直し（2026-09-23 12:12〜12:26 UTC）で見つかった「対象ごとの
+整理が無い」欠陥と、その直し。本文（上記 D1〜D4・受け入れ条件 1〜5、Phase 109b 追記）は書き換えない。
+
+### 観測
+
+1. **Web 調査（LDR）**: 必読の一次情報 6 件は全て fetch され `cited: true` になったが、1 回目の
+   不合格理由（BeeOND の公式章の本文が無い）を「## 必ず埋める項目」として**問いの先頭**に足した
+   再挑戦で、report 全体が BeeOND だけの報告になった。他 4 システムは末尾に README の生テキストが
+   貼られているだけで、deployment model の整理（server/client 配置・cache/direct I/O・file
+   semantics・replication 等）が無く、無い項目に「未確認」も付いていなかった。
+2. **文献調査（PaperQA）**: `answer.md` は 35 行の総論で、対象ごとの整理も比較分類も無く、
+   引用マーカーも無いため `cited=0` のままだった。8 システム×6 観点を 1 つの質問に詰め込んでいた。
+
+### 決定と実装
+
+- **A（対象と観点を構造として扱う）**: `crates/task-worker/src/research_targets.rs` に純関数
+  `research_targets(objective) -> Vec<String>`（`/`・`、`・`・`・`，` で連なる英数字識別子の列を対象の
+  列挙とみなす。URL のパス区切りは先に取り除く）と `research_aspects(objective) -> Vec<String>`
+  （目的文の括弧書きの列挙を優先、無ければ既定 7 項目）を追加。PaperQA / LDR 両方の入力 JSON
+  （`ask` の問い / `ldr_input.json`）と `research.json` に `targets`/`aspects` として載せる。
+  `preamble.rs`（CoS への指示文）に「対象を 1 行に列挙し、観点を括弧で列挙する。対象が 5 を超えるなら
+  対象ごとにタスクを分ける」を追記し、受け入れ条件の一文を「**対象ごとに**、指定の観点が一次情報
+  （または文献）に基づいて整理されている。確認できない観点は『未確認』と明記されていれば不合格の
+  理由にしない」に具体化した（D）。
+- **B1（LDR: 問いを置き換えない）**: `local_deep_research.rs::build_query` の組み立て順を
+  「目的文 → 前回からの改善点（見出しを「## 必ず埋める項目」から「## 前回からの改善点（必ず埋める）」
+  に改名）→ 前回の report.md（`attempts >= 1` のときだけ、先頭 20 KB）→ 人間の回答」に変更した
+  （Phase 109 まで「必ず埋める項目」を先頭に置いていたことが、LDR がそこだけに検索・合成を引きずられる
+  原因だった）。前回の report.md は `run_ldr` が消す前に読む（`read_prior_report`）。
+- **B2（LDR: docs サイトの深追い）**: `local_deep_research_run.py::build_primary_source_entries` に、
+  必読 URL が readthedocs / `doc.`・`docs.` サブドメイン / `/docs/` パスのとき、トップ HTML の
+  同一ホスト・1 階層下のリンクのうち URL かリンクテキストに `config|configuration|deploy|install|
+  setup|tuning|architecture|usage|admin|semantics` を含むものを最大 8 ページ（`select_docs_subpages`）
+  追加で fetch する処理を足した（各ページ 6 KB、呼び出し全体で合計 48 KB の予算。
+  `DOCS_SUBPAGES_TOTAL_MAX_CHARS`）。GitHub の `docs/` 直下の `.md` 一覧（ADR 原案の一部）は、
+  ディレクトリ一覧に GitHub API が要り、鍵無し・決定的なテストが組みにくいため Phase 109c では
+  見送った（README + docs サブページの深追いで実際の欠陥は塞がる。未解決事項 P-109c-1）。
+- **B3（LDR: 構造化合成）**: `local_deep_research_run.py` に `apply_structured_synthesis` を追加。
+  `targets` が非空（既定 `structured_synthesis = true`）のとき、LDR の findings と必読の一次情報の
+  抜粋を材料に、LDR と同じ `settings` の `llm.model`/`llm.openai_endpoint` へ 1 回 `chat/completions`
+  を叩き、対象×観点の表 + 対象ごとの節（`# 対象別の整理`）を `report.md` の**先頭**に足す（LDR の生の
+  findings はそのまま後段に残る）。プロンプトは「各セルは事実（出典）か『未確認』のどちらか。推測
+  しない」と明記。呼び出しは既存の `run_with_retries`/`call_ldr_stage`（2/4/8 秒バックオフ）を再利用
+  し、**best-effort**（最後まで失敗しても `report.md` は書き換えず run 自体も失敗にしない。LDR の生の
+  findings が既にフォールバックとしてある）。`[adapters.local_deep_research] structured_synthesis`
+  （既定 `true`）で無効化できる。
+- **C（PaperQA、縮小版）**: 対象ごとに `pqa ask` を複数回呼ぶ（元の C2）と PaperQA の Python API への
+  切り替え（元の C1、`session.contexts` から `cited` を数える）は、**この開発環境からは実機の
+  `paperqa`/`pqa` の Python API 面を検証できず**（パッケージ未導入・ネットワーク禁止）、既存の
+  paperqa.rs のテスト（43 件、`pqa` CLI の argv 組み立てを前提にしたスタブ多数）への影響も大きいため、
+  Phase 109c では**見送った**（未解決事項 P-109c-1 として記録。実機で API を確認できる環境で
+  改めて取り組む）。代わりに、目的文から対象が取れているとき `build_question` が 1 回の `pqa ask`
+  の問いに「対象ごとに `### <対象名>` の節を立て、観点ごとに `事実（出典）` か `未確認` で書き、
+  最後に対象×観点の Markdown 表でまとめよ」という形式指示を足す縮小策を実装した
+  （`render_structured_answer_instructions`）。対象×観点の情報を `research.json` にも残す。
+  `cited` の数え方（Phase 109b A2 の文字列一致 + References 節）自体は変えていない。
+
+### ゲート
+
+- `cargo test --workspace --no-fail-fast`: exit 0、**FAILED 0**（passed 合計 **1955**、Phase 109b の
+  1937 から新規 18 件増: `research_targets` 11 件、`local_deep_research` +5 件、`paperqa` +2 件）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0（`research_targets.rs` の
+  `manual_pattern_char_comparison` を 1 件修正済み）。
+- `git status --porcelain | grep -E "docs/api|docs/protocol"`: 出力なし（型を変えていないので
+  schema/types.ts の再生成は不要）。
+
+### 未解決事項（Phase 109c）
+
+- **P-109c-1（PaperQA の Python API・対象ごとの複数 ask）**: `pqa ask` の CLI から
+  `from paperqa import ask, Settings`（または `Docs.query`）への切り替えと、対象ごとに 1 回ずつ
+  `ask` を呼んで `session.contexts` の和集合で `cited` を数える実装は、実機で API を確認できる環境
+  （paperqa パッケージが入った venv）でなければ安全に進められないため見送った。今回実装した
+  「1 回の問いの中で構造化させる」縮小策（`render_structured_answer_instructions`）は、対象別の整理・
+  『未確認』の明記という失敗の症状には対処するが、PaperQA2 自身の引用マーカーが本文に出ない場合の
+  `cited=0` は直っていない（Phase 109b A2 の限界がそのまま残る）。
+- **P-109c-2（GitHub の `docs/` 直下ファイル一覧）**: B2 で見送った、GitHub リポジトリの `docs/`
+  直下の `.md` を API 経由で列挙する処理。今回は README + docs サブページ（readthedocs 等）の深追いで
+  実際の欠陥（FINCHFS の `finchfs.readthedocs.io`）は塞げているが、GitHub の `docs/` に一次情報を
+  置くプロジェクトでは同種の欠落が再発しうる。
+- **P-109c-3（LDR の構造化合成の材料の上限）**: `structured_synthesis_material` は本文+抜粋を
+  20000 字で単純に切り詰めるだけで、対象ごとに均等な材料を渡す配慮は無い（対象数が多いと後半の対象の
+  材料が削られやすい）。目的文の対象が 6 件を超えるケースが増えたら見直す。
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う）: Web 調査（BeeOND を含む対象）を
+  やり直し、対象×観点の表が出て reviewer が通ること。文献調査を（対象の取れる目的文で）やり直し、
+  `research.json`/`answer.md` に対象別の節が出ること（`cited` は Phase 109b までの仕組みのまま）。
