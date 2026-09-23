@@ -15202,3 +15202,119 @@ CoS の対話指示（`crates/task-worker/src/preamble.rs::conversation_instruct
 
 - P-107-1: GUI の「クラスタ」画面に `ClusterMasterExited` の直近の発生（exit code・stderr の末尾）を出す（現状は `GET /tasks/{id}/events` からしか見えない）。
 - P-107-2: `keepalive_secs`/`liveness_probe_secs` を `PUT /clusters/{id}/settings` で上書きできるようにする（現状は設定ファイルのみ）。
+
+## Phase 108（完了日 2026-09-23）: PATCH/retry で作業場所を直せる、remote-exec はユーザーの ssh config だけを読む（ADR-0062 追記）
+
+Phase 107 の本番反映で B1（担当に `cluster:<id>` が無い remote タスク）が正しく `blocked` + 質問を
+出すようになったが、**その質問に答えて先へ進む手段が無かった**（`PATCH /tasks/{id}` は `workspace` を
+受けず、`POST /tasks/{id}/retry` は元の `workspace` をそのまま複製する）。加えて codex アダプタの
+サンドボックス（`sandbox_mode=workspace-write`）内で `.celeris/remote-exec` が
+`ssh: Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf`（exit 255）で
+止まった。ADR-0062 に「Phase 108 追記」として決定を記録した。
+
+### 条件 1: `PATCH /tasks/{id}` が `workspace` を受け、B1 の `blocked` を `ready` に戻せる
+
+- **条件**: `TaskEdit.workspace: Option<WorkspaceSpec>`。許す状態は `draft`/`ready`/`blocked`/`failed`
+  だけ（`running`/`reviewing`/`done`/`cancelled` は 409 `invalid_transition`）。検証は `Remote.cluster`
+  が設定に存在すること（API 層）、`Local.path` が空でないこと、明示の `Remote` で（同じ本文で
+  `assignee` を変える場合は変更後の）担当が `cluster:<id>` を持たなければ 422。`blocked`（B1 の
+  unroutable）だったタスクは、`workspace`/`assignee` の変更で経路が通れば、既存の「質問に答える」経路
+  （`gate::answer` と同じ `Trigger::Answer` + 未決の `approvals` の settle）に相乗りしてその場で
+  `ready` に戻す。worker が聞いた質問による `blocked`（reason `"worker_question"`）はここでは触らない
+  （直近の `Blocked` 遷移の reason が `"unroutable"` かどうかで判別。`task_ops::derive::latest_block_is_unroutable`）。
+- **実行したコマンド**: `cargo test -p task-ops --lib edit::`
+- **出力の要点**: exit 0、**13 passed**。新規 5 件: (a) `workspace_can_be_switched_to_local_on_a_ready_task`、
+  (b) `a_blocked_unroutable_task_returns_to_ready_when_the_workspace_resolves_it`（`Event::Answered`
+  に `"解決済み"` を含む・approval が閉じる）、(c) `an_explicit_remote_workspace_is_rejected_when_the_assignee_lacks_the_cluster_tool`
+  （422、候補ノード `cluster-hpc` を含む）、(d) `workspace_edits_are_refused_on_running_tasks`（409）、
+  (e) `changing_the_assignee_to_a_node_with_the_cluster_tool_is_accepted`（200）。
+- **実装**: `crates/task-ops/src/edit.rs`。検証は `crates/task-ops/src/matching.rs::assignee_has_cluster_tool`
+  （新設。`create_task_action`/B3 と同じ規則を 1 か所にまとめた）を使う。
+- API 層: `crates/task-api/src/handlers.rs::patch_task` が `edit.workspace` を
+  `validated_workspace`（`PATCH /projects/{id}` と同じ関数）で検証してから `edit_task` に渡す
+  （`Remote.cluster` の存在チェックと `~` の展開はここで行う）。
+- **実行したコマンド**: `cargo test -p task-api --test task_management`
+- **出力の要点**: exit 0、**11 passed**。新規 `patch_task_workspace_switches_to_local_and_refuses_running_and_unknown_clusters`
+  が 200（Local へ）・409（`running`）・422（未設定クラスタ）を確認。既存の
+  `patch_task_validates_and_refuses_terminal_tasks`（`failed`/`done`/`cancelled` を `workspace` 無しの
+  編集で 409 のまま）も無変更で通過。
+
+### 条件 2: `POST /tasks/{id}/retry` の `workspace`
+
+- **条件**: `RetryBody.workspace: Option<WorkspaceSpec>`（省略可）。与えれば複製先の `workspace` を
+  差し替える（検証は条件 1 と同じ規則）。省略時は従来どおり元のタスクの `workspace` を複製する。
+- **実行したコマンド**: `cargo test -p task-ops --lib retry::`
+- **出力の要点**: exit 0、**8 passed**。新規 3 件: `retry_can_override_the_workspace_of_the_new_task`
+  （remote → local）、`retry_workspace_override_rejects_an_empty_local_path`（422）、
+  `retry_workspace_override_rejects_remote_when_the_assignee_lacks_the_cluster_tool`（422、
+  `cluster:sirius` を含む）。
+- **実行したコマンド**: `cargo test -p task-api --test operations`
+- **出力の要点**: exit 0、**18 passed**。新規 `retry_workspace_override_switches_to_local_and_validates_the_cluster`
+  が 201（Local へ複製）・422（未設定クラスタ）を確認。既存の `retry_duplicates_a_failed_task_and_rewires_dependents`
+  など無変更で通過。
+- **実装**: `crates/task-ops/src/retry.rs`（`retry_task` に `workspace` 引数を追加）、
+  `crates/task-api/src/types.rs::RetryBody`、`crates/task-api/src/handlers.rs::retry`（`validated_workspace`
+  を通す）。呼び出し元 `crates/celeris-mcp/src/tools/tasks.rs::retry_impl` は `None` を渡すよう追随
+  （MCP の `task_retry` に `workspace` 引数を足すのは範囲外。下記「提案」へ）。
+
+### 条件 3: `.celeris/remote-exec` はユーザーの `~/.ssh/config` だけを読む
+
+- **条件**: ヘルパのスクリプト自身が実行時に `[ -f "$HOME/.ssh/config" ]` を判定し、あれば
+  `set -- -F "$HOME/.ssh/config"` として `ssh` の直後にその引数を挿む（無ければ何も足さず ssh の
+  既定の探索に任せる）。celeris 自身が打つ ssh（master・`-O check`・実通信 probe・`Check::Command` の
+  remote 実行・rsync）は変えていない（サンドボックスの外で動くため）。
+- **実行したコマンド**: `cargo test -p task-worker --lib ssh::`
+- **出力の要点**: exit 0、**13 passed**。既存
+  `write_remote_exec_helper_writes_celeris_and_cleans_up_the_old_taskd_wrapper` に `-F` の条件分岐の
+  文字列アサーションを追加。新規 `the_wrapper_only_adds_dash_f_when_the_users_ssh_config_exists` が、
+  生成したラッパを偽 ssh（argv をファイルへ記録するだけ）に対して実際に実行し、`$HOME/.ssh/config` が
+  無ければ `-F` が付かず、あれば `-F "$HOME/.ssh/config"` が付くことを確認。
+- **実装**: `crates/task-worker/src/ssh.rs::write_remote_exec_helper` の生成スクリプト。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（79 テストバイナリすべて `test result: ok`、passed 合計 **1911**） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| schema (api) | `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::` | exit 0、2 passed。`docs/api/v1/api-v1.schema.json` に `RetryBody.workspace` / `TaskEdit.workspace` を追加（+22行） |
+| gui | `pnpm install --frozen-lockfile && pnpm gen:types && pnpm typecheck && pnpm test` | `install` exit 0（lockfile どおり、`+340` パッケージ）。`gen:types` は `gui/app/celeris/types.ts` に `RetryBody.workspace` / `TaskEdit.workspace`（`WorkspaceSpec \| null`）を追加（+11行、他は無変更）。`typecheck` exit 0。`test`（vitest）exit 0、**68 files / 1061 passed** |
+
+途中、`celeris-mcp` が `retry_task` の新引数に追随しておらず `cargo test --workspace` がコンパイルエラー
+（E0061）で止まった。`crates/celeris-mcp/src/tools/tasks.rs::retry_impl` の呼び出しに `None` を足して解消
+（MCP の `task_retry` ツールの入力に `workspace` を足すのは範囲外。下記「提案」へ）。
+
+### 変更ファイル
+
+- `crates/task-ops/src/edit.rs`（`TaskEdit.workspace`、状態ガード、B1 blocked → ready の復帰、テスト 5 件）
+- `crates/task-ops/src/retry.rs`（`retry_task` の `workspace` 引数、テスト 3 件、既存呼び出しの引数追加）
+- `crates/task-ops/src/matching.rs`（`assignee_has_cluster_tool` 新設）
+- `crates/task-ops/src/derive.rs`（`latest_block_is_unroutable` 新設）
+- `crates/task-api/src/types.rs`（`RetryBody.workspace`）、`crates/task-api/src/handlers.rs`（`patch_task`/`retry` の `validated_workspace` 検証）
+- `crates/task-worker/src/ssh.rs`（`write_remote_exec_helper` の生成スクリプトに `-F` の条件分岐、テスト追加）
+- `crates/celeris-mcp/src/tools/tasks.rs`（`retry_task` 呼び出しに `None` を追加。挙動は変えていない）
+- `crates/task-api/tests/task_management.rs`・`crates/task-api/tests/operations.rs`（結合テスト追加）
+- `docs/api/v1/api-v1.schema.json`・`gui/app/celeris/types.ts`（再生成）
+- `gui/docs/celeris-api-v1.md`（§3.63・§3.74 に「Phase 108 追記」を追加。既存記述は書き換えていない）
+- `docs/adr/0062-ssh-master-keepalive-and-cluster-tool-routing.md`（末尾に「Phase 108 追記」。本文は書き換えていない）
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う）:
+  1. web-research の remote タスク（B1 で `blocked`）を `PATCH {"workspace":{"kind":"local","path":"…"}}`
+     で Local に直し、`ready` に戻って進むこと。
+  2. literature-research の remote 準備失敗で `failed` になったタスクを
+     `POST /tasks/{id}/retry {"workspace":{"kind":"local","path":"…"}}` で Local にしてやり直し、
+     成功すること。
+  3. software-engineering の codex run（`sandbox_mode=workspace-write`）で `.celeris/remote-exec` が
+     `-F ~/.ssh/config` 付きの ssh で通ること（`Bad owner or permissions` が再発しないこと）。
+- MCP の `task_retry` ツールに `workspace` 引数は足していない（`crates/celeris-mcp`。今回のコンパイル
+  修正は呼び出し引数の追随のみ）。
+
+### 提案
+
+- P-108-1: GUI のタスク編集フォーム（`PATCH /tasks/{id}`）に作業場所（`workspace`）の入力を足す
+  （ローカル/リモート・クラスタ選択。現状は API のみ）。同様に「やり直す」ダイアログにも
+  `workspace` の入力を足す（`POST /tasks/{id}/retry`）。
+- P-108-2: MCP の `task_retry` ツール（`crates/celeris-mcp`）に `workspace` 引数を足す（今回は
+  コンパイルを通すために `None` を渡しただけ）。

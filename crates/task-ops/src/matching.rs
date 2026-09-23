@@ -219,6 +219,30 @@ pub fn assignee_accepts(
     ))
 }
 
+/// ADR-0062 B1/B3（Phase 107）・Phase 108 追記: 明示の `assignee` が `cluster:<id>` を持つか。
+/// `task_ops::actions::create_task_action` と同じ規則を `PATCH /tasks/{id}` の `workspace`/`assignee`
+/// 編集と `POST /tasks/{id}/retry` の `workspace` 差し替えからも使う（検証を 1 か所にまとめる）。
+pub fn assignee_has_cluster_tool(org: &[OrgNode], assignee: &str, cluster: &str) -> Result<(), String> {
+    let wanted = format!("{}{cluster}", task_core::CLUSTER_TOOL_PREFIX);
+    let effective = task_core::resolve_profile(org, assignee);
+    if effective.has_tool(&wanted) {
+        return Ok(());
+    }
+    let holders: Vec<&str> = org
+        .iter()
+        .filter(|n| task_core::resolve_profile(org, &n.id).has_tool(&wanted))
+        .map(|n| n.id.as_str())
+        .collect();
+    Err(format!(
+        "assignee {assignee:?} には {wanted} が無い。{wanted} を持つノード: {}",
+        if holders.is_empty() {
+            "なし".to_string()
+        } else {
+            holders.join(", ")
+        }
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

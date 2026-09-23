@@ -519,6 +519,56 @@ async fn retry_with_accept_starts_ready_and_non_terminal_or_done_is_409() {
     }
 }
 
+/// ADR-0062 Phase 108（本番の事故、2026-09-23）: `POST /tasks/{id}/retry` の `workspace` で
+/// 複製先の作業場所を差し替える（remote で失敗し続けたタスクを Local にしてやり直す）。
+/// `Remote.cluster` が設定に無ければ 422（`validated_workspace`、`PATCH` と同じ層で見る）。
+#[tokio::test]
+async fn retry_workspace_override_switches_to_local_and_validates_the_cluster() {
+    let env = admin_env();
+    let app = env.router();
+
+    let mut failed = new_task(TaskKind::Execute, Status::Failed);
+    failed.workspace = task_core::WorkspaceSpec::Remote {
+        cluster: "pegasus".into(),
+        path: "~".into(),
+        mode: None,
+    };
+    env.seed(&failed);
+
+    let resp = send(
+        &app,
+        post_admin(
+            &format!("/api/v1/tasks/{}/retry", failed.id),
+            &json!({"workspace": {"kind": "local", "path": "/tmp/retry-local"}}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status, 201, "{}", resp.text());
+    let new_id: TaskId = resp.json()["task_id"]
+        .as_str()
+        .expect("task_id")
+        .parse()
+        .expect("parse");
+    let new_task_row = env.store.get(new_id).expect("get").expect("some");
+    assert_eq!(
+        new_task_row.workspace,
+        task_core::WorkspaceSpec::local("/tmp/retry-local")
+    );
+
+    // 設定に無いクラスタは 422（複製は作られない）。
+    let failed2 = new_task(TaskKind::Execute, Status::Failed);
+    env.seed(&failed2);
+    let resp = send(
+        &app,
+        post_admin(
+            &format!("/api/v1/tasks/{}/retry", failed2.id),
+            &json!({"workspace": {"kind": "remote", "cluster": "no-such-cluster", "path": "~"}}),
+        ),
+    )
+    .await;
+    assert_problem(&resp, 422, "validation");
+}
+
 #[tokio::test]
 async fn create_task_returns_201_with_location_and_cli_defaults() {
     let env = admin_env();

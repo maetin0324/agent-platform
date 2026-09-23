@@ -473,10 +473,21 @@ impl SshWorkspace {
             "#!/bin/sh\n\
              # celeris が run ごとに作るラッパ（ADR-0018 D3）。クラスタ {cluster} でコマンドを実行する。\n\
              # 使い方: .celeris/remote-exec <コマンド ...>\n\
+             # ADR-0062 Phase 108 追記: システムの /etc/ssh/ssh_config（と Include 先の\n\
+             # /etc/ssh/ssh_config.d/...）は読まない。codex サンドボックス（sandbox_mode=workspace-write）\n\
+             # の中ではその Include 先が別所有者に見え、ssh が \"Bad owner or permissions\" で\n\
+             # 拒否することがある（本番 2026-09-23、software-engineering の run）。ユーザーの\n\
+             # ~/.ssh/config（Host 別名・ControlMaster を持つ）だけを -F で明示的に読む。\n\
+             # 無ければ何も足さず ssh の既定の探索に任せる。\n\
              set -u\n\
              if [ $# -eq 0 ]; then echo \"usage: $0 <command...>\" >&2; exit 2; fi\n\
              cmd=\"$*\"\n\
-             exec {ssh} {host} \"cd {remote_q} && {prefix}sh -c \\\"$cmd\\\"\"\n",
+             if [ -f \"$HOME/.ssh/config\" ]; then\n\
+             \x20   set -- -F \"$HOME/.ssh/config\"\n\
+             else\n\
+             \x20   set --\n\
+             fi\n\
+             exec {ssh} \"$@\" {host} \"cd {remote_q} && {prefix}sh -c \\\"$cmd\\\"\"\n",
             cluster = self.settings.cluster,
             ssh = ssh,
             host = self.settings.host,
@@ -786,6 +797,66 @@ mod tests {
         // ADR-0059 D2: `~/work/proj` は `.celeris/remote-exec` の生成スクリプトの中で `"$HOME"` に展開される。
         let script = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(script.contains("\"$HOME\"'/work/proj'"), "{script}");
+        // ADR-0062 Phase 108: `$HOME/.ssh/config` があるときだけ `-F` を足す条件分岐を持つ。
+        assert!(script.contains(r#"if [ -f "$HOME/.ssh/config" ]; then"#), "{script}");
+        assert!(script.contains(r#"-F "$HOME/.ssh/config""#), "{script}");
+    }
+
+    /// ADR-0062 Phase 108: 生成した `.celeris/remote-exec` は実行時に `$HOME/.ssh/config` があれば
+    /// `-F` で明示的に読み、無ければ何も足さない（システムの `/etc/ssh/ssh_config` に触れない）。
+    /// codex サンドボックス内で `/etc/ssh/ssh_config.d/...` の Include 先が拒否される問題への対応
+    /// （本番 2026-09-23）。
+    #[tokio::test]
+    async fn the_wrapper_only_adds_dash_f_when_the_users_ssh_config_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let mirror = dir.path().join("mirror");
+        tokio::fs::create_dir_all(&mirror).await.unwrap();
+
+        // 引数をそのままファイルに記録するだけの偽 ssh。
+        let log = dir.path().join("argv.log");
+        let fake_ssh = dir.path().join("ssh");
+        crate::test_support::write_executable(
+            &fake_ssh,
+            &format!("#!/bin/sh\necho \"$@\" > {log:?}\nexit 0\n"),
+        );
+
+        let mut settings = SshSettings::new("pegasus", "pegasus", PathBuf::from("/work/proj"));
+        settings.sync = SyncMode::None;
+        settings.ssh_command = vec![fake_ssh.to_string_lossy().into_owned()];
+        let ws = SshWorkspace::new(&mirror, settings);
+        let path = ws.write_remote_exec_helper().await.expect("write helper");
+
+        // `$HOME/.ssh/config` が無ければ `-F` を付けない。
+        let home_without = dir.path().join("home-without");
+        tokio::fs::create_dir_all(&home_without).await.unwrap();
+        let status = tokio::process::Command::new(&path)
+            .arg("true")
+            .env("HOME", &home_without)
+            .status()
+            .await
+            .expect("run wrapper");
+        assert!(status.success());
+        let argv = tokio::fs::read_to_string(&log).await.unwrap();
+        assert!(!argv.contains("-F"), "{argv}");
+
+        // `$HOME/.ssh/config` があれば `-F "$HOME/.ssh/config"` を付ける。
+        let home_with = dir.path().join("home-with");
+        tokio::fs::create_dir_all(home_with.join(".ssh")).await.unwrap();
+        tokio::fs::write(home_with.join(".ssh").join("config"), "Host pegasus\n")
+            .await
+            .unwrap();
+        let status = tokio::process::Command::new(&path)
+            .arg("true")
+            .env("HOME", &home_with)
+            .status()
+            .await
+            .expect("run wrapper");
+        assert!(status.success());
+        let argv = tokio::fs::read_to_string(&log).await.unwrap();
+        assert!(
+            argv.contains(&format!("-F {}/.ssh/config", home_with.display())),
+            "{argv}"
+        );
     }
 
     // ---- ADR-0018 D3 / ADR-0059 D5: `.celeris/` は同期から常に除外し、`.taskd/` も後方互換で残す ----

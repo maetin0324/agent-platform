@@ -195,11 +195,15 @@ pub struct CancelBody {
 }
 
 /// `POST /tasks/{id}/retry`（Phase 31）の本文。`accept: true` なら新しいタスクは `draft` を経ず `ready` で始まる。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+/// ADR-0062 Phase 108 追記: `workspace`（省略可）を与えると、複製先の作業場所をそれに差し替える
+/// （検証は `PATCH /tasks/{id}` の `workspace` と同じ）。省略時は従来どおり元のタスクの `workspace` を複製する。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetryBody {
     #[serde(default)]
     pub accept: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<task_core::WorkspaceSpec>,
 }
 
 /// `GET /tasks/{id}/events`、`GET /events`。

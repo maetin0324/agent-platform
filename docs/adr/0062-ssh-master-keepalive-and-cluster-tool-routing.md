@@ -173,3 +173,72 @@ ADR-0039 D2 の「子は案件・親の作業場所を継ぐ」は担当を見�
 8. 実機（親エージェントが行う）: sirius に再接続し、keepalive 付きの master が 1 時間以上維持
    されること、`ClusterMasterExited` が切断時に stderr 付きで残ること、担当に道具が無い 3 件が
    blocked + 質問になること。
+
+## Phase 108 追記（2026-09-23）
+
+Phase 107 の本番反映で B1 が正しく `blocked` + 質問を出すようになったが、**その質問に答えて先へ進む
+手段が無い**ことが分かった。`PATCH /tasks/{id}`（`TaskEdit`）は `workspace` を受けず、
+`POST /tasks/{id}/retry` は元の `workspace` をそのまま複製する。web-research / literature-research の
+remote タスク（案件から継承した `workspace`）を Local に直して進める道が無かった。加えて、codex
+アダプタ（`sandbox_mode=workspace-write`）の run で `.celeris/remote-exec` が
+`ssh: Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf`（exit 255）で
+止まった。このファイルはホスト上では root 所有の symlink で、人のシェルからの ssh は問題なく通るが、
+codex のサンドボックス内ではその Include 先が別所有者に見えるか読めず、ssh が設定の検査で拒否したと
+見られる。ワーカーの ssh はシステム全体の `/etc/ssh/ssh_config` を読む必要が無く、人の
+`~/.ssh/config`（Host 別名・ControlPath・ControlMaster を持つ）だけで足りる。
+
+### E1. `PATCH /tasks/{id}` と `POST /tasks/{id}/retry` が `workspace` を受ける
+
+- `TaskEdit.workspace: Option<WorkspaceSpec>`。許す状態は `draft` / `ready` / `blocked` / `failed`
+  だけ（`running` / `reviewing` / `done` / `cancelled` は 409 `invalid_transition`）。`failed` は
+  他の項目の編集では終端として拒むが、`workspace` の差し替え〈やり直しの前準備〉だけは例外的に許す。
+  検証は `create_task`/`PATCH /projects/{id}` と同じ規則（`Remote.cluster` は API 層の
+  `validated_workspace` が設定の存在を見て `~` を展開する。`Local.path` は空でないこと。明示の
+  `Remote` でその時点の担当が `cluster:<id>` を持たなければ 422 — B3 と同じ規則で、`assignee` を
+  同じ `PATCH` で変える場合は変更後の担当で判定する）。
+- `blocked`（B1 の unroutable）だったタスクは、`workspace` または `assignee` の変更で上の検証を
+  通り経路が通るなら、**その場で `ready` に戻す**。実装は新しい判断を作らず、既存の「質問に答える」
+  経路（`gate::answer` と同じ `Trigger::Answer` + `Event::Answered` + 未決の `approvals` の
+  settle）に相乗りする（答えの文は固定で「解決済み（作業場所/担当の変更）」）。判定は
+  `Trigger::Unroutable` の `Event::Transitioned{reason:"unroutable"}` が直近の `Blocked` 遷移かどうかで
+  行い、worker が聞いた質問による `blocked`（`Trigger::WorkerQuestion`、reason `"worker_question"`）
+  とは区別する（`task_ops::derive::latest_block_is_unroutable`）。
+- `POST /tasks/{id}/retry` の本文に `workspace`（省略可）を足す。与えれば複製先の `workspace` を
+  差し替える（検証は `PATCH` と同じ）。省略時は従来どおり元のタスクの `workspace` を複製する。
+- 検証（`cluster:<id>` の有無）は `task_ops::matching::assignee_has_cluster_tool` に 1 か所へまとめ、
+  既存の B3（`create_task_action`）と同じ規則をここからも使う。
+
+### E2. `.celeris/remote-exec` は `ssh -F "$HOME/.ssh/config"`（無ければ何も足さない）
+
+- ヘルパのスクリプト自身が実行時に `[ -f "$HOME/.ssh/config" ]` を判定し、あれば
+  `set -- -F "$HOME/.ssh/config"` として `ssh` の直後にその引数を挿む（`sh` の生成物なので、
+  celeris のプロセスではなく**ワーカーが実行する環境**の `$HOME` で判定される）。これにより
+  システムの `/etc/ssh/ssh_config`（と Include 先）を一切読まず、codex サンドボックス内での
+  所有者検査の拒否を避ける。
+- celeris 自身が打つ ssh（`ControlMaster` の起動・`-O check`・D2 の実通信 probe・`Check::Command` の
+  remote 実行・rsync の `-e`）は変えない（サンドボックスの外、celeris のプロセスとして動くため
+  問題が起きない）。
+
+### E3. 採らない
+
+- B1 以外の理由（担当なしの一般的な matching unroutable、worker の質問）で `blocked` になったタスクを
+  同じ経路で自動的に `ready` へ戻す一般化。今回は「`cluster:<id>` の検証を通った」という強い証拠がある
+  ときだけ相乗りする。ワーカーの質問への回答は従来どおり `POST /tasks/{id}/answer` /
+  コメント経由（ADR-0044 D2）。
+- GUI のタスク編集フォームに作業場所の入力を足すこと（`docs/PROGRESS.md` の提案に送る。今回は API と
+  ヘルパだけ）。
+
+### E4. 受け入れ条件（Phase 108）
+
+1. `TaskEdit.workspace` の状態ガードと検証、B1 blocked → ready の復帰（質問クローズ）が
+   ユニットテストで確認できる（`crates/task-ops/src/edit.rs`）。
+2. `retry_task` が `workspace` の差し替えを受け、検証が `PATCH` と同じであることがユニットテストで
+   確認できる（`crates/task-ops/src/retry.rs`）。
+3. `write_remote_exec_helper` が生成するスクリプトが `$HOME/.ssh/config` の有無で `-F` の有無を
+   切り替えることが、生成文字列とスクリプトの実行の両方のテストで確認できる
+   （`crates/task-worker/src/ssh.rs`）。
+4. `cargo test --workspace --no-fail-fast`（FAILED 0）、
+   `cargo clippy --workspace --all-targets -- -D warnings`（exit 0）。
+5. 実機（親エージェントが行う）: web-research / literature-research の remote タスクを `PATCH`/`retry`
+   で Local に直して進めること、software-engineering の codex run で `remote-exec` が
+   `-F ~/.ssh/config` で通ること。
