@@ -15337,3 +15337,11 @@ Phase 107 の本番反映で B1（担当に `cluster:<id>` が無い remote タ�
   - `POST /tasks/01M35X86XTHHN9C6XDAYD2FZ7T/answer {"answer": "remote-exec を直した（Phase 108）。同じ手順で再実行して…"}`（software-engineering、codex の `Bad owner or permissions` 質問）→ `blocked → ready`。sirius 接続後に codex run が `remote-exec`（`ssh -F ~/.ssh/config`）を通せるかで確認する。
   - 残り: systems-performance の 01M35X86XTEPXVZMBY7HSSEP7X は作業内容に関する正当な質問（scheduler / accounting データの所在）で人の回答待ち。sirius は未接続（人の再接続待ち。次の master から keepalive 付き）。
 - 提案（Phase 108 の未解決）: MCP `task_retry` に `workspace`（P-108-2）、GUI のタスク編集・やり直しに作業場所の入力（P-108-1）。
+
+### 2026-09-23 10:10 UTC: 調査系タスクの復旧（人の指示の順に）
+
+- 人の方針: 「アブストラクトまで確認できることが多いので、本文が有料ならアブストまでで妥協。それ以外は提案どおり」。一次情報: CHFS https://github.com/otatebe/chfs 、FINCHFS https://github.com/tsukuba-hpcs/finchfs 、GekkoFS https://github.com/wxl2github/GekkoFS 、UnifyFS https://github.com/llnl/unifyfs 。
+- 知識ベース: `celerisctl knowledge record`（scope project:benchfs、source human、confidence high）→ `_inbox/20260923T100627Z-benchfs.md` → `POST /knowledge/inbox/{id}/accept` → `projects/benchfs/primary-sources.md`（一次情報の表と「本文が有料ならアブストまで」の方針）。
+- Web 調査のやり直し: 最初の retry（01M36VM7A366X6KY6MRPQS208J）は acceptance の JSON 形（`{"type":…,"text":…}` の平坦形が正）を間違えて PATCH に失敗したまま approve してしまい、旧目的文で走り始めたので `POST /tasks/{id}/cancel` で取り消し（framing タスクが依存で cancelled → 後で再 approve）。再度 retry → 01M36VQK4K732SGEG497DK213D（local）に `PATCH` で目的文（一次情報の URL の節と「未確認と明記」）と受け入れ条件（対象ごとに一次情報を参照、確認できない項目は『未確認』と明記されていれば不合格にしない）を入れて approve → ready。framing 01M35X86XTK84F97QW0CN5PGMR も approve → ready（依存待ち）。
+- sirius: 人が再接続 → master は `ssh -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o TCPKeepAlive=yes -M -N sirius`（Phase 107 の keepalive 付き）で稼働。Phase 108 の `remote-exec`（`-F ~/.ssh/config`）で software-engineering の codex run が sirius の計算ノードに PBS ジョブを投入して実機監査を完了（01M35X86XTHHN9C6XDAYD2FZ7T → done、reviewer 合格）。systems-performance の 01M35X86XTEPXVZMBY7HSSEP7X も人の回答後に done。BenchFS の Phase0 は 3 件すべて done。
+- Phase 109（ADR-0063: PaperQA のアブスト妥協と OA 探索〈Unpaywall / Semantic Scholar〉、引用不足を hard error にしない、LDR の再挑戦を detailed に・必読 URL の pre-fetch、受け入れ条件の部分達成の指示、`acquire_input.json` から api_key を除く）を Sonnet で起動。文献調査のやり直しは Phase 109 の昇格後に行う。
