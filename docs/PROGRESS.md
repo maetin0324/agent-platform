@@ -16287,3 +16287,89 @@ Phase 109f の本番反映後、7 回目のやり直し（上記 2026-09-23 15:1
 - タスク 01M37FZRX8GMST4SVDNNQF8NMV: 抽出・表・8 対象の節は正常、`evidence = {cited: 3, insufficient: false}`。しかし `report.md` に「## BenchFS との比較分類」の節が無く、分類語は 0 件。`ask_input.json` の `comparison_context` は `page: None`（知識ベースの `projects/benchfs/architecture-overview.md` が見つからず fallback 段落のみ）、`seed_urls: None`（一次情報ページに DOI / arXiv / PDF が無かった）。
 - 見立て: (1) 対象 8 件 + 総括 1 問 = 9 問が `max_asks`（既定 8）に当たり、総括の問いが落ちた。(2) 比較先ページの探索が「BenchFS」と `benchfs`（path 小文字）を一致させていない。→ Phase 109h（総括は必ず走らせ対象側を詰める、探索を大文字小文字無視に）。
 - 知識ベース: `projects/benchfs/primary-sources.md` の `sources` に既知の DOI（CHFS 10.1145/3492805.3492807、GekkoFS 10.1109/CLUSTER.2018.00049）を足し「主要論文」節を追加（人が FINCHFS / UnifyFS / Mochi / UCX / io_uring の DOI か著者版 PDF を足す欄）。reindex 済み。
+
+## Phase 109h（完了日 2026-09-23）: 総括（比較分類）の問いは必ず残し対象側を詰める。max_asks 既定 10
+
+Phase 109g の本番反映後、8 回目のやり直し（run `01M37FZRX8GMST4SVDNNQF8NMV`）で見つかった「対象 8 件 +
+総括 1 問 = 9 問が `max_asks`（既定 8）を超え、総括（比較分類）の問いそのものが落ちた」直し。本文
+（ADR-0063 D1〜D4・受け入れ条件 1〜5、Phase 109b〜109g 追記）は書き換えない。
+
+### 条件ごとの実施
+
+1. **`build_questions_for_targets`: 比較先があるとき総括の問いを必ず含める。budget が足りなければ
+   対象側を後ろから削る（`max_asks - 1` 件まで）。削った対象は `dropped_targets` として
+   `ask_output.json`/`research.json` に記録し、`report.md`「## 証拠の質」に書く**
+   - 実行したコマンド:
+     `cargo test -p task-worker --lib paperqa::tests::ask_script_pure_functions_build_questions_flatten_contexts_and_the_table paperqa::tests::dropped_targets_and_comparison_observability_flow_into_research_json_and_report_md`
+   - 出力の要点: exit 0、2 passed。純関数テスト: 対象 5 件 + 比較先「BenchFS」で `max_asks=4` にすると
+     総括の問いは必ず残り（`capped_ids = [t1, t2, t3, summary]`）、対象は後ろから 2 件（D, E）が
+     `dropped_targets` に落ちる。本番相当（対象 8 件、`max_asks=8`）では `eight_capped_count = 8`
+     （対象 7 件 + summary）、`dropped_targets = ["io_uring"]`（末尾 1 件）。`max_asks=10`（新しい既定）
+     なら 9 件すべて入り何も削れない。比較先が無ければ従来どおり（`dropped_targets = []`）。
+     統合テスト（`dropped_targets_and_comparison_observability_flow_into_research_json_and_report_md`）:
+     Phase 109g/109h の本番目的文そのもの（8 対象、比較先 BenchFS）で `max_asks=8` の run を実際に流し、
+     `research.json.dropped_targets == ["io_uring"]`、`report.md` に「対象 1 件は max_asks の制限で
+     問えなかった: io_uring」、かつ「## BenchFS との比較分類」節が出ることを確認。
+2. **`max_asks` の既定を 10 に**
+   - 実行したコマンド: `cargo test -p celeris --lib config::tests::accepts_paperqa_adapter_with_default_config`
+   - 出力の要点: exit 0、1 passed（`cfg.adapters.paperqa.max_asks == 10`）。`crates/task-worker/src/paperqa.rs::default_max_asks`、`crates/task-worker/src/paperqa_ask.py::DEFAULT_MAX_ASKS`、`config/celeris.research.example.toml` のコメント例も 10 に更新。
+3. **`ask_output.json` に `comparison_page`/`comparison_context_chars` を足し、`research.json` に写す**
+   - 実行したコマンド: 上の統合テストと同じ（`dropped_targets_and_comparison_observability_flow_into_research_json_and_report_md`）
+   - 出力の要点: 知識ベース未設定の run では `comparison_page` は `null`（目的文の周辺文＝フォールバック
+     段落を使った）、`comparison_context_chars` は 0 より大きい（実際に埋め込んだ文字数）。知識ベースの
+     ページが使われた場合は `comparison_page` にその `path` が入ることは
+     `load_comparison_design_context` の実装（`page_only_text` が非空のときだけ `page_path` を返す）で
+     保証。
+4. **`find_comparison_page_path`: 索引の重複 `path` は 1 回だけ扱い、`architecture`/`overview`/`design`
+   を含む path を優先**
+   - 実行したコマンド:
+     `cargo test -p task-worker --lib paperqa::tests::comparison_judgement_pure_functions_extract_build_and_parse`
+   - 出力の要点: exit 0、1 passed。実測相当の 25 件の索引（`projects/README.md` ×2、`user/*` 2 件、
+     `projects/agent-platform/*` 5 件、`projects/benchfs/known-issues-inventory.md`・
+     `primary-sources.md`・`architecture-overview.md`〈×2 重複〉、他 12 件）で `comparison_target =
+     "BenchFS"` を渡すと `projects/benchfs/architecture-overview.md` が選ばれる（重複や
+     `primary-sources.md`/`known-issues-inventory.md` ではなく）。
+   - 補足: 8 回目の run の「見立て」（`docs/PROGRESS.md` 上の 2026-09-23 16:15 UTC 節）にあった
+     「`BenchFS` と `benchfs`（小文字）を一致させていない」という仮説はコードを読む限り誤り
+     （`find_comparison_page_path` は元から `.lower()` で両辺を正規化しており大文字小文字は無関係）。
+     実際に直したのは、この Phase の指示どおり「対象 8 + 総括 1 が `max_asks=8` を超えて総括が丸ごと
+     落ちていた」ことと、索引の重複・ページ選択の優先順位。次に知識ベースのページがそれでも拾えない
+     run が出たら、`comparison_context.knowledge_index` に該当ページが本当に含まれているか
+     （`req.context.knowledge` が渡っているか）を先に疑うこと。
+
+### ゲート
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（passed 合計 **1978**。Phase 109g の 1977 から +1: `paperqa`〈Rust〉新規テスト 1 件〈`dropped_targets_and_comparison_observability_flow_into_research_json_and_report_md`〉。既存テスト 2 件〈`ask_script_pure_functions_build_questions_flatten_contexts_and_the_table`/`comparison_judgement_pure_functions_extract_build_and_parse`〉にアサーションを追加〈新規 test 関数は増やしていない〉） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| API/protocol | `git status --porcelain -- docs/api docs/protocol` | 出力なし（型を変えていない。`AskOutput`/`PaperQaConfig`/`PaperQaAdapterConfig` は `task-worker`/`celeris` 内部の Rust 型で docs/api・docs/protocol の対象外） |
+
+### 変更ファイル
+
+- `crates/task-worker/src/paperqa_ask.py`（`DEFAULT_MAX_ASKS` 8→10。`build_questions_for_targets` を
+  「比較先があれば総括を必ず残し対象を後ろから詰める」方針に変更、戻り値を
+  `{"questions": [...], "dropped_targets": [...]}` に。`find_comparison_page_path` に重複排除と
+  `architecture`/`overview`/`design` 優先を追加。`load_comparison_design_context` の戻り値を
+  `(context_text, used_page_path)` に。`main()` が `ask_output.json` に `dropped_targets`/
+  `comparison_page`/`comparison_context_chars` を書く）
+- `crates/task-worker/src/paperqa.rs`（`AskOutput` に 3 フィールド追加、`default_max_asks` 8→10、
+  `write_research_json`/`render_evidence_section` に引数追加して `research.json`/`report.md` に反映。
+  新規テスト 1 件、既存テスト 2 件にアサーション追加）
+- `crates/celeris/src/config.rs`（`default_paperqa_max_asks` 8→10、既存テストの期待値更新）
+- `config/celeris.research.example.toml`（`max_asks` の例コメントを 10 に更新）
+- `docs/adr/0063-research-tasks-resilience.md`（「## Phase 109h 追記」を追加。本文・既存の Phase 追記は
+  書き換えていない）
+
+### 未解決事項
+
+- `dropped_targets`/`comparison_page`/`comparison_context_chars` の「## 証拠の質」節への反映は、
+  取得の段（acquire）が動く run（`acquiring = true`）でのみ書かれる（`render_evidence_section` の
+  呼び出しが `evidence.is_some()` の分岐の中にあるため）。取得を行わない構成（`max_candidates = 0`）で
+  比較先があり対象が削られた場合、`research.json` には残るが `report.md` の文面には出ない。実運用では
+  文献調査は常に取得を行う構成なので実害は小さいと見ているが未確認。
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う）: BenchFS の文献調査をやり直し、
+  (1) 対象が `max_asks` を超えても `report.md` に「## BenchFS との比較分類」節と分類語が必ず出ること、
+  (2) 対象が削られた場合は「## 証拠の質」に「max_asks の制限で問えなかった」対象が出ること、
+  (3) `research.json` の `comparison_page`/`comparison_context_chars` が実際の run の状況と一致すること、
+  (4) reviewer が合格判定すること。

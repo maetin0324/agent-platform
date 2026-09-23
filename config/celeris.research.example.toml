@@ -69,8 +69,10 @@ command = "/home/u/celeris/paperqa/.venv/bin/python"
 settings = "/home/u/celeris/paperqa/settings/qwen-local"
 paper_directory = "/home/u/celeris/paperqa/papers"
 index_directory = "/home/u/celeris/paperqa/index"
-# ADR-0063 Phase 109d C3: 対象ごとの問い + 総括の問いの上限（既定 8。目的文の対象が多ければ先頭から）。
-# max_asks = 8
+# ADR-0063 Phase 109d C3 / Phase 109h: 対象ごとの問い + 総括の問いの上限（既定 10。比較先があるときは
+# 総括の問いを必ず残し、対象側を後ろから詰める。目的文の対象がそれでも多ければ、詰めた対象は
+# `research.json`/`report.md` に「max_asks の制限で問えなかった」対象として残る）。
+# max_asks = 10
 # LiteLLM 経由で OpenAI 互換の口に向ける。ADR-0053 D2（Phase 65）: celeris の LLM source プロキシ
 # （`[llm_proxy]`。既定 `127.0.0.1:18100`）に向ける。Qwen が落ちていれば celeris/standard は自動で
 # Claude/GPT のアカウントプールに倒れる（下の `model` も参照）。`OPENAI_API_KEY` は**プロキシの Bearer**

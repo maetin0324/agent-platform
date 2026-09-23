@@ -247,8 +247,9 @@ pub struct PaperQaConfig {
     pub acquire: AcquireConfig,
     /// ADR-0035 D3: 決定的な証拠ゲートの閾値。
     pub evidence: PaperQaEvidence,
-    /// ADR-0063 Phase 109d C3: `ask()` を呼ぶ回数の上限（対象ごとの問い + 総括の問い）。
-    /// 対象が多ければ先頭から。既定 8。
+    /// ADR-0063 Phase 109d C3: `ask()` を呼ぶ回数の上限（対象ごとの問い + 総括の問い）。既定 10
+    /// （Phase 109h: 8 から引き上げ）。比較先があるときは総括の問いを必ず残し、対象側を後ろから
+    /// 詰める（`build_questions_for_targets`、`paperqa_ask.py`）。
     pub max_asks: u32,
     /// ADR-0063 Phase 109g A: `[knowledge] root`（絶対パス）。設定されていれば `paperqa_ask.py` が
     /// 比較先の設計条件（知識ベースのページ本文）をここから直接読む（`ask_input.json` の
@@ -278,7 +279,7 @@ impl Default for PaperQaConfig {
 }
 
 fn default_max_asks() -> u32 {
-    8
+    10
 }
 
 #[derive(Debug, Clone)]
@@ -929,6 +930,19 @@ struct AskOutput {
     answers: Vec<AskAnswer>,
     #[serde(default)]
     target_aspect_table: String,
+    /// ADR-0063 Phase 109h: `max_asks` に収めるため後ろから削られた対象（比較先があるときだけ。
+    /// 総括の問いは必ず残す。`build_questions_for_targets` が返す）。
+    #[serde(default)]
+    dropped_targets: Vec<String>,
+    /// ADR-0063 Phase 109h: 比較先の設計条件に実際に使われた知識ベースのページの path
+    /// （`find_comparison_page_path` の一致がページ本文の読み込みまで成功したときだけ。
+    /// 見つからなければ `None`、目的文の周辺 1 文にフォールバックしたときも `None`）。
+    #[serde(default)]
+    comparison_page: Option<String>,
+    /// ADR-0063 Phase 109h: 総括の判断の問いに埋め込んだ設計条件の文字数（比較先が無い、または
+    /// 設計条件が全く取れなかったときは 0）。
+    #[serde(default)]
+    comparison_context_chars: u32,
     #[serde(default)]
     error: Option<String>,
 }
@@ -1526,14 +1540,27 @@ struct EvidenceGateResult {
 
 /// `artifacts/research.json` を書く（ADR-0063 D1。取得の段が動いた run では常に書く）。
 /// ADR-0063 Phase 109c A: 目的文から取れた対象・観点も残す（監査・reviewer の参考用）。
+/// ADR-0063 Phase 109h: `dropped_targets`/`comparison_page`/`comparison_context_chars`
+/// （`ask_output.json` からそのまま写す。観測性）も残す。
+#[allow(clippy::too_many_arguments)]
 async fn write_research_json(
     path: &Path,
     summary: &EvidenceSummary,
     targets: &[String],
     aspects: &[String],
+    dropped_targets: &[String],
+    comparison_page: Option<&str>,
+    comparison_context_chars: u32,
     run_id: &str,
 ) {
-    let value = serde_json::json!({ "evidence": summary, "targets": targets, "aspects": aspects });
+    let value = serde_json::json!({
+        "evidence": summary,
+        "targets": targets,
+        "aspects": aspects,
+        "dropped_targets": dropped_targets,
+        "comparison_page": comparison_page,
+        "comparison_context_chars": comparison_context_chars,
+    });
     match serde_json::to_string_pretty(&value) {
         Ok(text) => {
             if let Err(e) = tokio::fs::write(path, format!("{text}\n")).await {
@@ -1545,7 +1572,9 @@ async fn write_research_json(
 }
 
 /// `answer.md` に足す「証拠の質」節（ADR-0063 D1: 本文 / アブストのみの内訳を必ず書く）。
-fn render_evidence_section(summary: &EvidenceSummary) -> String {
+/// ADR-0063 Phase 109h: `dropped_targets` が非空なら「max_asks の制限で問えなかった」対象を書く
+/// （総括〈比較分類〉の問いを必ず残すため後ろから詰められた対象。観測性）。
+fn render_evidence_section(summary: &EvidenceSummary, dropped_targets: &[String]) -> String {
     let mut out = String::from("\n\n## 証拠の質\n\n");
     out.push_str(&format!(
         "- 引用された出典: {} 件（本文からの引用: {} 件、アブストラクトのみ: {} 件、\
@@ -1557,6 +1586,13 @@ fn render_evidence_section(summary: &EvidenceSummary) -> String {
             "- 証拠不足（cited={} < min {}）。代替案: Web 調査（`web-research` / Local Deep Research）に \
              切り替えるか、人が著者版 PDF の URL を与えてください。\n",
             summary.cited, summary.min_cited
+        ));
+    }
+    if !dropped_targets.is_empty() {
+        out.push_str(&format!(
+            "- 対象 {} 件は max_asks の制限で問えなかった: {}\n",
+            dropped_targets.len(),
+            dropped_targets.join("、")
         ));
     }
     out
@@ -1906,6 +1942,9 @@ async fn run_paperqa(
                 &ev.summary,
                 &research_targets,
                 &research_aspects,
+                &ask_output.dropped_targets,
+                ask_output.comparison_page.as_deref(),
+                ask_output.comparison_context_chars,
                 run_id,
             )
             .await;
@@ -1935,7 +1974,7 @@ async fn run_paperqa(
                 render_sources_section(&marked)
             );
             if let Some(ev) = &evidence {
-                body.push_str(&render_evidence_section(&ev.summary));
+                body.push_str(&render_evidence_section(&ev.summary, &ask_output.dropped_targets));
             }
             body.push_str(&render_primary_sources_section(&github_urls));
             body
@@ -3648,6 +3687,66 @@ while true; do sleep 0.1; done
         );
     }
 
+    /// ADR-0063 Phase 109h: Phase 109g の本番 run（`01M37FZRX8GMST4SVDNNQF8NMV`）相当の目的文
+    /// （対象 8 件 + 比較先「BenchFS」）で `max_asks = 8` にすると、総括の問いは必ず残り、対象側が
+    /// 後ろから 1 件（`io_uring`）詰められる。その `dropped_targets`/`comparison_page`/
+    /// `comparison_context_chars`（`ask_output.json`）が `research.json` にそのまま写り、
+    /// `report.md` の「## 証拠の質」に「max_asks の制限で問えなかった」対象が出る。
+    #[tokio::test]
+    async fn dropped_targets_and_comparison_observability_flow_into_research_json_and_report_md() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_pqa_with_acquire(
+            dir.path(),
+            &ask_stub_script(STUB_ANSWER, ""),
+            &acquire_stub_script(6, 3),
+        );
+        config.max_asks = 8;
+        let adapter = PaperQaAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        // Phase 109g/109h の本番目的文そのもの（8 対象、比較先 BenchFS）。知識ベースは未設定なので
+        // `comparison_page` は必ず `null`（フォールバック段落〈目的文全体〉を使う）になるはず。
+        req.task.objective = "対象: CHFS / FINCHFS / GekkoFS / UnifyFS / BeeOND / \
+Mochi-Margo-Mercury / UCX / io_uring（観点: 目的、file semantics、deployment model、\
+server/core 利用、data path、BenchFS との比較分類）"
+            .to_string();
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-dropped", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
+
+        let research: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            research["dropped_targets"],
+            serde_json::json!(["io_uring"]),
+            "max_asks=8 では対象 8 件のうち末尾 1 件だけが詰められる: {research}"
+        );
+        assert!(
+            research["comparison_page"].is_null(),
+            "知識ベース未設定なのでページは使われない: {research}"
+        );
+        assert!(
+            research["comparison_context_chars"].as_u64().unwrap() > 0,
+            "目的文の周辺文（フォールバック段落）が使われるので 0 より大きい: {research}"
+        );
+
+        let report_md = std::fs::read_to_string(dir.path().join("artifacts/report.md")).unwrap();
+        assert!(
+            report_md.contains("対象 1 件は max_asks の制限で問えなかった: io_uring"),
+            "{report_md}"
+        );
+        // 総括の問いが必ず残るので、比較分類の節自体は出る（Phase 109g からの回帰確認）。
+        assert!(report_md.contains("## BenchFS との比較分類"), "{report_md}");
+    }
+
     /// ADR-0035 D3: 閾値に足りなければ `Error{retryable}`。**成果物は残す**（`artifacts/result.json` は書かない）。
     #[tokio::test]
     async fn gate_rejects_short_evidence_but_keeps_the_artifacts() {
@@ -5140,27 +5239,56 @@ spec.loader.exec_module(mod)
 
 out = {}
 
-# (b) 対象 5 件 + 総括（比較先あり）で 6 問、max_asks=4 なら 4 問。
+# (b) 対象 5 件 + 総括（比較先あり）で 6 問、max_asks=8 でも 5 件とも入って何も削られない。
 qs_default = mod.build_questions_for_targets(
     ["A", "B", "C", "D", "E"], ["x", "y"], "BenchFS", 8, "fallback")
-out["default_count"] = len(qs_default)
-out["default_ids"] = [q["id"] for q in qs_default]
-out["default_last_target"] = qs_default[-1]["target"]
+out["default_count"] = len(qs_default["questions"])
+out["default_ids"] = [q["id"] for q in qs_default["questions"]]
+out["default_last_target"] = qs_default["questions"][-1]["target"]
+out["default_dropped"] = qs_default["dropped_targets"]
+
+# ADR-0063 Phase 109h: max_asks=4 (< 5 対象 + 総括) でも総括の問いは必ず残り、対象側が後ろから
+# 削られる（max_asks - 1 = 3 件まで）。削られた対象は dropped_targets に残る。
 qs_capped = mod.build_questions_for_targets(
     ["A", "B", "C", "D", "E"], ["x", "y"], "BenchFS", 4, "fallback")
-out["capped_count"] = len(qs_capped)
-out["capped_ids"] = [q["id"] for q in qs_capped]
+out["capped_count"] = len(qs_capped["questions"])
+out["capped_ids"] = [q["id"] for q in qs_capped["questions"]]
+out["capped_dropped"] = qs_capped["dropped_targets"]
 
-# 比較先が無ければ総括の問いは無い（対象は全部入るのに max_asks 未満で終わる）。
+# ADR-0063 Phase 109h 実測相当: 対象 8 件 + 比較先あり、max_asks=8 なら対象は前から 7 件、最後は
+# summary、8 件目（末尾、io_uring）が dropped_targets に。max_asks=10（新しい既定）なら 9 件すべて
+# 入り、何も削られない。
+eight_targets = [
+    "CHFS", "FINCHFS", "GekkoFS", "UnifyFS", "BeeOND", "Mochi-Margo-Mercury", "UCX", "io_uring",
+]
+qs_eight_capped = mod.build_questions_for_targets(eight_targets, ["x"], "BenchFS", 8, "fallback")
+out["eight_capped_count"] = len(qs_eight_capped["questions"])
+out["eight_capped_last_id"] = qs_eight_capped["questions"][-1]["id"]
+out["eight_capped_target_count"] = len(
+    [q for q in qs_eight_capped["questions"] if q.get("target")]
+)
+out["eight_capped_dropped"] = qs_eight_capped["dropped_targets"]
+
+qs_eight_default_max = mod.build_questions_for_targets(
+    eight_targets, ["x"], "BenchFS", mod.DEFAULT_MAX_ASKS, "fallback"
+)
+out["eight_default_max_count"] = len(qs_eight_default_max["questions"])
+out["eight_default_max_dropped"] = qs_eight_default_max["dropped_targets"]
+out["default_max_asks"] = mod.DEFAULT_MAX_ASKS
+
+# 比較先が無ければ総括の問いは無い（対象は全部入るのに max_asks 未満で終わる。dropped_targets も
+# 追跡しない -- 従来どおり）。
 qs_no_comparison = mod.build_questions_for_targets(["A", "B"], ["x"], None, 8, "fallback")
-out["no_comparison_count"] = len(qs_no_comparison)
-out["no_comparison_ids"] = [q["id"] for q in qs_no_comparison]
+out["no_comparison_count"] = len(qs_no_comparison["questions"])
+out["no_comparison_ids"] = [q["id"] for q in qs_no_comparison["questions"]]
+out["no_comparison_dropped"] = qs_no_comparison["dropped_targets"]
 
 # (c) 対象が無ければフォールバックの単一の問い。
 qs_none = mod.build_questions_for_targets([], ["x", "y"], "BenchFS", 8, "the fallback question")
-out["none_count"] = len(qs_none)
-out["none_question"] = qs_none[0]["question"]
-out["none_target"] = qs_none[0]["target"]
+out["none_count"] = len(qs_none["questions"])
+out["none_question"] = qs_none["questions"][0]["question"]
+out["none_target"] = qs_none["questions"][0]["target"]
+out["none_dropped"] = qs_none["dropped_targets"]
 
 # contexts の平坦化（dict 形の偽の Context/Text/Doc、paperqa 無しで動く）。
 contexts = [
@@ -5237,18 +5365,44 @@ print(json.dumps(out, ensure_ascii=False))
             "{v}"
         );
         assert_eq!(v["default_last_target"], serde_json::Value::Null, "{v}");
-        assert_eq!(v["capped_count"], 4, "max_asks=4 のとき対象だけで埋まり総括は入らない: {v}");
+        assert_eq!(v["default_dropped"], serde_json::json!([]), "{v}");
+
+        // ADR-0063 Phase 109h: 総括の問いは必ず残る。対象側が後ろから 3 件（max_asks - 1）に詰まる。
+        assert_eq!(
+            v["capped_count"], 4,
+            "max_asks=4 でも総括は必ず残り、対象が 3 件に詰まる: {v}"
+        );
         assert_eq!(
             v["capped_ids"],
-            serde_json::json!(["t1", "t2", "t3", "t4"]),
+            serde_json::json!(["t1", "t2", "t3", "summary"]),
             "{v}"
         );
+        assert_eq!(v["capped_dropped"], serde_json::json!(["D", "E"]), "{v}");
+
+        // Phase 109g の本番 run 相当（対象 8 件、max_asks=8）: 総括は必ず残り、対象は前から 7 件、
+        // 末尾（io_uring）だけが dropped_targets に落ちる。
+        assert_eq!(v["eight_capped_count"], 8, "{v}");
+        assert_eq!(v["eight_capped_last_id"], "summary", "{v}");
+        assert_eq!(v["eight_capped_target_count"], 7, "{v}");
+        assert_eq!(
+            v["eight_capped_dropped"],
+            serde_json::json!(["io_uring"]),
+            "{v}"
+        );
+
+        // 既定の max_asks（10）なら 8 対象 + 総括の 9 件すべて入り、何も削られない。
+        assert_eq!(v["default_max_asks"], 10, "既定は 8 から 10 に引き上げ: {v}");
+        assert_eq!(v["eight_default_max_count"], 9, "{v}");
+        assert_eq!(v["eight_default_max_dropped"], serde_json::json!([]), "{v}");
+
         assert_eq!(v["no_comparison_count"], 2, "比較先が無ければ総括は無い: {v}");
         assert_eq!(v["no_comparison_ids"], serde_json::json!(["t1", "t2"]), "{v}");
+        assert_eq!(v["no_comparison_dropped"], serde_json::json!([]), "{v}");
 
         assert_eq!(v["none_count"], 1, "{v}");
         assert_eq!(v["none_question"], "the fallback question", "{v}");
         assert_eq!(v["none_target"], serde_json::Value::Null, "{v}");
+        assert_eq!(v["none_dropped"], serde_json::json!([]), "{v}");
 
         assert_eq!(
             v["flat"],
@@ -5329,6 +5483,49 @@ out["page_path_found"] = mod.find_comparison_page_path(index, "BenchFS")
 out["page_path_no_target"] = mod.find_comparison_page_path(index, None)
 out["page_path_no_match"] = mod.find_comparison_page_path(index, "SomethingElse")
 
+# ADR-0063 Phase 109h: 実測（run 01M37FZRX8GMST4SVDNNQF8NMV）相当の索引 -- 25 件、同じ path の
+# 重複（projects/README.md、projects/benchfs/architecture-overview.md）と、"benchfs" を含む
+# 複数のページ（primary-sources.md / known-issues-inventory.md / architecture-overview.md）。
+# 重複は 1 回だけ扱い、"architecture"/"overview"/"design" を含む path を優先する
+# （primary-sources.md や known-issues-inventory.md ではなく architecture-overview.md を選ぶ）。
+real_index = (
+    [{"path": "projects/README.md", "title": "Projects", "tags": []}] * 2
+    + [
+        {"path": "user/preferences.md", "title": "User preferences", "tags": ["user"]},
+        {"path": "user/notes.md", "title": "User notes", "tags": ["user"]},
+    ]
+    + [
+        {"path": "projects/agent-platform/%s.md" % n, "title": "agent-platform %s" % n, "tags": ["project:agent-platform"]}
+        for n in ["overview", "roadmap", "adr-index", "glossary", "progress"]
+    ]
+    + [
+        {
+            "path": "projects/benchfs/known-issues-inventory.md",
+            "title": "BenchFS known issues",
+            "tags": ["project:benchfs"],
+        },
+        {
+            "path": "projects/benchfs/primary-sources.md",
+            "title": "BenchFS primary sources",
+            "tags": ["project:benchfs", "primary-sources"],
+        },
+    ]
+    + [
+        {
+            "path": "projects/benchfs/architecture-overview.md",
+            "title": "BenchFS architecture overview",
+            "tags": ["project:benchfs"],
+        }
+    ]
+    * 2
+    + [
+        {"path": "projects/other-%d/note.md" % n, "title": "Other project %d" % n, "tags": ["misc"]}
+        for n in range(12)
+    ]
+)
+out["real_index_len"] = len(real_index)
+out["real_index_page"] = mod.find_comparison_page_path(real_index, "BenchFS")
+
 # strip_front_matter_block: front matter を落として本文だけ残す。閉じていない '---' はそのまま。
 paged = "---\ntitle: BenchFS\ntags: [project:benchfs]\n---\nBenchFS aggregates node-local NVMe.\n"
 out["stripped"] = mod.strip_front_matter_block(paged)
@@ -5400,6 +5597,15 @@ print(json.dumps(out, ensure_ascii=False))
         );
         assert_eq!(v["page_path_no_target"], serde_json::Value::Null, "{v}");
         assert_eq!(v["page_path_no_match"], serde_json::Value::Null, "{v}");
+
+        // ADR-0063 Phase 109h: 実測相当の 25 件の索引（重複あり）でも architecture-overview.md を選ぶ
+        // （primary-sources.md や known-issues-inventory.md ではなく）。
+        assert_eq!(v["real_index_len"], 25, "{v}");
+        assert_eq!(
+            v["real_index_page"],
+            "projects/benchfs/architecture-overview.md",
+            "重複や他の benchfs ページより architecture-overview.md を優先: {v}"
+        );
 
         assert_eq!(
             v["stripped"],

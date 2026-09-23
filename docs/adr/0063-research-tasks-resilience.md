@@ -584,3 +584,13 @@ run ごとに揺れる）ことも分かった。本文（上記 D1〜D4・受�
   `architecture-overview.md` が拾われること、(2) `answer.md` の「## BenchFS との比較分類」節に対象ごとの
   『公平比較可能』/『背景比較のみ』と確度が出ること、(3) reviewer が「BenchFS との比較分類」観点を合格
   と判定すること。
+
+## Phase 109h 追記（2026-09-23）
+
+8 回目のやり直し（run `01M37FZRX8GMST4SVDNNQF8NMV`）: 対象 8 件 + 総括 1 問 = 9 問が `max_asks`
+（既定 8）を超え、総括（比較分類）の問いが落ちていた。`build_questions_for_targets` を、比較先が
+あれば総括の問いを必ず残し対象側を後ろから `max_asks - 1` 件に詰める（削った対象は `dropped_targets`
+として `ask_output.json`/`research.json`/`report.md`「## 証拠の質」に残す）方針に変更、`max_asks` の
+既定を 8 → 10 に引き上げた。`find_comparison_page_path` は索引の重複 `path` を 1 回だけ扱い、
+`architecture`/`overview`/`design` を含む path を優先。`ask_output.json` に `comparison_page`/
+`comparison_context_chars` を足し観測性を上げた（本文・上の Phase 109g 追記は書き換えない）。

@@ -64,7 +64,7 @@ INPUT (all paths absolute):
        "knowledge_index": [{"path": ..., "title": ..., "tags": [...]}, ...],
        "fallback_paragraph": "<the objective's own sentence around the compare phrase>" | null,
    } | null,
-   "max_asks": 8,
+   "max_asks": 10,                                # ADR-0063 Phase 109h: default raised from 8
    "fallback_question": "<the full single-question text used when targets is empty>",
    "output_path": "<run_dir>/ask_output.json"}
 
@@ -84,7 +84,12 @@ OUTPUT (`output_path`):
                                "question": "t1"}, ...],
                 "references": "...", "cost": 0.01, "token_counts": {...}},
                ...],
-   "target_aspect_table": "| 対象 | ... |\n| --- | ... |\n..." }
+   "target_aspect_table": "| 対象 | ... |\n| --- | ... |\n...",
+   "dropped_targets": ["io_uring", ...],          # ADR-0063 Phase 109h: targets cut to fit
+                                                    # `max_asks` so the comparison summary
+                                                    # question could still run (`[]` otherwise)
+   "comparison_page": "projects/benchfs/architecture-overview.md" | null,  # Phase 109h
+   "comparison_context_chars": 3001 }              # Phase 109h: 0 when no context was used
   (or, if `paperqa` is not importable: {"error": "...", "answers": []})
 
 Retries (ADR-0063 Phase 109d C1): each `ask()` call is retried up to 3 times
@@ -113,6 +118,15 @@ when no design-conditions text can be found at all does the old, permissive ques
 place (未確認 remains acceptable then). `build_target_aspect_table`'s comparison column is
 then read back out of that summary answer (`extract_comparison_classification`), not out of
 each target's own per-target answer.
+
+ADR-0063 Phase 109h: Phase 109g's own production run (`01M37FZRX8GMST4SVDNNQF8NMV`, 8 targets +
+the summary question = 9 > the then-default `max_asks = 8`) still dropped the summary question
+entirely for budget, before `main()` ever got a chance to rebuild it as the judgement question --
+`report.md` had no comparison classification at all. `build_questions_for_targets` now always
+keeps the summary question when `comparison_target` is given and truncates *targets* instead
+(see its docstring); `DEFAULT_MAX_ASKS` is raised to 10; and `ask_output.json` gains
+`dropped_targets`/`comparison_page`/`comparison_context_chars` so a run like that one is
+diagnosable without reading stderr.
 """
 
 import json
@@ -121,7 +135,7 @@ import re
 import sys
 import time
 
-DEFAULT_MAX_ASKS = 8
+DEFAULT_MAX_ASKS = 10
 
 
 # --------------------------------------------------------- dict/attr duality
@@ -320,19 +334,43 @@ def build_questions_for_targets(
 ):
     """The `ask()` questions for one run (ADR-0063 Phase 109d C3). One
     question per target (`- <aspect>: <fact (citation)>` / `未確認` for each
-    aspect), plus one comparison summary question if `comparison_target` is
-    given and there is still room under `max_asks` -- targets are taken from
-    the front and the summary is dropped first when the budget is tight. No
-    targets at all: a single fallback question (the 109c structured prompt,
-    supplied by the Rust side, unchanged)."""
+    aspect), plus one comparison summary question when `comparison_target` is
+    given. No targets at all: a single fallback question (the 109c structured
+    prompt, supplied by the Rust side, unchanged).
+
+    ADR-0063 Phase 109h: the comparison-classification summary question is this
+    run's required deliverable (Phase 109g observed it silently dropped for
+    budget on an 8-target run with the then-default `max_asks = 8`, leaving no
+    classification at all in `report.md`) -- so when `comparison_target` is
+    given, the summary question is **always** included, and *targets* are the
+    ones truncated to fit `max_asks` instead (from the back, keeping the front
+    `max_asks - 1` of them). The dropped targets are returned as
+    `dropped_targets` (`main()`/the Rust adapter surface them for observability
+    and in `report.md`'s `## 証拠の質`). Without `comparison_target`, budgeting
+    is unchanged from before Phase 109h: targets alone, capped at `max_asks`,
+    nothing tracked as dropped.
+
+    Returns `{"questions": [...], "dropped_targets": [...]}`."""
     targets = [str(t).strip() for t in (targets or []) if str(t or "").strip()]
     max_asks = max(0, int(max_asks if max_asks is not None else DEFAULT_MAX_ASKS))
     if not targets:
-        return [{"id": "q1", "target": None, "question": fallback_question}]
+        return {
+            "questions": [{"id": "q1", "target": None, "question": fallback_question}],
+            "dropped_targets": [],
+        }
 
     aspects = [str(a).strip() for a in (aspects or []) if str(a or "").strip()]
     aspect_list = "、".join(aspects)
-    limited = targets[:max_asks]
+    comparison_target = str(comparison_target).strip() if comparison_target else ""
+
+    if comparison_target:
+        # 1 slot reserved for the summary question -- it is never the one dropped.
+        target_budget = max(0, max_asks - 1)
+    else:
+        target_budget = max_asks
+    limited = targets[:target_budget]
+    dropped_targets = targets[target_budget:] if comparison_target else []
+
     questions = []
     for index, target in enumerate(limited, start=1):
         text = (
@@ -341,9 +379,7 @@ def build_questions_for_targets(
         )
         questions.append({"id": "t%d" % index, "target": target, "question": text})
 
-    remaining = max_asks - len(questions)
-    comparison_target = str(comparison_target).strip() if comparison_target else ""
-    if remaining > 0 and comparison_target:
+    if comparison_target:
         # ADR-0063 Phase 109g A: this is the *placeholder* question text (allows 未確認,
         # asks nothing about design conditions) -- `main()` replaces it with the grounded
         # judgement question (`build_comparison_question`) once the per-target answers are
@@ -356,7 +392,7 @@ def build_questions_for_targets(
             "対象: %s" % (comparison_target, "、".join(limited))
         )
         questions.append({"id": "summary", "target": None, "question": summary_text})
-    return questions
+    return {"questions": questions, "dropped_targets": dropped_targets}
 
 
 # ------------------------------------------------ pure: comparison judgement (Phase 109g)
@@ -366,23 +402,46 @@ COMPARISON_CONTEXT_MAX_CHARS = 3000
 COMPARISON_TARGET_ANSWER_MAX_CHARS = 1500
 
 
+_COMPARISON_PAGE_PREFERRED_RE = re.compile(r"architecture|overview|design", re.IGNORECASE)
+
+
 def find_comparison_page_path(knowledge_index, comparison_target):
-    """ADR-0063 Phase 109g A: the `path` of the first knowledge-base index item (in index
-    order) whose `title`/`path`/`tags` contains `comparison_target` as a case-insensitive
-    substring (e.g. `projects/benchfs/architecture-overview.md` for `comparison_target =
-    "BenchFS"`). `None` if there is no `comparison_target`, no index, or no match --
-    `comparison_design_context` then falls back to the objective's own surrounding
-    sentence."""
+    """ADR-0063 Phase 109g A / Phase 109h: the `path` of a knowledge-base index item whose
+    `title`/`path`/`tags` contains `comparison_target` as a case-insensitive substring (e.g.
+    `projects/benchfs/architecture-overview.md` for `comparison_target = "BenchFS"`). `None`
+    if there is no `comparison_target`, no index, or no match -- `comparison_design_context`
+    then falls back to the objective's own surrounding sentence.
+
+    ADR-0063 Phase 109h: the real production index (25 items, `comparison_target = "BenchFS"`,
+    Phase 109g run `01M37FZRX8GMST4SVDNNQF8NMV`) has the same `path` listed more than once (the
+    matching order below counts each distinct `path` only once, in first-seen order) and
+    several matching `projects/benchfs/*` pages that are not the design-conditions page
+    (`primary-sources.md`, `known-issues-inventory.md`, ...). Among the matches, a `path`
+    containing `architecture`/`overview`/`design` (case-insensitive) is preferred over one that
+    doesn't, regardless of index order; with no such preferred match, the first matching path
+    (in index order) is used, same as before Phase 109h."""
     needle = str(comparison_target or "").strip().lower()
     if not needle:
         return None
+    matches = []
+    seen_paths = set()
     for item in knowledge_index or []:
+        path = _get(item, "path")
+        if path is None or path in seen_paths:
+            continue
         title = str(_get(item, "title") or "").lower()
-        path = str(_get(item, "path") or "").lower()
+        path_lower = str(path).lower()
         tags = " ".join(str(t) for t in (_get(item, "tags") or [])).lower()
-        if needle in title or needle in path or needle in tags:
-            return _get(item, "path")
-    return None
+        if needle not in title and needle not in path_lower and needle not in tags:
+            continue
+        seen_paths.add(path)
+        matches.append(path)
+    if not matches:
+        return None
+    for path in matches:
+        if _COMPARISON_PAGE_PREFERRED_RE.search(str(path)):
+            return path
+    return matches[0]
 
 
 def strip_front_matter_block(raw):
@@ -439,7 +498,15 @@ def load_comparison_design_context(payload):
     """The impure half of `comparison_design_context`: resolves `page_path` via
     `find_comparison_page_path`, reads it from `knowledge_root` if both are given (a missing
     file, unset `knowledge_root`, or any `OSError` just means no page text -- not a hard
-    failure of the run), and hands the result to the pure function above."""
+    failure of the run), and hands the result to the pure function above.
+
+    ADR-0063 Phase 109h: returns `(context_text, used_page_path)` instead of just the text --
+    `used_page_path` is `find_comparison_page_path`'s match, but only when the page's own body
+    actually ended up as `context_text` (not when it could not be read, was empty, or the
+    match's body was empty and `context_text` came from `fallback_paragraph` instead). `main()`
+    writes `used_page_path` to `ask_output.json`'s `comparison_page` (observability -- Phase
+    109g's 8th research run could not tell, without reading the run's stderr, whether the
+    knowledge-base page was ever found)."""
     comparison_target = payload.get("comparison_target")
     comparison_context = payload.get("comparison_context") or {}
     knowledge_root = comparison_context.get("knowledge_root")
@@ -453,7 +520,10 @@ def load_comparison_design_context(payload):
                 page_raw_text = handle.read()
         except OSError:
             page_raw_text = None
-    return comparison_design_context(page_raw_text, fallback_paragraph)
+    page_only_text = comparison_design_context(page_raw_text, None)
+    if page_only_text:
+        return page_only_text, page_path
+    return comparison_design_context(None, fallback_paragraph), None
 
 
 def build_comparison_question(comparison_target, targets, target_answers, comparison_context=None):
@@ -690,13 +760,15 @@ def main():
         payload = json.load(handle)
 
     output_path = payload["output_path"]
-    questions = build_questions_for_targets(
+    questions_result = build_questions_for_targets(
         payload.get("targets"),
         payload.get("aspects"),
         payload.get("comparison_target"),
         payload.get("max_asks"),
         payload.get("fallback_question") or "",
     )
+    questions = questions_result["questions"]
+    dropped_targets = questions_result["dropped_targets"]
 
     try:
         import paperqa  # noqa: F401 - import guarded per ADR-0063 Phase 109d C1
@@ -728,7 +800,10 @@ def main():
     # per-target answers it needs as material are available.
     comparison_target = payload.get("comparison_target")
     has_summary_question = any(q.get("id") == "summary" for q in questions)
-    comparison_context = load_comparison_design_context(payload) if has_summary_question else None
+    comparison_context = None
+    comparison_page = None
+    if has_summary_question:
+        comparison_context, comparison_page = load_comparison_design_context(payload)
     limited_targets = [q["target"] for q in questions if q.get("target")]
 
     progress = make_progress_printer()
@@ -748,7 +823,21 @@ def main():
     table = build_target_aspect_table(
         payload.get("targets"), payload.get("aspects"), answers, comparison_target
     )
-    write_json(output_path, {"answers": answers, "target_aspect_table": table})
+    # ADR-0063 Phase 109h: observability for `dropped_targets` (which targets, if any, were
+    # cut to fit `max_asks` so the comparison summary question could still run) and the
+    # comparison design-conditions material actually used (`comparison_page`/
+    # `comparison_context_chars`) -- the Rust adapter copies these into `research.json` and
+    # `report.md`'s `## 証拠の質`.
+    write_json(
+        output_path,
+        {
+            "answers": answers,
+            "target_aspect_table": table,
+            "dropped_targets": dropped_targets,
+            "comparison_page": comparison_page,
+            "comparison_context_chars": len(comparison_context) if comparison_context else 0,
+        },
+    )
     return 0
 
 
