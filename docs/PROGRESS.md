@@ -16144,3 +16144,10 @@ io_uring」が「(必要ならDAOS/Lustre)」の括弧に阻まれて落ちて�
 - merge: `worktree-agent-a48062c79dbd2d540` → main `d29909d`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1970 / failed 0）、`cargo clippy` exit 0。push 済み。
 - `release.sh main` → exit 0、`sha12=d29909d81743 schema_version=25`、`changes.json: base=62cc3985c29a commits=5 files=6 sensitive=0`。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 62cc3985c29a）, 6 すべて true、`ok=true live_ok=true`。`promote.sh d29909d81743` → mode=live、新 celeris 2 秒で active、GUI 切替 2 秒。
 - 文献調査の 7 回目のやり直しを起動（6 回目と同じ明示形の目的文。抽出は最初の段落に限定、明示の「対象:」「観点:」を最優先、質問のエコーを表に貼らない）。結果は次節に追記。
+
+### 2026-09-23 15:27 UTC: 文献調査の 7 回目（Phase 109f）は抽出が直り、比較分類の欠落で不合格 → Phase 109g
+
+- タスク 01M37D6TMRZSBQDC1SKBV22JAW: `targets` 8 件・`aspects` 6 件が正しく抽出され、`report.md` は「# 対象別の整理」の表 + 8 対象の節 + 引用された文献。`evidence = {cited: 3（本文 3、contexts 由来 2）, insufficient: false}`。
+- reviewer 不合格の理由（2 回とも）: 全対象で「BenchFS との比較分類」が『未確認』。PaperQA は文献の範囲で答えるため「文献に BenchFS の言及がない」としたが、この分類は BenchFS の設計条件（知識ベース `projects/benchfs/architecture-overview.md`）と対象の設計を照らす判断であり、文献検索の問いとして立てていたのが誤り。
+- 副次: 多くの観点が『未確認』。corpus が周辺論文中心で、対象の主要論文（CHFS DOI 10.1145/3492805.3492807、GekkoFS DOI 10.1109/CLUSTER.2018.00049 など）が毎 run 入るとは限らない（クエリ生成の揺れ）。
+- Phase 109g（Sonnet）: 総括の問いを「比較先の設計条件（知識ベースから 3 KB）+ 対象別の答えを材料に、必ず二択で分類し確度と理由を書く」に変更、表の分類列に反映。`primary-sources` ページの DOI / arXiv / PDF を acquire の種に。人が著者版 PDF を `~/.local/celeris/tools/paperqa/papers/<project_id>/` に置けば索引されることを文書化。CoS の指示に「分類の欠落は不合格」を追記。
