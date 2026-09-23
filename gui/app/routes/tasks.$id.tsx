@@ -60,6 +60,7 @@ import { HelpLink } from "~/components/HelpLink";
 import { ImageViewer } from "~/components/ImageViewer";
 import { LocalTime } from "~/components/LocalTime";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Sha256Badge } from "~/components/Sha256Badge";
 import { Badge, GenreLabel, KindBadge, RoleLabel, StatusBadge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
@@ -2444,6 +2445,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="mx-auto max-w-2xl space-y-3 p-6">
       <h1 className="text-xl font-semibold text-fg">エラー</h1>
       <Alert tone="danger">予期しないエラーが起きました。</Alert>
+      <RouteRecovery />
     </main>
   );
 }

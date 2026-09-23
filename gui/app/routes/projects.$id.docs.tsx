@@ -9,6 +9,7 @@ import { formString } from "~/celeris/forms";
 import type { DocCommit, ProjectDetail } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -569,6 +570,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="mx-auto max-w-2xl space-y-3 p-6">
       <h1 className="text-xl font-semibold text-fg">エラー</h1>
       <Alert tone="danger">予期しないエラーが起きました。</Alert>
+      <RouteRecovery />
     </main>
   );
 }

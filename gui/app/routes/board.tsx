@@ -17,6 +17,7 @@ import type {
 } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge, StatusBadge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody } from "~/components/ui/card";
@@ -737,6 +738,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="mx-auto max-w-2xl space-y-3 p-6">
       <h1 className="text-xl font-semibold text-fg">エラー</h1>
       <EmptyState icon="alert" title="予期しないエラーが起きました。" />
+      <RouteRecovery />
     </main>
   );
 }

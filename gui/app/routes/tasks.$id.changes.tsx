@@ -11,6 +11,7 @@ import {
   readTaskChangesQuery,
   type TaskChangesData,
 } from "~/celeris/task-changes";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { TaskChanges } from "~/components/task-changes";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, PageHeader } from "~/components/ui/misc";
@@ -112,6 +113,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="mx-auto max-w-2xl space-y-3 p-6">
       <h1 className="text-xl font-semibold text-fg">エラー</h1>
       <Alert tone="danger">予期しないエラーが起きました。</Alert>
+      <RouteRecovery />
     </main>
   );
 }

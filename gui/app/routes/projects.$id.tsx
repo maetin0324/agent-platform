@@ -55,6 +55,7 @@ import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { ProjectIntegrations } from "~/components/ProjectIntegrations";
 import { ProjectRepos } from "~/components/ProjectRepos";
 import { ReportsList } from "~/components/ReportsList";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -1513,6 +1514,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
       <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
+      <RouteRecovery />
     </main>
   );
 }

@@ -15,6 +15,7 @@ import { authCheck, sessionContext } from "~/auth.server";
 import { ConsoleComposer } from "~/components/ConsoleComposer";
 import { ConsoleComposerProvider, useConsoleComposerContext } from "~/components/ConsoleComposerContext";
 import { NotificationsWatcher } from "~/components/NotificationsWatcher";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { TimeZonePreference } from "~/components/TimeZonePreference";
 import { Badge } from "~/components/ui/badge";
 import { buttonClass } from "~/components/ui/button";
@@ -740,6 +741,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="mx-auto max-w-3xl p-4 pt-16">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -756,7 +758,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     }
     return (
       <main className="mx-auto max-w-3xl p-4 pt-16">
-        <ErrorPanel title={data.status === 404 ? "404" : `エラー ${data.status}`}>
+        <ErrorPanel title={data.status === 404 ? "404" : `エラー ${data.status}`} recover={data.status !== 404}>
           <p>{data.detail}</p>
         </ErrorPanel>
       </main>
@@ -779,7 +781,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   }
   return (
     <main className="mx-auto max-w-3xl p-4 pt-16">
-      <ErrorPanel title={message}>
+      <ErrorPanel title={message} recover>
         <p>{details}</p>
         {stack && (
           <pre className="mt-3 w-full overflow-x-auto rounded-lg border border-border bg-surface-2 p-4 text-xs">
@@ -791,7 +793,15 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
   );
 }
 
-function ErrorPanel({ title, children }: { title: string; children: React.ReactNode }) {
+function ErrorPanel({
+  title,
+  children,
+  recover = false,
+}: {
+  title: string;
+  children: React.ReactNode;
+  recover?: boolean;
+}) {
   return (
     <div className="rounded-2xl border border-border bg-surface p-8 shadow-md">
       <span className="grid size-11 place-items-center rounded-xl bg-danger-soft text-danger-soft-fg ring-1 ring-danger-border">
@@ -799,6 +809,7 @@ function ErrorPanel({ title, children }: { title: string; children: React.ReactN
       </span>
       <h1 className="mt-4 text-2xl font-bold tracking-tight text-fg">{title}</h1>
       <div className="mt-2 text-sm text-fg-muted">{children}</div>
+      {recover && <RouteRecovery />}
       <a href="/" className={buttonClass({ variant: "secondary", className: "mt-6" })}>
         <Icon name="arrowLeft" />
         Console へ戻る

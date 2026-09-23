@@ -7,6 +7,7 @@ import { promoteRelease, readReleaseSha12 } from "~/celeris/releases-admin.serve
 import type { ReleaseItem, Releases } from "~/celeris/types";
 import { ReleasePromoteFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -628,6 +629,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
       <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
+      <RouteRecovery />
     </main>
   );
 }
