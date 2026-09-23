@@ -15002,3 +15002,10 @@ handoff」、`scripts/selfdeploy/promote.sh` 90〜100 行付近）で完了し�
 - 約 10 秒後: `promoted.json` 作成、`promote.log` は「live handoff complete」→「promoted 5b80f99a8042 (mode=live)」まで到達。scope は消えた（プロセス終了で systemd が回収）。旧 unit `celeris@48a338a81f55` は drain して消え、新 `celeris@5b80f99a8042` のみ active。
 - 状態: `GET /health` release=5b80f99a8042 role=active schema_version=25、GUI `/healthz` 同 release、`current -> releases/5b80f99a8042`、`GET /releases` の当該項目は `promote_stale=false`、`is_current=true`。pegasus の ssh master は生存（`connected=true`、Phase 103 の 3 回目の確認）。
 - 21:55Z の事故（`setsid` の `promote.sh` が旧 unit の cgroup 回収で殺され、`current`/GUI が旧のまま止まる）と同じ条件（在庫 run 無し、旧デーモンが即 drain）で、今回は最後まで進んだ。GUI からの昇格は今後この経路で動く。
+
+### 2026-09-23 00:20 UTC: 運用の後片付けと RDC 経路の実績（人の指示）
+
+- MCP client `chatgpt`（旧 18201 用、scope に org:write / skills:write）を `celerisctl mcp client revoke chatgpt` → `revoked: chatgpt`。残る client は `claude-code` と `chatgpt-rdc`。
+- 古い unit の削除: `celeris-qwen-tunnel.timer` を disable --now、`celeris-qwen-tunnel.service` を stop、両 unit ファイルと wants リンクを削除、`celeris@44447197fcaf.service` の failed 状態を reset-failed、`daemon-reload`。`systemctl --user list-units 'celeris*'` は `celeris@5b80f99a8042` / `celeris-gui@5b80f99a8042` / `celeris-ssh-master-pegasus-4D76X42X.scope` の 3 つだけ。Qwen トンネルは ADR-0053 D3 のとおり celeris の `[[clusters.forwards]]` が担う。
+- RDC 経路（ChatGPT → Remote Desktop Commander → chatgpt-rdc → celeris-chat → MCP）: 人がペアリングを完了し、ChatGPT のチャットから実際に使った。`GET /mcp/calls?client=chatgpt-rdc` は 47 件（knowledge_get 25、knowledge_search 7、tasks_list 5、knowledge_propose 4、console_instruct 2、console_reply 2、tasks_get 1、task_comment 1。ok 45 / 失敗 2）。`_inbox/20260922T195001Z-benchfs-jobs.md` は ChatGPT からの知識候補。19:49Z の `console_instruct`「Celeris 自身の自己改善タスクとして、coding worker のハーネスを自動選択・ルーティングする機能を設計・実装して」が CoS → software-engineering → Phase 104（ADR-0061）の自己改善 → delivery → 人の昇格、という一連の流れの起点だった。外部エージェントが CoS 経由で仕事を作り、本番に反映されるまでを 1 周した。
+- 進行中: Phase 106（自己改善の delivery が merge 後・release 前に origin へ push する）。
