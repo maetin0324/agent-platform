@@ -9,7 +9,7 @@
           "api_base": "http://127.0.0.1:18000/v1",
           "api_key": "unused",
           "timeout": 900,
-          "num_retries": 1
+          "num_retries": 3
         }
       }
     ]
@@ -24,7 +24,7 @@
           "api_base": "http://127.0.0.1:18000/v1",
           "api_key": "unused",
           "timeout": 900,
-          "num_retries": 1
+          "num_retries": 3
         }
       }
     ]
@@ -51,7 +51,7 @@
             "api_base": "http://127.0.0.1:18000/v1",
             "api_key": "unused",
             "timeout": 900,
-            "num_retries": 1
+            "num_retries": 3
           }
         }
       ]

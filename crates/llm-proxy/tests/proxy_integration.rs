@@ -1041,3 +1041,101 @@ async fn no_secret_value_appears_in_the_logs_even_across_a_token_refresh() {
         assert!(!captured.contains(secret), "log leaked a secret value: {captured}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// ADR-0063 Phase 109b C1: 候補が一時的に全部無くなったときの再走査
+// ---------------------------------------------------------------------------
+
+/// 候補が 1 周目は全滅（cooldown 中）で、1 秒待った 2 周目には cooldown が切れていて成功する
+/// （即 503 にはしない）。`until` は実時間で 1 秒後に設定し、実際に 1 秒待たせて確かめる。
+#[tokio::test]
+async fn no_source_available_rescans_after_a_short_wait_and_then_succeeds() {
+    let fake = Arc::new(AnthropicFake::default());
+    let (upstream_addr, _h1) = spawn(anthropic_router(fake.clone())).await;
+
+    let accounts_tmp = tempfile::tempdir().expect("tmp");
+    write_claude_credentials(accounts_tmp.path(), "acct-a", "fake-access-a", "fake-refresh-a", far_future_ms());
+
+    let mut config = base_config();
+    config.sources.claude_oauth = Some(claude_source(upstream_addr, accounts_tmp.path().to_path_buf()));
+
+    // `until = now + 2`（1 秒ではなく）: 秒未満の端数が切り捨てられる `unix_timestamp()` の境界
+    // （セットアップが `T.999` 秒で行われると `until = T+1` は数ミリ秒後にはもう過去になり得る）で
+    // 1 周目からすり抜けてテストが flaky にならないよう、確実に 1 回はすり抜けない余裕を持たせる。
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let mut book = AccountBook::new_in_memory();
+    book.set_cooldown(
+        "acct-a",
+        task_dispatch::accounts::AccountCooldown {
+            until: now + 2,
+            reason: task_dispatch::accounts::AccountCooldownReason::Throttled,
+        },
+        now,
+    );
+    let state = ProxyState::new(
+        config,
+        reqwest::Client::new(),
+        Some(Arc::new(StdMutex::new(book))),
+        None,
+        None,
+        SharedRole::default(),
+        None,
+        std::time::Duration::from_secs(5),
+    );
+    let (addr, _h2) = spawn(router(state)).await;
+
+    let client = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    let resp = post_chat(&client, addr, &chat_request("claude/standard", false), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "少なくとも 1 回は再走査の待ちがあったはず: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(resp.headers().get("x-celeris-account").and_then(|v| v.to_str().ok()), Some("acct-a"));
+}
+
+/// 候補が最後まで無い（cooldown が切れない）場合は、最大 2 周（合計 2 秒）待った上で 503
+/// `no_source_available` と `Retry-After: 5` を返す。
+#[tokio::test]
+async fn no_source_available_gives_up_with_retry_after_when_nothing_ever_recovers() {
+    let accounts_tmp = tempfile::tempdir().expect("tmp");
+    write_claude_credentials(accounts_tmp.path(), "acct-a", "fake-access-a", "fake-refresh-a", far_future_ms());
+
+    let mut config = base_config();
+    config.sources.claude_oauth = Some(claude_source("127.0.0.1:1".parse().unwrap(), accounts_tmp.path().to_path_buf()));
+
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let mut book = AccountBook::new_in_memory();
+    book.set_cooldown(
+        "acct-a",
+        task_dispatch::accounts::AccountCooldown {
+            until: now + 3600,
+            reason: task_dispatch::accounts::AccountCooldownReason::Throttled,
+        },
+        now,
+    );
+    let state = ProxyState::new(
+        config,
+        reqwest::Client::new(),
+        Some(Arc::new(StdMutex::new(book))),
+        None,
+        None,
+        SharedRole::default(),
+        None,
+        std::time::Duration::from_secs(5),
+    );
+    let (addr, _h) = spawn(router(state)).await;
+
+    let client = reqwest::Client::new();
+    let started = std::time::Instant::now();
+    let resp = post_chat(&client, addr, &chat_request("claude/standard", false), None).await;
+    let elapsed = started.elapsed();
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(resp.headers().get(header::RETRY_AFTER).and_then(|v| v.to_str().ok()), Some("5"));
+    assert!(elapsed >= std::time::Duration::from_millis(1900), "2 回分の再走査待ちがあったはず: {elapsed:?}");
+    assert!(elapsed < std::time::Duration::from_secs(4), "3 秒以内という要件: {elapsed:?}");
+    let body: Value = resp.json().await.expect("json");
+    assert_eq!(body["error"]["type"], "no_source_available");
+}

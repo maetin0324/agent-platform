@@ -55,10 +55,13 @@ be imported on its own (e.g. to unit test `convert_setting_value` or
 `build_evidence_manifest`) without the package installed.
 """
 
+import html as html_module
+import inspect
 import json
 import os
 import re
 import sys
+import time
 import urllib.request
 from urllib.parse import urlparse
 
@@ -235,10 +238,15 @@ def build_evidence_manifest(result):
             # 実機（LDR 1.10.7）の 1 件は {id, index, link, snippet, source, title} で、
             # エンジン名は `source` に入る。
             engine = raw.get("engine") or raw.get("search_engine") or raw.get("source") or None
+            # ADR-0063 Phase 109b B1: `add_must_read_sources` が付けた `primary: true` は
+            # `sources.json`/report にも引き継ぐ（celeris のアダプタが「必読の一次情報のうち
+            # 何件使われたか」を数えるのに読む）。
+            primary = bool(raw.get("primary"))
         else:
             url = str(raw)
             title = url
             engine = None
+            primary = False
         if not url:
             continue
         cited_here = i in cited_indices
@@ -248,9 +256,14 @@ def build_evidence_manifest(result):
                 sources_list[idx]["cited"] = True
             if not sources_list[idx].get("engine") and engine:
                 sources_list[idx]["engine"] = engine
+            if primary:
+                sources_list[idx]["primary"] = True
         else:
             seen[url] = len(sources_list)
-            sources_list.append({"url": url, "title": title, "engine": engine, "cited": cited_here})
+            entry = {"url": url, "title": title, "engine": engine, "cited": cited_here}
+            if primary:
+                entry["primary"] = True
+            sources_list.append(entry)
 
     queries = extract_queries(result.get("questions"))
     if not queries:
@@ -282,6 +295,53 @@ def build_evidence_manifest(result):
         "counts": counts,
     }
     return sources_list, research
+
+
+# --------------------------------------------- ADR-0063 Phase 109b B1: primary sources
+
+
+MIN_CITED_EXCERPT_MATCH_CHARS = 24
+
+
+def excerpt_is_cited(url, excerpt_text, body_text):
+    """Whether a must-read primary source's excerpt shows up in the final
+    report body (ADR-0063 Phase 109b B1): true if the URL itself is quoted
+    in the body, or if some whitespace-collapsed line of the fetched
+    excerpt (at least `MIN_CITED_EXCERPT_MATCH_CHARS` characters) appears
+    verbatim in the whitespace-collapsed body. Best-effort and
+    deterministic -- no LLM judges whether the source was "really" used."""
+    body_collapsed = _collapse_whitespace(body_text or "").lower()
+    if not body_collapsed:
+        return False
+    if url and str(url).lower() in body_collapsed:
+        return True
+    for line in str(excerpt_text or "").splitlines():
+        candidate = _collapse_whitespace(line).lower()
+        if len(candidate) >= MIN_CITED_EXCERPT_MATCH_CHARS and candidate in body_collapsed:
+            return True
+    return False
+
+
+def apply_primary_source_citations(sources_list, research, primary_excerpts, body_text):
+    """Whichever must-read primary source's excerpt shows up in the final
+    report body counts as cited (ADR-0063 Phase 109b B1), even though LDR's
+    own `[n]` citation markers can never point at an index appended after
+    its own synthesis ran. `primary_excerpts` maps url -> excerpt text
+    (only entries that were actually fetched with content). Mutates
+    `sources_list` in place and recomputes `research["counts"]
+    ["sources_cited"]` when something changed."""
+    if not primary_excerpts:
+        return
+    changed = False
+    for source in sources_list:
+        if source.get("cited"):
+            continue
+        excerpt = primary_excerpts.get(source.get("url"))
+        if excerpt and excerpt_is_cited(source.get("url"), excerpt, body_text):
+            source["cited"] = True
+            changed = True
+    if changed:
+        research["counts"]["sources_cited"] = sum(1 for s in sources_list if s.get("cited"))
 
 
 def build_evidence_manifest_from_text(text):
@@ -488,13 +548,138 @@ def fetch_url_title(url, timeout=10):
     return url
 
 
+_GITHUB_REPO_RE = re.compile(r"^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", re.IGNORECASE)
+_GITLAB_REPO_RE = re.compile(r"^https?://gitlab\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", re.IGNORECASE)
+_SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style)[^>]*>.*?</\1>")
+_TAG_RE = re.compile(r"(?s)<[^>]+>")
+PRIMARY_EXCERPT_MAX_CHARS = 6000
+
+
+def github_readme_url(url):
+    """A bare GitHub/GitLab repository URL (`.../<owner>/<repo>`, no
+    sub-path) -> its README's raw-text URL (ADR-0063 Phase 109b B1). `None`
+    for anything else (a sub-path like `/issues/1`, or a non-repo host),
+    which falls back to plain HTML fetching."""
+    match = _GITHUB_REPO_RE.match(url.strip())
+    if match:
+        owner, repo = match.group(1), match.group(2)
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/HEAD/README.md"
+    match = _GITLAB_REPO_RE.match(url.strip())
+    if match:
+        owner, repo = match.group(1), match.group(2)
+        return f"https://gitlab.com/{owner}/{repo}/-/raw/HEAD/README.md"
+    return None
+
+
+def html_to_text(html):
+    """HTML -> plain text (ADR-0063 Phase 109b B1): drop `<script>`/`<style>`
+    blocks first (their content is not prose), strip every remaining tag,
+    unescape entities, and collapse whitespace."""
+    text = _SCRIPT_STYLE_RE.sub(" ", html or "")
+    text = _TAG_RE.sub(" ", text)
+    text = html_module.unescape(text)
+    return _collapse_whitespace(text)
+
+
+def default_primary_source_fetch(url, timeout=10):
+    """The real network fetch for a must-read primary source (production
+    only; tests inject a fake `fetch` instead)."""
+    request = urllib.request.Request(url, headers={"User-Agent": "celeris-ldr/1.0"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def build_primary_source_entries(must_read_urls, fetch=None, timeout=10):
+    """Fetch each true `http(s)://` must-read URL once (ADR-0063 Phase 109b
+    B1): a GitHub/GitLab repository URL's README (raw text, so no HTML
+    stripping is needed), else the page's HTML converted to text. Returns
+    `(section_markdown, entries)` where each entry is
+    `{"link", "title", "source": "must-read", "primary": True, "excerpt",
+    "fetch_error"}` (`excerpt` is `""` and `fetch_error` is set on failure).
+    A `must_read_urls` entry that is not `http(s)://` is dropped (ADR-0063
+    Phase 109b B1: `human` and the like from the knowledge base). `fetch(url,
+    timeout) -> bytes` is injected so tests never touch the network; `None`
+    resolves `default_primary_source_fetch` at call time (not bound as a
+    default at import time), so a test can also monkeypatch that name and
+    have `main()` -- which never passes its own `fetch` -- honor the fake."""
+    if fetch is None:
+        fetch = default_primary_source_fetch
+    entries = []
+    seen = set()
+    for raw_url in must_read_urls or []:
+        url = str(raw_url or "").strip()
+        if not is_http_url(url) or url in seen:
+            continue
+        seen.add(url)
+        readme_url = github_readme_url(url)
+        fetch_target = readme_url or url
+        title = url
+        excerpt = ""
+        error = None
+        try:
+            body = fetch(fetch_target, timeout)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+        else:
+            text = body.decode("utf-8", errors="replace") if isinstance(body, (bytes, bytearray)) else str(body)
+            if readme_url:
+                excerpt = text.strip()
+            else:
+                match = _TITLE_TAG_RE.search(text)
+                if match:
+                    title = _collapse_whitespace(match.group(1))
+                excerpt = html_to_text(text)
+            excerpt = excerpt[:PRIMARY_EXCERPT_MAX_CHARS]
+        entries.append(
+            {
+                "link": url,
+                "title": title,
+                "source": "must-read",
+                "primary": True,
+                "excerpt": excerpt,
+                "fetch_error": error,
+            }
+        )
+    return render_primary_excerpts_section(entries), entries
+
+
+def render_primary_excerpts_section(entries):
+    """「## 必読の一次情報（本文抜粋）」節（ADR-0063 Phase 109b B1）。research question の直後に
+    足され、LDR に渡す問いの一部になる。空リストなら空文字列（節そのものを付けない）。"""
+    if not entries:
+        return ""
+    lines = ["## 必読の一次情報（本文抜粋）", ""]
+    for entry in entries:
+        lines.append(f"### {entry['title']} — {entry['link']}")
+        if entry.get("fetch_error"):
+            lines.append(f"(取得失敗: {entry['fetch_error']})")
+        elif entry.get("excerpt"):
+            lines.append(entry["excerpt"])
+        else:
+            lines.append("(本文なし)")
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def is_http_url(url):
+    """`http(s)://` only (ADR-0063 Phase 109b B1: the knowledge base's
+    `sources` occasionally carries a non-URL value like `"human"` -- a
+    citation for a human-provided fact, not a page to read -- which must
+    never be treated as a must-read source)."""
+    return isinstance(url, str) and (url.startswith("http://") or url.startswith("https://"))
+
+
 def add_must_read_sources(result, must_read_urls, fetch_title):
     """Append the must-read URLs (ADR-0063 D2/D3: 必読の一次情報) to
     `result["sources"]` in place, skipping any already present (matched by
-    URL). Appended at the **end** so LDR's own `[n]` citation numbers in
+    URL) or that are not `http(s)://` (ADR-0063 Phase 109b B1). Appended at
+    the **end** so LDR's own `[n]` citation numbers in
     `summary`/`formatted_findings` keep pointing at the right entry.
     `fetch_title(url) -> str` is injected so tests never touch the network.
-    Returns the number of URLs actually appended."""
+    Each appended entry carries `primary: True` (so `build_evidence_manifest`
+    marks it in `sources.json`) and `cited: False` (the adapter/
+    `apply_primary_source_citations` may flip it to `True` once the report
+    body is known). Returns the number of URLs actually appended."""
     sources = list(result.get("sources") or [])
     existing = set()
     for raw in sources:
@@ -507,12 +692,132 @@ def add_must_read_sources(result, must_read_urls, fetch_title):
     added = 0
     for url in must_read_urls or []:
         url = str(url or "").strip()
-        if url and url not in existing:
-            sources.append({"link": url, "title": fetch_title(url), "source": "must-read"})
+        if url and is_http_url(url) and url not in existing:
+            sources.append(
+                {
+                    "link": url,
+                    "title": fetch_title(url),
+                    "source": "must-read",
+                    "primary": True,
+                    "cited": False,
+                }
+            )
             existing.add(url)
             added += 1
     result["sources"] = sources
     return added
+
+
+# ------------------------------------------------- ADR-0063 Phase 109b B2
+
+
+def iteration_setting_overrides(func, iterations, questions_per_iteration):
+    """Return `(settings_overrides, direct_kwargs)` for `iterations`/
+    `questions_per_iteration` (ADR-0063 Phase 109b B2). Whichever of the two
+    `func` actually declares as a named parameter (via `inspect.signature`)
+    is passed directly as a kwarg -- so `call_with_fallback` can still drop
+    it on a genuine `TypeError`; anything NOT declared goes into the LDR
+    settings instead (`search.iterations` / `search.questions_per_iteration`),
+    which `settings_override`/`settings_snapshot` reliably applies even when
+    the function's own `**kwargs` would silently swallow an unnamed keyword.
+
+    This is the real bug behind `research.json`'s `iterations` staying at
+    LDR's settings-file default after Phase 109 set `retry_iterations = 5`:
+    `detailed_research` only declares `query`/`settings_snapshot`/
+    `progress_callback` (plus `**kwargs`), so the direct `iterations=5`
+    kwarg landed in `**kwargs` and was silently never read."""
+    try:
+        declared = set(inspect.signature(func).parameters)
+    except (TypeError, ValueError):
+        declared = None  # cannot introspect; try both as direct kwargs (pre-Phase-109b behavior).
+
+    overrides = {}
+    direct = []
+    for name, value, setting_key in (
+        ("iterations", iterations, "search.iterations"),
+        ("questions_per_iteration", questions_per_iteration, "search.questions_per_iteration"),
+    ):
+        if value is None:
+            continue
+        if declared is None or name in declared:
+            direct.append((name, value))
+        else:
+            overrides[setting_key] = value
+    return overrides, direct
+
+
+# ------------------------------------------------- ADR-0063 Phase 109b B3
+
+
+class UpstreamLlmError(Exception):
+    """ADR-0063 Phase 109b B3: the LDR call itself raised, or returned a
+    result whose synthesis text is actually an upstream LLM error (the
+    llm-proxy's 503 written into `summary` as if it were the answer)."""
+
+
+_UPSTREAM_ERROR_RE = re.compile(
+    r"error code:\s*\d{3}\b|no_source_available|no reachable llm source",
+    re.IGNORECASE,
+)
+
+
+def detect_upstream_llm_error(text):
+    """Whether `text` (an LDR `summary`/body) is actually the *llm-proxy's*
+    error message rather than a real answer (ADR-0063 Phase 109b B3: LDR's
+    own synthesis step can swallow an LLM-call exception -- e.g. the
+    llm-proxy's 503 `no_source_available` -- and write `str(exc)` into the
+    `summary` field as if it were the answer, production observed
+    2026-09-23). Returns a short description for the error message, or
+    `None` if `text` does not look like a disguised upstream error."""
+    if not _UPSTREAM_ERROR_RE.search(str(text or "")):
+        return None
+    return _collapse_whitespace(text)[:300]
+
+
+LDR_RETRY_DELAYS = (2.0, 4.0, 8.0)
+
+
+def call_ldr_stage(perform, extract_text, on_bad_result=None):
+    """One attempt of an LDR API call (ADR-0063 Phase 109b B3). `perform()`
+    does the actual call (and, for `generate_report`, the file write) and
+    returns whatever the caller needs afterward; `extract_text(returned)`
+    is the string to scan for a disguised upstream LLM error. A real
+    exception, and a disguised error, both surface as `UpstreamLlmError` so
+    `run_with_retries` treats them alike. `on_bad_result(returned)` runs
+    before raising for a disguised error (e.g. to delete a `report.md` that
+    `generate_report` already wrote with the bad content)."""
+    try:
+        returned = perform()
+    except Exception as exc:
+        raise UpstreamLlmError(f"{type(exc).__name__}: {exc}") from exc
+    problem = detect_upstream_llm_error(extract_text(returned))
+    if problem:
+        if on_bad_result:
+            on_bad_result(returned)
+        raise UpstreamLlmError(f"llm error surfaced as the answer: {problem}")
+    return returned
+
+
+def run_with_retries(attempt_once, sleep=None, delays=LDR_RETRY_DELAYS):
+    """Call `attempt_once()` up to `len(delays) + 1` times total (ADR-0063
+    Phase 109b B3: 2s / 4s / 8s backoff between attempts, i.e. up to 3
+    retries). Only `UpstreamLlmError` is retried; any other exception, or
+    the last attempt's `UpstreamLlmError`, propagates. `sleep` is looked up
+    from `time.sleep` at call time (not bound as a default at import time)
+    so a test can monkeypatch `time.sleep` and have `main()` -- which never
+    passes its own `sleep` -- honor the fake without any real waiting."""
+    if sleep is None:
+        sleep = time.sleep
+    last_exc = None
+    for delay in (*delays, None):
+        try:
+            return attempt_once()
+        except UpstreamLlmError as exc:
+            last_exc = exc
+            if delay is None:
+                raise
+            sleep(delay)
+    raise last_exc  # pragma: no cover -- the loop above always returns or raises
 
 
 def main():
@@ -547,25 +852,53 @@ def main():
         return 1
 
     progress = make_progress_printer()
-    optional_kwargs = [("progress_callback", progress)]
-    if questions_per_iteration is not None:
-        optional_kwargs.append(("questions_per_iteration", questions_per_iteration))
-    if iterations is not None:
-        optional_kwargs.append(("iterations", iterations))
 
     try:
         os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
     except OSError:
         pass
 
+    # ADR-0063 Phase 109b B1: fetch each must-read primary source once, *before* any search, and
+    # fold its excerpt into the question right after the research question itself. URLs that are not
+    # `http(s)://` (e.g. `human` from the knowledge base) are dropped by `build_primary_source_entries`.
+    primary_section = ""
+    primary_entries = []
+    if must_read:
+        primary_section, primary_entries = build_primary_source_entries(must_read)
+        for entry in primary_entries:
+            if entry.get("fetch_error"):
+                progress(f"must-read: {entry['link']} (fetch failed: {entry['fetch_error']})")
+            else:
+                progress(f"must-read: {entry['link']} ({len(entry.get('excerpt') or '')} chars)")
+    augmented_query = f"{query}\n\n{primary_section}" if primary_section else query
+    primary_titles = {e["link"]: e["title"] for e in primary_entries}
+    primary_excerpts = {e["link"]: e["excerpt"] for e in primary_entries if e.get("excerpt")}
+
+    def fetch_title_for(url):
+        # Reuse the title already fetched while building the excerpt (no second request);
+        # fall back to `fetch_url_title` only for a URL the excerpt stage did not see.
+        return primary_titles.get(url) or fetch_url_title(url)
+
     try:
         if mode == "quick":
-            result = call_with_fallback(quick_summary, {"query": query, "settings_override": settings}, optional_kwargs)
+            overrides, direct = iteration_setting_overrides(quick_summary, iterations, questions_per_iteration)
+            settings_q = dict(settings)
+            settings_q.update(overrides)
+            result = run_with_retries(
+                lambda: call_ldr_stage(
+                    lambda: call_with_fallback(
+                        quick_summary,
+                        {"query": augmented_query, "settings_override": settings_q},
+                        [("progress_callback", progress)] + direct,
+                    ),
+                    lambda r: str((r or {}).get("summary") or "") if isinstance(r, dict) else "",
+                )
+            )
             if not isinstance(result, dict):
                 print(f"quick_summary returned an unexpected type: {type(result)!r}", file=sys.stderr)
                 return 1
             if must_read:
-                add_must_read_sources(result, must_read, fetch_url_title)
+                add_must_read_sources(result, must_read, fetch_title_for)
             summary, _ = write_report_from_result(report_path, query, result)
             sources_list, research = build_evidence_manifest(result)
         elif mode == "detailed":
@@ -577,39 +910,89 @@ def main():
             # package (ADR-0029): calling with `settings_override=settings` raises
             # "Ollama model not configured" even when `settings` has `llm.model` set,
             # while `settings_snapshot=create_settings_snapshot(overrides=settings)`
-            # uses it correctly.
-            result = call_with_fallback(
-                detailed_research,
-                {"query": query, "settings_snapshot": create_settings_snapshot(overrides=settings)},
-                optional_kwargs,
+            # uses it correctly. ADR-0063 Phase 109b B2: `detailed_research` also does not
+            # declare `iterations`/`questions_per_iteration` as real parameters (they get
+            # silently swallowed by its `**kwargs`), so those go into the settings snapshot
+            # instead when `iteration_setting_overrides` finds them undeclared.
+            overrides, direct = iteration_setting_overrides(detailed_research, iterations, questions_per_iteration)
+            settings_d = dict(settings)
+            settings_d.update(overrides)
+            result = run_with_retries(
+                lambda: call_ldr_stage(
+                    lambda: call_with_fallback(
+                        detailed_research,
+                        {
+                            "query": augmented_query,
+                            "settings_snapshot": create_settings_snapshot(overrides=settings_d),
+                        },
+                        [("progress_callback", progress)] + direct,
+                    ),
+                    lambda r: str((r or {}).get("summary") or "") if isinstance(r, dict) else "",
+                )
             )
             if not isinstance(result, dict):
                 print(f"detailed_research returned an unexpected type: {type(result)!r}", file=sys.stderr)
                 return 1
             if must_read:
-                add_must_read_sources(result, must_read, fetch_url_title)
+                add_must_read_sources(result, must_read, fetch_title_for)
             summary, _ = write_report_from_result(report_path, query, result)
             sources_list, research = build_evidence_manifest(result)
         elif mode == "report":
-            raw_result = call_with_fallback(
-                generate_report,
-                {"query": query, "settings_override": settings, "output_file": report_path},
-                optional_kwargs,
+            overrides, direct = iteration_setting_overrides(generate_report, iterations, questions_per_iteration)
+            settings_r = dict(settings)
+            settings_r.update(overrides)
+
+            def do_report():
+                raw = call_with_fallback(
+                    generate_report,
+                    {"query": augmented_query, "settings_override": settings_r, "output_file": report_path},
+                    [("progress_callback", progress)] + direct,
+                )
+                text, _ = summarize_report_file(report_path)
+                return raw, text
+
+            def discard_report_file(_ignored):
+                # ADR-0063 Phase 109b B3: `generate_report` already wrote `report_path` itself;
+                # if its content is a disguised upstream error, remove it before retrying/giving up.
+                try:
+                    os.remove(report_path)
+                except OSError:
+                    pass
+
+            raw_result, text = run_with_retries(
+                lambda: call_ldr_stage(do_report, lambda rt: rt[1], on_bad_result=discard_report_file)
             )
-            text, _ = summarize_report_file(report_path)
             summary = text
             # `generate_report` is not documented to return the same shape as
             # `quick_summary`/`detailed_research`; use it if it happens to be
             # a dict, otherwise fall back to scraping URLs out of the report.
             if isinstance(raw_result, dict):
                 if must_read:
-                    add_must_read_sources(raw_result, must_read, fetch_url_title)
+                    add_must_read_sources(raw_result, must_read, fetch_title_for)
                 sources_list, research = build_evidence_manifest(raw_result)
             else:
                 sources_list, research = build_evidence_manifest_from_text(text)
         else:
             print(f"unknown mode: {mode}", file=sys.stderr)
             return 2
+
+        # ADR-0063 Phase 109b B1: whichever must-read excerpt shows up in the report actually
+        # written counts as cited, even though LDR's own `[n]` markers never point past its own
+        # source list. Re-reads the file we (or `generate_report`) just wrote -- one extra read,
+        # simplest way to check the same text a human/reviewer will see for every mode.
+        if primary_excerpts:
+            body_for_citation_check, _ = summarize_report_file(report_path)
+            apply_primary_source_citations(sources_list, research, primary_excerpts, body_for_citation_check)
+    except UpstreamLlmError as exc:
+        # ADR-0063 Phase 109b B3: never leave a report.md behind that is actually the llm-proxy's
+        # error message masquerading as an answer.
+        try:
+            if os.path.exists(report_path):
+                os.remove(report_path)
+        except OSError:
+            pass
+        print(f"llm: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"local_deep_research call failed: {exc}", file=sys.stderr)
         return 1
