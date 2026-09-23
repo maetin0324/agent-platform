@@ -14986,3 +14986,11 @@ handoff」、`scripts/selfdeploy/promote.sh` 90〜100 行付近）で完了し�
 - P-105-2: ADR-0060 の master と同様、`celeris-promote-*` scope が異常終了で残り続けないかを本番の
   数回の昇格で確かめ、必要なら `systemd-run` に `--collect` 等の後始末オプションを足す判断を
   別 Phase で行う（この Phase では触れていない）。
+
+### Phase 105 の本番反映（2026-09-23、ライブ切替）
+
+- merge: `worktree-agent-a3919e0c5a65f0aed` → main `48a338a`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1876 / failed 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、`pnpm gen:types` 差分ゼロ（Phase 105 が types.ts を更新済み。Phase 104 の再生成漏れ `RunMetrics` / `Usage` も含む）、`pnpm typecheck` exit 0、`pnpm test` 68 files / 1061 passed。push 済み。
+- `release.sh main` → exit 0、`sha12=48a338a81f55 schema_version=25`、`changes.json: base=4fff25348ed6 commits=3 files=12 sensitive=2`（`crates/celeris/src/releases.rs`: `setsid` 1 行を launcher 分岐 `promote_exec_command` / `start_promote_with_launcher` に置換、`lock_pid` / `promote_last_line` / `promote_stale` 追加、テスト 6 件。`docs/adr/0040-*.md`: 追記のみ。差分を確認してから昇格）。ゲート 10 段すべて exit 0（cargo-test 121.9s、cargo-clippy 69.4s）。
+- `verify.sh 48a338a81f55` → exit 0、check 1〜4, 4b, 5（N-1 = 4fff25348ed6）, 6（smoke 5.1s）すべて true、`ok=true live_ok=true`。
+- `promote.sh 48a338a81f55`（素のコマンド）→ mode=live、DB バックアップ 18M、新 celeris が 4 秒で active、GUI 切替 2 秒、`current -> releases/48a338a81f55`。
+- 受け入れの実機確認（GUI と同じ経路 `POST /releases/{sha}/promote` で次のリリースを昇格し、`promote.log` が「promoted」まで進む・`celeris-promote-*` scope が現れて消える・`current` と GUI が切り替わる）は、この記録をコミットした次のリリースで親が行う（次節）。
