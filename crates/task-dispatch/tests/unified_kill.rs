@@ -140,6 +140,9 @@ fn dispatcher(
             containers: task_dispatch::ContainersRuntimeConfig::default(),
             knowledge: task_dispatch::KnowledgeRuntimeConfig::default(),
             session_rollover_tokens: 400_000,
+            shared_build_cache: false,
+            build_cache_dir: std::path::PathBuf::from("/nonexistent-build-cache"),
+            workspace_prune_after_secs: 0,
         },
     )
 }

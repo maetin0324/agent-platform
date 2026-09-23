@@ -903,14 +903,19 @@ fn tunnel_forward_ensurer(
 }
 
 /// ADR-0053 Phase 85: target（先方）の健康 probe の上限。`task_worker::PROBE_TIMEOUT`（3 秒。
-/// `[knowledge.langmem]` 等の到達性検査と共有の既定値）より短くしてある: この probe は
-/// `refresh_cluster_tunnels`（同期・tick を止めうる経路）から呼ばれるため、先方が応答しないとき
-/// tick を長く止めないよう 2 秒で切る（本番観測: forward は張れているのに先方が無応答で、旧実装は
-/// 3 秒の probe を毎 tick 行い tick が 6 秒に伸びていた）。
+/// `[knowledge.langmem]` 等の到達性検査と共有の既定値）より短くしてある。
+///
+/// ADR-0066 D3（Phase 110b）: この probe は、この forward を初めて観測する tick からは同期に
+/// （`refresh_cluster_tunnels` が 1 回だけ種を蒔く）、それ以降は task-dispatch 側の専用スレッド
+/// （tick とは無縁）から呼ばれる。同期に呼ばれるのは forward ごとに実質 1 回だけになったが、
+/// タイムアウトは変えていない（専用スレッドから呼ばれるときも、先方が無応答なら早めに諦めて次の
+/// forward・次の周回に進みたいため）。旧実装（tick が毎回 2〜3 秒級の probe を同期で待っていた）の
+/// 経緯は Phase 85 の追記のとおり。
 const TUNNEL_TARGET_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// ADR-0053 D3 / Phase 85: forward の target（先方）の健康を `GET http://<listen>/v1/models` で見る
-/// （既存の probe をそのまま使うが、タイムアウトは tick 向けに短くしてある）。
+/// ADR-0053 D3 / Phase 85 / ADR-0066 D3: forward の target（先方）の健康を `GET http://<listen>/v1/models`
+/// で見る（既存の probe をそのまま使うが、タイムアウトは短くしてある）。配線（`set_tunnel_probe`）は
+/// 変わらない。呼び出し元（同期の種蒔きか、専用スレッドか）は task-dispatch 側が決める。
 fn tunnel_probe() -> task_dispatch::dispatcher::TunnelProbe {
     Arc::new(|listen: &str| {
         let base = format!("http://{listen}/v1");

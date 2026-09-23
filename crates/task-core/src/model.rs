@@ -923,6 +923,12 @@ pub enum Event {
         /// worktree 準備が失敗した理由（ssh.rs の stderr）。
         reason: String,
     },
+    /// ADR-0066 D2（Phase 110b）: 終端になってから `[workspace] prune_after_secs` 経った作業場所から、
+    /// ビルド生成物（`target/` 等）を消した。状態は変えない（`replay` は無視する）。
+    WorkspacePruned {
+        /// 消したパス（作業場所〈`<workspace_root>/<task_id>`〉からの相対。例: `repos/benchfs/target`）。
+        removed: Vec<String>,
+    },
 }
 
 impl Event {

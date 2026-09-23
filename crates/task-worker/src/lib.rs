@@ -6,6 +6,8 @@ pub mod aider;
 pub mod acp;
 pub mod adapter;
 pub mod artifact;
+/// ADR-0066 D1（Phase 110b）: 同一リポジトリの worktree 間で cargo のビルドキャッシュを共有する。
+pub mod build_cache;
 pub mod claude_account;
 pub mod claude_code;
 pub mod cluster_login;
@@ -44,6 +46,8 @@ pub mod task_repos;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod workspace;
+/// ADR-0066 D2（Phase 110b）: 終端タスクの作業場所から、ビルド生成物だけを自動で刈る。
+pub mod workspace_prune;
 
 pub use acp::{AcpAdapter, AcpConfig, AcpPermission};
 pub use aider::{AiderAdapter, AiderConfig};

@@ -416,6 +416,13 @@ export type Event =
        */
       reason: string;
       type: "workspace_mode_downgraded";
+    }
+  | {
+      /**
+       * 消したパス（作業場所〈`<workspace_root>/<task_id>`〉からの相対。例: `repos/benchfs/target`）。
+       */
+      removed: string[];
+      type: "workspace_pruned";
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。

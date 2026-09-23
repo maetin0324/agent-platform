@@ -276,18 +276,46 @@ fn default_selfdeploy_repo() -> PathBuf {
 pub struct WorkspaceConfig {
     #[serde(default = "default_worktree_branch_prefix")]
     pub worktree_branch_prefix: String,
+    /// ADR-0066 D1（Phase 110b）: ローカルの git worktree のホスト実行（コンテナ・Remote は対象外）に
+    /// `CARGO_TARGET_DIR=<build_cache_dir>/cargo/<repo-key>` を与え、同じリポジトリの worktree 間で
+    /// cargo のビルドキャッシュを共有する。既定 `true`。
+    #[serde(default = "default_shared_build_cache")]
+    pub shared_build_cache: bool,
+    /// ADR-0066 D1: ビルドキャッシュの置き場所。既定 `~/.local/celeris/build-cache`（ADR-0042 D3 の層）。
+    #[serde(default = "default_build_cache_dir")]
+    pub build_cache_dir: PathBuf,
+    /// ADR-0066 D2（Phase 110b）: 終端（done / failed / cancelled）になってからこの秒数経った作業場所
+    /// から、ビルド生成物（`target/` 等）だけを刈る。既定 86400 秒（24 時間）。`0` で無効。
+    #[serde(default = "default_prune_after_secs")]
+    pub prune_after_secs: u64,
 }
 
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
             worktree_branch_prefix: default_worktree_branch_prefix(),
+            shared_build_cache: default_shared_build_cache(),
+            build_cache_dir: default_build_cache_dir(),
+            prune_after_secs: default_prune_after_secs(),
         }
     }
 }
 
 fn default_worktree_branch_prefix() -> String {
     task_worker::DEFAULT_BRANCH_PREFIX.to_string()
+}
+
+fn default_shared_build_cache() -> bool {
+    true
+}
+
+/// ADR-0042 D3 / ADR-0066 D1: `~/.local/celeris/build-cache`。
+fn default_build_cache_dir() -> PathBuf {
+    PathBuf::from("~/.local/celeris/build-cache")
+}
+
+fn default_prune_after_secs() -> u64 {
+    86400
 }
 
 /// `[containers]`（ADR-0043 D3。Phase 56）: リポジトリの `run` が `container` のタスクを
@@ -1637,6 +1665,14 @@ impl Config {
         if cfg.containers.build_dir.is_relative() {
             cfg.containers.build_dir = base.join(&cfg.containers.build_dir);
         }
+        // ADR-0066 D1: `[workspace] build_cache_dir` の既定は `~/.local/celeris/build-cache`。
+        cfg.workspace.build_cache_dir = task_core::expand_home(
+            &cfg.workspace.build_cache_dir,
+            task_core::home_dir().as_deref(),
+        );
+        if cfg.workspace.build_cache_dir.is_relative() {
+            cfg.workspace.build_cache_dir = base.join(&cfg.workspace.build_cache_dir);
+        }
         if let Some(token_file) = &cfg.api.token_file
             && token_file.is_relative()
         {
@@ -2529,6 +2565,10 @@ impl Config {
             },
             // ADR-0054 D1（Phase 67）: 継続セッションの逼迫判定。
             session_rollover_tokens: self.sessions.rollover_tokens,
+            // ADR-0066 D1 / D2（Phase 110b）。
+            shared_build_cache: self.workspace.shared_build_cache,
+            build_cache_dir: self.workspace.build_cache_dir.clone(),
+            workspace_prune_after_secs: self.workspace.prune_after_secs,
         }
     }
 

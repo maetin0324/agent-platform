@@ -16388,3 +16388,157 @@ Phase 109g の本番反映後、8 回目のやり直し（run `01M37FZRX8GMST4SV
 - 経緯（1〜8 回目）: 引用不足の hard error → アブスト妥協（109）／OpenAlex 429・cited の数え方・report.md 名・LLM 503（109b）／対象別の整理（109c）／Python API（109d）／settings の読み込み（109e）／観点抽出の誤認（109f）／比較分類を判断として立てる（109g）／総括の問いが予算で落ちる（109h）。Web 調査は 4 回目（109c）で合格済み。
 - 残る粗さ（提案）: P-109h-1 比較分類の節の後に、設計条件として埋め込んだ知識ベースの本文の見出し（`## 概要`、`## 主要アーキテクチャ`…）がそのまま report の見出しに混ざる。埋め込み時に見出しを 1 段下げるか引用ブロックにする。P-109h-2 対象別の観点は corpus の弱さで多くが『未確認』（主要論文の本文が 403）。人が著者版 PDF を `~/.local/celeris/tools/paperqa/papers/01M35WRV77A2JPYGERQGXF6V7K/` に置くか DOI を `primary-sources` に足すと改善する。
 - BenchFS 案件: Phase0 3 件 done、Phase1 の Web 調査・文献調査 done。framing（HUMAN GATE 1 向け候補案）は依存が揃い次第 dispatch される。
+
+## Phase 110b（完了日 2026-09-23）: 実装エージェントの I/O を減らし、tick からトンネルの target probe を外す
+
+ADR-0066 を書いてから実装。branch は worktree のブランチ（`worktree-agent-a941cd36051d2611c`。worktree
+に commit するだけで main へは merge / push しない。統合は別の人が行う）。
+
+### D1: 同一リポジトリの worktree で cargo のビルドキャッシュを共有する
+
+- 実行したコマンド:
+  `cargo test -p task-worker --lib build_cache::`、
+  `cargo test -p task-dispatch --lib -- shared_build_cache preamble_notes_the_shared preamble_does_not_note`
+- 出力の要点: exit 0。`build_cache::` 4 件（`repo_cache_key` の決定性・basename 込み・別パスで別キー・
+  `cargo_target_dir_env` の組み立て）、`dispatcher::` 5 件すべて green。
+  - `shared_build_cache_sets_cargo_target_dir_for_a_local_git_worktree_on_the_host`: 実際に git worktree
+    のタスクを `PoolAdapter`（`with_env` を実装する既存のテスト用アダプタ）で走らせ、
+    `CARGO_TARGET_DIR=<build_cache_dir>/cargo/<repo-key>` が渡ることを確認。
+  - `shared_build_cache_disabled_does_not_set_cargo_target_dir`: `shared_build_cache = false` なら渡らない。
+  - `shared_build_cache_is_not_applied_to_remote_workspaces`: `run_worker` を直接呼び、`remote.is_some()`
+    のときは `build_cache_dir` を渡しても適用されない（コンテナは別途 `container_plan.is_none()` の分岐で
+    除外。今回は `ContainerDecision::Host` のみテスト。コンテナ側の `[container] env` の仕組みは Phase 56
+    のまま変えていない）。
+  - `the_preamble_notes_the_shared_build_cache_when_enabled` / `..._disabled`: 前置きに「`target/` は
+    共有キャッシュにある（`CARGO_TARGET_DIR`）。worktree ごとに再ビルドしない。」の 1 行が、有効なときだけ
+    足される。
+- `[workspace] shared_build_cache`（既定 true）、`build_cache_dir`（既定 `~/.local/celeris/build-cache`。
+  `~` 展開は `containers.build_dir` と同じ経路）。`<repo-key>` は basename + パス文字列の sha256 先頭
+  10 桁（`crates/task-worker/src/build_cache.rs`）。
+- GUI の `node_modules` は対象外にした理由（ADR に明記）: pnpm の store が既に共有されており、
+  `node_modules` はハードリンクなので複製の問題が無い。コード変更は不要（確認のみ）。
+
+### D2: 終端タスクの作業場所から、ビルド生成物だけを自動で刈る
+
+- 実行したコマンド:
+  `cargo test -p task-worker --lib workspace_prune::`、
+  `cargo test -p task-dispatch --lib -- prunes_the_oldest_terminal workspace_prune_after_secs_zero`、
+  `cargo test -p celerisctl --bins -- workspace`
+- 出力の要点: exit 0。`workspace_prune::`（task-worker）5 件 green（`target`/`gui/node_modules` 等の検出、
+  シンボリックリンク〈`dir` リポジトリ〉は対象外、旧い `tree/` 形式への後方互換、`prune_after_secs = 0`
+  で無効、`prune()` がソースツリーは残すこと）。`dispatcher::` 2 件（`tick()` が終端になってから 1 秒後の
+  作業場所の `target/` を消し `workspace_pruned` イベントを積む。削除は背景スレッドなので最大 2 秒だけ
+  ポーリングして確認。`prune_after_secs = 0` で無効）。`celerisctl workspace prune` 3 件（`--dry-run` は
+  消さず列挙、実行で削除とイベント記録、`--older-than` が `[workspace] prune_after_secs` を上書き）。
+- `Event::WorkspacePruned { removed: Vec<String> }` を追加。`docs/api/v1/event.schema.json` と
+  `docs/api/v1/api-v1.schema.json` を `UPDATE_SCHEMA=1` で再生成（`crates/task-api/src/query.rs` の
+  `EVENT_TYPES`〈19→20 件〉と `event_type_name` の網羅マッチにも `"workspace_pruned"` を追加。ここが無いと
+  `task-api` がコンパイルできない）。
+- dispatcher の tick に `prune_one_workspace`（軽い phase。`cleanup_cancelled_worktrees` の直後）を追加し、
+  `slow tick phases` のログに `prune_ms` を足した。**探すところ（`store.list` と `existsAll` 相当の
+  メタデータ確認）は同期**（軽い）、**実際の `remove_dir_all` は `std::thread::spawn` に逃がす**（tick は
+  待たない。完了後にそのスレッドから直接 `store.append_event` する）。1 tick に最大 1 か所。
+  `--mode verify` の煙試験インスタンス（`self.eligible.is_some()`）では何もしない。
+- `celerisctl workspace prune [--dry-run] [--older-than <secs>]`（`crates/celerisctl/src/commands/
+  workspace.rs`）。`--config` で `celeris.toml` を読み、`workspace_root` と既定の `prune_after_secs` を得る。
+
+### D3: トンネルの target probe を tick から外し、指数バックオフする
+
+- 実行したコマンド:
+  `cargo test -p task-dispatch --lib -- tunnel target_probe next_probe_interval verify_mode`（3 回繰り返して
+  フレーキーでないことを確認）
+- 出力の要点: exit 0、8 件 green（既存の Phase 85 のテスト 5 件はほぼそのまま通った。理由: 「listener が
+  有る forward を初めて観測するときだけ同期に 1 回 probe して種を蒔く」設計にしたため、各テストの最初の
+  `refresh_cluster_tunnels()` 呼び出しでの振る舞いは従来と同じ）。
+  - `next_probe_interval_secs_grows_on_failure_and_resets_on_success`（新規、純粋関数、スレッドも時刻も
+    使わない）: 30→60→120→240→480→600（上限で頭打ち）、1 回成功で最短間隔に戻る。
+  - `target_probe_seeds_synchronously_once_then_the_tick_stops_waiting_on_it`（新規）: わざと 150ms
+    眠る偽 probe を使い、1 回目の `refresh_cluster_tunnels()` は同期に待つ（種蒔き）が、`probe_interval_secs`
+    を過ぎさせた 2 回目の呼び出しは 100ms 未満で返る（**tick が遅い probe を待たなくなったことの直接
+    証拠**。本番の「`tunnel_ms`≈2000 が 1 時間に 118 件」の直し）。
+  - 既存の `tunnel_target_probe_is_backed_off_by_probe_interval_secs`（Phase 85）は新しい非同期モデルに
+    合わせて書き直した（`d.last_target_probe` という間引きの内部状態フィールドが無くなったため。理由は
+    ADR-0066 D3 に明記）。`tunnel_target_unreachable_emits_the_event_once_across_many_ticks` は
+    `d.last_target_probe.remove(&key)` の行を削っただけで、他はそのまま通った。
+- 実装: `Dispatcher` に `tunnel_probe_state: Arc<Mutex<HashMap<String, TargetProbeState>>>` と
+  `tunnel_prober_stop: Option<Arc<AtomicBool>>` を足し、`last_target_probe: HashMap<String, Instant>` を
+  削除。`refresh_one_forward` は listener が有るとき、`tunnel_probe_state` にまだ記録が無い forward
+  だけ同期に 1 回 probe して種を蒔き（このときだけ `ensure_tunnel_prober_started` を**種蒔きの後**に
+  呼ぶ — 先に呼ぶと専用スレッドと種蒔きが同じ forward を取り合い、probe が二重に呼ばれることが実際に
+  1 度観測できた。テストで踏んだ）。2 回目以降は `Mutex` を読むだけ。専用スレッド
+  （`tunnel_prober_loop`、`celeris-tunnel-probe`）は forward ごとに期限（`probe_interval_secs` を最小
+  間隔とするバックオフ）が来たら probe し、結果と次の間隔を `tunnel_probe_state` に書く。200ms ごとに
+  期限をチェックするだけで busy loop はしない。`Dispatcher::Drop` で `AtomicBool` を立てて止める（join
+  はしない。tick を止めない設計と同じ理由）。
+- `crates/celeris/src/lib.rs` の変更は `tunnel_probe` / `TUNNEL_TARGET_PROBE_TIMEOUT` の doc コメント
+  更新（「専用スレッドから呼ばれることがある」への訂正）だけ。`tunnel_probe()` / `tunnel_listener_probe()`
+  の配線・実装、`TUNNEL_TARGET_PROBE_TIMEOUT` の値は変えていない。Phase 110a が並行して編集している
+  DB / health 部分には触れていない（`git diff` で確認: `crates/celeris/src/lib.rs` の差分はこの 2 関数の
+  コメントのみ）。
+
+### ゲート
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（passed 合計 **1998**。Phase 109h の 1978 から +20: `build_cache` 4、`workspace_prune`〈task-worker〉5、`celerisctl workspace`〈bin テスト〉3、dispatcher D1 5、D2 2、D3 1〈`next_probe_interval_secs_grows_on_failure_and_resets_on_success`〉。既存テスト 1 件〈`tunnel_target_probe_is_backed_off_by_probe_interval_secs`〉を新しいモデルに合わせて書き直し〈`target_probe_seeds_synchronously_once_then_the_tick_stops_waiting_on_it` に改名〉） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| GUI typecheck | `pnpm -C gui typecheck` | exit 0 |
+| GUI lint | `pnpm -C gui lint` | exit 0（`biome check .`: Checked 256 files, no fixes applied） |
+| GUI test | `pnpm -C gui test` | exit 0（vitest: 68 files / 1065 tests passed） |
+| GUI gen:types | `pnpm -C gui gen:types`（2 回実行して差分が安定することを確認） | 1 回目: `gui/app/celeris/types.ts` に `workspace_pruned` の型が追加される差分（+7 行）。2 回目: それ以上の差分なし（安定・冪等） |
+| tunnel テストの非フレーキー性 | 上記 `-- tunnel target_probe next_probe_interval verify_mode` を 3 回繰り返し | 3 回とも exit 0、15 passed |
+
+### 変更ファイル
+
+- `docs/adr/0066-worker-build-cache-and-tunnel-probe-backoff.md`（新規）
+- `crates/task-worker/src/build_cache.rs`（新規。D1）
+- `crates/task-worker/src/workspace_prune.rs`（新規。D2）
+- `crates/task-worker/src/lib.rs`（`build_cache` / `workspace_prune` モジュールを追加）
+- `crates/task-worker/src/preamble.rs`（`shared_build_cache_note` を追加）
+- `crates/task-core/src/model.rs`（`Event::WorkspacePruned` を追加）
+- `docs/api/v1/event.schema.json` / `docs/api/v1/api-v1.schema.json`（`UPDATE_SCHEMA=1` で再生成）
+- `crates/task-api/src/query.rs`（`EVENT_TYPES` と `event_type_name` に `workspace_pruned` を追加）
+- `crates/celeris/src/config.rs`（`WorkspaceConfig` に `shared_build_cache` / `build_cache_dir` /
+  `prune_after_secs`、`Config::load` の `build_cache_dir` の `~` 展開、`dispatch_config()` の配線）
+- `crates/task-dispatch/src/dispatcher.rs`（D1: `run_worker`/`spawn_worker` に `build_cache_dir` を追加し
+  ホストの git worktree にだけ `with_env` で注入。前置きへの 1 行。D2: `DispatchConfig` に
+  `workspace_prune_after_secs`、`prune_one_workspace`、tick への配線。D3: `TargetProbeState` /
+  `next_probe_interval_secs` / `tunnel_probe_state` / `tunnel_prober_stop` / `ensure_tunnel_prober_started`
+  / `tunnel_prober_loop` / `impl Drop for Dispatcher`、`refresh_one_forward` の書き換え、既存テストの更新）
+- `crates/task-dispatch/tests/unified_kill.rs`（`DispatchConfig` の新規フィールド 3 つを追加しただけ）
+- `crates/celerisctl/src/commands/workspace.rs`（新規。D2 の CLI）
+- `crates/celerisctl/src/commands/mod.rs` / `crates/celerisctl/src/main.rs`（配線）
+- `crates/celeris/src/lib.rs`（`tunnel_probe` / `TUNNEL_TARGET_PROBE_TIMEOUT` の doc コメント更新のみ。
+  D3 の制約どおり配線・実装は変えていない）
+- `config/celeris.example.toml`（`[workspace]` に `shared_build_cache` / `build_cache_dir` /
+  `prune_after_secs` のコメント例を追記）
+- `gui/app/celeris/types.ts`（`pnpm gen:types` の生成物。`Event` に `workspace_pruned` が追加）
+
+### 未解決事項
+
+- P-110b-1（D3・軽微）: 複数 forward を持つクラスタで、同じ tick の中で複数の forward が同時に「初めての
+  観測」になった場合、専用スレッドが最初の forward の種蒔き中に起き上がり、まだ種が無い 2 本目以降の
+  forward を取り合って probe が二重に呼ばれる可能性が理論上ある（1 本目については実際にテストで踏み、
+  `ensure_tunnel_prober_started` の呼び出し順を種蒔きの後に直したので解消済み）。本番の構成は 1 クラスタ
+  1 forward（Qwen 用の 18000 のみ。ADR-0053 Phase 85 の記載どおり）なので実害は無い。将来複数 forward を
+  持つクラスタを使うなら、種蒔き自体をクラスタ単位で 1 回の `Mutex` 区間にまとめるとよい。
+  - `pnpm -C gui gen:types` が生成した `gui/app/celeris/types.ts` の差分だけを対象に確認した
+    （`git diff --stat -- gui/app/celeris/types.ts`）。GUI のイベント表示（`TimelineEventBody`）は
+    `default: null`（バッジのみ）に自然に収まるため触っていない（他の「バッジのみ」のイベント種別
+    〈`workspace_mode_downgraded` 等〉と同じ扱い）。
+- P-110b-2（実機未確認。ADR-0009 P-34）: 本番での確認（親エージェントが行う）:
+  1. **D1**: 同じリポジトリで 2 つ以上のタスクを実装エージェントとして走らせ、`ps` / `lsof` 等で両方の
+     `cargo` プロセスが同じ `CARGO_TARGET_DIR`（`~/.local/celeris/build-cache/cargo/<repo-key>/`）を
+     指していること、2 本目のビルドが `target/` の複製をやり直さず速いこと。
+  2. **D2**: 終端タスクの作業場所のうち `prune_after_secs`（既定 86400 秒）を超えたものの `target/` が
+     実際に消え、`GET /tasks/{id}` のイベントに `workspace_pruned` が出ること。`celerisctl workspace
+     prune --dry-run` を本番の `celeris.toml` に対して実行し、現在 204 個ある作業場所のうちどれだけが
+     刈れる状態か（見立て。実際の `du` はしていないので削減量は推定できない。ADR の決定どおり）。
+  3. **D3**: Qwen トンネルの先方が無応答のままの状態で、`slow tick phases`（`tunnel_ms`）のログが
+     出なくなること（種蒔きの 1 回だけ出て、以後 118 件/時間のような繰り返しが消えること）。
+     `GET /clusters` の `target_healthy` が専用スレッドの周期どおり更新され続けること。
+- 提案: P-110b-3 D2 の `find_prune_candidates` は `store.list(Some(status))` を 3 回呼ぶ（done / failed /
+  cancelled）ので、終端タスクの総数が数万件規模になると 1 回のスキャンが重くなりうる。現状（数百〜数千
+  件）は問題にならないが、将来 `updated_at` にインデックスを張った専用のクエリ（例:
+  `list_terminal_older_than(after)` のような store メソッド）に切り出すと tick の軽さをより確実にできる
+  （今回は既存の `TaskStore` トレイトに手を入れない範囲でスコープを止めた）。

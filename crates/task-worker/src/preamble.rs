@@ -549,6 +549,14 @@ pub struct RepoNote {
     pub deliverables: String,
 }
 
+/// ADR-0066 D1（Phase 110b）: `[workspace] shared_build_cache` が有効で git のリポジトリがあるときだけ、
+/// `repos_note` の後ろに足す 1 行（ディスパッチャが `shared_build_cache` の設定を見て呼ぶかどうかを決める。
+/// ここは文面だけの純粋関数）。
+pub fn shared_build_cache_note() -> &'static str {
+    "`target/` はリポジトリ間で共有するビルドキャッシュにある（`CARGO_TARGET_DIR`）。worktree ごとに\
+     再ビルドしない。\n"
+}
+
 /// ADR-0043 D2 / D8: タスクが複数のリポジトリを持つときの「作業場所」の本文（純粋関数）。
 /// ディスパッチャが ADR-0039 D3 の `workspace_note` の代わりにこれを入れる。
 ///

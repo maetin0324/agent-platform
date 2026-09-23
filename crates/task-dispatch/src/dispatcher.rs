@@ -307,6 +307,35 @@ enum ForwardPhase {
     TargetUnreachable,
 }
 
+/// ADR-0066 D3（Phase 110b）: target probe の連続失敗に対する間隔の上限（10 分）。
+/// `probe_interval_secs`（既定 30 秒。forward ごとに設定可）を最小間隔として、失敗するたびに倍にして
+/// ここで頭打ちにする。1 回でも成功すれば `probe_interval_secs` に戻る。
+pub const TUNNEL_PROBE_MAX_INTERVAL_SECS: u64 = 600;
+
+/// 次に probe するまでの間隔（純粋関数）: 成功したら `min_secs`（forward の `probe_interval_secs`）に
+/// 戻す。失敗したら現在の間隔を倍にし、`TUNNEL_PROBE_MAX_INTERVAL_SECS` で頭打ちにする
+/// （30 → 60 → 120 → 240 → 480 → 600…）。`current_secs` が `min_secs` を下回っていても `min_secs` を
+/// 下限にする（設定変更で `probe_interval_secs` が上がった場合の安全側）。
+fn next_probe_interval_secs(current_secs: u64, min_secs: u64, healthy: bool) -> u64 {
+    if healthy {
+        return min_secs;
+    }
+    current_secs
+        .max(min_secs)
+        .saturating_mul(2)
+        .min(TUNNEL_PROBE_MAX_INTERVAL_SECS)
+}
+
+/// ADR-0066 D3: forward 1 本の target probe の直近の結果（`Dispatcher::tunnel_probe_state` に積む。
+/// 専用スレッドが書き、tick は読むだけ）。
+#[derive(Debug, Clone, Copy)]
+struct TargetProbeState {
+    healthy: bool,
+    checked_at: Instant,
+    /// 次に probe するまでの間隔（バックオフ済み）。
+    interval_secs: u64,
+}
+
 /// ADR-0041 D5: この celeris が**面倒を見てよいタスク**の述語。`None`（既定）は「全部」＝従来どおり。
 ///
 /// 検証（`--mode verify`）の celeris は、ここに「`genre = "smoke"` で、かつアダプタが `fake`」を渡す。
@@ -489,6 +518,14 @@ pub struct DispatchConfig {
     /// 継続セッションで、`approx_tokens`（run の usage の累計）がこれを超えたら次の run から
     /// 新しいセッションにする（要約を前置きに）。既定 400,000（`celeris::config` 側の既定値と同じ）。
     pub session_rollover_tokens: u64,
+    /// ADR-0066 D1（Phase 110b）: `[workspace] shared_build_cache`（既定 true）。ローカルの git
+    /// worktree のホスト実行に `CARGO_TARGET_DIR` を与えるかどうか。
+    pub shared_build_cache: bool,
+    /// ADR-0066 D1: `[workspace] build_cache_dir`（既定 `~/.local/celeris/build-cache`）。
+    pub build_cache_dir: PathBuf,
+    /// ADR-0066 D2（Phase 110b）: `[workspace] prune_after_secs`（既定 86400、`0` で無効）。終端に
+    /// なってからこの秒数経った作業場所から、ビルド生成物だけを刈る。
+    pub workspace_prune_after_secs: u64,
 }
 
 /// `[knowledge]`（ADR-0047 D1 / D2。Phase 61）。
@@ -1285,15 +1322,71 @@ pub struct Dispatcher {
     /// ADR-0053 D3 / Phase 85: forward ごとの直近の観測（キーは `tunnel_key`）。listener と target の
     /// 健康を別々に持つ（`ForwardObservation`）。
     tunnel_state: HashMap<String, ForwardObservation>,
-    /// ADR-0053 Phase 85: forward ごとに、target の健康 probe を最後に行った時刻（キーは `tunnel_key`）。
-    /// `[[clusters.forwards]] probe_interval_secs` より短い間隔では probe しない（バックオフ）。
-    last_target_probe: HashMap<String, Instant>,
+    /// ADR-0066 D3（Phase 110b）: forward ごとの target probe の直近の結果（キーは `tunnel_key`）。
+    /// **専用スレッド（`ensure_tunnel_prober_started`）が書き、`refresh_one_forward` は読むだけ**
+    /// （tick の同期経路から HTTP probe を外すため）。listener が初めて有りになった forward は、
+    /// ここにまだ記録が無い間だけ `refresh_one_forward` が 1 回だけ同期に probe して種を蒔く。
+    tunnel_probe_state: Arc<std::sync::Mutex<HashMap<String, TargetProbeState>>>,
+    /// ADR-0066 D3: 専用スレッドを起こしたら `Some`（二重に起こさない）。`Drop` でスレッドに停止を伝える。
+    tunnel_prober_stop: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// ADR-0053 D3: 「TOTP ログインが要る」と判定済みのクラスタ id（重複通知を防ぐ。master が戻れば消す）。
     cluster_login_needed: std::collections::HashSet<String>,
     /// ADR-0053 D3: 直近のトンネル状態遷移（Console / cluster API 向け。`take_tunnel_events` で取り出す）。
     tunnel_events: std::collections::VecDeque<TunnelEvent>,
     /// ADR-0053 D3: 最後にトンネルの生存を見た時刻（`refresh_cluster_liveness` と同じ間隔で間引く）。
     last_cluster_tunnel_refresh: Option<Instant>,
+}
+
+impl Drop for Dispatcher {
+    /// ADR-0066 D3: 専用の target-probe スレッド（起こしていれば）に停止を伝える。tick を止めない設計と
+    /// 同じ理由で、ここでも join はしない（スレッドは次の周回〈`TUNNEL_PROBER_STEP`〉で自分から終わる）。
+    fn drop(&mut self) {
+        if let Some(stop) = &self.tunnel_prober_stop {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// ADR-0066 D3: 専用スレッドが期限をチェックする周期。`probe_interval_secs`（最短でも 1 秒）よりずっと
+/// 短くして、期限が来たらすぐ probe する。
+const TUNNEL_PROBER_STEP: Duration = Duration::from_millis(200);
+
+/// ADR-0066 D3: forward ごとの target probe を、tick とは無縁に裏で行い続けるループ
+/// （`ensure_tunnel_prober_started` が専用スレッドで起こす）。`stop` が立ったら抜ける。
+fn tunnel_prober_loop(
+    probe: TunnelProbe,
+    forwards: Vec<(String, String, String, u64)>,
+    state: Arc<std::sync::Mutex<HashMap<String, TargetProbeState>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) {
+    while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        let now = Instant::now();
+        for (cluster, listen, _target, min_secs) in &forwards {
+            let key = tunnel_key(cluster, listen);
+            let due = {
+                let Ok(guard) = state.lock() else { continue };
+                guard
+                    .get(&key)
+                    .map(|s| now.duration_since(s.checked_at) >= Duration::from_secs(s.interval_secs))
+                    .unwrap_or(true)
+            };
+            if !due {
+                continue;
+            }
+            let healthy = probe(listen);
+            let Ok(mut guard) = state.lock() else { continue };
+            let prev_interval = guard.get(&key).map(|s| s.interval_secs).unwrap_or(*min_secs);
+            guard.insert(
+                key,
+                TargetProbeState {
+                    healthy,
+                    checked_at: Instant::now(),
+                    interval_secs: next_probe_interval_secs(prev_interval, *min_secs, healthy),
+                },
+            );
+        }
+        std::thread::sleep(TUNNEL_PROBER_STEP);
+    }
 }
 
 /// ADR-0052 D1（Phase 65b で `bearer_token` を追加）: 到達性の検査のフック（差し替えられるようにして
@@ -1402,7 +1495,8 @@ impl Dispatcher {
             tunnel_probe: None,
             tunnel_listener_probe: None,
             tunnel_state: HashMap::new(),
-            last_target_probe: HashMap::new(),
+            tunnel_probe_state: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            tunnel_prober_stop: None,
             cluster_login_needed: std::collections::HashSet::new(),
             tunnel_events: std::collections::VecDeque::new(),
             last_cluster_tunnel_refresh: None,
@@ -1847,6 +1941,10 @@ impl Dispatcher {
         // ADR-0043 D2: **中止**されたタスクの worktree とブランチを消す（終端〈done / failed〉では消さない）。
         self.cleanup_cancelled_worktrees()?;
         let abort_ms = lap(&mut at);
+        // ADR-0066 D2（Phase 110b）: 終端になってから `prune_after_secs` 経った作業場所から、ビルド
+        // 生成物だけを刈る（1 tick に最大 1 か所。探すところまでは軽いので同期、削除は別スレッド）。
+        self.prune_one_workspace();
+        let prune_ms = lap(&mut at);
         // ADR-0040 D4: draining のインスタンスは新しい仕事を始めない（拾い上げも dispatch もしない）。
         // 手元の run とレビューの完了・リース更新・後処理は上の `drain_completions` 以下でそのまま動く。
         if self.accepting_new_work {
@@ -1877,6 +1975,7 @@ impl Dispatcher {
                 drain_ms,
                 reclaim_ms,
                 abort_ms,
+                prune_ms,
                 recover_ms,
                 cluster_ms,
                 tunnel_ms,
@@ -2237,14 +2336,16 @@ impl Dispatcher {
         }
     }
 
-    /// ADR-0053 D3 / Phase 85: 1 本の forward。まずリスナー（`-O forward` の手元の待ち受け）の有無を見る
-    /// （軽い。ssh は起こさない）。無ければ `tunnel_forward_ensurer` で(再)確立を試みる。
+    /// ADR-0053 D3 / Phase 85 / ADR-0066 D3: 1 本の forward。まずリスナー（`-O forward` の手元の待ち受け）
+    /// の有無を見る（軽い。ssh は起こさない）。無ければ `tunnel_forward_ensurer` で(再)確立を試みる。
     ///
-    /// **listener が有れば、target の健康 probe は `probe_interval_secs` の間隔でしか行わない**
-    /// （Phase 85 のバックオフ。本番観測: `-O forward` は張れているのに先方の vLLM が落ちている間、
-    /// probe が毎 tick 失敗し続け、`reachable == false` を理由に celeris が毎 tick `-O forward` を打ち
-    /// 直し、tick が 6 秒に伸びていた。listener が有るのに再発行しても無意味な上、`/v1/models` の HTTP
-    /// probe 自体も遅い。listener と target の健康を分けて見ることで、両方を防ぐ）。
+    /// **target の健康 probe は tick の同期経路から外れている**（ADR-0066 D3。Phase 85 の
+    /// `probe_interval_secs` によるバックオフだけでは、tick の間隔と `probe_interval_secs` の既定が
+    /// 同じ 30 秒だったため実質毎 tick 期限が来てしまい、`slow tick phases`〈`tunnel_ms`≈2000〉が
+    /// 1 時間に 118 件出ていた〈本番観測〉）。listener が有るとき、この forward を初めて観測する
+    /// （`tunnel_probe_state` にまだ記録が無い）場合だけ、この tick の中で 1 回だけ同期に probe して
+    /// 種を蒔く。2 回目以降は専用スレッド（`ensure_tunnel_prober_started`）が裏で probe し続け、
+    /// ここは `Mutex` を読むだけ（ssh も HTTP も呼ばない）。
     fn refresh_one_forward(&mut self, spec: &ClusterSpec, fwd: &ClusterForwardSpec) {
         let mut listener = self.probe_listener(&fwd.listen);
         let mut ensure_error: Option<String> = None;
@@ -2268,22 +2369,40 @@ impl Dispatcher {
             return;
         }
 
-        // listener は有る。target の健康は `probe_interval_secs` の間隔でしか見ない（バックオフ）。
-        // 間隔内なら probe 自体を省略し、前回の観測をそのまま保つ（イベントも積まない＝スパムしない）。
+        // **専用スレッドを起こすのは、この forward を種蒔きした後**（`ensure_tunnel_prober_started` は
+        // 呼ぶたびに全 forward の一覧を見るので、先に起こすと「まだ種が無い」状態のこの forward を
+        // 専用スレッドと取り合い、probe が二重に呼ばれることがある）。
         let key = tunnel_key(&spec.id, &fwd.listen);
-        let now = Instant::now();
-        let probe_interval = Duration::from_secs(fwd.probe_interval_secs.max(1));
-        let due = self
-            .last_target_probe
-            .get(&key)
-            .map(|last| now.duration_since(*last) >= probe_interval)
-            .unwrap_or(true);
-        if !due {
-            return;
-        }
-        self.last_target_probe.insert(key, now);
-        let target_healthy = self.probe_forward(&fwd.listen);
-        let error = if target_healthy {
+        let existing = self
+            .tunnel_probe_state
+            .lock()
+            .ok()
+            .and_then(|guard| guard.get(&key).copied());
+        let observed = match existing {
+            Some(state) => state,
+            // まだ一度も probe していない（この forward の listener が今このプロセスで初めて有りに
+            // なった）。専用スレッドの次の周回を待つと最初の観測が遅れるので、ここだけ 1 回同期に
+            // probe して種を蒔く（Phase 85 までの「listener が有ればまず 1 回は確かめる」を保つ）。
+            None => {
+                let now = Instant::now();
+                let healthy = self.probe_forward(&fwd.listen);
+                let state = TargetProbeState {
+                    healthy,
+                    checked_at: now,
+                    interval_secs: next_probe_interval_secs(
+                        fwd.probe_interval_secs.max(1),
+                        fwd.probe_interval_secs.max(1),
+                        healthy,
+                    ),
+                };
+                if let Ok(mut guard) = self.tunnel_probe_state.lock() {
+                    guard.insert(key, state);
+                }
+                state
+            }
+        };
+        self.ensure_tunnel_prober_started();
+        let error = if observed.healthy {
             None
         } else {
             Some(format!(
@@ -2291,7 +2410,47 @@ impl Dispatcher {
                 fwd.target
             ))
         };
-        self.observe_tunnel(&spec.id, &fwd.listen, true, target_healthy, error);
+        self.observe_tunnel(&spec.id, &fwd.listen, true, observed.healthy, error);
+    }
+
+    /// ADR-0066 D3: forward 一覧から、target probe を裏で行い続ける専用スレッドを起こす（二重に起こさ
+    /// ない。`tunnel_probe` が挿してなければ何もしない）。`Drop` で止める。
+    fn ensure_tunnel_prober_started(&mut self) {
+        if self.tunnel_prober_stop.is_some() {
+            return;
+        }
+        let Some(probe) = self.tunnel_probe.clone() else {
+            return;
+        };
+        let forwards: Vec<(String, String, String, u64)> = self
+            .config
+            .clusters
+            .values()
+            .flat_map(|c| {
+                let id = c.id.clone();
+                c.forwards.iter().map(move |f| {
+                    (
+                        id.clone(),
+                        f.listen.clone(),
+                        f.target.clone(),
+                        f.probe_interval_secs.max(1),
+                    )
+                })
+            })
+            .collect();
+        if forwards.is_empty() {
+            return;
+        }
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let state = self.tunnel_probe_state.clone();
+        let stop_for_thread = stop.clone();
+        let spawned = std::thread::Builder::new()
+            .name("celeris-tunnel-probe".to_string())
+            .spawn(move || tunnel_prober_loop(probe, forwards, state, stop_for_thread));
+        match spawned {
+            Ok(_handle) => self.tunnel_prober_stop = Some(stop),
+            Err(e) => tracing::warn!(error = %e, "tunnel: could not start the target-probe thread"),
+        }
     }
 
     /// forward のリスナーが手元に有るか（`-O forward`/`ssh -N -L` が届いているか）。
@@ -2302,7 +2461,8 @@ impl Dispatcher {
             .unwrap_or(false)
     }
 
-    /// forward の target（先方）が健全か（`/v1/models` が応答するか）。
+    /// forward の target（先方）が健全か（`/v1/models` が応答するか）。`refresh_one_forward` の
+    /// 初回の種蒔きと、専用スレッドの両方から呼ぶ。
     fn probe_forward(&self, listen: &str) -> bool {
         self.tunnel_probe
             .as_ref()
@@ -4488,7 +4648,12 @@ impl Dispatcher {
         if conversation_addressee.is_none()
             && let Some(ws) = worktree
         {
-            let line = task_worker::preamble::repos_note(&self.repo_notes(ws));
+            let mut line = task_worker::preamble::repos_note(&self.repo_notes(ws));
+            // ADR-0066 D1（Phase 110b）: 共有ビルドキャッシュが有効で、かつ git のリポジトリが
+            // 1 つでもあれば「`target/` は共有キャッシュにある」の 1 行を足す。
+            if self.config.shared_build_cache && ws.repos.iter().any(|r| r.is_git()) {
+                line.push_str(task_worker::preamble::shared_build_cache_note());
+            }
             workspace_note = Some(match workspace_note {
                 Some(note) => format!("{note}\n{line}"),
                 None => line,
@@ -5238,6 +5403,11 @@ impl Dispatcher {
         let genres = self.config.genres.clone();
         let delegation = self.config.delegation;
         let account_book = account_adapter.and_then(|a| self.account_book(a));
+        // ADR-0066 D1（Phase 110b）: `[workspace] shared_build_cache`（既定 true）。
+        let build_cache_dir = self
+            .config
+            .shared_build_cache
+            .then(|| self.config.build_cache_dir.clone());
         tokio::spawn(async move {
             let result = run_worker(
                 store,
@@ -5257,6 +5427,7 @@ impl Dispatcher {
                 account,
                 account_book,
                 container,
+                build_cache_dir,
             )
             .await;
             let _ = tx.send(Completion::Worker {
@@ -6595,6 +6766,57 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// ADR-0066 D2（Phase 110b）: 終端（done / failed / cancelled）になってから
+    /// `workspace_prune_after_secs` 経った作業場所から、ビルド生成物（`target/` 等）だけを刈る
+    /// （ソースツリーと `artifacts/` は残す。ADR-0043 D2 の「終端では worktree を消さない」は変えない）。
+    ///
+    /// **1 tick に最大 1 か所**。探すところ（ストアの読み取りとメタデータの存在確認）までは同期で行う
+    /// （軽い）。実際の削除は別スレッドに逃がし、終わったら `workspace_pruned` イベントを積む
+    /// （tick はそれを待たない。`--mode verify` の煙試験インスタンスでは何もしない）。
+    fn prune_one_workspace(&mut self) {
+        if self.eligible.is_some() {
+            return;
+        }
+        if self.config.workspace_prune_after_secs == 0 {
+            return;
+        }
+        let now = OffsetDateTime::now_utc();
+        let candidate = match task_worker::workspace_prune::find_prune_candidate(
+            self.store.as_ref(),
+            &self.config.workspace_root,
+            now,
+            self.config.workspace_prune_after_secs,
+        ) {
+            Ok(Some(c)) => c,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(error = %e, "workspace prune: could not scan for candidates");
+                return;
+            }
+        };
+        let store = self.store.clone();
+        let task_id = candidate.task_id;
+        let task_dir = candidate.task_dir.clone();
+        let thread = std::thread::Builder::new()
+            .name("celeris-workspace-prune".to_string())
+            .spawn(move || {
+                let removed = task_worker::workspace_prune::prune(&candidate);
+                if removed.is_empty() {
+                    return;
+                }
+                let removed = task_worker::workspace_prune::relative_removed(&task_dir, &removed);
+                tracing::info!(task_id = %task_id, removed = ?removed, "workspace: pruned build artifacts");
+                if let Err(e) =
+                    store.append_event(task_id, &Event::WorkspacePruned { removed })
+                {
+                    tracing::warn!(task_id = %task_id, error = %e, "workspace prune: could not record the event");
+                }
+            });
+        if let Err(e) = thread {
+            tracing::warn!(task_id = %task_id, error = %e, "workspace prune: could not spawn the prune thread");
+        }
+    }
+
     /// ADR-0036 D1: そのタスクの成果物ディレクトリ（`<dir>/artifacts` か `<dir>/.taskd/artifacts/<task_id>`）。
     /// 判定は `task_core::artifacts`（純粋関数）。アダプタ・レビュー・記憶の読み取りはすべてこれを使う。
     fn artifacts_dir(&self, task: &Task, workspace_dir: &Path) -> PathBuf {
@@ -6794,6 +7016,11 @@ async fn run_worker(
     account: Option<String>,
     account_book: Option<Arc<StdMutex<AccountBook>>>,
     container: ContainerDecision,
+    // ADR-0066 D1（Phase 110b）: `[workspace] shared_build_cache` が有効なときだけ `Some`
+    // （`<build_cache_dir>`）。ローカルの git worktree のホスト実行に限って
+    // `CARGO_TARGET_DIR=<build_cache_dir>/cargo/<repo-key>` を与える（コンテナ・Remote は対象外。
+    // `container_plan` が決まってから判断する）。
+    build_cache_dir: Option<PathBuf>,
 ) -> Result<RunOutcome, AdapterError> {
     // リース取得後の状態（running, lease あり）をワーカーに渡す。
     let mut task = store
@@ -7069,6 +7296,28 @@ async fn run_worker(
             // ADR-0056 D3（Phase 79）: mount された skills（KB に実在したものだけ）。
             skills: extras.skills,
         },
+    };
+    // ADR-0066 D1（Phase 110b）: ローカルの git worktree のホスト実行にだけ、共有ビルドキャッシュの
+    // `CARGO_TARGET_DIR` を与える（コンテナ実行〈`container_plan.is_some()`〉と Remote は対象外）。
+    let adapter = if container_plan.is_none()
+        && remote.is_none()
+        && let Some(build_cache_dir) = &build_cache_dir
+        && let Some(repo) = worktree.as_ref().and_then(|wt| wt.repos.first())
+        && repo.is_git()
+    {
+        let env = [task_worker::build_cache::cargo_target_dir_env(
+            build_cache_dir,
+            &repo.source,
+        )];
+        match adapter.with_env(&env) {
+            Some(wrapped) => wrapped,
+            None => {
+                tracing::debug!(task_id = %task_id, adapter = %adapter.id(), "adapter does not support with_env; CARGO_TARGET_DIR was not applied (ADR-0066 D1)");
+                adapter
+            }
+        }
+    } else {
+        adapter
     };
     // ADR-0043 D3（Phase 56）: コンテナで走らせる run は、ここでアダプタを包んだ複製に差し替える
     // （差し込み点はアダプタ側の `container::wrap` 1 か所）。この経路を持たないアダプタ
@@ -7392,6 +7641,11 @@ mod tests {
                 containers: ContainersRuntimeConfig::default(),
                 knowledge: KnowledgeRuntimeConfig::default(),
                 session_rollover_tokens: 400_000,
+                // ADR-0066（Phase 110b）: 既定の試験用 dispatcher では無効にしておく（他のテストへの
+                // 副作用を避ける。専用のテストが明示的に有効化する）。
+                shared_build_cache: false,
+                build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
+                workspace_prune_after_secs: 0,
             },
         )
     }
@@ -8350,6 +8604,9 @@ mod tests {
                 containers: ContainersRuntimeConfig::default(),
                 knowledge: KnowledgeRuntimeConfig::default(),
                 session_rollover_tokens: 400_000,
+                shared_build_cache: false,
+                build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
+                workspace_prune_after_secs: 0,
             },
         );
 
@@ -8501,6 +8758,9 @@ mod tests {
                 containers: ContainersRuntimeConfig::default(),
                 knowledge: KnowledgeRuntimeConfig::default(),
                 session_rollover_tokens: 400_000,
+                shared_build_cache: false,
+                build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
+                workspace_prune_after_secs: 0,
             },
         );
 
@@ -10242,9 +10502,11 @@ mod tests {
     }
 
     /// ADR-0053 D3（Phase 66）: forward 付きの `ClusterSpec` を作る（`refresh_cluster_tunnels` 用）。
-    /// `probe_interval_secs` は既定（`DEFAULT_TUNNEL_PROBE_INTERVAL_SECS`）にしておく。バックオフを
-    /// テストしたいケースは `d.last_target_probe` を直接いじって間引きを避ける（既存の
-    /// `d.last_cluster_tunnel_refresh` の扱いと同じ流儀）。
+    /// `probe_interval_secs` は既定（`DEFAULT_TUNNEL_PROBE_INTERVAL_SECS`）にしておく。ADR-0066 D3
+    /// 以降、target probe のバックオフは `d.tunnel_probe_state`（専用スレッドが書く）に移った。
+    /// 間引きを避けたいテストは `d.last_cluster_tunnel_refresh` を過去にずらす（`CLUSTER_LIVENESS_INTERVAL`
+    /// の間引きだけがテストから直接いじれる。target probe 側は 1 forward につき最初の 1 回だけ同期に
+    /// 種を蒔くので、通常のテストはそれだけで足りる）。
     fn cluster_spec_with_forward(id: &str, host: &str, auth: &str, listen: &str, target: &str) -> ClusterSpec {
         let mut spec = cluster_spec_with_auth(id, host, auth);
         spec.forwards = vec![ClusterForwardSpec {
@@ -10459,6 +10721,7 @@ mod tests {
             None,
             None,
             ContainerDecision::Host,
+            None,
         )
         .await
     }
@@ -10817,11 +11080,13 @@ mod tests {
         );
     }
 
-    /// ADR-0053 Phase 85: target の健康 probe は `probe_interval_secs`（既定 30 秒）より短い間隔では
-    /// 行わない。listener が有る限り、間隔内の 2 回目の呼び出しは probe をスキップする（tick を
-    /// 毎回 HTTP 呼び出しで遅くしないためのバックオフ）。
+    /// ADR-0066 D3（Phase 110b）: この forward を初めて観測するときだけ、`refresh_cluster_tunnels` は
+    /// 同期に 1 回 probe して種を蒔く（listener が有れば必ず 1 回は確かめる、という Phase 85 までの
+    /// 前提を保つ）。**2 回目以降はもう同期に probe しない** — 専用スレッドが裏で行うので、probe 自体が
+    /// 遅くても（本番観測: `/v1/models` が 2 秒級）tick は待たない。これが Phase 110b の本旨（`slow tick
+    /// phases`〈`tunnel_ms`≈2000〉が 1 時間に 118 件出ていた不具合の直し）。
     #[tokio::test]
-    async fn tunnel_target_probe_is_backed_off_by_probe_interval_secs() {
+    async fn target_probe_seeds_synchronously_once_then_the_tick_stops_waiting_on_it() {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         let adapter = Arc::new(InstantAdapter {
             terminal: Terminal::Done {
@@ -10849,34 +11114,46 @@ mod tests {
         let probe_calls_hook = probe_calls.clone();
         d.set_tunnel_probe(Arc::new(move |_listen: &str| {
             probe_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // 本番観測（無応答の Qwen 先方への `/v1/models`）の遅さを模す。
+            std::thread::sleep(Duration::from_millis(150));
             true
         }));
 
+        let first_started = Instant::now();
         d.refresh_cluster_tunnels();
+        assert!(
+            first_started.elapsed() >= Duration::from_millis(150),
+            "the first observation seeds synchronously"
+        );
         assert_eq!(probe_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(d.tunnel_reachable("pegasus", "127.0.0.1:19006"));
 
-        // 2 回目（`CLUSTER_LIVENESS_INTERVAL` は過ぎさせるが、`probe_interval_secs` はまだ過ぎていない）。
-        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        // 次の tick（`CLUSTER_LIVENESS_INTERVAL` を過ぎさせる）。probe はもう同期では呼ばれないので、
+        // probe が遅くても tick は速い。
+        d.last_cluster_tunnel_refresh =
+            Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        let second_started = Instant::now();
         d.refresh_cluster_tunnels();
-        assert_eq!(
-            probe_calls.load(std::sync::atomic::Ordering::SeqCst),
-            1,
-            "the target probe must not run again before probe_interval_secs elapses"
+        assert!(
+            second_started.elapsed() < Duration::from_millis(100),
+            "the tick must not wait on the slow target probe once it has been seeded: {:?}",
+            second_started.elapsed()
         );
+    }
 
-        // `probe_interval_secs` を過ぎさせる。
-        let key = tunnel_key("pegasus", "127.0.0.1:19006");
-        d.last_target_probe.insert(
-            key,
-            Instant::now() - Duration::from_secs(DEFAULT_TUNNEL_PROBE_INTERVAL_SECS + 1),
-        );
-        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
-        d.refresh_cluster_tunnels();
-        assert_eq!(
-            probe_calls.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "the target probe must run again once probe_interval_secs elapses"
-        );
+    /// ADR-0066 D3: 失敗が続くと probe の間隔が伸び、1 回成功すれば最短間隔に戻る（純粋関数。
+    /// スレッドも時刻も使わない）。
+    #[test]
+    fn next_probe_interval_secs_grows_on_failure_and_resets_on_success() {
+        assert_eq!(next_probe_interval_secs(30, 30, false), 60);
+        assert_eq!(next_probe_interval_secs(60, 30, false), 120);
+        assert_eq!(next_probe_interval_secs(120, 30, false), 240);
+        assert_eq!(next_probe_interval_secs(240, 30, false), 480);
+        assert_eq!(next_probe_interval_secs(480, 30, false), 600, "capped at the max");
+        assert_eq!(next_probe_interval_secs(600, 30, false), 600, "stays at the max");
+        assert_eq!(next_probe_interval_secs(600, 30, true), 30, "one success resets to the minimum");
+        // 設定変更で `probe_interval_secs`（min）が現在値より大きくなっても、min を下限にする。
+        assert_eq!(next_probe_interval_secs(10, 30, false), 60);
     }
 
     /// ADR-0053 Phase 85: 同じフェーズ（ここでは `TargetUnreachable`）が続く間、状態遷移のイベント
@@ -10908,13 +11185,13 @@ mod tests {
         d.set_tunnel_forward_ensurer(Arc::new(|_host: &str, _listen: &str, _target: &str| Ok(())));
         d.set_tunnel_probe(Arc::new(|_listen: &str| false));
 
-        let key = tunnel_key("pegasus", "127.0.0.1:19007");
         for _ in 0..5 {
-            // 間引き（`CLUSTER_LIVENESS_INTERVAL` と `probe_interval_secs`）を毎回越えさせ、実際に
-            // probe が走ることを保証したうえで、それでもイベントが 1 回しか積まれないことを確かめる。
+            // `CLUSTER_LIVENESS_INTERVAL` の間引きを毎回越えさせる。ADR-0066 D3: target probe 自体は
+            // 最初の 1 回だけ同期で種を蒔き、以後は `tunnel_probe_state` の既存の観測を読むだけ
+            // （専用スレッドがこのテストの短い実行時間の中で probe をやり直すことは通常無い）。
+            // それでもイベントが 1 回しか積まれないことを確かめる。
             d.last_cluster_tunnel_refresh =
                 Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
-            d.last_target_probe.remove(&key);
             d.refresh_cluster_tunnels();
         }
         let events = d.take_tunnel_events();
@@ -12381,6 +12658,9 @@ mod tests {
                 containers: ContainersRuntimeConfig::default(),
                 knowledge: KnowledgeRuntimeConfig::default(),
                 session_rollover_tokens: 400_000,
+                shared_build_cache: false,
+                build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
+                workspace_prune_after_secs: 0,
             },
         )
     }
@@ -15696,6 +15976,363 @@ mod tests {
         );
     }
 
+    // ---- ADR-0066 D1（Phase 110b）: 共有ビルドキャッシュの `CARGO_TARGET_DIR` ----
+
+    /// `req.context.workspace_note` を記録するだけのアダプタ。
+    struct WorkspaceNoteAdapter {
+        seen: Arc<StdMutex<Vec<Option<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkerAdapter for WorkspaceNoteAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            self.seen.lock().unwrap().push(req.context.workspace_note);
+            Ok(RunOutcome {
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// 共有ビルドキャッシュが有効で git のリポジトリがある run の前置きに、`target/` は共有キャッシュに
+    /// あるという 1 行が足される。無効なら足されない。
+    #[tokio::test]
+    async fn the_preamble_notes_the_shared_build_cache_when_enabled() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(WorkspaceNoteAdapter { seen: seen.clone() });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        d.config.shared_build_cache = true;
+        run_until_idle(&mut d, 60).await;
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        let notes = seen.lock().unwrap().clone();
+        assert_eq!(notes.len(), 1);
+        let note = notes[0].as_deref().unwrap_or_default();
+        assert!(
+            note.contains("target/") && note.contains("CARGO_TARGET_DIR"),
+            "{note}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_preamble_does_not_note_the_shared_build_cache_when_disabled() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(WorkspaceNoteAdapter { seen: seen.clone() });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        d.config.shared_build_cache = false;
+        run_until_idle(&mut d, 60).await;
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        let notes = seen.lock().unwrap().clone();
+        assert_eq!(notes.len(), 1);
+        let note = notes[0].as_deref().unwrap_or_default();
+        assert!(!note.contains("CARGO_TARGET_DIR"), "{note}");
+    }
+
+    /// `[workspace] shared_build_cache`（既定 true）が有効なローカルの git worktree のホスト実行に、
+    /// `CARGO_TARGET_DIR=<build_cache_dir>/cargo/<repo-key>` が渡る。
+    #[tokio::test]
+    async fn shared_build_cache_sets_cargo_target_dir_for_a_local_git_worktree_on_the_host() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let cache_dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
+        store.insert(&task).unwrap();
+        let captured: CapturedEnvs = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(PoolAdapter {
+            terminal_or_throttled: Ok(Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            }),
+            delay: Duration::ZERO,
+            observation: None,
+            env: Vec::new(),
+            captured: captured.clone(),
+            spawn_failure: false,
+        });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        d.config.shared_build_cache = true;
+        d.config.build_cache_dir = cache_dir.path().to_path_buf();
+        run_until_idle(&mut d, 60).await;
+
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        let runs = captured.lock().unwrap().clone();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        let expected = task_worker::build_cache::cargo_target_dir_env(
+            cache_dir.path(),
+            repo_dir.path(),
+        );
+        assert!(
+            runs[0].contains(&expected),
+            "expected {expected:?} in {:?}",
+            runs[0]
+        );
+    }
+
+    /// `[workspace] shared_build_cache = false` なら `CARGO_TARGET_DIR` は渡らない。
+    #[tokio::test]
+    async fn shared_build_cache_disabled_does_not_set_cargo_target_dir() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
+        store.insert(&task).unwrap();
+        let captured: CapturedEnvs = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(PoolAdapter {
+            terminal_or_throttled: Ok(Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            }),
+            delay: Duration::ZERO,
+            observation: None,
+            env: Vec::new(),
+            captured: captured.clone(),
+            spawn_failure: false,
+        });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        d.config.shared_build_cache = false;
+        run_until_idle(&mut d, 60).await;
+
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+        let runs = captured.lock().unwrap().clone();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert!(
+            !runs[0].iter().any(|(k, _)| k == "CARGO_TARGET_DIR"),
+            "{:?}",
+            runs[0]
+        );
+    }
+
+    /// リモート（クラスタ）実行には `CARGO_TARGET_DIR` を渡さない（ADR-0066 D1 は対象外と決めている）。
+    /// `run_worker` を直接呼ぶ（`remote_task`/`write_stub_ssh` は既存の Phase 99 のテストと同じ小道具）。
+    #[tokio::test]
+    async fn shared_build_cache_is_not_applied_to_remote_workspaces() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let tmp = tempfile::tempdir().unwrap();
+        let stub = write_stub_ssh(tmp.path(), 0);
+        let task = remote_task(tmp.path(), Some(WorkspaceMode::Shared), Vec::new());
+        store.insert(&task).unwrap();
+
+        let mut settings = SshSettings::new("pegasus", "pegasus", PathBuf::from("/work/proj"));
+        settings.sync = SyncMode::None;
+        settings.task_id = task.id.to_string();
+        settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
+
+        let captured: CapturedEnvs = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(PoolAdapter {
+            terminal_or_throttled: Ok(Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            }),
+            delay: Duration::ZERO,
+            observation: None,
+            env: Vec::new(),
+            captured: captured.clone(),
+            spawn_failure: false,
+        });
+        let outcome = run_worker(
+            store.clone(),
+            adapter,
+            task.id,
+            Tier::Standard,
+            tmp.path().join("mirror"),
+            "run1",
+            RunLimits {
+                wall_clock: Duration::from_secs(30),
+                idle_timeout: Duration::from_secs(5),
+                kill_grace: Duration::from_millis(100),
+            },
+            LeaseRenewal {
+                ttl: Duration::from_secs(60),
+                every: Duration::from_secs(30),
+            },
+            Some(settings),
+            None,
+            RunExtras::default(),
+            Vec::new(),
+            Vec::new(),
+            DelegationLimits::default(),
+            None,
+            None,
+            ContainerDecision::Host,
+            // `Some` のまま渡しても、`remote.is_some()` なので適用されないことを確かめる。
+            Some(tmp.path().join("build-cache")),
+        )
+        .await;
+        assert!(outcome.is_ok(), "{:?}", outcome.err());
+
+        let runs = captured.lock().unwrap().clone();
+        assert_eq!(runs.len(), 1, "{runs:?}");
+        assert!(
+            !runs[0].iter().any(|(k, _)| k == "CARGO_TARGET_DIR"),
+            "{:?}",
+            runs[0]
+        );
+    }
+
+    // ---- ADR-0066 D2（Phase 110b）: 終端タスクの作業場所からビルド生成物を刈る ----
+
+    /// `tick()` は、終端になってから `workspace_prune_after_secs` 経った作業場所の `target/` を消し、
+    /// `workspace_pruned` イベントを積む（削除は背景スレッド。少し待てば反映される）。
+    #[tokio::test]
+    async fn tick_prunes_the_oldest_terminal_workspace_and_records_an_event() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let mut d = dispatcher(store.clone(), done_adapter(), 1);
+        d.config.workspace_root = root.path().to_path_buf();
+        d.config.workspace_prune_after_secs = 1;
+
+        let task = new_task(
+            root.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        store.insert(&task).unwrap();
+        store
+            .apply_transition_with_events(task.id, Trigger::Dispatch, vec![])
+            .unwrap();
+        store
+            .apply_transition_with_events(task.id, Trigger::WorkerDone, vec![])
+            .unwrap();
+        store
+            .apply_transition_with_events(task.id, Trigger::ReviewPass, vec![])
+            .unwrap();
+        let mut current = store.get(task.id).unwrap().unwrap();
+        current.updated_at = OffsetDateTime::now_utc() - time::Duration::days(2);
+        store
+            .update_task(&current, Event::worker_progress("x", "backdated"))
+            .unwrap();
+
+        let task_dir = root.path().join(task.id.to_string());
+        let target_dir = task_dir.join("repos").join("benchfs").join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        d.tick().unwrap();
+        // 削除は背景スレッドなので、少し待って反映を確かめる。
+        for _ in 0..100 {
+            if !target_dir.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!target_dir.exists(), "target/ should have been pruned");
+        assert!(
+            task_dir.join("repos").join("benchfs").is_dir(),
+            "the repo dir itself is kept"
+        );
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::WorkspacePruned { removed }
+                    if removed == &vec!["repos/benchfs/target".to_string()]
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// `workspace_prune_after_secs == 0` は無効（何も消さない）。
+    #[tokio::test]
+    async fn workspace_prune_after_secs_zero_disables_pruning() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let mut d = dispatcher(store.clone(), done_adapter(), 1);
+        d.config.workspace_root = root.path().to_path_buf();
+        d.config.workspace_prune_after_secs = 0;
+
+        let task = new_task(
+            root.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        store.insert(&task).unwrap();
+        store
+            .apply_transition_with_events(task.id, Trigger::Dispatch, vec![])
+            .unwrap();
+        store
+            .apply_transition_with_events(task.id, Trigger::WorkerDone, vec![])
+            .unwrap();
+        store
+            .apply_transition_with_events(task.id, Trigger::ReviewPass, vec![])
+            .unwrap();
+        let mut current = store.get(task.id).unwrap().unwrap();
+        current.updated_at = OffsetDateTime::now_utc() - time::Duration::days(30);
+        store
+            .update_task(&current, Event::worker_progress("x", "backdated"))
+            .unwrap();
+
+        let task_dir = root.path().join(task.id.to_string());
+        let target_dir = task_dir.join("repos").join("benchfs").join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+
+        d.tick().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(target_dir.exists(), "prune_after_secs = 0 must disable pruning");
+    }
+
     /// ADR-0041 D1: 前置きに作業ツリー・ブランチ・base と「このブランチにコミットせよ」が出る。
     #[tokio::test]
     async fn the_preamble_note_names_the_worktree_the_branch_and_the_base() {
@@ -17061,6 +17698,9 @@ mod knowledge_fallback_tests {
                     ..KnowledgeRuntimeConfig::default()
                 },
                 session_rollover_tokens: 400_000,
+                shared_build_cache: false,
+                build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
+                workspace_prune_after_secs: 0,
             },
         )
     }

@@ -66,6 +66,18 @@ dir = "../memory"
 [workspace]
 # worktree_branch_prefix = "celeris/"
 
+# ADR-0066 D1（Phase 110b）: 同一リポジトリの worktree 間で cargo のビルドキャッシュを共有する。
+# ローカルの git worktree のホスト実行（コンテナ・Remote は対象外）に
+# `CARGO_TARGET_DIR=<build_cache_dir>/cargo/<repo-key>` を与える。既定で有効。
+# shared_build_cache = true
+# build_cache_dir = "~/.local/celeris/build-cache"
+
+# ADR-0066 D2（Phase 110b）: 終端（done/failed/cancelled）になってからこの秒数経った作業場所から、
+# ビルド生成物（`target/`、`node_modules/` 等）だけを刈る（ソースツリーと `artifacts/` は残す）。
+# `0` で無効。既定 86400（24 時間）。`celerisctl workspace prune [--dry-run] [--older-than <secs>]` で
+# 人が手で回すこともできる。
+# prune_after_secs = 86400
+
 # 変更の取り込み（ADR-0043 D5、Phase 54）。タスクが作ったブランチを**人が** GUI から
 # 「main に取り込む」「PR を作る」「捨てる」する（`GET/POST /api/v1/tasks/{id}/changes...`）。
 # 押せるのは人だけで、組織の「人」＝ワーカーからこの経路には届かない（SPEC §3.6）。
