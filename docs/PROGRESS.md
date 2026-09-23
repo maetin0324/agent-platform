@@ -15072,3 +15072,11 @@ Phase 104（本番、2026-09-22）の delivery は merge 後 push を行わず�
 ### 提案
 
 - P-106-1: `pushed_at`/`push_error` を `GET /tasks/{id}/changes` のレスポンス（`ChangesView.delivery`）経由で GUI の「変更」タブに小さく出す（現状は通知メッセージの本文にしか出ていない）。
+
+### Phase 106 の本番反映（2026-09-23、ライブ切替）
+
+- merge: `worktree-agent-aae752b807570a21a` → main `a6e12d8`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1885 / failed 0）、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、`pnpm gen:types` 差分ゼロ（Phase 106 が types.ts の `Delivery.pushed_at` / `push_error` を更新済み）、`pnpm typecheck` exit 0、`pnpm test` 68 files / 1061 passed。push 済み。
+- `release.sh main` → exit 0、`sha12=a6e12d813f3b schema_version=25`（DB マイグレーション無し。`Delivery` は JSON blob で `#[serde(default)]`）、`changes.json: base=5b80f99a8042 commits=4 files=10 sensitive=1`（`config/celeris.example.toml` の `[selfdeploy] push` / `push_remote` の例のみ）。ゲート 10 段すべて exit 0（cargo-test 141.7s、cargo-clippy 46.6s、cargo-build 45.5s）。
+- `verify.sh a6e12d813f3b` → exit 0、check 1〜4, 4b, 5（N-1 = 5b80f99a8042）, 6（smoke 5.1s）すべて true、`ok=true live_ok=true`。
+- `promote.sh a6e12d813f3b` → mode=live、DB バックアップ 18M、新 celeris が 2 秒で active、GUI 切替 1 秒、`current -> releases/a6e12d813f3b`。`GET /health` release=a6e12d813f3b role=active schema_version=25。pegasus の ssh master は生存（4 回目の昇格をまたいだ確認）。
+- 本番で新たに有効になったもの: 自己改善の delivery は main への merge 直後・`release.sh` の前に `git push origin main`（非対話、120 秒、失敗は release 準備を止めず記録・通知・1 度だけ再試行。既定 `[selfdeploy] push = true`、`push_remote = "origin"`。本番 config は既定のまま）。受け入れは次の自己改善 delivery で origin/main が自動で進むことで確認する（親が観測して追記）。GUI の「変更」タブへの push 状態表示は提案 P-106-1。
