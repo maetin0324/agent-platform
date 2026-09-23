@@ -16380,3 +16380,11 @@ Phase 109g の本番反映後、8 回目のやり直し（run `01M37FZRX8GMST4SV
 - merge: `worktree-agent-aa0da1916b39bdf7b` → main `7b7d137`。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1978 / failed 0）、`cargo clippy` exit 0。push 済み。
 - `release.sh main` → exit 0、`sha12=7b7d137b52d3 schema_version=25`、`changes.json: base=5df58158b50a commits=4 files=6 sensitive=1`（`config/celeris.research.example.toml` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 5df58158b50a）, 6 すべて true、`ok=true live_ok=true`。`promote.sh 7b7d137b52d3` → mode=live、新 celeris 2 秒で active、GUI 切替 1 秒。
 - 文献調査の 9 回目のやり直しを起動（総括の問いは必ず走る、`max_asks` 既定 10、`dropped_targets` / `comparison_page` を research.json に記録、`primary-sources` の DOI が種に入る）。結果は次節に追記。
+
+### 2026-09-23 16:56 UTC: 文献調査が合格（9 回目、Phase 109h で初めて reviewer を通過）
+
+- タスク 01M37JKZ4Q97KYPY70WQ30DRMD（literature-research、local、PaperQA Python API）: 7 分で done。`evidence = {cited: 2（本文 1 / アブスト 1、contexts 由来 2）, insufficient: false}`、`dropped_targets = []`（`max_asks` 10）、`comparison_page = projects/benchfs/architecture-overview.md`（設計条件 2,302 文字）、種 `seed:doi` 2 件（CHFS 10.1145/3492805.3492807、GekkoFS 10.1109/CLUSTER.2018.00049）が候補に入った（`candidates 30, pdfs 10, abstracts 18`）。
+- `report.md`: 「# 対象別の整理」の表（8 対象 × 6 観点）、対象ごとの節、「## BenchFS との比較分類」（分類語 17 箇所）。reviewer（codex）: 合格。「全 8 対象の 5 観点が整理され、確認済みの記述には引用がある。未確認と明記された観点は条件どおり不合格理由にしない。比較結論では全 8 対象に二分類と理由があり、CHFS・GekkoFS・UnifyFS は公平比較可能、残る 5 対象は背景比較のみ。BenchFS の Pluvio・Locusta、io_uring/RDMA、サーバ構成を示した設計条件と比較し、資源正規化や比較単位の違い、情報不足を理由にしている」。
+- 経緯（1〜8 回目）: 引用不足の hard error → アブスト妥協（109）／OpenAlex 429・cited の数え方・report.md 名・LLM 503（109b）／対象別の整理（109c）／Python API（109d）／settings の読み込み（109e）／観点抽出の誤認（109f）／比較分類を判断として立てる（109g）／総括の問いが予算で落ちる（109h）。Web 調査は 4 回目（109c）で合格済み。
+- 残る粗さ（提案）: P-109h-1 比較分類の節の後に、設計条件として埋め込んだ知識ベースの本文の見出し（`## 概要`、`## 主要アーキテクチャ`…）がそのまま report の見出しに混ざる。埋め込み時に見出しを 1 段下げるか引用ブロックにする。P-109h-2 対象別の観点は corpus の弱さで多くが『未確認』（主要論文の本文が 403）。人が著者版 PDF を `~/.local/celeris/tools/paperqa/papers/01M35WRV77A2JPYGERQGXF6V7K/` に置くか DOI を `primary-sources` に足すと改善する。
+- BenchFS 案件: Phase0 3 件 done、Phase1 の Web 調査・文献調査 done。framing（HUMAN GATE 1 向け候補案）は依存が揃い次第 dispatch される。
