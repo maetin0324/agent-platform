@@ -16281,3 +16281,9 @@ Phase 109f の本番反映後、7 回目のやり直し（上記 2026-09-23 15:1
 - merge: `worktree-agent-a9f4507b50cb99305` → main `5df5815`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1977 / failed 0）、`cargo clippy` exit 0。push 済み。
 - `release.sh main` → exit 0、`sha12=5df58158b50a schema_version=25`、`changes.json: base=d29909d81743 commits=4 files=8 sensitive=1`（`config/celeris.research.example.toml` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = d29909d81743）, 6 すべて true、`ok=true live_ok=true`。`promote.sh 5df58158b50a` → mode=live、新 celeris 2 秒で active、GUI 切替 2 秒。
 - 文献調査の 8 回目のやり直しを起動（比較分類は BenchFS の設計条件〈知識ベース〉と対象別の答えを材料に必ず二択、`primary-sources` の DOI / arXiv / PDF を種に）。結果は次節に追記。
+
+### 2026-09-23 16:15 UTC: 文献調査の 8 回目（Phase 109g）も比較分類が出ず不合格 → Phase 109h
+
+- タスク 01M37FZRX8GMST4SVDNNQF8NMV: 抽出・表・8 対象の節は正常、`evidence = {cited: 3, insufficient: false}`。しかし `report.md` に「## BenchFS との比較分類」の節が無く、分類語は 0 件。`ask_input.json` の `comparison_context` は `page: None`（知識ベースの `projects/benchfs/architecture-overview.md` が見つからず fallback 段落のみ）、`seed_urls: None`（一次情報ページに DOI / arXiv / PDF が無かった）。
+- 見立て: (1) 対象 8 件 + 総括 1 問 = 9 問が `max_asks`（既定 8）に当たり、総括の問いが落ちた。(2) 比較先ページの探索が「BenchFS」と `benchfs`（path 小文字）を一致させていない。→ Phase 109h（総括は必ず走らせ対象側を詰める、探索を大文字小文字無視に）。
+- 知識ベース: `projects/benchfs/primary-sources.md` の `sources` に既知の DOI（CHFS 10.1145/3492805.3492807、GekkoFS 10.1109/CLUSTER.2018.00049）を足し「主要論文」節を追加（人が FINCHFS / UnifyFS / Mochi / UCX / io_uring の DOI か著者版 PDF を足す欄）。reindex 済み。
