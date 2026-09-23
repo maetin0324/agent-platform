@@ -17028,3 +17028,10 @@ resume run は codex の既定の（読み取り専用の）承認・サンド�
   「同じ run の中で諦めた」ことのログ以外に、運用側が「この対話は resume できていない」と気付く手段が
   今は tracing warn しか無い。頻発するようなら `node_sessions` に「最後に resume を諦めた理由」を
   残す仕組みを検討してよい（今回のスコープ外）。
+
+## Phase 112 の本番反映（2026-09-23 23:45Z、Fable が統合・昇格）
+
+- 発端: CoS チャットからのタスク作成が作られない。原因は codex `exec resume` で `extra_args = ["--approve-for-me"]` が許可リスト外として落とされ、読み取り専用サンドボックスで `artifacts/result.json` を書けず、actions が本文に吐かれて捨てられていた（task 01M388G6Q6D7NPNB77MWFFQRKH / run 01M388G8HG8BJEFCD0H8WQKN0N、journal に「dropping codex extra_args on `exec resume`」）。
+- 統合 c0e72f1（fast-forward）、ゲート: `cargo test --workspace --no-fail-fast` FAILED 0、clippy 警告 0。release `c0e72f139ba7`、verify 全 true、ライブ切替（from cc64fbd0b40e）。
+- 実機確認: 同じ依頼を `POST /api/v1/console/instruct` で再送（対話 01M38AHQTP4XPVRXZPPG4ZZSW6）。journal に「translated codex extra_args for `exec resume` (ADR-0054 Phase 112 D1)」、CoS は 40 秒で done、子タスク 01M38AJZ5QD9E88ZD6FDDWG968（software-engineering、「スマホのタスク画面でタイトルが縦に崩れる問題の修正」）が作られ running。
+- 発見（Phase 113 へ）: framing タスク 01M35X86XTK84F97QW0CN5PGMR は人が承認（approval 01M381GRMXM8MP23BZ1E4RKWP2）したのに、reviewer run 01M388BENASH3JEBWFS03KEQYT が `No conversation found with session ID: …`（claude-code の `--resume` 先が消えている）で `error_during_execution` となり、`review.rs` の `fail_all` で全条件不合格 → `failed`。`looks_like_resume_rejection` は `for session` の文言しか見ておらず self-heal が働かなかった。reviewer のインフラ失敗は「判定不能」として reviewer だけやり直すべき（人の承認は保持）。
