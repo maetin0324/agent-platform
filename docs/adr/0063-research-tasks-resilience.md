@@ -315,3 +315,126 @@ Phase 109b を本番で試した 3 回目のやり直し（2026-09-23 12:12〜12
 - 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う）: Web 調査（BeeOND を含む対象）を
   やり直し、対象×観点の表が出て reviewer が通ること。文献調査を（対象の取れる目的文で）やり直し、
   `research.json`/`answer.md` に対象別の節が出ること（`cited` は Phase 109b までの仕組みのまま）。
+
+## Phase 109d 追記（2026-09-23）
+
+Phase 109c で見送った P-109c-1（PaperQA の Python API 切り替え、対象ごとの複数 `ask`）に、親が本番の
+venv で `paperqa==2026.8.12` を実際に `inspect` して確認した API 面（`paperqa.ask`/`Settings`/
+`PQASession`/`Context`/`Text`/`Doc` の公開名とフィールド）を前提に、改めて取り組む。本文（上記
+D1〜D4・受け入れ条件 1〜5、Phase 109b・109c 追記）は書き換えない。
+
+### 決定と実装
+
+- **C1（`pqa ask` CLI → PaperQA の Python API）**: 新しい埋め込み Python ランナー
+  `crates/task-worker/src/paperqa_ask.py` を追加（`paperqa_acquire.py` と同じ「`include_str!` で
+  run ディレクトリに書き出し、`<入力 JSON>` を渡して起動する」流儀）。`import paperqa` /
+  `from paperqa import Settings, ask` は `try/except ImportError` で守り、失敗すれば
+  `output_path` に `{"error": ..., "answers": []}` を書いて **exit 3** で終わる（`paperqa` が
+  入っていないテスト環境やまだ設定していない venv 向け）。入力 JSON は
+  `{settings_name, settings_dir, paper_directory, index_directory, index_name, model,
+  targets, aspects, comparison_target, max_asks, fallback_question, output_path}`
+  （ADR 原案の `questions: [{id, target, question}]` は、質問の組み立て自体を
+  `paperqa_ask.py::build_questions_for_targets` という**純関数**にして `python3 -c` から直接テスト
+  できるようにするため、Rust 側で事前に組み立てず、上記の材料だけを渡してランナー自身に組ませる形に
+  変えた。目的は同じ — 対象ごとに小さく問う — で、実装の置き場所を変えただけ）。`PQA_SETTINGS_DIR` は
+  `settings_dir` に設定してから `Settings.from_name(settings_name)`（無ければ `Settings()`）、
+  `settings.agent.index.paper_directory`/`index_directory`/`name` を上書きし、`model` があれば
+  `settings.llm` も上書きする（CLI の `--llm` と同じ意味）。各 `ask()` は 2/4/8 秒のバックオフで
+  最大 3 回まで再試行する（`ask_with_retries`/`is_transient_error`。503/429/502/接続断のみ再試行、
+  それ以外は即座に伝播）。1 問が最終的に失敗しても他の問いは続け、その問いは
+  `{"error": "..."}`・空の答えとして記録する（run 全体は失敗にしない）。
+- **C1'（`paper_qa_ask.py` の純関数）**: `build_questions_for_targets`（質問の生成。対象が空なら
+  `fallback_question` の単一問い、対象があれば対象ごとの問い + 空きがあれば総括の問い、
+  `max_asks` を超えない）、`flatten_contexts`（`PQASession.contexts` 相当を `{docname, dockey,
+  citation, score, question}` に平坦化。辞書でも属性アクセスの実物でも動く `_get` ヘルパ経由）、
+  `build_target_aspect_table`（対象×観点の Markdown 表。観点が答えに無ければ `未確認`）の 3 つは
+  すべて標準ライブラリだけで書かれ、`paperqa` パッケージ無しに `python3 -c` から直接呼べる
+  （テストの (b)(c)(d) はこれで確認する）。
+- **C2（Rust 側、`paperqa.rs`）**: `run_paperqa` の 2 段目を `pqa ask` の `Command` 組み立てから
+  `paperqa_ask.py` を起動する形に全面書き換え（`run_acquire` と対になる構造）。`[adapters.paperqa]
+  command` の既定を `"pqa"` → `"python"` に変更（`task_worker::PaperQaConfig::default`・
+  `celeris::config::default_paperqa_command`）。旧 `pqa` 実行ファイルを指す設定が来たら
+  `resolve_ask_command` が同じディレクトリの `python` に自動で置き換えて `tracing::warn!` を 1 回出す
+  （`config.command` の `file_name()` が `"pqa"` と一致するかだけを見る、決定的な判定）。
+  `config.settings`（設定ファイルへのフルパス、拡張子無し。既存の `settings_llm` と同じ前提）は
+  `split_settings_path` で `settings_dir`（親ディレクトリ）/`settings_name`（ファイル名、`.json` が
+  付いていても剥がす）に分ける。`docs/`・`config/celeris.research.example.toml` を更新（`command` の
+  既定例を venv の `python` に、`pqa ask`/`--llm` 等の CLI 前提の記述を Python API 前提に書き換え）。
+  `pqa` の生の rich 出力をパースしていた `extract_answer`/`extract_references_section`/
+  `strip_log_prefix`/`strip_ansi` は不要になったので削除した（構造化 JSON を直接読むため）。
+  `exit == 3` は「一般の非 0 終了」とは別扱いにし、`retryable: false` の分かりやすいメッセージ
+  （「paperqa が import できない。`[adapters.paperqa] command` が指す環境に `paperqa` を入れること」）
+  にする（インストールしない限り再試行しても直らないため。テスト (e)）。
+- **C2'（`cited` の数え方）**: `research.json.evidence.cited` は、全 `ask()` 呼び出しの `contexts` に
+  現れた `docname`/`dockey`（英数字だけに正規化して比較。`parsing.use_doc_details = false` だと
+  PaperQA2 は corpus のファイル名から `docname` を作るので、既存の `answer_cites` と同じ「ファイル名の
+  語幹」で突き合わせる）の和集合と、答え全文（全問いの `answer` を連結したもの）に対する既存の
+  `answer_cites`（文字列一致、補助）との **OR**。新しく `cited_from_contexts: u32`
+  （`context_identifiers`/`candidate_in_contexts` で突き合わせられた件数）を `research.json.evidence`
+  と「## 証拠の質」節に足した。`sources.json` の `cited` も同じ定義（`marked` を作る 1 箇所を直しただけ
+  で両方に伝わる）。Phase 109b A2 の `References`/`Sources` 節スクレイピングはこの数え方に置き換わり、
+  不要になった。
+- **C3（対象ごとの質問）**: `research_targets(objective)` が対象を返すとき、対象ごとに 1 問
+  （「<対象> について、次の観点を提示された文献の範囲で答えよ: <観点リスト>。文献に無い観点は
+  『未確認』と書け。各事実に引用を付けよ。」）+ 目的文に比較先があれば総括 1 問（「対象ごとに
+  <比較先> と『公平比較可能』か『背景比較のみ』かを分類し理由を1行で述べよ」）。比較先は
+  `research_targets.rs::comparison_target(objective)`（「<識別子>と比較」「<識別子>との比較」を
+  決定的に抜く、新規の純関数）。上限は `[adapters.paperqa] max_asks`（既定 8）で、対象は先頭から。
+  総括は「対象を全部入れてなお枠が余っていれば」だけ追加するので、対象数が `max_asks` ちょうどか
+  それを超えていれば総括は入らない（テスト (b)）。対象が 1 つも取れなければ、`build_question`
+  （Phase 109c までの単一問いの組み立て。前置き・目的文・答えの人間の回答履歴）の出力を
+  `fallback_question` としてそのまま使う（テスト (c)）。対象・観点は引き続き `research.json` にも残す
+  （`write_research_json`、変更なし）。
+- **C4（`answer.md`/`report.md` の組み立て）**: 対象が 1 件でも取れていれば「# 対象別の整理」
+  （`render_target_sections`: 表 → `### <対象>` の節（その対象の答え全文）→ （総括の問いがあれば）
+  `## 総括`）を先頭に置く。表の組み立て自体は Python 側（`build_target_aspect_table`。C1' 参照）が
+  やり、Rust はその文字列をそのまま埋め込むだけ（対象ごとの節・総括の並びは Rust 側
+  `render_target_sections` が組む）。対象が無ければフォールバックの単一の答えをそのまま使う。
+  続けて「## 引用された文献（contexts）」（`render_contexts_section`: `docname` で重複排除し、
+  `citation`（無ければ `docname`）とどの問い〈`id`〉で使われたかを列挙）、既存の「## 出典」
+  （`render_sources_section`。取得の段を行ったときだけ）・「## 証拠の質」・「## 一次情報（実装）」は
+  そのまま続く。
+
+### ゲート
+
+- `cargo test --workspace --no-fail-fast`: exit 0、**FAILED 0**（passed 合計 **1960**、Phase 109c の
+  1955 から新規 5 件〈`research_targets` の `comparison_target` テスト 2 件、`paperqa` の
+  `resolve_ask_command`/`split_settings_path` テスト 2 件、`paperqa_ask.py` の純関数を
+  `python3 -c` から呼ぶテスト 1 件〉。既存 45 件の `pqa` CLI argv ベースのテストは、`ask_input.json`
+  を読むテスト（`ask_input_carries_settings_and_index_paths`/`ask_input_defaults_when_...`/
+  `ask_input_carries_model_only_when_set`）や、実物の `paperqa_ask.py` を `sys.modules["paperqa"]`
+  の偽物越しに動かすテスト用スタブ〈`ask_stub_script`。LDR の `sys.modules["local_deep_research"]`
+  注入と同じ考え方〉に書き換え、件数はほぼ変わらない）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0（警告 0）。
+- `git status --porcelain | grep -E "docs/api|docs/protocol"`: 出力なし（型を変えていないので
+  schema/types.ts の再生成は不要）。
+
+### 変更ファイル
+
+- 新規: `crates/task-worker/src/paperqa_ask.py`
+- `crates/task-worker/src/paperqa.rs`（C1・C2・C2'・C3・C4。`extract_answer`/
+  `extract_references_section`/`strip_log_prefix`/`strip_ansi` を削除し、`AskAnswer`/`AskContext`/
+  `AskOutput`/`resolve_ask_command`/`split_settings_path`/`context_identifiers`/
+  `candidate_in_contexts`/`render_target_sections`/`render_contexts_section` を追加）
+- `crates/task-worker/src/research_targets.rs`（`comparison_target` を追加）
+- `crates/celeris/src/config.rs`（`PaperQaAdapterConfig.max_asks`、`command` の既定を `python` に）
+- `crates/celeris/src/lib.rs`（`PaperQaConfig` の構築に `max_asks` を配線）
+- `config/celeris.research.example.toml`（`command` の例を venv の `python` に、`max_asks` の例と
+  コメントの更新）
+
+### 未解決事項
+
+- P-109d-1: `answer_cites`（文字列一致の補助）は Phase 109b A2 からの既存の限界（言い換えられた引用は
+  拾えない）がそのまま残る。`contexts` ベースの突き合わせ（C2'）はこの限界を実際の証拠で補うが、
+  `docname` がファイル名以外（`parsing.use_doc_details = true` 等）から作られる設定では
+  `candidate_in_contexts` のファイル名突き合わせが機能しない可能性がある（本番の設定
+  `parsing.use_doc_details = false` を前提にしている。ADR-0027 参照）。
+- P-109d-2: `build_target_aspect_table`（Python 側）のセル抽出（`_extract_aspect_line`）は
+  「`- <観点>: <内容>` 形式の行」を優先し、無ければ「観点の文字列を含む行をそのまま使う」という
+  素朴な規則。モデルが指示した形式を守らない答え方をした場合、本当は書いてある事実を「未確認」扱いに
+  してしまう可能性がある（表は補助であり、対象ごとの節に答え全文は残るので、実害は限定的）。
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う）:
+  `[adapters.paperqa] command` を venv の `python`（`paperqa` パッケージが入ったもの）に向け、対象の
+  取れる目的文（例 BenchFS の文献調査）で再実行し、(1) `research.json.evidence.cited_from_contexts`
+  が 0 より大きいこと、(2) `answer.md` の先頭に「# 対象別の整理」（対象×観点の表）が出ること、
+  (3) 「## 引用された文献（contexts）」に実際に使われた文献が出ることを確認する。
