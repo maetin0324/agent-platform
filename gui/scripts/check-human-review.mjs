@@ -31,12 +31,48 @@ const base = await new Promise((resolve) => {
       actions: ["cancel"],
       answers: [],
       approvals: [
-        { approval: { id: APPROVAL_ID, kind: "approval", status: "ready", title: "承認", actions: ["approve", "reject"] }, criterion_idx: 1, attempt: 1 },
+        {
+          approval: {
+            id: APPROVAL_ID,
+            kind: "approval",
+            status: "ready",
+            title: "承認",
+            actions: ["approve", "reject"],
+          },
+          criterion_idx: 1,
+          attempt: 1,
+        },
       ],
       children: [],
       criteria: [
-        { idx: 0, text: "cargo test が通る", check: { type: "command", cmd: "cargo test", expect_exit: 0 }, latest_verdict: { criterion_idx: 0, pass: true, reason: "exit 0 を確認", run_id: "R1", ts: "2026-09-21T00:00:00Z" } },
-        { idx: 1, text: "人が挙動を確認して承認する", check: { type: "human" }, approval: { approval: { id: APPROVAL_ID, kind: "approval", status: "ready", title: "承認", actions: ["approve", "reject"] }, criterion_idx: 1, attempt: 1 } },
+        {
+          idx: 0,
+          text: "cargo test が通る",
+          check: { type: "command", cmd: "cargo test", expect_exit: 0 },
+          latest_verdict: {
+            criterion_idx: 0,
+            pass: true,
+            reason: "exit 0 を確認",
+            run_id: "R1",
+            ts: "2026-09-21T00:00:00Z",
+          },
+        },
+        {
+          idx: 1,
+          text: "人が挙動を確認して承認する",
+          check: { type: "human" },
+          approval: {
+            approval: {
+              id: APPROVAL_ID,
+              kind: "approval",
+              status: "ready",
+              title: "承認",
+              actions: ["approve", "reject"],
+            },
+            criterion_idx: 1,
+            attempt: 1,
+          },
+        },
       ],
       delegated: [],
       dependencies: [],
@@ -44,24 +80,67 @@ const base = await new Promise((resolve) => {
       priority_label: "P2",
       prior_review: [{ criterion: 0, pass: false, reason: "前回はテストが 1 件失敗していた" }],
       runs: [
-        { run_id: "01RUNAAAAAAAAAAAAAAAAAAAAA", role: "worker", adapter: "claude-code", model: "m", provider: "p", started_at: "2026-09-21T00:00:00Z", finished_at: "2026-09-21T00:05:00Z", outcome: "done", outcome_text: LONG, usage: null, progress: 0, artifacts: 1, verdicts: 1, reviewer_deferrals: 0, files: { stdout: true, stderr: true, result: true } },
+        {
+          run_id: "01RUNAAAAAAAAAAAAAAAAAAAAA",
+          role: "worker",
+          adapter: "claude-code",
+          model: "m",
+          provider: "p",
+          started_at: "2026-09-21T00:00:00Z",
+          finished_at: "2026-09-21T00:05:00Z",
+          outcome: "done",
+          outcome_text: LONG,
+          usage: null,
+          progress: 0,
+          artifacts: 1,
+          verdicts: 1,
+          reviewer_deferrals: 0,
+          files: { stdout: true, stderr: true, result: true },
+        },
       ],
-      task: { ...(await_task()), status: "reviewing" },
-      timers: { consecutive_requeues: 0, consecutive_reviewer_requeues: 0, max_requeues: 2, now: "2026-09-21T00:10:00Z" },
+      task: { ...await_task(), status: "reviewing" },
+      timers: {
+        consecutive_requeues: 0,
+        consecutive_reviewer_requeues: 0,
+        max_requeues: 2,
+        now: "2026-09-21T00:10:00Z",
+      },
     }),
   );
   mock.on("GET", "/api/v1/inbox", (_req, res) =>
     send(res, {
       approvals: [
         {
-          approval: { id: APPROVAL_ID, kind: "approval", status: "ready", title: "承認", actions: ["approve", "reject"] },
+          approval: {
+            id: APPROVAL_ID,
+            kind: "approval",
+            status: "ready",
+            title: "承認",
+            actions: ["approve", "reject"],
+          },
           parent: { id: TASK_ID, kind: "execute", status: "reviewing", title: "GUI 改善", actions: ["cancel"] },
           criterion_idx: 1,
           criterion_text: "人が挙動を確認して承認する",
           requested_at: "2026-09-21T00:06:00Z",
-          last_run: { run_id: "R1", role: "worker", adapter: "claude-code", model: "m", started_at: "2026-09-21T00:00:00Z", outcome: "done", outcome_text: LONG, progress: 0, artifacts: 1, verdicts: 1, reviewer_deferrals: 0 },
-          evidence: [{ criterion: 0, command: "cargo test --workspace", exit: 0, stdout_tail: "test result: ok. 1978 passed" }],
-          other_verdicts: [{ criterion_idx: 0, pass: true, reason: "exit 0", run_id: "R1", ts: "2026-09-21T00:05:00Z" }],
+          last_run: {
+            run_id: "R1",
+            role: "worker",
+            adapter: "claude-code",
+            model: "m",
+            started_at: "2026-09-21T00:00:00Z",
+            outcome: "done",
+            outcome_text: LONG,
+            progress: 0,
+            artifacts: 1,
+            verdicts: 1,
+            reviewer_deferrals: 0,
+          },
+          evidence: [
+            { criterion: 0, command: "cargo test --workspace", exit: 0, stdout_tail: "test result: ok. 1978 passed" },
+          ],
+          other_verdicts: [
+            { criterion_idx: 0, pass: true, reason: "exit 0", run_id: "R1", ts: "2026-09-21T00:05:00Z" },
+          ],
           artifacts: [{ kind: "report", name: "report.md", path: "artifacts/report.md", sha256: "abc" }],
           previous_decisions: [],
         },
@@ -76,9 +155,21 @@ const base = await new Promise((resolve) => {
 });
 function await_task() {
   return {
-    id: TASK_ID, kind: "execute", status: "reviewing", title: "GUI 改善", objective: "GUI を直す", priority: 5, attempts: 1,
-    created_at: "2026-09-21T00:00:00Z", updated_at: "2026-09-21T00:06:00Z", acceptance: [], depends_on: [], inputs: [],
-    worker_hint: { tier: "standard" }, budget: { max_retries: 3, max_turns: 10, max_wall_secs: 600 }, workspace: { kind: "local", path: "." },
+    id: TASK_ID,
+    kind: "execute",
+    status: "reviewing",
+    title: "GUI 改善",
+    objective: "GUI を直す",
+    priority: 5,
+    attempts: 1,
+    created_at: "2026-09-21T00:00:00Z",
+    updated_at: "2026-09-21T00:06:00Z",
+    acceptance: [],
+    depends_on: [],
+    inputs: [],
+    worker_hint: { tier: "standard" },
+    budget: { max_retries: 3, max_turns: 10, max_wall_secs: 600 },
+    workspace: { kind: "local", path: "." },
   };
 }
 
@@ -127,5 +218,5 @@ try {
   gui.kill("SIGTERM");
   await mock.close();
 }
-console.log(JSON.stringify({ ok: !failed, results }, null, 1));
+process.stdout.write(`${JSON.stringify({ ok: !failed, results }, null, 1)}\n`);
 process.exit(failed ? 1 : 0);
