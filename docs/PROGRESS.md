@@ -15476,3 +15476,11 @@ Web 調査（LDR）も 2 回とも reviewer 不合格で `failed`（`prior_revie
   に書く（今回は `context.knowledge.index[].sources` を読むだけで、タグの命名規則は決めていない）。
 - P-109-2: Unpaywall/Semantic Scholar のレート制限・障害時の扱い（現状は例外を握りつぶして abstract に
   倒すだけ）を実機で観測してから、必要ならリトライ/バックオフを足す。
+
+### Phase 109 の本番反映（2026-09-23 11:03 UTC、ライブ切替）と API トークンのローテーション
+
+- merge: `worktree-agent-a948e019aa82307eb` → main `2d8b0d6`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1925 / failed 0）、`cargo clippy` exit 0、`pnpm gen:types` 差分ゼロ、`pnpm typecheck` exit 0。push 済み。
+- `release.sh main` → exit 0、`sha12=2d8b0d6c787c schema_version=25`、`changes.json: base=9f16b74ce1d0 commits=4 files=19 sensitive=2`（`config/celeris.research.example.toml` と `config/celeris.web-research.example.toml` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 9f16b74ce1d0）, 6（smoke 6.27s）すべて true、`ok=true live_ok=true`。
+- **API トークンのローテーション**（Phase 109 で `acquire_input.json` に平文で残っていたため）: in-flight run が無いことを確認し、`api.token` と `secrets/celeris-api-token`（同じ値）を `openssl rand -hex 32` の新しい値に書き換え（600、旧値は `*.bak-20260923` に 600 で保持、値はどこにも表示していない）。昇格前は旧トークンが 200 / 新が 401（デーモンは起動時に読む）。
+- `promote.sh 2d8b0d6c787c` → mode=live、新 celeris 2 秒で active、GUI 切替 1 秒。昇格後: 新トークン 200 / 旧トークン 401、LLM プロキシ `GET /v1/models` も新トークンで 200、GUI `/healthz` release=2d8b0d6c787c、`GET /health` role=active schema_version=25。LDR / PaperQA / LangMem は run ごとに `secrets/celeris-api-token` を読むので設定変更は不要。MCP のトークン（`chatgpt-rdc` / `claude-code`）は別物で影響なし。
+- 調査のやり直し（Phase 109 の効果を見る）: 文献 01M36YZR20QDDC4KXWJ24MBDCC（local、目的文に「本文が有料ならアブストまで」と一次情報 URL、受け入れ条件はアブストのみ・未確認を許す）と Web 01M36YZR3NBJVC4QHAEBSM2MZH（local、一次情報 URL 付きの目的文を複製。attempts≥1 で detailed、知識ベースの `primary-sources` の URL を pre-fetch）を approve → ready。framing 01M35X86XTK84F97QW0CN5PGMR も再 approve。結果は次節に追記。
