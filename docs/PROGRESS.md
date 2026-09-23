@@ -15782,3 +15782,10 @@ Phase 109 の本番反映直後（2026-09-23 11:04〜11:10 UTC）にやり直し
   `from paperqa import ask, Settings` への切り替えと対象ごとの複数 `ask` を改めて実装する。
 - P-109c-2（上記）: GitHub の `docs/` 直下ファイル一覧を GitHub API（鍵無しの `contents` エンドポイント
   等、レート制限に注意）で取る実装を検討する。
+
+### Phase 109c の本番反映（2026-09-23 13:09 UTC、ライブ切替）
+
+- merge: `worktree-agent-aa89cfef45fd4b8ea` → main `3e09916`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1955 / failed 0）、`cargo clippy` exit 0（型変更なし）。push 済み。
+- `release.sh main` → exit 0、`sha12=3e0991661ee0 schema_version=25`、`changes.json: base=5b496f5b5720 commits=4 files=11 sensitive=1`（`config/celeris.web-research.example.toml` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 5b496f5b5720）, 6 すべて true、`ok=true live_ok=true`。`promote.sh 3e0991661ee0` → mode=live、新 celeris 2 秒で active、GUI 切替 3 秒。
+- 知識ベース `projects/benchfs/primary-sources.md` の `sources` に BeeOND の章 `https://doc.beegfs.io/latest/advanced_topics/beeond.html` と FINCHFS の docs `https://finchfs.readthedocs.io` を追加（3 回目の不合格理由の 2 つ）。
+- Web 調査の 4 回目のやり直しを起動（構造化合成・docs 深追い・目的文を保つ再挑戦）。結果は次節に追記。PaperQA の Python API 化（Phase 109d）は並行して実装中。
