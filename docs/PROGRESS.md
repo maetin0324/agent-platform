@@ -16891,3 +16891,21 @@ ADR-0067（`docs/adr/0067-human-deliverables-policy-and-approval-visibility.md`�
   タスクに対して「`artifact_exists` を 1 件足す」のような機械的な修復コマンド（`plan-lint --fix`）を
   用意すると、本番で既存タスクの是正が楽になる可能性がある。今回は D5 の指示文の範囲を超えるため
   やっていない。
+
+## Phase 110a / 110b / 111 の本番反映（2026-09-23、人の判断で Fable が統合・昇格）
+
+発端: 実装タスクを 2〜3 本並走させたら 503 `db_busy` で GUI が固まった（18:36〜18:55 JST+9 相当、`POST /api/v1/console/instruct` 5005 ms、`GET /board` 15007 ms）。実測: `/home` は `/dev/loop0`（実体は LXC ホストが NFS からマウントした raw イメージ）で fsync 1 回 69 ms、ローカル LVM `/` は 8 ms、I/O PSI full 47%。負荷源は worktree ごとの `cargo test --workspace`（workspaces 204 個・322 GB）。DB 自体は 26 MB・events 38k 行で小さい。
+
+- 統合: 110b（9dc0431）→ 110a（4aab35a、ADR 番号は 0064 に統一）→ 111（e946870）。merge 衝突は `celerisctl/main.rs`（両方のサブコマンドを残す）と PROGRESS.md（両方残す）。
+- ゲート（main、各 release の前）: `cargo test --workspace --no-fail-fast` FAILED 0（1998 → 111 後も全 `test result: ok`）、`cargo clippy --workspace --all-targets -- -D warnings` 警告 0、GUI typecheck / lint / test 1065 件 / gen:types 差分ゼロ（この環境の `pnpm` は 12 系なので `corepack pnpm@11.27.0` で呼ぶ。release.sh は gui/ 内で corepack shim を使うので影響なし）。
+- release / verify / 昇格: `fb788f8445e0`（110a+110b、20:31Z、verify 全 true、live 切替、from 82b0128136be）→ `cc64fbd0b40e`（111、22:32Z、verify 全 true、live 切替）。pegasus の ssh master scope は両方の昇格をまたいで生存。
+- 実機の効果（fb788f8445e0 の 2 時間）: `slow tick phases` は昇格前 1 時間 118 件 → 昇格後 1 件（初回の同期 probe）。`workspace: pruned build artifacts` 27 件で `/home` 使用量 834 GB → 731 GB。`GET /health` の `db` に `filesystem=ext4 device=/dev/loop0` が出る。
+- 設定: `~/.config/celeris/config.toml` の `db = "…"` を `[db]` テーブルへ（`.bak-20260923l`）。`busy_timeout_ms = 15000`、`checkpoint_interval_secs = 30`、`backup_dir = ~/.local/celeris/backups/periodic`（1 時間ごと 48 世代）。cc64fbd0b40e は起動時にこれを読み、`/health` が `busy_timeout_ms: 15000` を返す。
+- `celerisctl plan-lint`（本番 DB、読み取りのみ）: 違反 0。
+- 移設先 `/var/lib/celeris`（人が作成、rmaeda 700、ローカル LVM、fsync 8.8 ms）は準備済み。`relocate-db.sh /var/lib/celeris/celeris.sqlite3 --dry-run` は in-flight（reviewing 1 = BenchFS framing の人待ち承認 01M37KDV94FPN70M5VYED7SGD2）で止まる。人の判断後に実行する。
+- 救済: タスク 01M35X86XTK84F97QW0CN5PGMR の成果物（作業場所の `docs/paper/phase1/framing-candidates.md`、artifacts 未登録で GUI から見えなかった）を知識ベース `projects/benchfs/framing-candidates.md`（b0a5560）へ移した。これが Phase 111 の発端。
+
+### 未解決 / 提案
+- P-110-1: `relocate-db.sh` は「人待ちの reviewing」も in-flight に数える。lease の無い reviewing（承認待ち）は数えない方が運用に合う（次の小 Phase）。
+- P-110-2: origin が `github.com/maetin0324/celeris.git` へ移動した（push 時に案内が出る）。`git remote set-url` は人の判断で。
+- P-110-3: この環境の `~/.local/bin/pnpm`（12.4.2、9/18 に配置）は gui/ の `packageManager`（11.27.0）と合わない。実装エージェントへの指示には `corepack pnpm@11.27.0` を書く。
