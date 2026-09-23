@@ -15900,3 +15900,9 @@ venv で `paperqa==2026.8.12` を実際に `inspect` して確認した API 面�
 - `release.sh main` → exit 0、`sha12=bbd5f21188b0 schema_version=25`、`changes.json: base=3e0991661ee0 commits=4 files=8 sensitive=1`（`config/celeris.research.example.toml` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 3e0991661ee0）, 6 すべて true、`ok=true live_ok=true`。`promote.sh bbd5f21188b0` → mode=live、新 celeris 2 秒で active、GUI 切替 5 秒。
 - 本番設定: `[adapters.paperqa] command` を `.venv/bin/pqa` → `.venv/bin/python`（バックアップ `config.toml.bak-20260923k`、文献調査の run が無いことを確認して変更。venv の python が paperqa 2026.8.12 を import できることを確認）。旧値のままでも新コードは同じディレクトリの python に置き換えるが、明示した。
 - 文献調査の 4 回目のやり直しを起動（PaperQA Python API、contexts 由来の cited、対象ごとの質問、対象 × 観点の表）。結果は次節に追記。
+
+### 2026-09-23 13:54 UTC: 文献調査の 4 回目（Phase 109d）は settings の読み込みで即失敗 → Phase 109e
+
+- タスク 01M378JWR702TADBQCQRCEAB5V（literature-research、local）: acquire は改善（`candidates 30, pdfs 14, abstracts 15, engines arxiv 19 / openalex 11`。OpenAlex の 429 は解消）。しかし `paperqa_ask.py` が `FileNotFoundError: No configuration file 'celeris-proxy' found at user config path ~/.pqa/settings/celeris-proxy.json …` で exit 1 ×2 → failed。
+- 原因: 本番 paperqa 2026.8.12 の `Settings.from_name` は `pqa_directory("settings")`（`~/.pqa` 配下）だけを見て `PQA_SETTINGS_DIR` を読まない。Phase 109d はその環境変数に依存していた（親が 109d の指示に書いた前提の誤り）。旧 `pqa -s <path>` はパスをそのまま受けていた。
+- Phase 109e（小修正）を Sonnet で起動: `paperqa_ask.py` は `<settings_dir>/<name>.json` を `Settings.model_validate_json` で直接読む（from_name と同じ手順）。見つからなければ探したパスを列挙して exit 2（non-retryable）。
