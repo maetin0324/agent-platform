@@ -15673,3 +15673,9 @@ Phase 109 の本番反映直後（2026-09-23 11:04〜11:10 UTC）にやり直し
 - `promote.sh 5b496f5b5720` → mode=live、新 celeris 2 秒で active、GUI 切替 1 秒。`GET /health` release=5b496f5b5720 role=active schema_version=25。
 - 本番設定: `~/.local/celeris/tools/paperqa/settings/celeris-proxy.json` の litellm `num_retries` を 3 箇所とも 1 → 3（バックアップ `.bak-20260923`。run ごとに読むので再起動不要。秘密は含まない）。
 - 調査のやり直し（3 回目、Phase 109b の効果を見る）: 文献 / Web を local で retry → approve。結果は次節に追記。
+
+### 2026-09-23 12:26 UTC: 3 回目のやり直しの結果（Phase 109b の効果と残る 2 つの穴 → Phase 109c）
+
+- Web（LDR、01M372XH925ZG12Q2P9SPP57JM、failed）: 必読の一次情報 6 件（CHFS / FINCHFS / GekkoFS ×2 / UnifyFS ×2）はすべて fetch され `primary: true, cited: true`、「証拠の質」に「6 件中 6 件が反映」。CHFS の節ができ、出典 18 件。1 回目は BeeOND の公式章（与えた URL はサイトルート）の本文が無く不合格。2 回目（detailed）は「必ず埋める項目」を先頭に置いた結果 **report が BeeOND だけになり**、他 4 システムは README の逐語ダンプのみ・観点の整理無し（FINCHFS の readthedocs 未 fetch）で不合格。
+- 文献（PaperQA、01M372XH8PP56555FMRQRMB9WT、failed）: `report.md` は書けたが答えは 35 行の総論で対象別の整理・比較分類が無く、引用マーカーも無いため `cited=0`（`pqa ask` に JSON 出力は無い。Python API の `session.contexts` が要る）。8 対象 × 6 観点を 1 問で投げるのは無理。
+- Phase 109c を Sonnet で起動: 目的文から対象と観点を抽出し `research.json` に残す。LDR は再挑戦でも元の目的文を保ち前回の報告を「改善対象」として添える、docs サイトを 1 階層深追い、最後に LLM で対象 × 観点の表と対象ごとの節を合成（推測禁止、無ければ『未確認』）。PaperQA は Python API に切り替えて contexts から cited を数え、対象ごとに小さく ask して表に組む。CoS の指示に「対象を 1 行に列挙、5 超なら分割」と受け入れ条件の形を追記。
