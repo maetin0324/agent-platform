@@ -1328,9 +1328,11 @@ pub struct PaperQaAdapterConfig {
     /// 自動で同じディレクトリの `python` に置き換えて 1 回警告する。
     #[serde(default = "default_paperqa_command")]
     pub command: String,
-    /// `Settings.from_name(name)` に渡すファイルパス（拡張子は付けない。実機の仕様。ADR-0027 D3）。
-    /// `PQA_SETTINGS_DIR`（親ディレクトリ）と名前（ファイル名）に分けて `paperqa_ask.py` に渡す
-    /// （ADR-0063 Phase 109d C1）。
+    /// 設定ファイルへのフルパス（拡張子は付けても付けなくてもよい。実機の仕様。ADR-0027 D3）。
+    /// `paperqa_ask.py` にはこのファイル自体（`settings_path`）を渡して**直接読ませる**
+    /// （`Settings.from_name` は `PQA_SETTINGS_DIR` を見ないため使えない。本番で観測、
+    /// ADR-0063 Phase 109e）。名前だけ（ディレクトリ無し）を渡した場合だけ
+    /// `Settings.from_name` にフォールバックする。
     #[serde(default)]
     pub settings: Option<String>,
     /// `--agent.index.paper_directory`。相対パスは設定ファイルのディレクトリ基準で絶対化する。

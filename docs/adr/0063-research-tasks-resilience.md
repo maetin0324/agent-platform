@@ -438,3 +438,15 @@ D1〜D4・受け入れ条件 1〜5、Phase 109b・109c 追記）は書き換え�
   取れる目的文（例 BenchFS の文献調査）で再実行し、(1) `research.json.evidence.cited_from_contexts`
   が 0 より大きいこと、(2) `answer.md` の先頭に「# 対象別の整理」（対象×観点の表）が出ること、
   (3) 「## 引用された文献（contexts）」に実際に使われた文献が出ることを確認する。
+
+## Phase 109e 追記（2026-09-23）
+
+本番で観測（run `01M378JWR702TADBQCQRCEAB5V`）: `Settings.from_name` は `PQA_SETTINGS_DIR` を見ない
+（`pqa_directory("settings")` は `~/.pqa/settings/` 固定。本番 venv の `paperqa==2026.8.12` のソースで
+確認）ため、Phase 109d C1 の「`PQA_SETTINGS_DIR=settings_dir` を設定してから `from_name`」は常に
+`FileNotFoundError` になっていた。`paperqa_ask.py` は Rust 側が新たに組む `settings_path`（絶対パス、
+`.json` 付き。`split_settings_path` を 3 要素に拡張）が実在すればそれを `Settings.model_validate_json`
+→ `model_dump()` → `Settings(**...)` で直接読み（`load_settings`）、無ければ従来どおり
+`Settings.from_name(settings_name)` にフォールバックする（paperqa 自身の同梱設定名向け）。
+`PQA_SETTINGS_DIR` の設定は削除した。どちらでも見つからなければ `SettingsResolutionError` → exit 2、
+アダプタは探したパスを含むメッセージで `retryable: false` にする（設定の誤りは再試行しても直らない）。

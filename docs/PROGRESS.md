@@ -15906,3 +15906,105 @@ venv で `paperqa==2026.8.12` を実際に `inspect` して確認した API 面�
 - タスク 01M378JWR702TADBQCQRCEAB5V（literature-research、local）: acquire は改善（`candidates 30, pdfs 14, abstracts 15, engines arxiv 19 / openalex 11`。OpenAlex の 429 は解消）。しかし `paperqa_ask.py` が `FileNotFoundError: No configuration file 'celeris-proxy' found at user config path ~/.pqa/settings/celeris-proxy.json …` で exit 1 ×2 → failed。
 - 原因: 本番 paperqa 2026.8.12 の `Settings.from_name` は `pqa_directory("settings")`（`~/.pqa` 配下）だけを見て `PQA_SETTINGS_DIR` を読まない。Phase 109d はその環境変数に依存していた（親が 109d の指示に書いた前提の誤り）。旧 `pqa -s <path>` はパスをそのまま受けていた。
 - Phase 109e（小修正）を Sonnet で起動: `paperqa_ask.py` は `<settings_dir>/<name>.json` を `Settings.model_validate_json` で直接読む（from_name と同じ手順）。見つからなければ探したパスを列挙して exit 2（non-retryable）。
+## Phase 109e（完了日 2026-09-23）: `paperqa_ask.py` は settings をファイルパスから直接読む（`PQA_SETTINGS_DIR` は効かない）
+
+本番で観測（2026-09-23 13:53 UTC、文献調査 run `01M378JWR702TADBQCQRCEAB5V`）: `paperqa_ask.py exited
+with a non-zero status (exit=1)`、stderr に `FileNotFoundError: No configuration file 'celeris-proxy'
+found at user config path /home/rmaeda/.pqa/settings/celeris-proxy.json or bundled config path ...`。
+親が本番 venv の `paperqa==2026.8.12` のソースを `inspect.getsource` で確認: `Settings.from_name` は
+`pqa_directory("settings")`（`~/.pqa/settings/` 固定）しか見ず、`PQA_SETTINGS_DIR` 環境変数は効かない。
+Phase 109d C1 の「`PQA_SETTINGS_DIR=settings_dir` にしてから `from_name(settings_name)`」は本番の
+`[adapters.paperqa] settings = "/home/rmaeda/.local/celeris/tools/paperqa/settings/celeris-proxy"`
+（`~/.pqa/settings/` の外）を永遠に見つけられない構造的なバグだった。決定は
+`docs/adr/0063-research-tasks-resilience.md` の「## Phase 109e 追記」に記録。
+
+### 原因
+
+`Settings.from_name(name)` は `pqa_directory("settings") / f"{name}.json"`（`~/.pqa/settings/`。
+環境変数を見ない）を読み、無ければ paperqa 同梱の設定を探す。`settings_dir` を別の場所に向けても、
+`from_name` 自身の探索先は変わらない。
+
+### 直し
+
+1. `crates/task-worker/src/paperqa_ask.py`:
+   - `resolve_settings_path(settings_dir, settings_name)`（純関数）: `<settings_dir>/<settings_name>.json`
+     を組む。ディレクトリか名前が無ければ `None`。
+   - `load_settings(payload)`: `settings_path`（`payload` に無ければ `resolve_settings_path` で作る）が
+     実在すれば `Settings.model_validate_json(text)` → `Settings(**tmp.model_dump())`（`from_name` 自身と
+     同じ「検証してから作り直す」二段構え）で**直接読む**。無ければ `settings_name` があるときだけ
+     `Settings.from_name(settings_name)` にフォールバック（paperqa 同梱の設定名、例
+     `"high_quality"`、を指す唯一の経路として残す）。どちらもだめなら `SettingsResolutionError`
+     （探したパスを列挙したメッセージ）。
+   - `main()`: `SettingsResolutionError` を捕まえて `output_path` に `{"error": ..., "answers": []}` を
+     書き、**exit 2** で終わる。`os.environ["PQA_SETTINGS_DIR"] = ...` の行は削除（効かないので誤解を招く）。
+2. `crates/task-worker/src/paperqa.rs`:
+   - `split_settings_path` を 2 要素（`settings_dir`/`settings_name`）から 3 要素
+     （`settings_path`/`settings_dir`/`settings_name`）に拡張。拡張子無しのフルパス・`.json` 付きの
+     フルパス・ディレクトリの無い名前だけ、の 3 通りすべてから正しく組む（名前だけのときは
+     `settings_path = None`、`paperqa_ask.py` 側が `from_name` にフォールバックする）。
+   - `ask_input.json` に `settings_path` を追加。
+   - `ASK_EXIT_BAD_USAGE_OR_SETTINGS_NOT_FOUND = 2` を追加。exit 2 は `output_path` の `error`
+     （無ければ stderr の最後の行）をメッセージにした `Terminal::Error { retryable: false }`
+     （設定の誤りで再試行しても直らないため。exit 3 の「`paperqa` が import できない」と同じ扱い）。
+3. `crates/celeris/src/config.rs`: `PaperQaAdapterConfig.settings` のドキュメントコメントを
+   `PQA_SETTINGS_DIR` は効かない旨に更新（フィールドの型・既定値は変更なし）。
+
+### 条件ごとの実施
+
+1. **Rust: `split_settings_path` が 3 通りの入力から `settings_path` を組む**
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa::split_settings_path_builds_the_settings_path_from_all_three_input_forms`
+   - 出力の要点: exit 0、1 passed。拡張子無しのフルパス・`.json` 付きのフルパス→同じ `settings_path`
+     （`/settings/celeris-proxy.json`）、名前だけ→ `settings_path`/`settings_dir` とも `None`。
+2. **Python 純関数 `resolve_settings_path` を `python3 -c` で確認**
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa::ask_script_pure_functions_build_questions_flatten_contexts_and_the_table`
+     （既存の純関数テストに `resolve_settings_path` の確認を追加）
+   - 出力の要点: exit 0、1 passed。`resolve_settings_path("/settings", "celeris-proxy")` /
+     `resolve_settings_path("/settings", "celeris-proxy.json")` はどちらも
+     `"/settings/celeris-proxy.json"`、ディレクトリ無し・名前無しはどちらも `None`。
+3. **偽の settings JSON + 偽 `paperqa` で `main` が settings を直接読んで `ask` に渡す**
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa::paperqa_ask_main_reads_the_settings_file_directly_when_it_exists`
+   - 出力の要点: exit 0、1 passed。`settings_path` が実在するファイルを指すとき、`Settings.from_name`
+     は呼ばれず（`from_name_called: false`）、ファイルの内容（`model_validate_json` に渡った生 JSON）が
+     `Settings(**tmp.model_dump())` を経て `ask()` に渡ること、`output_path` に答えが書かれることを
+     確認（ネットワーク無し、`sys.modules["paperqa"]` に最小スタブを注入）。
+4. **見つからないときの exit 2**
+   - 条件: `settings_path` が無く `Settings.from_name` も `FileNotFoundError` のとき、`main` は探した
+     パスを列挙したメッセージで exit 2、`output_path` に `{"error": ..., "answers": []}`。アダプタは
+     `Terminal::Error { retryable: false }`。
+   - 実行したコマンド:
+     `cargo test -p task-worker --lib paperqa::paperqa_ask_main_exits_2_with_a_clear_message_when_settings_are_not_found`
+     `cargo test -p task-worker --lib paperqa::ask_exit_2_becomes_a_non_retryable_terminal_error`
+   - 出力の要点: 両方 exit 0、各 1 passed。`output_path["error"]`/stderr とも設定名
+     （`celeris-proxy`）と探した `settings_path` を含む。アダプタ側は `retryable: false` の
+     `Terminal::Error`（メッセージに `celeris-proxy` を含む）。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| task-worker paperqa | `cargo test -p task-worker --lib paperqa::` | exit 0、**51 passed**（0 failed。Phase 109d の 48 から新規 3 件: `paperqa_ask_main_reads_the_settings_file_directly_when_it_exists`/`paperqa_ask_main_exits_2_with_a_clear_message_when_settings_are_not_found`/`ask_exit_2_becomes_a_non_retryable_terminal_error`） |
+| celeris config | `cargo test -p celeris --lib config::` | exit 0、71 passed（Phase 109d と同数。ドキュメントコメントのみの変更で挙動・件数とも変化なし） |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（passed 合計 **1963**。Phase 109d の 1960 から +3） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| API/protocol | `git status --porcelain -- docs/api docs/protocol` | 出力なし（型を変えていないので差分ゼロ） |
+
+### 変更ファイル
+
+- `crates/task-worker/src/paperqa_ask.py`（`resolve_settings_path`/`SettingsResolutionError`/
+  `load_settings` を追加、`main` の settings 組み立てを書き換え、`PQA_SETTINGS_DIR` の設定を削除）
+- `crates/task-worker/src/paperqa.rs`（`split_settings_path` を 3 要素に拡張、`ask_input.json` に
+  `settings_path` を追加、`ASK_EXIT_BAD_USAGE_OR_SETTINGS_NOT_FOUND` と exit 2 の分岐を追加、テスト
+  3 件新規・2 件更新）
+- `crates/celeris/src/config.rs`（`PaperQaAdapterConfig.settings` のドキュメントコメントのみ更新）
+- `docs/adr/0063-research-tasks-resilience.md`（「## Phase 109e 追記」を追加。本文・既存の Phase 追記は
+  書き換えていない）
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う、認証の使える環境で）:
+  Phase 109d の本番反映で `.venv/bin/pqa` → `.venv/bin/python` に切り替えた `[adapters.paperqa]
+  command` はそのまま、`settings = "/home/rmaeda/.local/celeris/tools/paperqa/settings/celeris-proxy"`
+  が実在するファイルを指していることを確認したうえで、Phase 109d で 4 回目を起動した文献調査
+  run（`01M378JWR702TADBQCQRCEAB5V` またはその再試行）をやり直し、(1) exit=1 の
+  `FileNotFoundError` が再発しないこと、(2) `ask_output.json`/`answer.md` に実際の答えが書かれること
+  を確認する。
