@@ -827,7 +827,10 @@ mod tests {
     fn cluster_config(clusters: Vec<celeris::config::ClusterConfig>) -> Config {
         Config {
             harnesses: Vec::new(),
-            db: PathBuf::from("celeris.sqlite3"),
+            db: celeris::config::DbConfig {
+                path: PathBuf::from("celeris.sqlite3"),
+                ..Default::default()
+            },
             workspace_root: PathBuf::from("workspaces"),
             tick_ms: 2000,
             max_concurrency: 2,

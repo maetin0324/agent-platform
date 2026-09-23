@@ -16388,3 +16388,173 @@ Phase 109g の本番反映後、8 回目のやり直し（run `01M37FZRX8GMST4SV
 - 経緯（1〜8 回目）: 引用不足の hard error → アブスト妥協（109）／OpenAlex 429・cited の数え方・report.md 名・LLM 503（109b）／対象別の整理（109c）／Python API（109d）／settings の読み込み（109e）／観点抽出の誤認（109f）／比較分類を判断として立てる（109g）／総括の問いが予算で落ちる（109h）。Web 調査は 4 回目（109c）で合格済み。
 - 残る粗さ（提案）: P-109h-1 比較分類の節の後に、設計条件として埋め込んだ知識ベースの本文の見出し（`## 概要`、`## 主要アーキテクチャ`…）がそのまま report の見出しに混ざる。埋め込み時に見出しを 1 段下げるか引用ブロックにする。P-109h-2 対象別の観点は corpus の弱さで多くが『未確認』（主要論文の本文が 403）。人が著者版 PDF を `~/.local/celeris/tools/paperqa/papers/01M35WRV77A2JPYGERQGXF6V7K/` に置くか DOI を `primary-sources` に足すと改善する。
 - BenchFS 案件: Phase0 3 件 done、Phase1 の Web 調査・文献調査 done。framing（HUMAN GATE 1 向け候補案）は依存が揃い次第 dispatch される。
+
+## Phase 110a（完了日 2026-09-23）: DB をローカルディスクへ置き、I/O 遅延に強くする
+
+本番で観測した事実（再調査は不要。指示に記載済み）への対応。`docs/adr/0064-db-local-disk-and-store-resilience.md`
+（D1〜D5）を先に書いてから実装した。`docs/DESIGN.md` は書き換えていない。
+
+### 条件ごとの実施
+
+1. **D1: DB の置き場所の分離、設定・観測の拡張**
+   - 実行したコマンド: `cargo test -p celeris --lib config::tests::db_accepts_both_the_bare_path_string_and_the_table_form`、
+     `cargo test -p task-core --lib mountinfo::tests`、`UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::tests::committed_schema_matches_generated`
+   - 出力の要点: exit 0（config 1 test、mountinfo 3 tests、schema 1 test）。`Config.db` を
+     `DbConfig`（カスタム `Deserialize`）に変更し、`db = "<path>"`（従来どおり）と
+     `[db] path/busy_timeout_ms/checkpoint_interval_secs/backup_dir/backup_interval_secs/backup_keep`
+     の両方を受け付ける（テストで両形式・一部省略・綴り間違いの拒否・相対パスの解決を確認）。
+     `crates/task-core/src/mountinfo.rs`（新規）の `mount_info_for` が loop デバイス
+     （`/dev/loop*` のマウントソース）を判定できるようにし、`warn_if_db_on_network_filesystem`
+     （`crates/celeris/src/lib.rs`）が nfs/fuse に加えて loop デバイス上のファイルシステムにも
+     WARN するよう拡張。`GET /api/v1/health` の `db` に `filesystem`/`device` を追加（`path` は
+     **追加しなかった**。理由は下の「未解決」参照）。GUI 型を再生成した（差分は `DbInfo` への
+     2 フィールド追加のみ）。
+2. **D2: `relocate-db.sh`（実装エージェントは実行しない）**
+   - 実行したコマンド: `bash -n scripts/selfdeploy/relocate-db.sh`（構文検査）。config.toml 書き換え
+     ロジック（python3 の正規表現置換部分）は、`scripts/selfdeploy/relocate-db.sh` から該当ブロックを
+     抜き出し、8 通りの入力（トップレベル文字列 / `[db]` テーブル / `path` 省略のテーブル / `db` 未記載
+     / 別の節に同名 `db` キーがある場合 / `[db]` がファイル末尾のテーブルの場合 / 両形式の行末コメント
+     付き）で手動検証し、いずれも `python3 -c "import tomllib; tomllib.load(...)"` で再パースできる
+     ことを確認した（`config/celeris.example.toml` の実際の `db = "..." # ...` 行でも確認）。
+   - 出力の要点: 構文検査 exit 0。config 書き換えは全 8 ケースで単一の `db` キーに正しく収束（当初の
+     実装は 2 つのバグがあった: (a) ファイル先頭が `[db]` テーブルのとき「トップレベル」の境界判定を
+     誤り、(b) 置換対象がブロック末尾にちょうど接すると `\s*$` が改行を飲み込み後続のテーブル見出しと
+     連結してしまう。両方直して 8 ケース全てが有効な TOML になることを確認）。
+   - `celerisctl db backup <dest> [--src <path>]` / `celerisctl db integrity-check <path>`（新規
+     サブコマンド。`crates/celerisctl/src/commands/db.rs`）を追加し、`cargo run -p celerisctl -- db
+     backup ...` → `db integrity-check ...` の実機コマンド往復（一時ディレクトリ、本番パスは触れて
+     いない）で動作確認済み（exit 0、`ok: <path>`）。
+   - `docs/selfdeploy.md` に §5b を追記（手順・冪等性・各段階の失敗時の手動復旧の要約）。
+3. **D3: 定期バックアップ**
+   - 実行したコマンド: `cargo test -p celeris --lib db_maintenance`
+   - 出力の要点: exit 0、4 passed。`crates/celeris/src/db_maintenance.rs`（新規）の
+     `spawn_backup_task` が `backup_interval_secs` ごとに `task_core::backup_database`（rusqlite の
+     backup API、API/dispatcher の `Mutex` とは別の専用接続）で `backup_dir/celeris-<unix_ts>.sqlite3`
+     を書き、`backup_keep` 世代だけ残すことを確認（`backup_once_writes_a_restorable_copy_and_
+     prune_keeps_only_the_newest`: 3 回書いて keep=2 なら最古が消え、残った最新は
+     `SqliteStore::open` で復元・読み取り可能）。`backup_dir` が無ければ `BackupError::MissingDir`
+     で WARN して継続（ディレクトリは作らない。D2 と同じ規律）。`tokio::spawn` の tick →
+     `spawn_blocking` → `stop()` の配線自体も別テストで確認（`spawn_checkpoint_task`/
+     `spawn_backup_task` を 20ms 間隔で動かし 300ms 待ってから `stop()`、バックアップファイルが
+     実際に書かれることを確認）。`run()` に `!verify` のときだけ起動・プロセス終了時に `stop()` する
+     配線を追加（`crates/celeris/src/lib.rs`）。
+4. **D4: 読み書き分離（読み取り専用の小さな接続プール）**
+   - 実行したコマンド:
+     `cargo test -p task-core --lib store::tests::reads_do_not_wait_for_a_held_write_lock
+     store::tests::read_pool_size_zero_falls_back_to_the_write_connection
+     store::tests::two_connections_read_and_write_the_same_file_concurrently
+     store::tests::concurrent_read_then_write_transactions_on_two_connections_wait_instead_of_failing`
+   - 出力の要点: exit 0、4 passed。`SqliteStore` にファイル DB のときだけ `query_only=ON` の接続
+     プール（既定 2 本、`StoreOptions.read_pool_size`）を追加し、`with_read_conn` が
+     `TaskStore` 本体の SELECT 専用メソッド（`get`/`list`/`ready_tasks`/`children`/`events_for*`/
+     `events_since`/`latest_event_id`/`event_rows_for`/`list_page`/`count_by_status`/`org_list`/
+     `org_get`/`project_get`/`project_list`/`repo_get`/`repo_list`/`repo_active_tasks`/
+     `integration_get`/`integration_list_for_task`/`integration_latest`/
+     `integration_list_for_project`/`milestone_list`/`milestone_get`/`message_list`/
+     `message_page`/`comments_for`/`instance_list`/`cluster_settings_get`/`cluster_settings_list`。
+     計 30 メソッド）をそちらへ回す。新規テスト
+     `reads_do_not_wait_for_a_held_write_lock` は、書き込み接続の `Mutex` を 400ms 保持している間に
+     `get()` を呼び、200ms（保持時間の半分）未満で返ることを確認（実測は数 ms）。既存の並走テスト
+     （`concurrent_read_then_write_transactions_on_two_connections_wait_instead_of_failing`、
+     `two_connections_read_and_write_the_same_file_concurrently`）はそのまま通る。インメモリ DB
+     （テストの大半）は接続間で状態を共有できないため読み取りプールを作らず、従来どおり書き込み
+     接続にフォールバックする（`read_pool_size_zero_falls_back_to_the_write_connection` で確認）。
+5. **D5: 背景チェックポイント**
+   - 実行したコマンド:
+     `cargo test -p task-core --lib store::tests::background_checkpoint_option_disables_wal_autocheckpoint
+     store::tests::backup_database_round_trips_and_integrity_check_detects_a_good_copy`、
+     `cargo test -p celeris --lib db_maintenance::tests::checkpoint_once_runs_on_a_fresh_wal_db_without_error`
+   - 出力の要点: exit 0（3 tests）。`StoreOptions.background_checkpoint`（デーモンの接続だけ
+     `true`）で `wal_autocheckpoint=0`・`journal_size_limit=64MB` を設定することを確認。
+     `background_checkpoint_option_disables_wal_autocheckpoint` で既定（false）は `wal_autocheckpoint`
+     が 0 でない（sqlite 既定のまま）ことと、`true` なら 0 になることの両方を検証。
+     `crates/celeris/src/db_maintenance.rs::spawn_checkpoint_task` が `checkpoint_interval_secs`
+     ごとに専用接続で `PRAGMA wal_checkpoint(PASSIVE)` を打ち、WAL が 64MB を超えていれば
+     `TRUNCATE` も試みることを確認。`build_dispatcher`/`build_mcp_state`/`api_settings` の
+     3 接続すべてに `background_checkpoint: true` を配線（`crates/celeris/src/lib.rs`、
+     `crates/celeris-mcp/src/state.rs::McpState::open` に引数追加）。`llm-proxy` のリクエストごとの
+     ログ接続（`crates/llm-proxy/src/log.rs`）は対象外にした（「未解決」参照）。
+
+### ゲート
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（passed 合計 **1993**。Phase 109h の main 反映後の 1978 から +15: `task-core::store` +4〈`reads_do_not_wait_for_a_held_write_lock`/`background_checkpoint_option_disables_wal_autocheckpoint`/`backup_database_round_trips_and_integrity_check_detects_a_good_copy`/`read_pool_size_zero_falls_back_to_the_write_connection`〉、`task-core::mountinfo`（新規モジュール）+3、`celeris::config` +1〈`db_accepts_both_the_bare_path_string_and_the_table_form`〉、`celeris::db_maintenance`（新規モジュール）+4、`celerisctl::commands::db`（新規モジュール）+3） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| GUI typecheck | `pnpm -C gui typecheck` | exit 0（エラー 0） |
+| GUI lint | `pnpm -C gui lint` | exit 0（`biome check .`、256 files、fixes 0） |
+| GUI test | `pnpm -C gui test` | exit 0（68 files、1065 passed） |
+| GUI gen:types | `pnpm -C gui gen:types` | 実行後の差分: `DbInfo` に `device`/`filesystem`（任意）が増えただけ。2 回目の実行では追加の差分なし（`docs/api/v1/api-v1.schema.json`/`gui/app/celeris/types.ts` は再実行前後で同一） |
+
+### 変更ファイル
+
+- `crates/task-core/src/store.rs`（`StoreOptions.read_pool_size`/`background_checkpoint`、
+  `ReadPool`/`SqliteStore.read_pool`/`with_read_conn`、`backup_database`/`integrity_check` 自由関数、
+  29 読み取りメソッドの移行、新規テスト 4 件）
+- `crates/task-core/src/mountinfo.rs`（新規。`MountInfo`/`mount_info_for`/`is_network_filesystem`/`is_loop_device`）
+- `crates/task-core/src/lib.rs`（`mountinfo` モジュールと `backup_database`/`integrity_check` の re-export）
+- `crates/task-core/Cargo.toml`（rusqlite の `backup` feature を有効化）
+- `crates/celeris/src/config.rs`（`DbConfig` とカスタム `Deserialize`、`Config.db` の型変更、
+  `Config::load`/`apply_overrides` の追従、新規テスト 1 件）
+- `crates/celeris/src/lib.rs`（`config.db` 型変更への追従、loop デバイス検出、
+  `build_dispatcher`/`build_mcp_state`/`build_llm_proxy_state`/`api_settings` への `[db]` 配線、
+  背景チェックポイント・定期バックアップの起動/停止）
+- `crates/celeris/src/db_maintenance.rs`（新規。`spawn_checkpoint_task`/`spawn_backup_task`、
+  `checkpoint_once`/`backup_once`/`prune_backups`、テスト 4 件）
+- `crates/celeris/Cargo.toml`（`rusqlite` 依存を追加）
+- `crates/task-api/src/types.rs`（`DbInfo.filesystem`/`device`。`path` は追加していない）
+- `crates/task-api/src/state.rs`（`detect_db_mount`、`Inner.db_mount`、`background_checkpoint` の配線）
+- `crates/task-api/src/handlers.rs`（health ハンドラの `db` 組み立て）
+- `crates/task-api/src/lib.rs`（`ApiSettings.background_checkpoint`）
+- `crates/task-api/tests/common/mod.rs`、`crates/task-api/src/handlers.rs`（テスト側の `ApiSettings` 構築に `background_checkpoint: false` を追加）
+- `crates/celeris-mcp/src/state.rs`（`McpState::open` に `background_checkpoint: bool` 引数）
+- `crates/celerisctl/src/commands/db.rs`（新規。`db backup`/`db integrity-check`、テスト 3 件）
+- `crates/celerisctl/src/commands/mod.rs`、`crates/celerisctl/src/main.rs`（`Command::Db` の配線）
+- `crates/celerisctl/src/commands/worker.rs`（テスト用 `Config` 組み立ての `db` フィールド更新）
+- `scripts/selfdeploy/relocate-db.sh`（新規）
+- `docs/selfdeploy.md`（§5b 追記、§8 に `[db]` テーブルの説明を追記）
+- `docs/adr/0064-db-local-disk-and-store-resilience.md`（新規）
+- `docs/api/v1/api-v1.schema.json`、`gui/app/celeris/types.ts`（`DbInfo` の再生成）
+
+### 未解決事項
+
+- P-110a-1: `GET /api/v1/health` に DB の絶対パス（`path`）は**追加しなかった**。指示文の D1 は
+  `path`/`filesystem`/`device` を足すとしていたが、`crates/task-api/tests/auth_and_guards.rs` の
+  `health_is_unauthenticated_but_still_host_checked` が「`/health` は無認証なので DB のパスを
+  露出しない」ことを明示的にテストしており（`docs/gui/api.md` §1.1、`/health` は無認証という
+  既存の ADR-0013 D8 の設計）、これと矛盾する。絶対パスは既に認証済みの `GET /api/v1/config`
+  （`ConfigView.db`）が返しているので、`filesystem`/`device`（fstype・マウントソース。低感度な
+  診断情報）だけを `/health` に足し、`path` はそちらに任せた。`relocate-db.sh` の最終確認も
+  `/config` を見るよう設計している。人が「`/health` にも `path` を出したい」と判断するなら、
+  既存のテストと ADR-0013 D8 の「`/health` は無認証」という前提を変える判断が要る（別 ADR）。
+- P-110a-2: D4（読み書き分離）は `TaskStore` トレイト本体の SELECT 系（30 メソッド）だけを読み取り
+  プールへ移した。`report`/`approval`/`notify`/`knowledge_run`/`delivery`/`node_session`/`mcp` の
+  各サブトレイト（`crates/task-core/src/{report,approval,notify,knowledge_run,delivery,
+  node_session,mcp}.rs`）は今回は触っていない（書き込み接続の `Mutex` のまま。既存の挙動と同じ、
+  退行なし）。これらの読み取りメソッドが多い経路（例えば `GET /reports` や `GET /approvals`）が
+  次に問題になったら、同じ `with_read_conn` パターンを適用できる。
+- P-110a-3: D5 の `background_checkpoint` は dispatcher・API・MCP の接続には配線したが、
+  `llm-proxy` のリクエストごとのログ接続（`crates/llm-proxy/src/log.rs::open`。毎リクエスト開いて
+  閉じる）には配線していない。単一の小さな追記専用テーブルへの INSERT なので実害は小さいと見ている
+  が、`llm_proxy_requests` の書き込みが多い環境では次の Phase で見直すとよい。
+- 実機未確認（ADR-0009 P-34）。`relocate-db.sh` は本番の systemd unit・API・DB を直接操作するため、
+  このエージェント（CLAUDE.md の制約で systemctl / systemd-run / 実 ssh に触れない）では実行できない。
+  config.toml の書き換えロジック（最もバグを仕込みやすい部分）は 8 通りの入力で手動検証済み
+  （「条件ごとの実施」の D2 参照）。人が実機で以下を確認すること:
+  1. `/var/lib/celeris` のようなローカルディスクのディレクトリを作る（`sudo install -d ...`）。
+  2. `scripts/selfdeploy/relocate-db.sh <path> --dry-run` → 計画と in-flight の確認結果が妥当なこと。
+  3. `scripts/selfdeploy/relocate-db.sh <path>` を実行し、`GET /api/v1/health` の `db.filesystem`/
+     `db.device` が新しいディスクを指すこと、`GET /api/v1/config` の `db` が新パスであること、
+     GUI と API が通常どおり動くこと。
+  4. `[db] backup_dir` を設定に足して再起動し、`backup_interval_secs` 後に `backup_dir` へ
+     `celeris-<ts>.sqlite3` が実際に書かれること（ログに `wrote a periodic db backup` が出る）。
+  5. `busy_timeout_ms = 15000` を足して、以前 503 `db_busy` が出ていた高 I/O 負荷の時間帯
+     （複数 worktree での `cargo test --workspace` 並走）で再現しないことを確認する。
+
+### 提案
+
+- P-110a-4: `relocate-db.sh` の config.toml 書き換えは正規表現ベースの素朴な実装（TOML パーサを
+  使っていない）。`[db]` テーブルの中に配列テーブル（`[[db.x]]`）のような構造が将来増えると壊れる
+  可能性がある。人手で確認する頻度の低い操作なので許容範囲と判断したが、`toml` crate で読み書き
+  する小さな Rust ツール（`celerisctl config set-db-path` のようなサブコマンド）に置き換えると
+  堅くなる。

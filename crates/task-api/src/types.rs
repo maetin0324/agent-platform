@@ -34,6 +34,16 @@ pub struct DbInfo {
     /// `PRAGMA journal_mode` の実測値（`"wal"` でなければ設定不備）。
     pub journal_mode: String,
     pub busy_timeout_ms: u64,
+    /// ADR-0065 D1: `/proc/self/mountinfo` から引けたファイルシステム種別（`"ext4"` 等）。
+    /// `GET /health` は無認証（`docs/gui/api.md` §1.1 / auth_and_guards.rs のテスト）なので、DB の
+    /// **絶対パス自体はここに出さない**（それは認証済みの `GET /api/v1/config` の `config.db` が
+    /// 既に返している）。判定できなければ `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filesystem: Option<String>,
+    /// 同上のマウントソース（`/dev/loop0` のような loop デバイスならネットワーク越しの可能性がある。
+    /// ADR-0065 D1）。判定できなければ `null`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
 }
 
 /// RFC 9457 の problem details（`application/problem+json`）。`extra` は `code` ごとの付加フィールド。

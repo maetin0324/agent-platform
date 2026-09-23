@@ -14,6 +14,7 @@ use task_core::SqliteStore;
 use commands::add::{self, AddArgs};
 use commands::cancel::{self, CancelArgs};
 use commands::config::{self as config_cmd, ConfigCommand};
+use commands::db::{self as db_cmd, DbCommand};
 use commands::gate::{self, AnswerArgs, ApproveArgs, RejectArgs};
 use commands::knowledge::{self, KnowledgeCommand};
 use commands::mcp::{self, McpCommand};
@@ -84,6 +85,13 @@ enum Command {
         #[command(subcommand)]
         command: ProjectsCommand,
     },
+    /// ADR-0065 D2/D3（Phase 110a）: `backup <dest>` / `integrity-check <path>`。
+    /// `scripts/selfdeploy/relocate-db.sh` が `sqlite3` コマンドの無い環境で使う。**DB を通常の
+    /// 経路（`--db`）では開かない**（`backup` は `--src` で任意の元ファイルを指定できる）。
+    Db {
+        #[command(subcommand)]
+        command: DbCommand,
+    },
 }
 
 fn resolve_db_path(cli_db: Option<PathBuf>) -> PathBuf {
@@ -111,6 +119,7 @@ fn dispatch(store: &SqliteStore, db_path: &Path, command: Command) -> Result<Exi
         // `main` が先に処理する（DB を開かない場合があるため）。
         Command::Knowledge { .. } => unreachable!("handled before the store is opened"),
         Command::Mcp { .. } => unreachable!("handled before the store is opened"),
+        Command::Db { .. } => unreachable!("handled before the store is opened"),
         Command::Worker { command } => match command {
             WorkerCommand::Run(args) => worker::run_run(store, args),
         },
@@ -155,6 +164,29 @@ fn main() -> ExitCode {
                 eprintln!("error: {e}");
                 ExitCode::FAILURE
             }
+        };
+    }
+    // ADR-0065 D2/D3: `db backup`/`db integrity-check` は通常の `--db` の store を開かず、
+    // 専用の接続で直接処理する（`backup` の既定の元は `--db` の解決規則と同じ）。
+    if let Command::Db { command } = cli.command {
+        return match command {
+            DbCommand::Backup(args) => {
+                let src = args.src.clone().unwrap_or_else(|| resolve_db_path(cli.db));
+                match db_cmd::run_backup(args, src) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        ExitCode::FAILURE
+                    }
+                }
+            }
+            DbCommand::IntegrityCheck(args) => match db_cmd::run_integrity_check(args) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::FAILURE
+                }
+            },
         };
     }
     // ADR-0056 D1: `mcp stdio` は DB を開かない（手元の HTTP に橋を架けるだけ）。

@@ -6,7 +6,8 @@ edition.workspace = true
 [dependencies]
 ulid = { version = "1", features = ["serde"] }
 time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+# ADR-0065 D2/D3: "backup" は `rusqlite::backup`（バックアップ API）を有効にする。
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 sha2 = "0.10"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

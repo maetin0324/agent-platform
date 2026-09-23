@@ -24,6 +24,9 @@ pub mod message;
 /// ADR-0056 D1 / D4（Phase 78）: MCP サーバーの認証（`mcp_clients`）とログ（`mcp_calls`）。
 pub mod mcp;
 pub mod model;
+/// ADR-0065 D1（Phase 110a）: `/proc/self/mountinfo` からマウント点のファイルシステム種別・ソースを
+/// 引く純関数（DB がネットワーク越し／loop デバイス上にあることを警告するため）。
+pub mod mountinfo;
 /// ADR-0054 D1（Phase 67）: ノードごとの継続セッション（`node_sessions`）。
 pub mod node_session;
 pub mod notify;
@@ -129,7 +132,7 @@ pub use repos::{
 };
 pub use store::{
     ClusterSettings, EventRow, ListFilter, ListOrder, Page, SCHEMA_VERSION, SqliteStore,
-    StoreError, StoreOptions, TaskStore, event_row_schema_value,
+    StoreError, StoreOptions, TaskStore, backup_database, event_row_schema_value, integrity_check,
 };
 pub use transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
 

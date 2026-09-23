@@ -289,6 +289,7 @@ pub fn settings(
         allowed_hosts: options.allowed_hosts,
         db_path: db_path.to_path_buf(),
         busy_timeout: Duration::from_millis(5000),
+        background_checkpoint: false,
         view: view_context(workspace_root),
         config_view: config_view(),
         roles: options.roles,

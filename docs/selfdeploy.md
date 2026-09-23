@@ -24,7 +24,10 @@ release.sh <ref>  →  verify.sh <sha12>  →  promote.sh <sha12>        （戻�
   secrets/               ADR-0030 の秘密（1 秘密 = 1 ファイル）
 
 ~/.local/celeris/        （状態）
-  celeris.sqlite3        本番の DB（`sqlite3 .backup` と `mode=ro` で読むだけ）
+  celeris.sqlite3        本番の DB（`sqlite3 .backup` と `mode=ro` で読むだけ）。ADR-0065 D1/D2
+                          （Phase 110a）以降、`config.toml` の `db =`（または `[db].path`）を
+                          ローカルディスクの別パス（例 `/var/lib/celeris/celeris.sqlite3`）に向けて
+                          よい。状態ディレクトリ本体はここのまま（§5b）。
   current -> releases/<sha12>     いま動いている版
   previous -> releases/<sha12>    直前の版（rollback 先）
   releases/<sha12>/     bin/{celeris,celerisctl}  gui/  manifest.json  gate.json  verify.json
@@ -461,6 +464,45 @@ scripts/selfdeploy/rollback.sh --restore-db # DB も昇格前に書き戻す（�
 
 **書き戻すと、昇格してから今までに進んだ仕事は消える。** どちらが損かを人が決める。
 
+## 5b. DB をローカルディスクへ移す（`relocate-db.sh`。人だけ）
+
+ADR-0065（Phase 110a）: 本番の DB（`~/.local/celeris`）が `/home` にあり、その実体が NFS 越しの
+raw イメージ（`/dev/loop*`）だと、fsync が数十 ms かかり I/O が混むと `database is locked` や
+GUI のタイムアウトが起きる（実機で観測。`docs/PROGRESS.md` Phase 110a）。DB ファイル**だけ**を
+ローカルディスク（例 `/var/lib/celeris/`）へ移し、状態ディレクトリ本体（workspaces / releases /
+backups / tools）は `/home` のまま残せる。
+
+```bash
+sudo install -d -o "$(whoami)" -g "$(whoami)" -m 0750 /var/lib/celeris   # 先に人が作る（スクリプトは作らない）
+scripts/selfdeploy/relocate-db.sh /var/lib/celeris/celeris.sqlite3 --dry-run   # 計画と in-flight の確認だけ
+scripts/selfdeploy/relocate-db.sh /var/lib/celeris/celeris.sqlite3            # 実行
+```
+
+手順（`docs/adr/0065-db-local-disk-and-store-resilience.md` D2）:
+
+1. `GET /api/v1/tasks` の `counts_by_status`（`running` + `reviewing`）が 0 であることを確認する。
+   0 でなければ何もせず止まる（待つか、`--dry-run` で様子を見てから改めて実行する）。
+2. `current` の sha の `celeris@<sha>` / `celeris-gui@<sha>` を止める。
+3. `sqlite3` があれば `VACUUM INTO`、無ければ現在のリリースの `celerisctl db backup`（rusqlite の
+   backup API。ADR-0065 D2/D3 の新規サブコマンド）で新しい場所へコピーする。
+4. 新しいファイルに `PRAGMA integrity_check`。`ok` でなければコピーを消して止まる
+   （**旧 DB とサービスには触れない**）。
+5. `config.toml` の `db =`（または `[db].path`）を書き換える。`config.toml.bak-<ts>` を残す。
+6. 旧ファイルを `<旧パス>.moved-<ts>` に**リネーム**する（削除しない）。
+7. unit を起こす。
+8. `GET /api/v1/config`（認証つき）の `db` が新パスになっていることを確認する。**`GET /health` は
+   無認証なので DB の絶対パスは出さない**（`db.filesystem` / `db.device` だけ出る。ADR-0065 D1）。
+
+各段階の失敗は、その時点までに済んだことと**手で戻す手順**を stderr に出して exit 1 で止まる
+（自動では戻さない）。冪等（`db` が既に指定パスなら何もせず exit 0）。ディレクトリは作らない
+（無ければ「先に `sudo install -d` してください」と言って止まる）。
+
+移した後は、`[db]` テーブルで `busy_timeout_ms`（本番では 15000 を勧める）・
+`checkpoint_interval_secs`（既定 30）・`backup_dir`・`backup_interval_secs`（既定 3600）・
+`backup_keep`（既定 48）も書ける（§8）。`backup_dir` を書くと、celeris がその間隔で
+`celeris-<unix_ts>.sqlite3` を自分の背景タスクで書き、世代を`backup_keep`件だけ残す
+（DB がローカルディスクにあると NFS 側のスナップショットに乗らなくなるため）。
+
 ## 6. いまを見る（`status.sh`）
 
 ```bash
@@ -506,6 +548,18 @@ ADR-0045 D2 で「省略したときの既定」が新しい置き場になっ�
 | `[memory] dir` | `~/.local/celeris/memory` |
 | `[containers] build_dir` | `~/.local/celeris/containers` |
 | `[secrets] dir` | `~/.config/celeris/secrets` |
+
+ADR-0065 D1（Phase 110a）: `db` は文字列（従来どおり）でも、`[db]` テーブルでもよい
+（`db = "<path>"` と `[db] path = "<path>"` は同じ意味）。テーブルにすると追加のキーが書ける:
+
+| `[db]` のキー | 省略時の既定 |
+|---|---|
+| `path` | `~/.local/celeris/celeris.sqlite3`（`db = "..."` と同じ既定） |
+| `busy_timeout_ms` | 5000（本番では 15000 を勧める。`relocate-db.sh` の後に書き足すとよい） |
+| `checkpoint_interval_secs` | 30（背景チェックポイントの間隔。ADR-0065 D5） |
+| `backup_dir` | 無し（無ければ定期バックアップをしない） |
+| `backup_interval_secs` | 3600 |
+| `backup_keep` | 48 |
 
 **書いてあれば従来どおり**（相対パスは設定ファイルのディレクトリ基準）。`[api] token_file` と
 `[accounts] claude_dir` / `codex_dir` には**暗黙の既定を入れない**: 「書いていない」こと自体が

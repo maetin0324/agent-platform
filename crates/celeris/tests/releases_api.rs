@@ -84,7 +84,7 @@ adapter = "fake"
             "relative repo must be config-dir based"
         );
         // マイグレーションを流す（`GET /releases` は `daemon_instances` を読む）。
-        let _store = SqliteStore::open(&config.db).unwrap_or_else(|e| panic!("open: {e}"));
+        let _store = SqliteStore::open(&config.db.path).unwrap_or_else(|e| panic!("open: {e}"));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

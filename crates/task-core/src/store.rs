@@ -75,21 +75,35 @@ const MIGRATION_0025: &str = include_str!("../migrations/0025_cluster_settings.s
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
 pub const SCHEMA_VERSION: u32 = 25;
 
-/// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5）。
+/// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5、ADR-0065 D1/D4/D5）。
 #[derive(Debug, Clone, Copy)]
 pub struct StoreOptions {
     /// `PRAGMA busy_timeout`。複数接続（ディスパッチャ・API・celerisctl）が同じファイルを
-    /// 開くときにロック待ちする時間。既定は 5000 ms。
+    /// 開くときにロック待ちする時間。既定は 5000 ms（本番では 15000 ms を勧める。ADR-0065 D1）。
     pub busy_timeout: StdDuration,
+    /// ADR-0065 D4: ファイル DB のとき、読み取り専用（`query_only=ON`）の小さな接続プールを
+    /// この本数だけ作る（既定 2）。`0` ならプールを作らず、読み取りも書き込み接続を使う
+    /// （従来どおり）。インメモリ DB では接続間で状態を共有できないため常にプールを作らない。
+    pub read_pool_size: usize,
+    /// ADR-0065 D5: `true` なら `wal_autocheckpoint=0` にし、`journal_size_limit` を設定する
+    /// （チェックポイントは背景の専用接続がタイマーで行う想定。デーモンの接続だけ立てる。
+    /// `celerisctl` 等デーモン外の接続は既定の `false` のまま）。
+    pub background_checkpoint: bool,
 }
 
 impl Default for StoreOptions {
     fn default() -> Self {
         Self {
             busy_timeout: StdDuration::from_millis(5000),
+            read_pool_size: 2,
+            background_checkpoint: false,
         }
     }
 }
+
+/// ADR-0065 D5: `background_checkpoint` のときに設定する `PRAGMA journal_size_limit`（64 MB）。
+/// WAL がこれを超えたら次のバックグラウンド・チェックポイントが `TRUNCATE` を試みる。
+const BACKGROUND_CHECKPOINT_JOURNAL_SIZE_LIMIT: i64 = 64 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -888,6 +902,53 @@ pub struct ClusterSettings {
 
 pub struct SqliteStore {
     conn: Mutex<Connection>,
+    /// ADR-0065 D4: ファイル DB のときだけ `Some`（インメモリでは接続間の状態共有ができないため）。
+    read_pool: Option<ReadPool>,
+}
+
+/// ADR-0065 D4: 読み取り専用（`query_only=ON`）の小さな接続プール。書き込み接続（`conn`）の
+/// `Mutex` とは別物で、読み取りは書き込みのトランザクション中でも待たされない（WAL の性質）。
+struct ReadPool {
+    conns: Mutex<Vec<Connection>>,
+    available: std::sync::Condvar,
+}
+
+impl ReadPool {
+    fn open(path: &Path, size: usize, busy_timeout: StdDuration) -> Result<Self, StoreError> {
+        let mut conns = Vec::with_capacity(size);
+        for _ in 0..size {
+            let conn = Connection::open(path)?;
+            conn.busy_timeout(busy_timeout)?;
+            // ADR-0065 D4: `?mode=ro` ではなく通常の接続を `query_only=ON` にする（`ATTACH` や
+            // 一時テーブルなど、真の読み取り専用オープンでは使えない機能を素朴に避けるため）。
+            conn.pragma_update(None, "query_only", true)?;
+            conns.push(conn);
+        }
+        Ok(Self {
+            conns: Mutex::new(conns),
+            available: std::sync::Condvar::new(),
+        })
+    }
+
+    /// 空いている接続を 1 本取り出す（無ければ空くまで待つ）。
+    fn checkout(&self) -> Result<Connection, StoreError> {
+        let mut guard = self.conns.lock().map_err(|_| StoreError::Poisoned)?;
+        loop {
+            if let Some(conn) = guard.pop() {
+                return Ok(conn);
+            }
+            guard = self.available.wait(guard).map_err(|_| StoreError::Poisoned)?;
+        }
+    }
+
+    /// 使い終わった接続をプールへ返す。プールの `Mutex` が poison していたら、その接続は
+    /// 静かに捨てる（プールは縮むだけで、以後の `with_read_conn` はエラーにはならない）。
+    fn checkin(&self, conn: Connection) {
+        if let Ok(mut guard) = self.conns.lock() {
+            guard.push(conn);
+            self.available.notify_one();
+        }
+    }
 }
 
 /// ADR-0043 D1: 既存の作業場所を写すとき・API が `kind` を省略したときの `kind` の決め方
@@ -948,22 +1009,54 @@ pub(crate) fn parse_rfc3339(s: &str) -> Result<OffsetDateTime, StoreError> {
     Ok(OffsetDateTime::parse(s, &Rfc3339)?)
 }
 
+/// ADR-0065 D2/D3: `src` を `dest` へ rusqlite の backup API でコピーする。既存のストア接続の
+/// `Mutex` は取らない**専用の接続**を新たに開くので、進行中の書き込み・読み取りを長く待たせない
+/// （WAL のバックアップはページ単位で進み、途中でも一貫したスナップショットになる）。呼び出し側
+/// （`celeris` の背景バックアップ tick、`celerisctl db backup`、`relocate-db.sh`）が使う。
+pub fn backup_database(src: &Path, dest: &Path, busy_timeout: StdDuration) -> Result<(), StoreError> {
+    let src_conn = Connection::open(src)?;
+    src_conn.busy_timeout(busy_timeout)?;
+    let mut dest_conn = Connection::open(dest)?;
+    let backup = rusqlite::backup::Backup::new(&src_conn, &mut dest_conn)?;
+    backup.run_to_completion(100, StdDuration::from_millis(250), None)?;
+    Ok(())
+}
+
+/// ADR-0065 D2: `path` の DB に対して `PRAGMA integrity_check` を実行し、`"ok"` だけが返れば
+/// `true`（1 行でも別の文言があれば破損の疑い）。`relocate-db.sh` が退避先の検証に使う想定。
+pub fn integrity_check(path: &Path) -> Result<bool, StoreError> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare("PRAGMA integrity_check")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    let mut ok = true;
+    let mut any = false;
+    for row in rows {
+        any = true;
+        if row? != "ok" {
+            ok = false;
+        }
+    }
+    Ok(ok && any)
+}
+
 impl SqliteStore {
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
-        Self::from_connection(conn, &StoreOptions::default())
+        // ADR-0065 D4: インメモリでは追加の接続が同じ状態を共有できないので、読み取りプールは作らない
+        // （`with_read_conn` は書き込み接続にフォールバックする）。
+        Self::from_connection(conn, &StoreOptions::default(), None)
     }
 
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         Self::open_with(path, StoreOptions::default())
     }
 
-    /// ADR-0013 D5: `path` の DB を `options` の PRAGMA 設定で開き、マイグレーションを適用する。
-    /// DB の版数がこのバイナリの知る `SCHEMA_VERSION` より新しければ `StoreError::SchemaTooNew` を
-    /// 返し、DB には何も書かない。
+    /// ADR-0013 D5 / ADR-0065 D1・D4・D5: `path` の DB を `options` の PRAGMA 設定で開き、
+    /// マイグレーションを適用する。DB の版数がこのバイナリの知る `SCHEMA_VERSION` より新しければ
+    /// `StoreError::SchemaTooNew` を返し、DB には何も書かない。
     pub fn open_with(path: &Path, options: StoreOptions) -> Result<Self, StoreError> {
         let conn = Connection::open(path)?;
-        Self::from_connection(conn, &options)
+        Self::from_connection(conn, &options, Some(path))
     }
 
     // ---- ADR-0046 D7（Phase 59）: `celerisctl org migrate-v2` のための低レベルの書き換え。
@@ -1064,22 +1157,68 @@ impl SqliteStore {
         Ok(v as u32)
     }
 
-    fn from_connection(mut conn: Connection, options: &StoreOptions) -> Result<Self, StoreError> {
+    fn from_connection(
+        mut conn: Connection,
+        options: &StoreOptions,
+        path: Option<&Path>,
+    ) -> Result<Self, StoreError> {
         Self::configure_pragmas(&conn, options)?;
         Self::migrate(&mut conn)?;
+        // ADR-0065 D4: ファイル DB でだけ、読み取り専用の小さな接続プールを作る（`read_pool_size = 0`
+        // にすれば無効化できる）。
+        let read_pool = match path {
+            Some(path) if options.read_pool_size > 0 => {
+                Some(ReadPool::open(path, options.read_pool_size, options.busy_timeout)?)
+            }
+            _ => None,
+        };
         Ok(Self {
             conn: Mutex::new(conn),
+            read_pool,
         })
     }
 
-    /// ADR-0013 D5: WAL・busy_timeout・synchronous=NORMAL を設定する。`foreign_keys` は変えない。
-    /// インメモリ DB では `journal_mode` が `memory` のまま返ることがあるが、エラーにはしない。
+    /// ADR-0013 D5 / ADR-0065 D5: WAL・busy_timeout・synchronous=NORMAL を設定する。`foreign_keys`
+    /// は変えない。インメモリ DB では `journal_mode` が `memory` のまま返ることがあるが、エラーには
+    /// しない。`background_checkpoint` のときは `wal_autocheckpoint=0` にし、専用の背景タスクが
+    /// `PRAGMA wal_checkpoint(PASSIVE)` を打つ前提で `journal_size_limit` も設定する
+    /// （fsync がリクエストや tick の中に落ちないようにするため）。
     fn configure_pragmas(conn: &Connection, options: &StoreOptions) -> Result<(), StoreError> {
         conn.busy_timeout(options.busy_timeout)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         let _journal_mode: String =
             conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        if options.background_checkpoint {
+            conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+            conn.pragma_update(
+                None,
+                "journal_size_limit",
+                BACKGROUND_CHECKPOINT_JOURNAL_SIZE_LIMIT,
+            )?;
+        }
         Ok(())
+    }
+
+    /// ADR-0065 D4: 読み取り専用の接続でクロージャを実行する（読み取りプールがあればそこから、
+    /// 無ければ〈インメモリ DB や `read_pool_size = 0`〉書き込み接続にフォールバックする）。
+    /// `TaskStore` の SELECT だけを行うメソッドはこれを使い、書き込みを伴うメソッドは引き続き
+    /// `self.lock()` を使う。
+    pub(crate) fn with_read_conn<T>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        match &self.read_pool {
+            Some(pool) => {
+                let conn = pool.checkout()?;
+                let result = f(&conn);
+                pool.checkin(conn);
+                result
+            }
+            None => {
+                let conn = self.lock()?;
+                f(&conn)
+            }
+        }
     }
 
     fn table_exists(conn: &Connection, name: &str) -> Result<bool, StoreError> {
@@ -2187,31 +2326,31 @@ impl TaskStore for SqliteStore {
     }
 
     fn get(&self, id: TaskId) -> Result<Option<Task>, StoreError> {
-        let conn = self.lock()?;
-        Self::get_locked(&conn, id)
+        self.with_read_conn(|conn| Self::get_locked(conn, id))
     }
 
     fn list(&self, filter: Option<Status>) -> Result<Vec<Task>, StoreError> {
-        let conn = self.lock()?;
-        let mut tasks = Vec::new();
-        match filter {
-            Some(status) => {
-                let mut stmt = conn.prepare("SELECT json FROM tasks WHERE status = ?1")?;
-                let rows =
-                    stmt.query_map(params![status_str(status)], |row| row.get::<_, String>(0))?;
-                for row in rows {
-                    tasks.push(Self::row_to_task(row?)?);
+        self.with_read_conn(|conn| {
+            let mut tasks = Vec::new();
+            match filter {
+                Some(status) => {
+                    let mut stmt = conn.prepare("SELECT json FROM tasks WHERE status = ?1")?;
+                    let rows = stmt
+                        .query_map(params![status_str(status)], |row| row.get::<_, String>(0))?;
+                    for row in rows {
+                        tasks.push(Self::row_to_task(row?)?);
+                    }
+                }
+                None => {
+                    let mut stmt = conn.prepare("SELECT json FROM tasks")?;
+                    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+                    for row in rows {
+                        tasks.push(Self::row_to_task(row?)?);
+                    }
                 }
             }
-            None => {
-                let mut stmt = conn.prepare("SELECT json FROM tasks")?;
-                let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
-                for row in rows {
-                    tasks.push(Self::row_to_task(row?)?);
-                }
-            }
-        }
-        Ok(tasks)
+            Ok(tasks)
+        })
     }
 
     fn append_event(&self, task_id: TaskId, event: &Event) -> Result<u64, StoreError> {
@@ -2225,39 +2364,41 @@ impl TaskStore for SqliteStore {
     }
 
     fn events_for(&self, task_id: TaskId) -> Result<Vec<(u64, Event)>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt =
-            conn.prepare("SELECT seq, json FROM events WHERE task_id = ?1 ORDER BY seq ASC")?;
-        let rows = stmt.query_map(params![task_id.to_string()], |row| {
-            let seq: i64 = row.get(0)?;
-            let json: String = row.get(1)?;
-            Ok((seq, json))
-        })?;
-        let mut events = Vec::new();
-        for row in rows {
-            let (seq, json) = row?;
-            let event: Event = serde_json::from_str(&json)?;
-            events.push((seq as u64, event));
-        }
-        Ok(events)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT seq, json FROM events WHERE task_id = ?1 ORDER BY seq ASC")?;
+            let rows = stmt.query_map(params![task_id.to_string()], |row| {
+                let seq: i64 = row.get(0)?;
+                let json: String = row.get(1)?;
+                Ok((seq, json))
+            })?;
+            let mut events = Vec::new();
+            for row in rows {
+                let (seq, json) = row?;
+                let event: Event = serde_json::from_str(&json)?;
+                events.push((seq as u64, event));
+            }
+            Ok(events)
+        })
     }
 
     fn events_for_with_global_ids(&self, task_id: TaskId) -> Result<Vec<(u64, Event)>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt =
-            conn.prepare("SELECT id, json FROM events WHERE task_id = ?1 ORDER BY id ASC")?;
-        let rows = stmt.query_map(params![task_id.to_string()], |row| {
-            let id: i64 = row.get(0)?;
-            let json: String = row.get(1)?;
-            Ok((id, json))
-        })?;
-        let mut events = Vec::new();
-        for row in rows {
-            let (id, json) = row?;
-            let event: Event = serde_json::from_str(&json)?;
-            events.push((id as u64, event));
-        }
-        Ok(events)
+        self.with_read_conn(|conn| {
+            let mut stmt =
+                conn.prepare("SELECT id, json FROM events WHERE task_id = ?1 ORDER BY id ASC")?;
+            let rows = stmt.query_map(params![task_id.to_string()], |row| {
+                let id: i64 = row.get(0)?;
+                let json: String = row.get(1)?;
+                Ok((id, json))
+            })?;
+            let mut events = Vec::new();
+            for row in rows {
+                let (id, json) = row?;
+                let event: Event = serde_json::from_str(&json)?;
+                events.push((id as u64, event));
+            }
+            Ok(events)
+        })
     }
 
     fn acquire_lease(
@@ -2389,76 +2530,76 @@ impl TaskStore for SqliteStore {
     }
 
     fn ready_tasks(&self, limit: usize) -> Result<Vec<Task>, StoreError> {
-        let conn = self.lock()?;
+        self.with_read_conn(|conn| {
+            // ADR-0044 D6（Phase 55）: **一時停止・中止・アーカイブされた案件／途中目標のタスクは
+            // dispatch しない**（`ready` のまま。状態機械は触らない）。案件の支援 run（計画・レビュー・
+            // まとめ・報告の圧縮）も同じ `tasks` の行なので、この 1 か所で全部が止まる。
+            // **対話（`is_conversation`）だけは例外**: 人が「なぜ止めたのか」を秘書と話せなくなるため、
+            // 止まっている案件でも対話は起こす（判断は下の Rust 側。`Task` を読まないと見分けられない）。
+            let halted_projects = Self::halted_projects_locked(conn)?;
+            let halted_milestones = Self::halted_milestones_locked(conn)?;
 
-        // ADR-0044 D6（Phase 55）: **一時停止・中止・アーカイブされた案件／途中目標のタスクは
-        // dispatch しない**（`ready` のまま。状態機械は触らない）。案件の支援 run（計画・レビュー・
-        // まとめ・報告の圧縮）も同じ `tasks` の行なので、この 1 か所で全部が止まる。
-        // **対話（`is_conversation`）だけは例外**: 人が「なぜ止めたのか」を秘書と話せなくなるため、
-        // 止まっている案件でも対話は起こす（判断は下の Rust 側。`Task` を読まないと見分けられない）。
-        let halted_projects = Self::halted_projects_locked(&conn)?;
-        let halted_milestones = Self::halted_milestones_locked(&conn)?;
+            // ADR-0010 D2（P-36）: dispatch されない Approval は取得件数を占有しないよう SQL 段階で除外する。
+            let mut stmt = conn.prepare(
+                "SELECT json FROM tasks WHERE status = ?1 AND kind != ?2 ORDER BY priority DESC, created_at ASC",
+            )?;
+            let rows = stmt.query_map(
+                params![status_str(Status::Ready), kind_str(TaskKind::Approval)],
+                |row| row.get::<_, String>(0),
+            )?;
 
-        // ADR-0010 D2（P-36）: dispatch されない Approval は取得件数を占有しないよう SQL 段階で除外する。
-        let mut stmt = conn.prepare(
-            "SELECT json FROM tasks WHERE status = ?1 AND kind != ?2 ORDER BY priority DESC, created_at ASC",
-        )?;
-        let rows = stmt.query_map(
-            params![status_str(Status::Ready), kind_str(TaskKind::Approval)],
-            |row| row.get::<_, String>(0),
-        )?;
+            let mut result = Vec::new();
+            for row in rows {
+                let task = Self::row_to_task(row?)?;
 
-        let mut result = Vec::new();
-        for row in rows {
-            let task = Self::row_to_task(row?)?;
-
-            // ADR-0044 D6（Phase 55）: 止まっている案件・途中目標のタスクは見送る（対話は除く）。
-            if !is_conversation(&task) {
-                let halted = task
-                    .project_id
-                    .is_some_and(|p| halted_projects.contains(&p.to_string()))
-                    || task
-                        .milestone_id
-                        .is_some_and(|m| halted_milestones.contains(&m.to_string()));
-                if halted {
-                    continue;
-                }
-            }
-
-            // P-78（ADR-0033 D4 / Phase 28）: 対話タスクの `depends_on` は返事を送った順に返すための
-            // 直列化だけが目的で、前の対話タスクの成否には意味が無い。前の対話タスクが終端に達していれば
-            // （`done` だけでなく `failed` / `cancelled` でも）次の対話タスクへ進めてよい。
-            let is_conv = is_conversation(&task);
-            let mut deps_done = true;
-            for dep_id in &task.depends_on {
-                match Self::get_locked(&conn, *dep_id)? {
-                    Some(dep) if dep.status == Status::Done => {}
-                    Some(dep) if is_conv && dep.status.is_terminal() => {}
-                    _ => {
-                        deps_done = false;
-                        break;
+                // ADR-0044 D6（Phase 55）: 止まっている案件・途中目標のタスクは見送る（対話は除く）。
+                if !is_conversation(&task) {
+                    let halted = task
+                        .project_id
+                        .is_some_and(|p| halted_projects.contains(&p.to_string()))
+                        || task
+                            .milestone_id
+                            .is_some_and(|m| halted_milestones.contains(&m.to_string()));
+                    if halted {
+                        continue;
                     }
                 }
-            }
-            if !deps_done {
-                continue;
+
+                // P-78（ADR-0033 D4 / Phase 28）: 対話タスクの `depends_on` は返事を送った順に返すための
+                // 直列化だけが目的で、前の対話タスクの成否には意味が無い。前の対話タスクが終端に達していれば
+                // （`done` だけでなく `failed` / `cancelled` でも）次の対話タスクへ進めてよい。
+                let is_conv = is_conversation(&task);
+                let mut deps_done = true;
+                for dep_id in &task.depends_on {
+                    match Self::get_locked(conn, *dep_id)? {
+                        Some(dep) if dep.status == Status::Done => {}
+                        Some(dep) if is_conv && dep.status.is_terminal() => {}
+                        _ => {
+                            deps_done = false;
+                            break;
+                        }
+                    }
+                }
+                if !deps_done {
+                    continue;
+                }
+
+                if let Some(parent_id) = task.parent_id
+                    && let Some(parent) = Self::get_locked(conn, parent_id)?
+                    && parent.kind == TaskKind::Approval
+                    && parent.status != Status::Done
+                {
+                    continue;
+                }
+
+                result.push(task);
+                if result.len() >= limit {
+                    break;
+                }
             }
 
-            if let Some(parent_id) = task.parent_id
-                && let Some(parent) = Self::get_locked(&conn, parent_id)?
-                && parent.kind == TaskKind::Approval
-                && parent.status != Status::Done
-            {
-                continue;
-            }
-
-            result.push(task);
-            if result.len() >= limit {
-                break;
-            }
-        }
-
-        Ok(result)
+            Ok(result)
+        })
     }
 
     fn apply_transition_with_events(
@@ -2641,19 +2782,20 @@ impl TaskStore for SqliteStore {
     }
 
     fn children(&self, parent_id: TaskId) -> Result<Vec<Task>, StoreError> {
-        let conn = self.lock()?;
-        // 同じトランザクションで挿入した子（created_at が同じ）は挿入順（rowid）で返す。
-        let mut stmt = conn.prepare(
-            "SELECT json FROM tasks WHERE parent_id = ?1 ORDER BY created_at ASC, rowid ASC",
-        )?;
-        let rows = stmt.query_map(params![parent_id.to_string()], |row| {
-            row.get::<_, String>(0)
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(Self::row_to_task(row?)?);
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            // 同じトランザクションで挿入した子（created_at が同じ）は挿入順（rowid）で返す。
+            let mut stmt = conn.prepare(
+                "SELECT json FROM tasks WHERE parent_id = ?1 ORDER BY created_at ASC, rowid ASC",
+            )?;
+            let rows = stmt.query_map(params![parent_id.to_string()], |row| {
+                row.get::<_, String>(0)
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(Self::row_to_task(row?)?);
+            }
+            Ok(out)
+        })
     }
 
     fn renew_lease(
@@ -2693,41 +2835,44 @@ impl TaskStore for SqliteStore {
     }
 
     fn events_since(&self, after_id: u64, limit: usize) -> Result<Vec<EventRow>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, task_id, seq, ts, json FROM events WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![u64_to_i64(after_id), usize_to_i64(limit)], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, task_id, seq, ts, json) = row?;
-            let task_id = Self::parse_id(&task_id)?;
-            let event: Event = serde_json::from_str(&json)?;
-            out.push(EventRow {
-                id: id as u64,
-                task_id,
-                seq: seq as u64,
-                ts,
-                event,
-            });
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, task_id, seq, ts, json FROM events WHERE id > ?1 ORDER BY id ASC LIMIT ?2",
+            )?;
+            let rows =
+                stmt.query_map(params![u64_to_i64(after_id), usize_to_i64(limit)], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, task_id, seq, ts, json) = row?;
+                let task_id = Self::parse_id(&task_id)?;
+                let event: Event = serde_json::from_str(&json)?;
+                out.push(EventRow {
+                    id: id as u64,
+                    task_id,
+                    seq: seq as u64,
+                    ts,
+                    event,
+                });
+            }
+            Ok(out)
+        })
     }
 
     fn latest_event_id(&self) -> Result<u64, StoreError> {
-        let conn = self.lock()?;
-        let id: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
-            row.get(0)
-        })?;
-        Ok(id as u64)
+        self.with_read_conn(|conn| {
+            let id: i64 = conn.query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |row| {
+                row.get(0)
+            })?;
+            Ok(id as u64)
+        })
     }
 
     fn event_rows_for(
@@ -2736,35 +2881,36 @@ impl TaskStore for SqliteStore {
         after_seq: Option<u64>,
         limit: usize,
     ) -> Result<Vec<EventRow>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, task_id, seq, ts, json FROM events WHERE task_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3",
-        )?;
-        let after: i64 = after_seq.map(u64_to_i64).unwrap_or(-1);
-        let rows = stmt.query_map(
-            params![task_id.to_string(), after, usize_to_i64(limit)],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            },
-        )?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (id, seq, ts, json) = row?;
-            let event: Event = serde_json::from_str(&json)?;
-            out.push(EventRow {
-                id: id as u64,
-                task_id,
-                seq: seq as u64,
-                ts,
-                event,
-            });
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, task_id, seq, ts, json FROM events WHERE task_id = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3",
+            )?;
+            let after: i64 = after_seq.map(u64_to_i64).unwrap_or(-1);
+            let rows = stmt.query_map(
+                params![task_id.to_string(), after, usize_to_i64(limit)],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, seq, ts, json) = row?;
+                let event: Event = serde_json::from_str(&json)?;
+                out.push(EventRow {
+                    id: id as u64,
+                    task_id,
+                    seq: seq as u64,
+                    ts,
+                    event,
+                });
+            }
+            Ok(out)
+        })
     }
 
     fn list_page(
@@ -2774,91 +2920,94 @@ impl TaskStore for SqliteStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Page<Task>, StoreError> {
-        let conn = self.lock()?;
-        let (filter_sql, filter_params) = filter_predicate(filter);
+        self.with_read_conn(|conn| {
+            let (filter_sql, filter_params) = filter_predicate(filter);
 
-        let total: i64 = {
-            let sql = format!("SELECT COUNT(*) FROM tasks WHERE {filter_sql}");
-            conn.query_row(&sql, params_from_iter(filter_params.iter()), |row| {
-                row.get(0)
-            })?
-        };
+            let total: i64 = {
+                let sql = format!("SELECT COUNT(*) FROM tasks WHERE {filter_sql}");
+                conn.query_row(&sql, params_from_iter(filter_params.iter()), |row| {
+                    row.get(0)
+                })?
+            };
 
-        let mut where_sql = format!("({filter_sql})");
-        let mut query_params = filter_params;
-        if let Some(c) = cursor {
-            let payload = decode_cursor(c)?;
-            let (keyset_sql, keyset_params) = keyset_predicate(order, &payload);
-            where_sql.push_str(&format!(" AND ({keyset_sql})"));
-            query_params.extend(keyset_params);
-        }
-
-        let order_sql = order_by_sql(order);
-        let fetch_limit = usize_to_i64(limit.saturating_add(1));
-        let sql = format!("SELECT json FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ?");
-        query_params.push(SqlValue::Integer(fetch_limit));
-
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
-            row.get::<_, String>(0)
-        })?;
-        let mut items = Vec::new();
-        for row in rows {
-            items.push(Self::row_to_task(row?)?);
-        }
-
-        let has_more = items.len() > limit;
-        if has_more {
-            items.truncate(limit);
-        }
-        let next_cursor = if has_more {
-            match items.last() {
-                Some(last) => Some(encode_cursor(&CursorPayload::from_task(last)?)?),
-                None => None,
+            let mut where_sql = format!("({filter_sql})");
+            let mut query_params = filter_params;
+            if let Some(c) = cursor {
+                let payload = decode_cursor(c)?;
+                let (keyset_sql, keyset_params) = keyset_predicate(order, &payload);
+                where_sql.push_str(&format!(" AND ({keyset_sql})"));
+                query_params.extend(keyset_params);
             }
-        } else {
-            None
-        };
 
-        Ok(Page {
-            items,
-            next_cursor,
-            total: total as u64,
+            let order_sql = order_by_sql(order);
+            let fetch_limit = usize_to_i64(limit.saturating_add(1));
+            let sql =
+                format!("SELECT json FROM tasks WHERE {where_sql} ORDER BY {order_sql} LIMIT ?");
+            query_params.push(SqlValue::Integer(fetch_limit));
+
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(query_params.iter()), |row| {
+                row.get::<_, String>(0)
+            })?;
+            let mut items = Vec::new();
+            for row in rows {
+                items.push(Self::row_to_task(row?)?);
+            }
+
+            let has_more = items.len() > limit;
+            if has_more {
+                items.truncate(limit);
+            }
+            let next_cursor = if has_more {
+                match items.last() {
+                    Some(last) => Some(encode_cursor(&CursorPayload::from_task(last)?)?),
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+            Ok(Page {
+                items,
+                next_cursor,
+                total: total as u64,
+            })
         })
     }
 
     fn count_by_status(&self) -> Result<Vec<(Status, u64)>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status")?;
-        let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (s, c) = row?;
-            out.push((parse_status(&s)?, c as u64));
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (s, c) = row?;
+                out.push((parse_status(&s)?, c as u64));
+            }
+            Ok(out)
+        })
     }
 
     // ---- ADR-0033 D1: 組織 ----
 
     fn org_list(&self) -> Result<Vec<OrgNode>, StoreError> {
-        let conn = self.lock()?;
-        Self::org_list_tx(&conn)
+        self.with_read_conn(Self::org_list_tx)
     }
 
     fn org_get(&self, id: &str) -> Result<Option<OrgNode>, StoreError> {
-        let conn = self.lock()?;
-        let row = conn
-            .query_row(
-                "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at, profile_json \
-                 FROM org_nodes WHERE id = ?1",
-                params![id],
-                Self::org_row,
-            )
-            .optional()?;
-        row.transpose()
+        self.with_read_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT id, parent_id, name, kind, genre, brief, position, created_at, updated_at, profile_json \
+                     FROM org_nodes WHERE id = ?1",
+                    params![id],
+                    Self::org_row,
+                )
+                .optional()?;
+            row.transpose()
+        })
     }
 
     fn org_upsert(&self, node: &OrgNode) -> Result<OrgNode, StoreError> {
@@ -3019,38 +3168,40 @@ impl TaskStore for SqliteStore {
     }
 
     fn project_get(&self, id: ProjectId) -> Result<Option<Project>, StoreError> {
-        let conn = self.lock()?;
-        let row = conn
-            .query_row(
-                "SELECT p.id, p.title, p.request, p.status, p.secretary_summary, p.created_at, p.updated_at, \
-                 COALESCE((SELECT r.location_json FROM project_repos r \
-                           WHERE r.project_id = p.id AND r.is_primary = 1 \
-                           ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace), \
-                 p.archived_at, p.paused_from \
-                 FROM projects p WHERE p.id = ?1",
-                params![id.to_string()],
-                Self::project_row,
-            )
-            .optional()?;
-        row.transpose()
+        self.with_read_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT p.id, p.title, p.request, p.status, p.secretary_summary, p.created_at, p.updated_at, \
+                     COALESCE((SELECT r.location_json FROM project_repos r \
+                               WHERE r.project_id = p.id AND r.is_primary = 1 \
+                               ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace), \
+                     p.archived_at, p.paused_from \
+                     FROM projects p WHERE p.id = ?1",
+                    params![id.to_string()],
+                    Self::project_row,
+                )
+                .optional()?;
+            row.transpose()
+        })
     }
 
     fn project_list(&self) -> Result<Vec<Project>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT p.id, p.title, p.request, p.status, p.secretary_summary, p.created_at, p.updated_at, \
-                 COALESCE((SELECT r.location_json FROM project_repos r \
-                           WHERE r.project_id = p.id AND r.is_primary = 1 \
-                           ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace), \
-                 p.archived_at, p.paused_from \
-             FROM projects p ORDER BY p.created_at DESC, p.id DESC",
-        )?;
-        let rows = stmt.query_map([], Self::project_row)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row??);
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT p.id, p.title, p.request, p.status, p.secretary_summary, p.created_at, p.updated_at, \
+                     COALESCE((SELECT r.location_json FROM project_repos r \
+                               WHERE r.project_id = p.id AND r.is_primary = 1 \
+                               ORDER BY r.created_at ASC, r.id ASC LIMIT 1), p.workspace), \
+                     p.archived_at, p.paused_from \
+                 FROM projects p ORDER BY p.created_at DESC, p.id DESC",
+            )?;
+            let rows = stmt.query_map([], Self::project_row)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            Ok(out)
+        })
     }
 
     fn project_set_status(&self, id: ProjectId, status: ProjectStatus) -> Result<bool, StoreError> {
@@ -3230,13 +3381,11 @@ impl TaskStore for SqliteStore {
     }
 
     fn repo_get(&self, id: RepoId) -> Result<Option<ProjectRepo>, StoreError> {
-        let conn = self.lock()?;
-        Self::repo_get_tx(&conn, id)
+        self.with_read_conn(|conn| Self::repo_get_tx(conn, id))
     }
 
     fn repo_list(&self, project_id: ProjectId) -> Result<Vec<ProjectRepo>, StoreError> {
-        let conn = self.lock()?;
-        Self::repo_list_tx(&conn, project_id)
+        self.with_read_conn(|conn| Self::repo_list_tx(conn, project_id))
     }
 
     fn repo_update(&self, repo: &ProjectRepo) -> Result<bool, StoreError> {
@@ -3314,8 +3463,7 @@ impl TaskStore for SqliteStore {
     }
 
     fn repo_active_tasks(&self, id: RepoId) -> Result<Vec<TaskId>, StoreError> {
-        let conn = self.lock()?;
-        Self::repo_active_tasks_tx(&conn, id)
+        self.with_read_conn(|conn| Self::repo_active_tasks_tx(conn, id))
     }
 
     // ---- ADR-0043 D5（Phase 54）: 変更の取り込み ----
@@ -3326,20 +3474,22 @@ impl TaskStore for SqliteStore {
     }
 
     fn integration_get(&self, id: IntegrationId) -> Result<Option<TaskIntegration>, StoreError> {
-        let conn = self.lock()?;
-        Ok(
-            Self::integration_query_tx(&conn, "id = ?1", params![id.to_string()])?
-                .into_iter()
-                .next(),
-        )
+        self.with_read_conn(|conn| {
+            Ok(
+                Self::integration_query_tx(conn, "id = ?1", params![id.to_string()])?
+                    .into_iter()
+                    .next(),
+            )
+        })
     }
 
     fn integration_list_for_task(
         &self,
         task_id: TaskId,
     ) -> Result<Vec<TaskIntegration>, StoreError> {
-        let conn = self.lock()?;
-        Self::integration_query_tx(&conn, "task_id = ?1", params![task_id.to_string()])
+        self.with_read_conn(|conn| {
+            Self::integration_query_tx(conn, "task_id = ?1", params![task_id.to_string()])
+        })
     }
 
     fn integration_latest(
@@ -3347,14 +3497,15 @@ impl TaskStore for SqliteStore {
         task_id: TaskId,
         repo: &str,
     ) -> Result<Option<TaskIntegration>, StoreError> {
-        let conn = self.lock()?;
-        Ok(Self::integration_query_tx(
-            &conn,
-            "task_id = ?1 AND repo_name = ?2",
-            params![task_id.to_string(), repo],
-        )?
-        .into_iter()
-        .next())
+        self.with_read_conn(|conn| {
+            Ok(Self::integration_query_tx(
+                conn,
+                "task_id = ?1 AND repo_name = ?2",
+                params![task_id.to_string(), repo],
+            )?
+            .into_iter()
+            .next())
+        })
     }
 
     fn integration_list_for_project(
@@ -3362,36 +3513,37 @@ impl TaskStore for SqliteStore {
         project_id: ProjectId,
         limit: usize,
     ) -> Result<Vec<TaskIntegration>, StoreError> {
-        let conn = self.lock()?;
-        // タスク × リポジトリごとに最新の 1 件（`created_at` が同じなら `id`〈ULID〉で決める）。
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {cols} FROM task_integrations i \
-             JOIN tasks t ON t.id = i.task_id \
-             WHERE t.project_id = ?1 \
-               AND NOT EXISTS ( \
-                 SELECT 1 FROM task_integrations n \
-                 WHERE n.task_id = i.task_id AND n.repo_name = i.repo_name \
-                   AND (n.created_at > i.created_at OR (n.created_at = i.created_at AND n.id > i.id)) \
-               ) \
-             ORDER BY i.created_at DESC, i.id DESC LIMIT ?2",
-            cols = Self::INTEGRATION_COLUMNS
-                .split(", ")
-                .map(|c| format!("i.{c}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))?;
-        let rows = stmt.query_map(
-            params![
-                project_id.to_string(),
-                i64::try_from(limit).unwrap_or(i64::MAX)
-            ],
-            Self::integration_row,
-        )?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row??);
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            // タスク × リポジトリごとに最新の 1 件（`created_at` が同じなら `id`〈ULID〉で決める）。
+            let mut stmt = conn.prepare(&format!(
+                "SELECT {cols} FROM task_integrations i \
+                 JOIN tasks t ON t.id = i.task_id \
+                 WHERE t.project_id = ?1 \
+                   AND NOT EXISTS ( \
+                     SELECT 1 FROM task_integrations n \
+                     WHERE n.task_id = i.task_id AND n.repo_name = i.repo_name \
+                       AND (n.created_at > i.created_at OR (n.created_at = i.created_at AND n.id > i.id)) \
+                   ) \
+                 ORDER BY i.created_at DESC, i.id DESC LIMIT ?2",
+                cols = Self::INTEGRATION_COLUMNS
+                    .split(", ")
+                    .map(|c| format!("i.{c}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))?;
+            let rows = stmt.query_map(
+                params![
+                    project_id.to_string(),
+                    i64::try_from(limit).unwrap_or(i64::MAX)
+                ],
+                Self::integration_row,
+            )?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            Ok(out)
+        })
     }
 
     fn milestone_create(
@@ -3449,30 +3601,32 @@ impl TaskStore for SqliteStore {
     }
 
     fn milestone_list(&self, project_id: ProjectId) -> Result<Vec<Milestone>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, seq, title, description, status, created_at, updated_at, paused_from \
-             FROM milestones WHERE project_id = ?1 ORDER BY seq ASC",
-        )?;
-        let rows = stmt.query_map(params![project_id.to_string()], Self::milestone_row)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row??);
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, project_id, seq, title, description, status, created_at, updated_at, paused_from \
+                 FROM milestones WHERE project_id = ?1 ORDER BY seq ASC",
+            )?;
+            let rows = stmt.query_map(params![project_id.to_string()], Self::milestone_row)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            Ok(out)
+        })
     }
 
     fn milestone_get(&self, id: MilestoneId) -> Result<Option<Milestone>, StoreError> {
-        let conn = self.lock()?;
-        let row = conn
-            .query_row(
-                "SELECT id, project_id, seq, title, description, status, created_at, updated_at, paused_from \
-                 FROM milestones WHERE id = ?1",
-                params![id.to_string()],
-                Self::milestone_row,
-            )
-            .optional()?;
-        row.transpose()
+        self.with_read_conn(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT id, project_id, seq, title, description, status, created_at, updated_at, paused_from \
+                     FROM milestones WHERE id = ?1",
+                    params![id.to_string()],
+                    Self::milestone_row,
+                )
+                .optional()?;
+            row.transpose()
+        })
     }
 
     fn milestone_set_status(
@@ -3547,27 +3701,29 @@ impl TaskStore for SqliteStore {
         project_id: Option<ProjectId>,
         limit: usize,
     ) -> Result<Vec<Message>, StoreError> {
-        let conn = self.lock()?;
-        // 新しい順に `limit` 件取ってから古い順に戻す（直近のやり取りを時系列で渡すため）。
-        let sql = match project_id {
-            Some(_) => {
-                "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json FROM messages \
-                 WHERE node_id = ?1 AND project_id = ?2 ORDER BY created_at DESC, id DESC LIMIT ?3"
+        self.with_read_conn(|conn| {
+            // 新しい順に `limit` 件取ってから古い順に戻す（直近のやり取りを時系列で渡すため）。
+            let sql = match project_id {
+                Some(_) => {
+                    "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json FROM messages \
+                     WHERE node_id = ?1 AND project_id = ?2 ORDER BY created_at DESC, id DESC LIMIT ?3"
+                }
+                None => {
+                    "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json FROM messages \
+                     WHERE node_id = ?1 AND project_id IS NULL ORDER BY created_at DESC, id DESC LIMIT ?3"
+                }
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let project = project_id.map(|p| p.to_string()).unwrap_or_default();
+            let rows =
+                stmt.query_map(params![node_id, project, limit as i64], Self::message_row)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
             }
-            None => {
-                "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json FROM messages \
-                 WHERE node_id = ?1 AND project_id IS NULL ORDER BY created_at DESC, id DESC LIMIT ?3"
-            }
-        };
-        let mut stmt = conn.prepare(sql)?;
-        let project = project_id.map(|p| p.to_string()).unwrap_or_default();
-        let rows = stmt.query_map(params![node_id, project, limit as i64], Self::message_row)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row??);
-        }
-        out.reverse();
-        Ok(out)
+            out.reverse();
+            Ok(out)
+        })
     }
 
     /// ADR-0048 D1（Phase 60a）: Console の一本の流れ用（絞り込みは任意、`after` は閉区間）。
@@ -3578,41 +3734,42 @@ impl TaskStore for SqliteStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Message>, StoreError> {
-        let conn = self.lock()?;
-        let mut where_sql = String::from("1 = 1");
-        let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-        if let Some(node_id) = node_id {
-            where_sql.push_str(" AND node_id = ?");
-            args.push(Box::new(node_id.to_string()));
-        }
-        if let Some(project_id) = project_id {
-            where_sql.push_str(" AND project_id = ?");
-            args.push(Box::new(project_id.to_string()));
-        }
-        if let Some(after) = after {
-            where_sql.push_str(" AND created_at >= ?");
-            args.push(Box::new(after.to_string()));
-        }
-        // `after` 有り = 古い順にその先から、無し = 新しい順に `limit` 件取って戻す。
-        let order = if after.is_some() { "ASC" } else { "DESC" };
-        let sql = format!(
-            "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json FROM messages \
-             WHERE {where_sql} ORDER BY created_at {order}, id {order} LIMIT ?"
-        );
-        args.push(Box::new(limit as i64));
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            params_from_iter(args.iter().map(|a| a.as_ref())),
-            Self::message_row,
-        )?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row??);
-        }
-        if after.is_none() {
-            out.reverse();
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            let mut where_sql = String::from("1 = 1");
+            let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            if let Some(node_id) = node_id {
+                where_sql.push_str(" AND node_id = ?");
+                args.push(Box::new(node_id.to_string()));
+            }
+            if let Some(project_id) = project_id {
+                where_sql.push_str(" AND project_id = ?");
+                args.push(Box::new(project_id.to_string()));
+            }
+            if let Some(after) = after {
+                where_sql.push_str(" AND created_at >= ?");
+                args.push(Box::new(after.to_string()));
+            }
+            // `after` 有り = 古い順にその先から、無し = 新しい順に `limit` 件取って戻す。
+            let order = if after.is_some() { "ASC" } else { "DESC" };
+            let sql = format!(
+                "SELECT id, node_id, project_id, role, text, run_id, created_at, task_id, metadata_json FROM messages \
+                 WHERE {where_sql} ORDER BY created_at {order}, id {order} LIMIT ?"
+            );
+            args.push(Box::new(limit as i64));
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                params_from_iter(args.iter().map(|a| a.as_ref())),
+                Self::message_row,
+            )?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            if after.is_none() {
+                out.reverse();
+            }
+            Ok(out)
+        })
     }
 
     // ---- ADR-0048 D3（Phase 60b）: CoS の actions の冪等性 ----
@@ -3706,17 +3863,18 @@ impl TaskStore for SqliteStore {
     }
 
     fn comments_for(&self, task_id: TaskId) -> Result<Vec<TaskComment>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, task_id, author_kind, author, body, run_id, created_at FROM task_comments \
-             WHERE task_id = ?1 ORDER BY created_at ASC, id ASC",
-        )?;
-        let rows = stmt.query_map(params![task_id.to_string()], Self::comment_row)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row??);
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, task_id, author_kind, author, body, run_id, created_at FROM task_comments \
+                 WHERE task_id = ?1 ORDER BY created_at ASC, id ASC",
+            )?;
+            let rows = stmt.query_map(params![task_id.to_string()], Self::comment_row)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            Ok(out)
+        })
     }
 
     fn instance_register(&self, instance: &DaemonInstance) -> Result<(), StoreError> {
@@ -3795,16 +3953,17 @@ impl TaskStore for SqliteStore {
     }
 
     fn instance_list(&self) -> Result<Vec<DaemonInstance>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(&format!(
-            "{SELECT_INSTANCE} ORDER BY started_at ASC, instance_id ASC"
-        ))?;
-        let rows = stmt.query_map([], row_to_instance)?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row??);
-        }
-        Ok(out)
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(&format!(
+                "{SELECT_INSTANCE} ORDER BY started_at ASC, instance_id ASC"
+            ))?;
+            let rows = stmt.query_map([], row_to_instance)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            Ok(out)
+        })
     }
 
     fn instance_delete(&self, instance_id: &str) -> Result<bool, StoreError> {
@@ -3848,51 +4007,53 @@ impl TaskStore for SqliteStore {
     }
 
     fn cluster_settings_get(&self, cluster_id: &str) -> Result<Option<ClusterSettings>, StoreError> {
-        let conn = self.lock()?;
-        conn.query_row(
-            "SELECT cluster_id, work_dir, updated_at FROM cluster_settings WHERE cluster_id = ?1",
-            params![cluster_id],
-            |row| {
+        self.with_read_conn(|conn| {
+            conn.query_row(
+                "SELECT cluster_id, work_dir, updated_at FROM cluster_settings WHERE cluster_id = ?1",
+                params![cluster_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(cluster_id, work_dir, updated_at)| {
+                Ok(ClusterSettings {
+                    cluster_id,
+                    work_dir,
+                    updated_at: parse_rfc3339(&updated_at)?,
+                })
+            })
+            .transpose()
+        })
+    }
+
+    fn cluster_settings_list(&self) -> Result<Vec<ClusterSettings>, StoreError> {
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT cluster_id, work_dir, updated_at FROM cluster_settings ORDER BY cluster_id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, String>(2)?,
                 ))
-            },
-        )
-        .optional()?
-        .map(|(cluster_id, work_dir, updated_at)| {
-            Ok(ClusterSettings {
-                cluster_id,
-                work_dir,
-                updated_at: parse_rfc3339(&updated_at)?,
-            })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (cluster_id, work_dir, updated_at) = row?;
+                out.push(ClusterSettings {
+                    cluster_id,
+                    work_dir,
+                    updated_at: parse_rfc3339(&updated_at)?,
+                });
+            }
+            Ok(out)
         })
-        .transpose()
-    }
-
-    fn cluster_settings_list(&self) -> Result<Vec<ClusterSettings>, StoreError> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT cluster_id, work_dir, updated_at FROM cluster_settings ORDER BY cluster_id ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (cluster_id, work_dir, updated_at) = row?;
-            out.push(ClusterSettings {
-                cluster_id,
-                work_dir,
-                updated_at: parse_rfc3339(&updated_at)?,
-            });
-        }
-        Ok(out)
     }
 
     fn cluster_settings_set(
@@ -5219,6 +5380,87 @@ mod tests {
         assert_eq!(mode.to_lowercase(), "wal");
     }
 
+    /// ADR-0065 D5: `background_checkpoint` は `wal_autocheckpoint` を 0 にする（既定は非 0）。
+    #[test]
+    fn background_checkpoint_option_disables_wal_autocheckpoint() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let default_path = dir.path().join("default.sqlite3");
+        let default_store = SqliteStore::open(&default_path).unwrap();
+        let default_autocheckpoint: i64 = {
+            let conn = default_store.conn.lock().unwrap();
+            conn.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_ne!(default_autocheckpoint, 0, "the default keeps sqlite's own autocheckpoint");
+
+        let bg_path = dir.path().join("bg.sqlite3");
+        let bg_store = SqliteStore::open_with(
+            &bg_path,
+            StoreOptions {
+                background_checkpoint: true,
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        let (bg_autocheckpoint, journal_size_limit): (i64, i64) = {
+            let conn = bg_store.conn.lock().unwrap();
+            (
+                conn.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
+                    .unwrap(),
+                conn.query_row("PRAGMA journal_size_limit", [], |row| row.get(0))
+                    .unwrap(),
+            )
+        };
+        assert_eq!(bg_autocheckpoint, 0);
+        assert_eq!(journal_size_limit, BACKGROUND_CHECKPOINT_JOURNAL_SIZE_LIMIT);
+    }
+
+    /// ADR-0065 D2/D3: `backup_database` は別ファイルへ完全なコピーを作り、`integrity_check` はそれを
+    /// `true` と判定する。元と壊れた DB（空ファイル）は区別できる。
+    #[test]
+    fn backup_database_round_trips_and_integrity_check_detects_a_good_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_path = dir.path().join("src.sqlite3");
+        let store = SqliteStore::open(&src_path).unwrap();
+        let t = sample_task(Status::Ready);
+        store.insert(&t).unwrap();
+        drop(store);
+
+        let dest_path = dir.path().join("backup.sqlite3");
+        backup_database(&src_path, &dest_path, StdDuration::from_millis(5000)).unwrap();
+
+        assert!(integrity_check(&dest_path).unwrap());
+        let restored = SqliteStore::open(&dest_path).unwrap();
+        assert_eq!(restored.get(t.id).unwrap().map(|task| task.id), Some(t.id));
+
+        // ゴミバイト列は正しい SQLite DB ではないので `integrity_check` はエラーを返す
+        // （`SQLITE_NOTADB`。「壊れている」を「開けない」として区別できることの確認）。
+        let garbage_path = dir.path().join("garbage.sqlite3");
+        std::fs::write(&garbage_path, b"not a sqlite database").unwrap();
+        assert!(integrity_check(&garbage_path).is_err());
+    }
+
+    /// ADR-0065 D4: `read_pool_size = 0` なら読み取りプールを作らず、書き込み接続にフォールバック
+    /// する（挙動は変わらない）。
+    #[test]
+    fn read_pool_size_zero_falls_back_to_the_write_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_pool.sqlite3");
+        let store = SqliteStore::open_with(
+            &path,
+            StoreOptions {
+                read_pool_size: 0,
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(store.read_pool.is_none());
+        let t = sample_task(Status::Ready);
+        store.insert(&t).unwrap();
+        assert_eq!(store.get(t.id).unwrap().map(|task| task.id), Some(t.id));
+    }
+
     /// Phase 9 監査（受け入れ 2）: 2 つの接続（ディスパッチャと celerisctl / API 相当）が、読んでから書くトランザクションを
     /// 同じファイルに並走させても `database is locked` にならない。DEFERRED だと読み取り後の書き込みへの格上げが
     /// busy_timeout を待たずに SQLITE_BUSY で失敗するため、書き込みトランザクションは IMMEDIATE で始める。
@@ -5285,6 +5527,42 @@ mod tests {
         reader.join().unwrap();
 
         assert_eq!(store_a.list(None).unwrap().len(), 20);
+    }
+
+    /// ADR-0065 D4: 読み取り専用の接続プールがあるおかげで、読み取り（`get`）は書き込み接続の
+    /// `Mutex` を長く保持している間も待たされない（同じ `SqliteStore`、同じファイル）。
+    #[test]
+    fn reads_do_not_wait_for_a_held_write_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("read_pool.sqlite3");
+        let store = Arc::new(SqliteStore::open(&path).unwrap());
+        let t = sample_task(Status::Ready);
+        store.insert(&t).unwrap();
+
+        const HOLD: std::time::Duration = std::time::Duration::from_millis(400);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || {
+                let guard = store.lock().expect("lock");
+                ready_tx.send(()).expect("signal held");
+                std::thread::sleep(HOLD);
+                drop(guard);
+            })
+        };
+        ready_rx.recv().expect("writer took the lock");
+
+        let started = std::time::Instant::now();
+        let found = store.get(t.id).unwrap();
+        let elapsed = started.elapsed();
+        holder.join().unwrap();
+
+        assert!(found.is_some());
+        assert!(
+            elapsed < HOLD / 2,
+            "get() took {elapsed:?} while the write lock was held for {HOLD:?}; \
+             the read pool should have kept it from waiting"
+        );
     }
 
     /// ADR-0013 D6: `events_since` は全タスクを跨いで id 昇順、`limit`、`after_id` を尊重し、

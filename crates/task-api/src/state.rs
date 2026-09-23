@@ -53,6 +53,11 @@ pub(crate) struct Inner {
     pub(crate) allowed_hosts: Vec<String>,
     pub(crate) journal_mode: String,
     pub(crate) busy_timeout_ms: u64,
+    /// ADR-0065 D1: `/proc/self/mountinfo` から引けた範囲の DB のファイルシステムとマウントソース
+    /// （`GET /health` の `db.filesystem` / `db.device`）。判定できない環境（`/proc` が無い等）では
+    /// `None`。DB の絶対パス自体は `/health` に出さない（無認証のため。認証済みの `/config` が既に
+    /// 返している）。
+    pub(crate) db_mount: Option<task_core::mountinfo::MountInfo>,
     pub(crate) view: ViewContext,
     pub(crate) config_view: ConfigView,
     /// ADR-0016 M3: `POST /tasks` の省略値を埋める `[[roles]]`。
@@ -115,9 +120,12 @@ impl ApiState {
             &settings.db_path,
             StoreOptions {
                 busy_timeout: settings.busy_timeout,
+                background_checkpoint: settings.background_checkpoint,
+                ..StoreOptions::default()
             },
         )?;
         let journal_mode = measure_journal_mode(&settings)?;
+        let db_mount = detect_db_mount(&settings.db_path);
         let (shutdown, _) = watch::channel(false);
         let inner = Inner {
             store: Arc::new(store),
@@ -125,6 +133,7 @@ impl ApiState {
             allowed_hosts: allowed_host_list(settings.listen, &settings.allowed_hosts),
             journal_mode,
             busy_timeout_ms: u64::try_from(settings.busy_timeout.as_millis()).unwrap_or(u64::MAX),
+            db_mount,
             view: settings.view,
             config_view: settings.config_view,
             roles: settings.roles,
@@ -248,10 +257,20 @@ impl Drop for StreamSlot {
     }
 }
 
-/// `PRAGMA journal_mode` の実測値（WAL はファイルに持続する設定なので、別接続で読んでも同じ値になる）。
+/// `PRAGMA journal_mode` の実測値(WAL はファイルに持続する設定なので、別接続で読んでも同じ値になる)。
 fn measure_journal_mode(settings: &ApiSettings) -> Result<String, ApiError> {
     let conn = rusqlite::Connection::open(&settings.db_path)?;
     conn.busy_timeout(settings.busy_timeout)?;
     let mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
     Ok(mode.to_ascii_lowercase())
+}
+
+/// ADR-0065 D1: `db_path` の親ディレクトリを含むマウント点のファイルシステム・ソースを
+/// `/proc/self/mountinfo` から引く。読めない・一致しない環境では `None`（`GET /health` の
+/// `db.filesystem` / `db.device` はそのとき `null`）。
+fn detect_db_mount(db_path: &std::path::Path) -> Option<task_core::mountinfo::MountInfo> {
+    let dir = db_path.parent().unwrap_or(std::path::Path::new("."));
+    let target = dir.canonicalize().ok()?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    task_core::mountinfo::mount_info_for(&mountinfo, &target)
 }
