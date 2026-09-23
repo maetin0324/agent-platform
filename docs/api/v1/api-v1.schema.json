@@ -3328,6 +3328,20 @@
         "project_id": {
           "$ref": "#/$defs/ProjectId"
         },
+        "push_error": {
+          "description": "push失敗の理由（stderr末尾500バイト）。1度だけ再試行し、再試行後もなお失敗したものには\n`[retried] ` を前置して以後は触らない目印にする（通知文には前置詞を外して出す）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pushed_at": {
+          "description": "ADR-0051 Phase 106追記: merge直後にoriginへpushした時刻（成功または「既に同じかそれより先」で\n省略したとき）。push機能を使わない（`[selfdeploy] push = false`）ときは常に`None`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "release": {
           "type": [
             "string",

@@ -10,8 +10,15 @@ use task_core::{
     Delivery, DeliveryState as State, Message, MessageId, MessageRole, Status, StoreError,
     TaskStore,
 };
-use task_ops::changes::git;
+use task_ops::changes::{git, git_with_env};
 use time::OffsetDateTime;
+
+/// ADR-0051 Phase 106追記: push の待ち時間。ローカルの merge/rev-parse より長め
+/// （ssh 越しの origin を想定。`BatchMode=yes` で対話的な認証には絶対に落ちない）。
+const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
+/// 1度だけ再試行したがなお失敗した `push_error` の目印。通知文では外して見せる
+/// （[`push_error_display`]）。この目印が付いていたら以後は触らない。
+const PUSH_RETRIED_PREFIX: &str = "[retried] ";
 
 fn git_text(repo: &Path, args: &[&str]) -> Result<String, String> {
     let out = git(repo, args, Duration::from_secs(20)).ok_or("git を起動できません")?;
@@ -23,6 +30,94 @@ fn git_text(repo: &Path, args: &[&str]) -> Result<String, String> {
 }
 fn sha(repo: &Path, reference: &str) -> Result<String, String> {
     git_text(repo, &["rev-parse", "--verify", reference])
+}
+
+fn push_error_display(err: &str) -> &str {
+    err.strip_prefix(PUSH_RETRIED_PREFIX).unwrap_or(err)
+}
+
+/// stderr の末尾 `max` バイト（文字境界を守る）。
+fn tail_bytes(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut start = s.len() - max;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
+}
+
+/// origin が既にこのブランチと同じかそれより先か（省略できるか）。判定できなければ
+/// （リモート追跡ブランチが無い等）省略しない。
+fn push_already_up_to_date(repo: &Path, remote: &str, branch: &str) -> bool {
+    git_text(
+        repo,
+        &["rev-list", "--count", &format!("{remote}/{branch}..{branch}")],
+    )
+    .map(|s| s.trim() == "0")
+    .unwrap_or(false)
+}
+
+/// ADR-0051 Phase 106: `merge_reviewed` が成功した直後、release.sh を起こす前に呼ぶ純粋な git 呼び出し。
+/// 非対話（`git()` が既定で `GIT_TERMINAL_PROMPT=0` を設定。ここでは `GIT_SSH_COMMAND` に
+/// `-o BatchMode=yes` を足す）。force push はしない。
+fn push_merged(repo: &Path, remote: &str, branch: &str, timeout: Duration) -> Result<(), String> {
+    if push_already_up_to_date(repo, remote, branch) {
+        return Ok(());
+    }
+    let ssh_command = match std::env::var("GIT_SSH_COMMAND") {
+        Ok(existing) if !existing.trim().is_empty() => format!("{existing} -o BatchMode=yes"),
+        _ => "ssh -o BatchMode=yes".to_string(),
+    };
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    match git_with_env(
+        repo,
+        &["push", remote, &refspec],
+        &[("GIT_SSH_COMMAND", ssh_command.as_str())],
+        timeout,
+    ) {
+        Some(o) if o.ok => Ok(()),
+        Some(o) => Err(tail_bytes(o.stderr.trim(), 500)),
+        None => Err("git を起動できません".into()),
+    }
+}
+
+/// push が失敗して（まだ再試行の目印が付いていなければ）1度だけ再試行する。release の準備を
+/// 止めないので、これは `advance` の状態遷移そのものではなく独立した CAS 保存。
+fn maybe_retry_push(
+    store: &dyn TaskStore,
+    config: &Config,
+    old: &Delivery,
+    now: OffsetDateTime,
+) -> Result<Delivery, StoreError> {
+    if !config.selfdeploy.push || old.release.is_none() || old.pushed_at.is_some() {
+        return Ok(old.clone());
+    }
+    let Some(err) = &old.push_error else {
+        return Ok(old.clone());
+    };
+    if err.starts_with(PUSH_RETRIED_PREFIX) {
+        return Ok(old.clone());
+    }
+    let mut next = old.clone();
+    match push_merged(
+        &config.selfdeploy.repo,
+        &config.selfdeploy.push_remote,
+        &old.default_branch,
+        PUSH_TIMEOUT,
+    ) {
+        Ok(()) => {
+            next.pushed_at = Some(now);
+            next.push_error = None;
+        }
+        Err(e) => next.push_error = Some(format!("{PUSH_RETRIED_PREFIX}{e}")),
+    }
+    Ok(if store.delivery_save(Some(old), &next)? {
+        next
+    } else {
+        old.clone()
+    })
 }
 pub fn tick(store: &dyn TaskStore, config: &Config, now: OffsetDateTime) -> Result<(), StoreError> {
     for delivery in store.delivery_list()? {
@@ -83,6 +178,10 @@ fn advance(
     old: &Delivery,
     now: OffsetDateTime,
 ) -> Result<(), StoreError> {
+    // ADR-0051 Phase 106追記: mergeが既に済んでいてpushが未成功・未再試行なら、状態遷移とは独立に
+    // 1度だけ再試行する（`old` を最新の永続状態に差し替えてから通常の遷移へ進む）。
+    let retried = maybe_retry_push(store, config, old, now)?;
+    let old = &retried;
     let mut d = old.clone();
     let repo = &config.selfdeploy.repo;
     if old.state == State::MergeQueued {
@@ -131,6 +230,19 @@ fn advance(
                     d.release = Some(d.head[..12].into());
                     d.detail =
                         "部署内レビュー合格・マージ済み。ビルドとリリース検証を実行中です".into();
+                    // ADR-0051 Phase 106: release.sh（start_prepare）を起こす前にoriginへpush。
+                    // 失敗してもrelease準備は止めない（下のstart_prepareはこの結果を待たない）。
+                    if config.selfdeploy.push {
+                        match push_merged(
+                            repo,
+                            &config.selfdeploy.push_remote,
+                            &d.default_branch,
+                            PUSH_TIMEOUT,
+                        ) {
+                            Ok(()) => d.pushed_at = Some(now),
+                            Err(e) => d.push_error = Some(e),
+                        }
+                    }
                 }
                 Err(e) => {
                     d.state = State::Blocked;
@@ -257,7 +369,16 @@ fn advance(
                     .as_ref()
                     .map(|s| format!("\n[リリース {s} を確認してデプロイ](/releases#release-{s})"))
                     .unwrap_or_default();
-                store.message_append(&Message { id, node_id: node.id, project_id: Some(d.project_id), role: MessageRole::Node, text: format!("【{label}・自動引き渡し結果】{title}\n{}\n[タスクと部署レビュー](/tasks/{}?tab=changes){}", d.detail, d.task_id, release), run_id: None, task_id: Some(d.task_id), metadata: None, created_at: now })?;
+                // ADR-0051 Phase 106追記: origin へのpush状況を1行足す。push=falseで一度も
+                // 試みていなければ何も足さない。
+                let push_line = if let Some(head) = d.pushed_at.is_some().then(|| d.head.clone()) {
+                    format!("\norigin へ push 済み: {head}")
+                } else if let Some(err) = d.push_error.as_deref().map(push_error_display) {
+                    format!("\n**push に失敗**: {err}。人が `git push` してください")
+                } else {
+                    String::new()
+                };
+                store.message_append(&Message { id, node_id: node.id, project_id: Some(d.project_id), role: MessageRole::Node, text: format!("【{label}・自動引き渡し結果】{title}\n{}\n[タスクと部署レビュー](/tasks/{}?tab=changes){}{}", d.detail, d.task_id, release, push_line), run_id: None, task_id: Some(d.task_id), metadata: None, created_at: now })?;
             }
             d.notification = Some(id);
             store.delivery_save(Some(old), &d)?;
@@ -352,6 +473,8 @@ mod tests {
             release: None,
             prepare_pid: None,
             notification: None,
+            pushed_at: None,
+            push_error: None,
         }
     }
     fn repository() -> (tempfile::TempDir, Delivery) {
@@ -533,4 +656,217 @@ mod tests {
                 .is_empty()
         );
     }
+
+    // ---- ADR-0051 Phase 106追記: merge直後・release前のpush。ここから ----
+
+    fn bare_remote() -> tempfile::TempDir {
+        let bare = tempfile::tempdir().unwrap();
+        git_text(bare.path(), &["init", "--bare", "-b", "main"]).unwrap();
+        bare
+    }
+
+    #[test]
+    fn push_merged_pushes_new_commits_to_a_bare_remote() {
+        let (dir, d) = repository();
+        let p = dir.path();
+        merge_reviewed(p, &d).unwrap();
+        let bare = bare_remote();
+        git_text(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]).unwrap();
+        push_merged(p, "origin", "main", Duration::from_secs(20)).unwrap();
+        assert_eq!(sha(bare.path(), "refs/heads/main").unwrap(), d.head);
+    }
+
+    #[test]
+    fn push_merged_reports_failure_reason_when_remote_is_unreachable() {
+        let (dir, d) = repository();
+        let p = dir.path();
+        merge_reviewed(p, &d).unwrap();
+        git_text(p, &["remote", "add", "origin", "/no/such/path-phase106"]).unwrap();
+        let err = push_merged(p, "origin", "main", Duration::from_secs(20)).unwrap_err();
+        assert!(!err.trim().is_empty());
+    }
+
+    #[test]
+    fn push_merged_skips_when_remote_is_already_up_to_date() {
+        let (dir, d) = repository();
+        let p = dir.path();
+        merge_reviewed(p, &d).unwrap();
+        // 実際には壊れたリモートだが、追跡refだけを直接作って「既に同じ」を再現する
+        // （ネットワークにもリモートにも触れずに済む）。
+        git_text(p, &["remote", "add", "origin", "/no/such/path-phase106"]).unwrap();
+        git_text(p, &["update-ref", "refs/remotes/origin/main", &d.head]).unwrap();
+        push_merged(p, "origin", "main", Duration::from_secs(5)).unwrap();
+    }
+
+    /// `stored_delivery()`（task がDone・cos/engineeringの組織）と `repository()`（git リポジトリ）を
+    /// 組み合わせ、`State::MergeQueued` から `advance` を通す。
+    fn merge_queued_delivery() -> (task_core::SqliteStore, tempfile::TempDir, Delivery) {
+        use task_core::DeliveryStore;
+        let (store, mut d) = stored_delivery();
+        let (dir, repo_d) = repository();
+        d.base = repo_d.base;
+        d.head = repo_d.head;
+        d.branch = repo_d.branch;
+        d.default_branch = repo_d.default_branch;
+        d.state = State::MergeQueued;
+        store.delivery_save(None, &d).unwrap();
+        (store, dir, d)
+    }
+
+    fn cfg_for(repo: &Path, releases_dir: &Path) -> Config {
+        let mut cfg: Config = toml::from_str("").unwrap();
+        cfg.selfdeploy.repo = repo.to_path_buf();
+        cfg.selfdeploy.releases_dir = releases_dir.to_path_buf();
+        cfg
+    }
+
+    #[test]
+    fn advance_pushes_to_origin_right_after_merge_before_release_prep() {
+        use task_core::DeliveryStore;
+        let (store, dir, d) = merge_queued_delivery();
+        let bare = bare_remote();
+        git_text(
+            dir.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_for(dir.path(), &tmp.path().join("releases"));
+        advance(&store, &cfg, &d, OffsetDateTime::now_utc()).unwrap();
+        let after = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert!(after.pushed_at.is_some());
+        assert!(after.push_error.is_none());
+        assert_eq!(after.state, State::Preparing);
+        assert!(after.prepare_pid.is_some());
+        assert_eq!(sha(bare.path(), "refs/heads/main").unwrap(), after.head);
+    }
+
+    #[test]
+    fn push_failure_after_merge_does_not_block_release_prep_and_retries_once() {
+        use task_core::DeliveryStore;
+        let (store, dir, d) = merge_queued_delivery();
+        git_text(
+            dir.path(),
+            &["remote", "add", "origin", "/no/such/path-phase106-retry"],
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_for(dir.path(), &tmp.path().join("releases"));
+
+        advance(&store, &cfg, &d, OffsetDateTime::now_utc()).unwrap();
+        let after_merge = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert_eq!(after_merge.state, State::Preparing, "release準備は進む");
+        assert!(after_merge.pushed_at.is_none());
+        let first_err = after_merge
+            .push_error
+            .clone()
+            .expect("push は失敗しているはず");
+        assert!(!first_err.starts_with(PUSH_RETRIED_PREFIX));
+
+        // 次のtickで1度だけ再試行。
+        advance(&store, &cfg, &after_merge, OffsetDateTime::now_utc()).unwrap();
+        let after_retry = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert!(after_retry.pushed_at.is_none());
+        let retried_err = after_retry
+            .push_error
+            .clone()
+            .expect("再試行後も失敗しているはず");
+        assert!(retried_err.starts_with(PUSH_RETRIED_PREFIX));
+
+        // それでも失敗したら以後は触らない: もう一度 advance しても push_error は変わらない。
+        advance(&store, &cfg, &after_retry, OffsetDateTime::now_utc()).unwrap();
+        let after_third = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert_eq!(after_third.push_error, after_retry.push_error);
+        assert!(after_third.pushed_at.is_none());
+    }
+
+    #[test]
+    fn maybe_retry_push_noop_when_push_disabled() {
+        let store = task_core::SqliteStore::open_in_memory().unwrap();
+        let mut cfg: Config = toml::from_str("").unwrap();
+        cfg.selfdeploy.push = false;
+        let mut d = record();
+        d.release = Some("a".repeat(12));
+        d.push_error = Some("boom".into());
+        let out = maybe_retry_push(&store, &cfg, &d, OffsetDateTime::now_utc()).unwrap();
+        assert_eq!(out, d, "push=falseなら何もしない");
+    }
+
+    /// Preparing → Ready の通知文に、pushの結果を1行足す（成功）。
+    #[test]
+    fn ready_notification_reports_successful_push() {
+        use task_core::DeliveryStore;
+        let (store, mut d) = stored_delivery();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: Config = toml::from_str("").unwrap();
+        cfg.selfdeploy.releases_dir = tmp.path().join("releases");
+        d.head = "c".repeat(40);
+        d.release = Some("c".repeat(12));
+        d.state = State::Preparing;
+        d.pushed_at = Some(OffsetDateTime::now_utc());
+        let dir = preparation_dir(&cfg, &d);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("result.json"), r#"{"ok":true}"#).unwrap();
+        let rel = cfg
+            .selfdeploy
+            .releases_dir
+            .join(d.release.as_ref().unwrap());
+        fs::create_dir_all(&rel).unwrap();
+        fs::write(rel.join("gate.json"), r#"{"ok":true}"#).unwrap();
+        fs::write(rel.join("verify.json"), r#"{"ok":true}"#).unwrap();
+        fs::write(
+            rel.join("manifest.json"),
+            serde_json::json!({"sha": d.head}).to_string(),
+        )
+        .unwrap();
+        store.delivery_save(None, &d).unwrap();
+        advance(&store, &cfg, &d, OffsetDateTime::now_utc()).unwrap();
+        let ready = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert_eq!(ready.state, State::Ready);
+        advance(&store, &cfg, &ready, OffsetDateTime::now_utc()).unwrap();
+        let messages = store.message_list("cos", Some(d.project_id), 20).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].text.contains("origin へ push 済み"));
+        assert!(messages[0].text.contains(&d.head));
+    }
+
+    /// Preparing → Ready の通知文に、pushの結果を1行足す（失敗。`[retried]` の目印は見せない）。
+    #[test]
+    fn ready_notification_reports_push_failure_without_the_retry_marker() {
+        use task_core::DeliveryStore;
+        let (store, mut d) = stored_delivery();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg: Config = toml::from_str("").unwrap();
+        cfg.selfdeploy.releases_dir = tmp.path().join("releases");
+        d.head = "d".repeat(40);
+        d.release = Some("d".repeat(12));
+        d.state = State::Preparing;
+        d.push_error = Some(format!("{PUSH_RETRIED_PREFIX}fatal: repository not found"));
+        let dir = preparation_dir(&cfg, &d);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("result.json"), r#"{"ok":true}"#).unwrap();
+        let rel = cfg
+            .selfdeploy
+            .releases_dir
+            .join(d.release.as_ref().unwrap());
+        fs::create_dir_all(&rel).unwrap();
+        fs::write(rel.join("gate.json"), r#"{"ok":true}"#).unwrap();
+        fs::write(rel.join("verify.json"), r#"{"ok":true}"#).unwrap();
+        fs::write(
+            rel.join("manifest.json"),
+            serde_json::json!({"sha": d.head}).to_string(),
+        )
+        .unwrap();
+        store.delivery_save(None, &d).unwrap();
+        advance(&store, &cfg, &d, OffsetDateTime::now_utc()).unwrap();
+        let ready = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert_eq!(ready.state, State::Ready);
+        advance(&store, &cfg, &ready, OffsetDateTime::now_utc()).unwrap();
+        let messages = store.message_list("cos", Some(d.project_id), 20).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].text.contains("push に失敗"));
+        assert!(messages[0].text.contains("fatal: repository not found"));
+        assert!(!messages[0].text.contains(PUSH_RETRIED_PREFIX));
+    }
+    // ---- ADR-0051 Phase 106追記: ここまで ----
 }

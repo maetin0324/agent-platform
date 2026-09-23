@@ -107,6 +107,8 @@ pub fn begin(
         release: None,
         prepare_pid: None,
         notification: None,
+        pushed_at: None,
+        push_error: None,
     };
     if !store.delivery_save(old.as_ref(), &d)? {
         return Err(StoreError::Invalid(

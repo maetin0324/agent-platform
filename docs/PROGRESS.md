@@ -15009,3 +15009,66 @@ handoff」、`scripts/selfdeploy/promote.sh` 90〜100 行付近）で完了し�
 - 古い unit の削除: `celeris-qwen-tunnel.timer` を disable --now、`celeris-qwen-tunnel.service` を stop、両 unit ファイルと wants リンクを削除、`celeris@44447197fcaf.service` の failed 状態を reset-failed、`daemon-reload`。`systemctl --user list-units 'celeris*'` は `celeris@5b80f99a8042` / `celeris-gui@5b80f99a8042` / `celeris-ssh-master-pegasus-4D76X42X.scope` の 3 つだけ。Qwen トンネルは ADR-0053 D3 のとおり celeris の `[[clusters.forwards]]` が担う。
 - RDC 経路（ChatGPT → Remote Desktop Commander → chatgpt-rdc → celeris-chat → MCP）: 人がペアリングを完了し、ChatGPT のチャットから実際に使った。`GET /mcp/calls?client=chatgpt-rdc` は 47 件（knowledge_get 25、knowledge_search 7、tasks_list 5、knowledge_propose 4、console_instruct 2、console_reply 2、tasks_get 1、task_comment 1。ok 45 / 失敗 2）。`_inbox/20260922T195001Z-benchfs-jobs.md` は ChatGPT からの知識候補。19:49Z の `console_instruct`「Celeris 自身の自己改善タスクとして、coding worker のハーネスを自動選択・ルーティングする機能を設計・実装して」が CoS → software-engineering → Phase 104（ADR-0061）の自己改善 → delivery → 人の昇格、という一連の流れの起点だった。外部エージェントが CoS 経由で仕事を作り、本番に反映されるまでを 1 周した。
 - 進行中: Phase 106（自己改善の delivery が merge 後・release 前に origin へ push する）。
+## Phase 106（完了日 2026-09-23）: 自己改善の delivery は merge 後・release 前に origin へ push する（ADR-0051 追記）
+
+### 背景
+
+Phase 104（本番、2026-09-22）の delivery は merge 後 push を行わず、昇格まで origin に反映されないまま止まっていた（親が手で `git push origin main` した）。人の指示: 「release を作る前に push する」。
+
+### 条件 1: `merge_reviewed` 成功直後・`release.sh`（`start_prepare`）を起こす前に origin へ push する。非対話・タイムアウト120秒。失敗はrelease準備を止めない
+
+- `crates/celeris/src/delivery.rs`: `push_merged(repo, remote, branch, timeout) -> Result<(), String>`（純粋な git 呼び出し。`git_text` の流儀）。`State::MergeQueued` の merge 成功アームで、`config.selfdeploy.push` が真なら `merge_reviewed` 成功直後・`d.state = Preparing` を保存する前に呼び出し、`d.pushed_at` / `d.push_error` を設定してから同じ CAS 保存に含める（`start_prepare` はその後）。
+- `task_ops::changes::git_with_env(dir, args, extra_env, timeout)` を追加（`crates/task-ops/src/changes.rs`）。`GIT_SSH_COMMAND` に `-o BatchMode=yes` を足すために必要で、既存 `git()` はそこへ委譲するだけに変えた（挙動は変えていない）。
+- **実行したコマンド**: `cargo test -p celeris --lib delivery::`
+- **出力の要点**: exit 0、**13 passed**（既存 6 件 + 新規 7 件。`push_merged_pushes_new_commits_to_a_bare_remote`、`push_merged_reports_failure_reason_when_remote_is_unreachable`、`push_merged_skips_when_remote_is_already_up_to_date`、`advance_pushes_to_origin_right_after_merge_before_release_prep`、`push_failure_after_merge_does_not_block_release_prep_and_retries_once`、`maybe_retry_push_noop_when_push_disabled`、`ready_notification_reports_successful_push`、`ready_notification_reports_push_failure_without_the_retry_marker`）。すべて `git init --bare` の一時リモート（ローカルファイルシステム上のパス）を使い、外部ネットワークへは出ていない。
+
+### 条件 2: `[selfdeploy] push`（既定 `true`）/ `push_remote`（既定 `"origin"`）。`config/celeris.example.toml` に例を追記。`Config` は `deny_unknown_fields`
+
+- `crates/celeris/src/config.rs`: `SelfdeployConfig::push: bool`（既定 `true`）、`push_remote: String`（既定 `"origin"`）。`validate()` に「`push_remote` は空文字禁止」を追加。
+- `config/celeris.example.toml` の `[selfdeploy]` の例に `push` / `push_remote`（コメントアウト、既定値のまま）を追記。
+- **実行したコマンド**: `cargo test -p celeris --lib config::`
+- **出力の要点**: exit 0、**71 passed**（新規 `selfdeploy_push_defaults_to_true_and_origin_and_rejects_blank_remote` を含む。`loads_example_config_and_resolves_relative_paths` が更新後の例ファイルも読めることを確認）。
+
+### 条件 3: `pushed_at: Option<OffsetDateTime>` / `push_error: Option<String>`（stderr末尾500バイト）を `Delivery` に保存し、通知文に1行足す。push失敗は1度だけ再試行し、それでも失敗したら以後は触らない。既に origin が同じかそれより先なら省略して `pushed_at` だけ入れる
+
+- `crates/task-core/src/delivery.rs`: `Delivery` に `pushed_at` / `push_error` を追加（`#[serde(default)]`。`Delivery` に `deny_unknown_fields` は無いので旧バイナリは新フィールドを無視できる）。
+- `crates/celeris/src/delivery.rs`: `maybe_retry_push` が `advance` の先頭で毎 tick 呼ばれ、`old.release.is_some() && old.pushed_at.is_none() && push_error がまだ [retried] を前置していない` ときだけ 1 回だけ再試行する。再試行してもなお失敗したら `push_error` に内部の目印 `[retried] ` を前置して「以後は触らない」を表現する（通知文では `push_error_display` でこの目印を外す）。origin が既に同じかそれより先（`git rev-list --count <remote>/<branch>..<branch>` が 0）なら push 自体を省略し `pushed_at` だけ入れる（`push_already_up_to_date`）。
+- 通知文（`advance` の `State::Ready | State::Blocked` アーム、CoS/部署への「デプロイ準備完了」等のメッセージ）に「origin へ push 済み: `<head>`」または「**push に失敗**: `<理由>`。人が `git push` してください」を1行追加。`push = false` で一度も push を試みていなければ何も足さない。
+- **実行したコマンド**: `cargo test -p celeris --lib delivery::`（条件1と同じ実行。上記参照）。
+- **出力の要点**: 上記条件1のとおり13 passed、0 failed。うち `push_failure_after_merge_does_not_block_release_prep_and_retries_once` が「release 準備が進む（`state == Preparing`）」「1度だけ再試行（2回目の `advance` で `push_error` に `[retried]` が付く）」「それでも失敗したら以後は触らない（3回目の `advance` で `push_error` が変化しない）」の3点を1テストで確認、`push_merged_skips_when_remote_is_already_up_to_date` が省略のケースを確認、`ready_notification_reports_successful_push` / `ready_notification_reports_push_failure_without_the_retry_marker` が通知文の1行を確認。
+
+### 条件 4: ゲート
+
+- **実行したコマンド**: `cargo test --workspace --no-fail-fast`
+- **出力の要点**: 1回目は exit 101（`task-api::schema::tests::committed_schema_matches_generated` が FAILED。`Delivery` の新フィールド2件が `ChangesView` 経由でスキーマに現れたため、想定どおりの検知）。`UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::` で再生成後、2回目は **exit 0、1885 passed / 0 failed**（前 Phase 105 の 1876 + 新規9件相当。退行なし）。
+- **実行したコマンド**: `cargo clippy --workspace --all-targets -- -D warnings`
+- **出力の要点**: exit 0（warning 0）。
+- **実行したコマンド**: `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::`
+- **出力の要点**: exit 0、2 passed。`docs/api/v1/api-v1.schema.json` に `Delivery` の `push_error` / `pushed_at` の2フィールドだけの差分（+14行）。
+- **SCHEMA_VERSION は 25 のまま**（migration を追加していない。理由は下記「実装からの逸脱」）。`crates/task-core/src/store.rs` の `assert_eq!(SCHEMA_VERSION, 25)` トリップワイヤは変更不要（上記ゲートで green を確認済み）。
+- **実行したコマンド**（`gui/`）: `pnpm install --frozen-lockfile && pnpm gen:types && pnpm typecheck && pnpm test`
+- **出力の要点**: `install` exit 0（lockfile どおり）。`gen:types` は `gui/app/celeris/types.ts` の `Delivery` に `push_error?: string | null` / `pushed_at?: string | null` を追加（+10行、他は無変更）。`typecheck` exit 0。`test`（vitest）exit 0、**68 test files / 1061 passed**。
+
+### 実装からの逸脱（設計は変えていない。ADR-0051 の「Phase 106 追記」に同内容を記載済み）
+
+- **migration `0026_delivery_push.sql` を作らなかった**。`Delivery` は `deliveries` テーブル（migration `0020_deliveries.sql`）の1カラム `json`（TEXT）に丸ごと直列化されているだけで、専用の SQLite カラムを持たない。新フィールド2つは `#[serde(default)]` なので旧い JSON 行（フィールド無し）も読め、`Delivery` に `deny_unknown_fields` は付いていないので旧バイナリが新しい JSON（2フィールド増）を読んでも無視できる。したがって DB スキーマの変更は不要で `SCHEMA_VERSION` は 25 のまま。
+- `task_ops::changes` に `git_with_env`（`git` に追加の環境変数を渡す版）を新規追加した。push だけ `GIT_SSH_COMMAND` を足す必要があり、既存の `git()`（固定環境のみ）では表現できなかったため。`git()` は `git_with_env(dir, args, &[], timeout)` に委譲するだけに変え、既存呼び出し元の挙動は変えていない（`cargo test -p task-ops --lib changes::` 13 passed で確認）。
+
+### 変更ファイル
+
+- `crates/task-core/src/delivery.rs`（`Delivery::pushed_at` / `push_error`）
+- `crates/task-ops/src/changes.rs`（`git_with_env`）、`crates/task-ops/src/delivery.rs`（新フィールドをレコード生成に追加）
+- `crates/celeris/src/config.rs`（`SelfdeployConfig::push` / `push_remote`、`validate()`、テスト）
+- `crates/celeris/src/delivery.rs`（`push_merged` / `push_already_up_to_date` / `maybe_retry_push` / `push_error_display` / `tail_bytes`、`advance` への組み込み、通知文の1行、テスト8件）
+- `config/celeris.example.toml`（`[selfdeploy] push` / `push_remote` の例）
+- `docs/api/v1/api-v1.schema.json`（再生成）、`gui/app/celeris/types.ts`（再生成）
+- `docs/adr/0051-supervised-delivery.md`（末尾に「Phase 106 追記」。本文は書き換えていない）
+
+### 未解決事項
+
+- 本番確認は親が行う（次の自己改善の delivery で origin/main が自動で進むこと）。この worktree からは実際の `~/workspace/agent-platform` や本番の `git push` は一切行っていない（禁止事項どおり）。テストはすべて `git init --bare` の一時リモートのみ。
+- GUI の「デプロイ準備完了」画面に push 状態（`pushed_at`/`push_error`）を出す表示はこの Phase の範囲外（`gen:types` で型は届いているが、画面はメッセージ本文の1行のみ。次の GUI Phase の提案へ）。
+
+### 提案
+
+- P-106-1: `pushed_at`/`push_error` を `GET /tasks/{id}/changes` のレスポンス（`ChangesView.delivery`）経由で GUI の「変更」タブに小さく出す（現状は通知メッセージの本文にしか出ていない）。

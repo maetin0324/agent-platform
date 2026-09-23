@@ -1156,6 +1156,16 @@ export interface Delivery {
   notification?: MessageId | null;
   prepare_pid?: number | null;
   project_id: ProjectId;
+  /**
+   * push失敗の理由（stderr末尾500バイト）。1度だけ再試行し、再試行後もなお失敗したものには
+   * `[retried] ` を前置して以後は触らない目印にする（通知文には前置詞を外して出す）。
+   */
+  push_error?: string | null;
+  /**
+   * ADR-0051 Phase 106追記: merge直後にoriginへpushした時刻（成功または「既に同じかそれより先」で
+   * 省略したとき）。push機能を使わない（`[selfdeploy] push = false`）ときは常に`None`。
+   */
+  pushed_at?: string | null;
   release?: string | null;
   repo: string;
   repo_id: RepoId;

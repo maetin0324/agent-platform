@@ -403,6 +403,10 @@ interval_secs = 30                                # 判定と送信の間隔（�
 # delivery_projects = [] # 許可した自己改善案件ID。部署レビュー合格後にmerge・release・verify（本番デプロイは人）
 # releases_dir = "~/.local/celeris/releases"   # 既定
 # repo = "~/workspace/agent-platform"  # 既定。on_mainと自動取り込みの対象
+# ADR-0051 Phase 106追記: mergeが成功した直後、release.sh を起こす前に origin へ push する。
+# 失敗してもrelease準備は止めない（1度だけ再試行し、それでも駄目なら人に `git push` を促す）。
+# push = true            # 既定
+# push_remote = "origin" # 既定
 
 # HTTP API（ADR-0013、docs/gui/api.md）。listen を書いたときだけ celeris のプロセス内で動く（既定は無効）。celeris-gui はこれを使う。
 # loopback 以外で listen するなら token_file が必須（中身 1 行が Bearer トークン。読めない・空なら起動時に exit 2）。
