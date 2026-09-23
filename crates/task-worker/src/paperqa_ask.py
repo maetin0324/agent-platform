@@ -13,8 +13,16 @@ production venv (`paperqa==2026.8.12`) by the parent agent (2026-09-23):
   PQASession.contexts -> list[Context(id, context, question, text, score)]
   Context.text -> Text(embedding, text, name, media, doc)
   Text.doc -> Doc(embedding, docname, dockey, citation, content_hash, ...)
-  Settings.from_name(name) reads `<PQA_SETTINGS_DIR>/<name>.json`
-      (same lookup the `-s <name>` CLI flag used).
+  Settings.from_name(name) reads `pqa_directory("settings")/<name>.json`, an
+      **unconfigurable** `~/.pqa/settings/` path -- `PQA_SETTINGS_DIR` has no
+      effect on it (confirmed by reading the production venv's source,
+      paperqa==2026.8.12: `pqa_directory` never looks at that env var).
+      ADR-0063 Phase 109e: this runner reads `settings_path` (a full path
+      the adapter builds from `[adapters.paperqa] settings`) directly
+      instead, redoing the same "validate then rebuild" two steps
+      `from_name` itself does, and only falls back to `from_name(name)` when
+      `settings_path` does not exist (still the only way to reach paperqa's
+      own bundled config names, e.g. `"high_quality"`).
 
 Why the switch (ADR-0063 Phase 109b A2 / Phase 109c P-109c-1): the CLI has no
 `--output json`, so the adapter had to scrape the `References`/`Sources`
@@ -32,14 +40,18 @@ Contract with the adapter (crates/task-worker/src/paperqa.rs):
            process exits)
   exit     0 on success (an `output_path` JSON is always written, even if
            individual questions failed -- see `error` per answer),
-           2 bad usage, **3 if `paperqa` cannot be imported** (the adapter
-           turns this into a clear "tool not set up" error rather than a
-           generic retryable failure), 1 any other failure before any
+           2 bad usage, or settings could not be resolved (ADR-0063 Phase
+           109e: neither `settings_path` nor `Settings.from_name` found
+           anything -- retrying will not help, the adapter reports this as
+           `retryable: false`), **3 if `paperqa` cannot be imported** (the
+           adapter turns this into a clear "tool not set up" error rather
+           than a generic retryable failure), 1 any other failure before any
            question could be attempted.
 
 INPUT (all paths absolute):
-  {"settings_name": "celeris-proxy" | null,     # `Settings.from_name(...)`
-   "settings_dir": "<.../settings>" | null,      # `PQA_SETTINGS_DIR`
+  {"settings_name": "celeris-proxy" | null,     # `Settings.from_name(...)` fallback only
+   "settings_dir": "<.../settings>" | null,      # only used to rebuild `settings_path` if absent
+   "settings_path": "<.../settings/celeris-proxy.json>" | null,  # read directly if it exists (ADR-0063 Phase 109e)
    "paper_directory": "<papers>/<project_id>",
    "index_directory": "<index>/<project_id>",
    "index_name": "<project_id>" | null,
@@ -265,6 +277,94 @@ def ask_with_retries(perform, sleep=None, delays=RETRY_DELAYS):
     raise last_exc  # pragma: no cover -- the loop above always returns or raises
 
 
+# -------------------------------------------------------------- pure: settings
+
+
+def resolve_settings_path(settings_dir, settings_name):
+    """The absolute `<settings_dir>/<settings_name>.json` path (ADR-0063
+    Phase 109e), the same one the adapter's `split_settings_path`
+    (crates/task-worker/src/paperqa.rs) builds from `[adapters.paperqa]
+    settings`. Normally the adapter already sends this as `settings_path` in
+    the input JSON; this pure re-derivation exists so (a) a test can check
+    the two sides agree without installing `paperqa`, and (b) `load_settings`
+    still has something to try if `settings_path` is ever missing from the
+    input. `None` when there isn't enough to build one -- no `settings_name`,
+    or a bare name with no directory (that case only has
+    `Settings.from_name` to fall back to, same as before Phase 109e)."""
+    if not settings_name or not settings_dir:
+        return None
+    name = settings_name[:-5] if settings_name.endswith(".json") else settings_name
+    if not name:
+        return None
+    return os.path.join(settings_dir, name + ".json")
+
+
+class SettingsResolutionError(Exception):
+    """Raised by `load_settings` when settings could not be found by either
+    lookup path (ADR-0063 Phase 109e): neither `settings_path` names an
+    existing file, nor does `Settings.from_name(settings_name)` find
+    anything. `str(exc)` lists every path tried, for a human to act on
+    (fix `[adapters.paperqa] settings` or create the file); `main` turns
+    this into exit 2, which the adapter treats as non-retryable."""
+
+
+def load_settings(payload):
+    """The `paperqa.Settings` for this run (ADR-0063 Phase 109e). Assumes
+    `paperqa` is already imported -- the caller guards that separately with
+    its own ImportError -> exit 3 handling.
+
+    1. If `settings_path` (given directly in `payload`, or rebuilt from
+       `settings_dir` + `settings_name` via `resolve_settings_path`) names a
+       file that exists, read and validate it **directly**. Production
+       `Settings.from_name` (paperqa==2026.8.12) looks up
+       `pqa_directory("settings")` (`~/.pqa/settings/`), which does not
+       honor `PQA_SETTINGS_DIR` -- that lookup can never find a settings
+       file that lives anywhere else, which is exactly the bug this phase
+       fixes (observed in production, ADR-0063 Phase 109e). We redo the
+       same two steps `from_name` performs internally (validate the raw
+       JSON into a throwaway `Settings`, then rebuild from its
+       `model_dump()` so whatever defaults `Settings.__init__` normally
+       fills in still apply) so `agent.index.*` and every other field behave
+       the same as the old `-s <name>` CLI flag / `from_name` path did.
+    2. Otherwise, if `settings_name` is given, fall back to
+       `Settings.from_name(settings_name)` -- still the only way to reach
+       paperqa's own bundled config names (e.g. `"high_quality"`).
+    3. Otherwise (no `settings_name` either), `Settings()` (paperqa's
+       built-in defaults) -- there was never anything to look up.
+
+    Raises `SettingsResolutionError` only when `settings_name` was given but
+    neither step above found anything.
+    """
+    from paperqa import Settings
+
+    settings_dir = payload.get("settings_dir") or None
+    settings_name = payload.get("settings_name") or None
+    settings_path = payload.get("settings_path") or resolve_settings_path(
+        settings_dir, settings_name
+    )
+
+    tried = []
+    if settings_path:
+        tried.append(settings_path)
+        if os.path.isfile(settings_path):
+            with open(settings_path, "r", encoding="utf-8") as handle:
+                raw_json = handle.read()
+            tmp = Settings.model_validate_json(raw_json)
+            return Settings(**tmp.model_dump())
+
+    if not settings_name:
+        return Settings()
+
+    try:
+        return Settings.from_name(settings_name)
+    except FileNotFoundError as exc:
+        tried.append("Settings.from_name(%r): %s" % (settings_name, exc))
+        raise SettingsResolutionError(
+            "could not resolve PaperQA settings %r; looked at: %s"
+            % (settings_name, "; ".join(tried))
+        ) from exc
+
+
 # --------------------------------------------------------------------- main
 
 
@@ -343,17 +443,18 @@ def main():
 
     try:
         import paperqa  # noqa: F401 - import guarded per ADR-0063 Phase 109d C1
-        from paperqa import Settings, ask
+        from paperqa import ask
     except ImportError as exc:
         write_json(output_path, {"error": "paperqa not importable: %s" % exc, "answers": []})
         print("paperqa not importable: %s" % exc, file=sys.stderr)
         return 3
 
-    settings_dir = payload.get("settings_dir") or None
-    settings_name = payload.get("settings_name") or None
-    if settings_dir:
-        os.environ["PQA_SETTINGS_DIR"] = settings_dir
-    settings = Settings.from_name(settings_name) if settings_name else Settings()
+    try:
+        settings = load_settings(payload)
+    except SettingsResolutionError as exc:
+        write_json(output_path, {"error": str(exc), "answers": []})
+        print(str(exc), file=sys.stderr)
+        return 2
     settings.agent.index.paper_directory = payload.get("paper_directory") or ""
     settings.agent.index.index_directory = payload.get("index_directory") or ""
     index_name = payload.get("index_name") or None

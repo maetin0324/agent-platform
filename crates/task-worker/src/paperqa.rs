@@ -57,6 +57,10 @@ const PROGRESS_PREFIX: &str = "progress:";
 const ASK_SCRIPT: &str = include_str!("paperqa_ask.py");
 /// `paperqa_ask.py` が `paperqa` を import できなかったときの exit code（ADR-0063 Phase 109d C1）。
 const ASK_EXIT_PAPERQA_NOT_IMPORTABLE: i32 = 3;
+/// `paperqa_ask.py` の引数の誤り、または `settings_path`/`Settings.from_name` のどちらでも設定が
+/// 見つからなかったときの exit code（ADR-0063 Phase 109e）。どちらも設定の誤りで再試行しても
+/// 直らないので `retryable: false` にする。
+const ASK_EXIT_BAD_USAGE_OR_SETTINGS_NOT_FOUND: i32 = 2;
 /// `artifacts/result.json` の `summary` の上限（ADR-0027 D3）。
 const SUMMARY_MAX_CHARS: usize = 1500;
 /// `progress` に転送する 1 行あたりの上限（他アダプタと同じ規則。ADR-0026 の `truncate` を踏襲）。
@@ -724,10 +728,25 @@ fn resolve_ask_command(config: &PaperQaConfig, run_id: &str) -> String {
     replacement
 }
 
-/// ADR-0063 Phase 109d C1: `config.settings` はこのコードベースでは設定ファイルへの**フルパス**
-/// （拡張子無し。`settings_llm` と同じ前提）として扱われてきた。`paperqa_ask.py` に渡す
-/// `settings_dir`（`PQA_SETTINGS_DIR`）/`settings_name`（`Settings.from_name` の引数）に分解する。
-fn split_settings_path(settings: &str) -> (Option<String>, Option<String>) {
+/// ADR-0063 Phase 109e: `config.settings` はこのコードベースでは設定ファイルへの**フルパス**
+/// （拡張子無し。`settings_llm` と同じ前提。ただし `.json` 付きでも名前だけでも受け付ける）として
+/// 扱われてきた。`paperqa_ask.py` に渡す `settings_path`（**直接読む**絶対パス、`.json` 付き）/
+/// `settings_dir`/`settings_name`（`settings_path` が組めない、または見つからないときの
+/// `Settings.from_name` フォールバック用）に分解する。
+///
+/// Phase 109d までは `settings_dir` を `PQA_SETTINGS_DIR` として渡し `Settings.from_name` に
+/// 探させていたが、本番の `Settings.from_name`（paperqa==2026.8.12）はその環境変数を見ない
+/// （`~/.pqa/settings/` 固定）ため、それでは設定ファイルの実際の置き場所（`settings_dir`）を
+/// 全く見つけられなかった（本番で観測。Phase 109e）。`settings_path` はその置き場所を
+/// `paperqa_ask.py` に直接教える。
+///
+/// 3 通りの入力を同じ `settings_path` に正規化する:
+/// - 拡張子無しのフルパス（`/a/b/name`）→ `/a/b/name.json`
+/// - `.json` 付きのフルパス（`/a/b/name.json`）→ そのまま
+/// - ディレクトリの無い名前だけ（`name`）→ `settings_path` は組めない（`None`）。
+///   `settings_name` だけが残り、`paperqa_ask.py` 側は `Settings.from_name` に委ねる
+///   （paperqa 自身の同梱設定名、例 `"high_quality"`、を指すときの唯一の経路）。
+fn split_settings_path(settings: &str) -> (Option<String>, Option<String>, Option<String>) {
     let path = Path::new(settings);
     let name = path
         .file_stem()
@@ -737,7 +756,11 @@ fn split_settings_path(settings: &str) -> (Option<String>, Option<String>) {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_string_lossy().into_owned());
-    (dir, name)
+    let settings_path = match (&dir, &name) {
+        (Some(dir), Some(name)) => Some(format!("{dir}/{name}.json")),
+        _ => None,
+    };
+    (settings_path, dir, name)
 }
 
 /// ADR-0063 Phase 109d C2: 答え（全問い）の `contexts` に現れた `docname`/`dockey` の集合
@@ -1595,16 +1618,19 @@ async fn run_paperqa(
     let ask_script_path = run_dir.join("paperqa_ask.py");
     let ask_input_path = run_dir.join("ask_input.json");
     let ask_output_path = run_dir.join("ask_output.json");
-    let (settings_dir, settings_name) = config
+    let (settings_path, settings_dir, settings_name) = config
         .settings
         .as_deref()
         .map(split_settings_path)
-        .unwrap_or((None, None));
+        .unwrap_or((None, None, None));
     // ADR-0063 Phase 109d C3: 対象が複数（比較先込み）でも `max_asks` を超えない。
     let comparison_target = crate::research_targets::comparison_target(&req.task.objective);
     let ask_input = serde_json::json!({
         "settings_name": settings_name,
         "settings_dir": settings_dir,
+        // ADR-0063 Phase 109e: `paperqa_ask.py` がこれを直接読む（`Settings.from_name` は
+        // `PQA_SETTINGS_DIR` を見ないので使えない。あればフォールバックとしてのみ使う）。
+        "settings_path": settings_path,
         "paper_directory": paper_directory.to_string_lossy(),
         "index_directory": index_directory.to_string_lossy(),
         "index_name": index_name,
@@ -1671,7 +1697,7 @@ async fn run_paperqa(
         Err(_) => None,
     };
     // 成功と見なせる出力（`error` なし・答えが 1 件でも非空）だけを次に渡す。
-    let usable_ask_output = ask_output.filter(|o| {
+    let usable_ask_output = ask_output.clone().filter(|o| {
         o.error.is_none() && o.answers.iter().any(|a| !a.answer.trim().is_empty())
     });
 
@@ -1685,6 +1711,29 @@ async fn run_paperqa(
                           used by [adapters.paperqa] command; install `paperqa` there \
                           (ADR-0063 Phase 109d C1)"
                     .to_string(),
+                retryable: false,
+            },
+            None,
+        )
+    } else if exit_status.code() == Some(ASK_EXIT_BAD_USAGE_OR_SETTINGS_NOT_FOUND) {
+        // ADR-0063 Phase 109e: 引数の誤り、または `settings_path`/`Settings.from_name` のどちらでも
+        // 設定ファイルが見つからなかった（`paperqa_ask.py::load_settings`）。どちらも設定の誤りで
+        // 再試行しても直らないので `retryable: false`。`output_path` の `error`（探したパスを列挙した
+        // メッセージ）を優先し、無ければ stderr の最後の行を使う。
+        let message = ask_output
+            .as_ref()
+            .and_then(|o| o.error.clone())
+            .filter(|m| !m.trim().is_empty())
+            .unwrap_or_else(|| {
+                stderr_tail
+                    .lines()
+                    .next_back()
+                    .unwrap_or("paperqa_ask.py: bad usage or settings not found")
+                    .to_string()
+            });
+        (
+            Terminal::Error {
+                message: format!("paperqa_ask.py could not start (exit=2): {message}"),
                 retryable: false,
             },
             None,
@@ -2565,6 +2614,8 @@ while true; do sleep 0.1; done
         let input = read_ask_input(dir.path(), "run-5");
         assert_eq!(input["settings_dir"], "/settings", "{input}");
         assert_eq!(input["settings_name"], "qwen-local", "{input}");
+        // ADR-0063 Phase 109e: `settings_path`（直接読む絶対パス）も足される。
+        assert_eq!(input["settings_path"], "/settings/qwen-local.json", "{input}");
         assert_eq!(
             input["paper_directory"],
             format!("/papers/{SHARED_PROJECT_KEY}"),
@@ -2602,6 +2653,7 @@ while true; do sleep 0.1; done
         let input = read_ask_input(dir.path(), "run-6");
         assert!(input["settings_name"].is_null(), "{input}");
         assert!(input["settings_dir"].is_null(), "{input}");
+        assert!(input["settings_path"].is_null(), "{input}");
         assert_eq!(
             input["paper_directory"],
             format!("papers/{SHARED_PROJECT_KEY}"),
@@ -2920,13 +2972,18 @@ while true; do sleep 0.1; done
         assert_eq!(resolve_ask_command(&config, "run-x"), "python");
     }
 
-    /// ADR-0063 Phase 109d C1: `settings`（設定ファイルへのフルパス、拡張子無し）を
-    /// `settings_dir`（`PQA_SETTINGS_DIR`）/`settings_name`（`Settings.from_name` の引数）に分ける。
+    /// ADR-0063 Phase 109e: `settings`（設定ファイルへのフルパス）を `settings_path`
+    /// （`paperqa_ask.py` が**直接読む**絶対パス、`.json` 付き）/`settings_dir`/`settings_name`
+    /// （`settings_path` が組めない、または見つからないときの `Settings.from_name` フォールバック用）
+    /// に分ける。3 通りの入力（拡張子無しのフルパス・`.json` 付きのフルパス・ディレクトリの無い
+    /// 名前だけ）すべてから正しく組まれることを確認する。
     #[test]
-    fn split_settings_path_separates_the_directory_and_the_name() {
+    fn split_settings_path_builds_the_settings_path_from_all_three_input_forms() {
+        // 拡張子無しのフルパス。
         assert_eq!(
             split_settings_path("/home/u/celeris/paperqa/settings/celeris-proxy"),
             (
+                Some("/home/u/celeris/paperqa/settings/celeris-proxy.json".to_string()),
                 Some("/home/u/celeris/paperqa/settings".to_string()),
                 Some("celeris-proxy".to_string())
             )
@@ -2935,14 +2992,17 @@ while true; do sleep 0.1; done
         assert_eq!(
             split_settings_path("/settings/celeris-proxy.json"),
             (
+                Some("/settings/celeris-proxy.json".to_string()),
                 Some("/settings".to_string()),
                 Some("celeris-proxy".to_string())
             )
         );
-        // ディレクトリの無い名前だけなら `settings_dir` は `None`。
+        // ディレクトリの無い名前だけなら `settings_path`/`settings_dir` は `None`
+        // （`paperqa_ask.py` 側は `Settings.from_name` に委ねる。paperqa 自身の同梱設定名を指す
+        // 唯一の経路）。
         assert_eq!(
             split_settings_path("celeris-proxy"),
-            (None, Some("celeris-proxy".to_string()))
+            (None, None, Some("celeris-proxy".to_string()))
         );
     }
 
@@ -4803,8 +4863,9 @@ print(json.dumps(out, ensure_ascii=False))
 
     // ---------------------------------------------- paperqa_ask.py（python3、ネットワーク無し）
 
-    /// ADR-0063 Phase 109d: `paperqa_ask.py` の純関数（質問の生成・contexts の平坦化・表の組み立て）を
-    /// `python3 -c` から直接呼ぶ（`paperqa` パッケージ無しで動く）。
+    /// ADR-0063 Phase 109d/109e: `paperqa_ask.py` の純関数（質問の生成・contexts の平坦化・
+    /// 表の組み立て・`settings_path` の組み立て）を `python3 -c` から直接呼ぶ
+    /// （`paperqa` パッケージ無しで動く）。
     #[test]
     fn ask_script_pure_functions_build_questions_flatten_contexts_and_the_table() {
         if !python3_available() {
@@ -4868,6 +4929,13 @@ out["transient"] = [
     mod.is_transient_error(Exception("KeyError: 'missing'")),
 ]
 
+# (e) ADR-0063 Phase 109e: resolve_settings_path は Rust の split_settings_path と同じ組み方
+# （dir + name(.json 無し) -> "<dir>/<name>.json"）。名前だけ・ディレクトリだけでは組めない。
+out["settings_path_full"] = mod.resolve_settings_path("/settings", "celeris-proxy")
+out["settings_path_name_already_json"] = mod.resolve_settings_path("/settings", "celeris-proxy.json")
+out["settings_path_no_dir"] = mod.resolve_settings_path(None, "celeris-proxy")
+out["settings_path_no_name"] = mod.resolve_settings_path("/settings", None)
+
 print(json.dumps(out, ensure_ascii=False))
 "##;
         let output = std::process::Command::new("python3")
@@ -4928,6 +4996,308 @@ print(json.dumps(out, ensure_ascii=False))
             serde_json::json!([true, true, true, false]),
             "{v}"
         );
+
+        assert_eq!(v["settings_path_full"], "/settings/celeris-proxy.json", "{v}");
+        assert_eq!(
+            v["settings_path_name_already_json"],
+            "/settings/celeris-proxy.json",
+            "{v}"
+        );
+        assert_eq!(v["settings_path_no_dir"], serde_json::Value::Null, "{v}");
+        assert_eq!(v["settings_path_no_name"], serde_json::Value::Null, "{v}");
+    }
+
+    /// ADR-0063 Phase 109e: `settings_path` が指す設定ファイルが**実在すれば**、`paperqa_ask.py::main`
+    /// は `Settings.from_name` を経由せずそれを直接読んで（`Settings.model_validate_json` →
+    /// `model_dump()` → `Settings(**...)`）`ask()` に渡し、`output_path` に答えを書く
+    /// （本番で観測した `Settings.from_name` が `PQA_SETTINGS_DIR` を見ない不具合の直し）。
+    /// 偽の `paperqa`（`sys.modules` に差し込む最小スタブ）を使い、ネットワークには出ない。
+    #[test]
+    fn paperqa_ask_main_reads_the_settings_file_directly_when_it_exists() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("paperqa_ask.py");
+        std::fs::write(&script_path, ASK_SCRIPT).unwrap();
+
+        let settings_dir = dir.path().join("settings");
+        std::fs::create_dir_all(&settings_dir).unwrap();
+        let settings_path = settings_dir.join("celeris-proxy.json");
+        std::fs::write(&settings_path, r#"{"llm": "qwen3.8-27b", "marker": "from-disk"}"#).unwrap();
+
+        let output_path = dir.path().join("ask_output.json");
+        let input = serde_json::json!({
+            "settings_name": "celeris-proxy",
+            "settings_dir": settings_dir.to_string_lossy(),
+            "settings_path": settings_path.to_string_lossy(),
+            "paper_directory": dir.path().join("papers").to_string_lossy(),
+            "index_directory": dir.path().join("index").to_string_lossy(),
+            "index_name": "proj",
+            "model": null,
+            "targets": [],
+            "aspects": [],
+            "comparison_target": null,
+            "max_asks": 8,
+            "fallback_question": "the question",
+            "output_path": output_path.to_string_lossy(),
+        });
+        let input_path = dir.path().join("input.json");
+        std::fs::write(&input_path, serde_json::to_string_pretty(&input).unwrap()).unwrap();
+
+        let driver = r##"
+import importlib.util, json, sys, types
+
+script_path, input_path = sys.argv[1], sys.argv[2]
+calls = {"from_name_called": False, "validated_raw": None, "settings_marker_seen_by_ask": None}
+
+
+class FakeIndex:
+    def __init__(self):
+        self.paper_directory = None
+        self.index_directory = None
+        self.name = None
+
+
+class FakeAgent:
+    def __init__(self):
+        self.index = FakeIndex()
+
+
+class FakeSettings:
+    def __init__(self, **kw):
+        self.agent = FakeAgent()
+        self.llm = kw.get("llm")
+        self.marker = kw.get("marker")
+
+    @classmethod
+    def model_validate_json(cls, text):
+        data = json.loads(text)
+        calls["validated_raw"] = data
+        inst = cls(**data)
+        inst._raw = data
+        return inst
+
+    def model_dump(self):
+        return dict(getattr(self, "_raw", {}))
+
+    @classmethod
+    def from_name(cls, name):
+        # settings_path が実在するなら呼ばれてはいけない (ADR-0063 Phase 109e).
+        calls["from_name_called"] = True
+        raise FileNotFoundError("from_name should not be reached: %s" % name)
+
+
+def fake_ask(question_text, settings=None):
+    calls["settings_marker_seen_by_ask"] = getattr(settings, "marker", None)
+    session = types.SimpleNamespace(
+        formatted_answer="the answer",
+        answer="the answer",
+        has_successful_answer=True,
+        contexts=[],
+        references="",
+        cost=0.01,
+        token_counts={},
+    )
+    return types.SimpleNamespace(session=session)
+
+
+fake_pkg = types.ModuleType("paperqa")
+fake_pkg.Settings = FakeSettings
+fake_pkg.ask = fake_ask
+sys.modules["paperqa"] = fake_pkg
+
+spec = importlib.util.spec_from_file_location("paperqa_ask_direct", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+sys.argv = [script_path, input_path]
+calls["exit_code"] = mod.main()
+print(json.dumps(calls))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(driver)
+            .arg(&script_path)
+            .arg(&input_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // `main()` 自身が `progress: asking: ...` を stdout に出す（実行中の 1 問につき 1 行）ので、
+        // 最後の行だけが `calls` の JSON。
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let last_line = stdout.lines().next_back().unwrap_or("");
+        let v: serde_json::Value =
+            serde_json::from_str(last_line).expect("valid JSON on the last stdout line");
+        assert_eq!(v["exit_code"], 0, "{v}");
+        assert_eq!(
+            v["from_name_called"], false,
+            "settings_path が実在するので from_name は呼ばれない: {v}"
+        );
+        assert_eq!(v["settings_marker_seen_by_ask"], "from-disk", "{v}");
+        assert_eq!(
+            v["validated_raw"],
+            serde_json::json!({"llm": "qwen3.8-27b", "marker": "from-disk"}),
+            "{v}"
+        );
+
+        let ask_output: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&output_path).unwrap()).unwrap();
+        assert!(ask_output["error"].is_null(), "{ask_output}");
+        assert_eq!(ask_output["answers"][0]["answer"], "the answer", "{ask_output}");
+        assert_eq!(
+            ask_output["answers"][0]["has_successful_answer"],
+            true,
+            "{ask_output}"
+        );
+    }
+
+    /// ADR-0063 Phase 109e: `settings_path` にファイルが無く、`Settings.from_name` も見つけられない
+    /// ときは exit 2、`output_path` に探したパスを列挙した `error` を書く（Rust 側は
+    /// `retryable: false` にする。`ask_output_signals_settings_not_found_as_a_non_retryable_error`
+    /// でアダプタ側の分類も確認する）。
+    #[test]
+    fn paperqa_ask_main_exits_2_with_a_clear_message_when_settings_are_not_found() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("paperqa_ask.py");
+        std::fs::write(&script_path, ASK_SCRIPT).unwrap();
+
+        let missing_settings_path = dir.path().join("settings").join("celeris-proxy.json");
+        let output_path = dir.path().join("ask_output.json");
+        let input = serde_json::json!({
+            "settings_name": "celeris-proxy",
+            "settings_dir": dir.path().join("settings").to_string_lossy(),
+            "settings_path": missing_settings_path.to_string_lossy(),
+            "paper_directory": dir.path().join("papers").to_string_lossy(),
+            "index_directory": dir.path().join("index").to_string_lossy(),
+            "index_name": "proj",
+            "model": null,
+            "targets": [],
+            "aspects": [],
+            "comparison_target": null,
+            "max_asks": 8,
+            "fallback_question": "the question",
+            "output_path": output_path.to_string_lossy(),
+        });
+        let input_path = dir.path().join("input.json");
+        std::fs::write(&input_path, serde_json::to_string_pretty(&input).unwrap()).unwrap();
+
+        let driver = r##"
+import importlib.util, json, sys, types
+
+script_path, input_path = sys.argv[1], sys.argv[2]
+
+
+class FakeIndex:
+    def __init__(self):
+        self.paper_directory = None
+        self.index_directory = None
+        self.name = None
+
+
+class FakeAgent:
+    def __init__(self):
+        self.index = FakeIndex()
+
+
+class FakeSettings:
+    def __init__(self, **kw):
+        self.agent = FakeAgent()
+        self.llm = None
+
+    @classmethod
+    def from_name(cls, name):
+        raise FileNotFoundError(
+            "No configuration file %r found at user config path "
+            "/home/u/.pqa/settings/%s.json or bundled config path ..." % (name, name)
+        )
+
+
+def fake_ask(question_text, settings=None):  # pragma: no cover - should never run
+    raise AssertionError("ask() should not be called when settings could not be resolved")
+
+
+fake_pkg = types.ModuleType("paperqa")
+fake_pkg.Settings = FakeSettings
+fake_pkg.ask = fake_ask
+sys.modules["paperqa"] = fake_pkg
+
+spec = importlib.util.spec_from_file_location("paperqa_ask_direct", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+sys.argv = [script_path, input_path]
+rc = mod.main()
+print(json.dumps({"exit_code": rc}))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(driver)
+            .arg(&script_path)
+            .arg(&input_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "the python driver itself must not crash: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["exit_code"], 2, "{v}");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("celeris-proxy"), "{stderr}");
+
+        let ask_output: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&output_path).unwrap()).unwrap();
+        let error = ask_output["error"].as_str().unwrap();
+        assert!(error.contains("celeris-proxy"), "{error}");
+        assert!(
+            error.contains(&missing_settings_path.to_string_lossy().into_owned()),
+            "探した settings_path を含む: {error}"
+        );
+        assert_eq!(ask_output["answers"], serde_json::json!([]), "{ask_output}");
+    }
+
+    /// ADR-0063 Phase 109e: `paperqa_ask.py` が exit 2（設定/使い方の誤り）で終わったとき、アダプタは
+    /// `output_path` の `error` をメッセージに使い、`retryable: false` の `Terminal::Error` にする
+    /// （再試行しても直らない設定の誤りのため）。
+    #[tokio::test]
+    async fn ask_exit_2_becomes_a_non_retryable_terminal_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = r#"input="$2"
+out=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['output_path'])" "$input")
+cat > "$out" <<'JSON'
+{"error": "could not resolve PaperQA settings 'celeris-proxy'; looked at: /settings/celeris-proxy.json", "answers": []}
+JSON
+echo "could not resolve PaperQA settings 'celeris-proxy'; looked at: /settings/celeris-proxy.json" >&2
+exit 2
+"#;
+        let config = stub_pqa(dir.path(), script);
+        let adapter = PaperQaAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-settings-missing", default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Error { message, retryable } => {
+                assert!(!retryable, "{message}");
+                assert!(message.contains("celeris-proxy"), "{message}");
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
     }
 
     /// ADR-0063 Phase 109d C4: 対象が取れているとき、`answer.md`/`report.md` に「# 対象別の整理」
