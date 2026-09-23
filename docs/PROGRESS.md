@@ -15665,3 +15665,11 @@ Phase 109 の本番反映直後（2026-09-23 11:04〜11:10 UTC）にやり直し
   `answer_cites`/`extract_references_section` を `Answer.contexts` 直読みに置き換える。
 - P-109b-2: LDR 以外のアダプタでも「例外を握りつぶして成功した体裁の結果を返す」下流ツールが
   見つかった場合に備え、`WorkerAdapter` 共通の「これは実は失敗」を伝える型を検討する。
+
+### Phase 109b の本番反映（2026-09-23 12:11 UTC、ライブ切替）
+
+- merge: `worktree-agent-aa4903130990484c3` → main `5b496f5`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1937 / failed 0）、`cargo clippy` exit 0（API の型は変えていないので schema / types.ts の再生成は無し）。push 済み。
+- `release.sh main` → exit 0、`sha12=5b496f5b5720 schema_version=25`、`changes.json: base=2d8b0d6c787c commits=4 files=13 sensitive=3`（`config/celeris.research.example.toml`、`config/celeris.web-research.example.toml`、`config/paperqa.qwen-local.example.json` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 2d8b0d6c787c）, 6（smoke 5.08s）すべて true、`ok=true live_ok=true`。
+- `promote.sh 5b496f5b5720` → mode=live、新 celeris 2 秒で active、GUI 切替 1 秒。`GET /health` release=5b496f5b5720 role=active schema_version=25。
+- 本番設定: `~/.local/celeris/tools/paperqa/settings/celeris-proxy.json` の litellm `num_retries` を 3 箇所とも 1 → 3（バックアップ `.bak-20260923`。run ごとに読むので再起動不要。秘密は含まない）。
+- 調査のやり直し（3 回目、Phase 109b の効果を見る）: 文献 / Web を local で retry → approve。結果は次節に追記。
