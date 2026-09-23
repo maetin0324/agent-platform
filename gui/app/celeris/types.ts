@@ -2625,11 +2625,11 @@ export interface DbInfo {
   busy_timeout_ms: number;
   /**
    * 同上のマウントソース（`/dev/loop0` のような loop デバイスならネットワーク越しの可能性がある。
-   * ADR-0065 D1）。判定できなければ `null`。
+   * ADR-0064 D1）。判定できなければ `null`。
    */
   device?: string | null;
   /**
-   * ADR-0065 D1: `/proc/self/mountinfo` から引けたファイルシステム種別（`"ext4"` 等）。
+   * ADR-0064 D1: `/proc/self/mountinfo` から引けたファイルシステム種別（`"ext4"` 等）。
    * `GET /health` は無認証（`docs/gui/api.md` §1.1 / auth_and_guards.rs のテスト）なので、DB の
    * **絶対パス自体はここに出さない**（それは認証済みの `GET /api/v1/config` の `config.db` が
    * 既に返している）。判定できなければ `null`。

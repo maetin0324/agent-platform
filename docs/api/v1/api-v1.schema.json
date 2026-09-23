@@ -3162,14 +3162,14 @@
           "type": "integer"
         },
         "device": {
-          "description": "同上のマウントソース（`/dev/loop0` のような loop デバイスならネットワーク越しの可能性がある。\nADR-0065 D1）。判定できなければ `null`。",
+          "description": "同上のマウントソース（`/dev/loop0` のような loop デバイスならネットワーク越しの可能性がある。\nADR-0064 D1）。判定できなければ `null`。",
           "type": [
             "string",
             "null"
           ]
         },
         "filesystem": {
-          "description": "ADR-0065 D1: `/proc/self/mountinfo` から引けたファイルシステム種別（`\"ext4\"` 等）。\n`GET /health` は無認証（`docs/gui/api.md` §1.1 / auth_and_guards.rs のテスト）なので、DB の\n**絶対パス自体はここに出さない**（それは認証済みの `GET /api/v1/config` の `config.db` が\n既に返している）。判定できなければ `null`。",
+          "description": "ADR-0064 D1: `/proc/self/mountinfo` から引けたファイルシステム種別（`\"ext4\"` 等）。\n`GET /health` は無認証（`docs/gui/api.md` §1.1 / auth_and_guards.rs のテスト）なので、DB の\n**絶対パス自体はここに出さない**（それは認証済みの `GET /api/v1/config` の `config.db` が\n既に返している）。判定できなければ `null`。",
           "type": [
             "string",
             "null"
