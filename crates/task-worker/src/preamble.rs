@@ -864,12 +864,16 @@ fn actions_instructions() -> String {
      `add_milestone`。判断に必要な情報が欠けるときは `ask_human`。通常の実装判断は担当に任せます。案件・担当が分かっていれば `project` / `assignee` \
      を書いてください（`assignee` を省けば celeris が skills と harness から決定的に選びます）。\
      検証に落ちた action（知らない harness / repos / 案件など）は実行されず、理由が人に見えます。\n\
-     調査系（`literature` / `web-research`）の `create_task` を書くときは、受け入れ条件を対象ごとに \
-     分けるか、レビュアー条件（`acceptance` のうち `check` が reviewer のもの）に「一次情報で確認できな \
-     かった項目は『未確認』と明記されていれば不合格の理由にしない」という一文を含めてください \
-     （ADR-0063 D3）。1 件の欠落で全体を落とさないためです。成果物の存在確認（`check: \"artifact_exists\"`）\
-     は `report.md` を使ってください（`literature`/`web-research` のどちらのハーネスも `report.md` を \
-     書きます。ADR-0063 Phase 109b A3）。\n\n"
+     調査系（`literature` / `web-research`）の `create_task` を書くときは、`objective` に**対象を \
+     1 行に列挙**し（例: `CHFS / FINCHFS / GekkoFS / UnifyFS / BeeOND`）、観点を括弧で列挙してください \
+     （例: `(server/client 配置、cache/direct I/O、file semantics、replication)`）。対象が 5 を超える \
+     場合は対象ごとにタスクを分けてください（ADR-0063 Phase 109c A）。受け入れ条件は、対象ごとに分ける \
+     か、レビュアー条件（`acceptance` のうち `check` が reviewer のもの）に「**対象ごとに**、指定の観点 \
+     が一次情報（または文献）に基づいて整理されている。確認できない観点は『未確認』と明記されていれば \
+     不合格の理由にしない」という一文を含めてください（ADR-0063 D3、Phase 109c D で具体化）。1 件の欠落 \
+     で全体を落とさないためです。成果物の存在確認（`check: \"artifact_exists\"`）は `report.md` を \
+     使ってください（`literature`/`web-research` のどちらのハーネスも `report.md` を書きます。\
+     ADR-0063 Phase 109b A3）。\n\n"
         .to_string()
 }
 

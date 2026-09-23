@@ -8,9 +8,18 @@ answers (`add_must_read_sources`), and a `"<env:NAME>"` placeholder scheme so
 a secret `settings` value (an `api_key`, say) never has to be written into
 `ldr_input.json` in the clear (`resolve_env_placeholder`).
 
+Extended by ADR-0063 Phase 109c A/B2/B3 (Phase 109c): `targets`/`aspects`
+(deterministically pulled out of the objective on the Rust side,
+`research_targets.rs`) drive a structured-synthesis pass
+(`apply_structured_synthesis`) that prepends a target x aspect table plus
+per-target sections to report.md, and a must-read docs site (readthedocs /
+`doc.`/`docs.` / a `/docs/` path) gets its same-host, config/deploy-ish
+sub-pages followed one level deep (`select_docs_subpages`).
+
 Contract with the adapter (crates/task-worker/src/local_deep_research.rs):
   argv[1]  path to a JSON file: {query, mode, settings, iterations,
-           questions_per_iteration, report_path, must_read_urls}
+           questions_per_iteration, report_path, must_read_urls,
+           targets, aspects, structured_synthesis}
   stdout   one message per line: "progress: <text>" while running, and
            exactly one final line "CELERIS_RESULT {json}" with
            {"summary": <=1500 chars, single line, "sources": <int>,
@@ -63,7 +72,7 @@ import re
 import sys
 import time
 import urllib.request
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 _ENV_PLACEHOLDER_RE = re.compile(r"^<env:([A-Za-z_][A-Za-z0-9_]*)>$")
 
@@ -589,23 +598,93 @@ def default_primary_source_fetch(url, timeout=10):
         return response.read()
 
 
+_DOCS_HOST_RE = re.compile(r"(?i)readthedocs\.io$|^doc\.|^docs\.")
+_DOCS_KEYWORD_RE = re.compile(
+    r"(?i)config|configuration|deploy|install|setup|tuning|architecture|usage|admin|semantics"
+)
+_HREF_RE = re.compile(r'(?is)<a\s[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>')
+MAX_DOCS_SUBPAGES = 8
+DOCS_SUBPAGES_TOTAL_MAX_CHARS = 48000
+
+
+def is_docs_site(url):
+    """Whether a must-read URL looks like a docs site worth crawling one
+    level deep (ADR-0063 Phase 109c B2): a `*.readthedocs.io` host, a
+    `doc.`/`docs.` subdomain, or a `/docs/` path segment. Malformed URLs are
+    not a docs site."""
+    try:
+        parsed = urlparse(str(url or ""))
+    except ValueError:
+        return False
+    if _DOCS_HOST_RE.search(parsed.netloc.lower()):
+        return True
+    return "/docs/" in parsed.path.lower()
+
+
+def extract_links(html, base_url):
+    """`(absolute_url, link_text)` pairs for every `<a href>` in `html`,
+    resolved against `base_url`. Anchors and `javascript:` links are
+    skipped; malformed hrefs just do not resolve to anything useful and are
+    left in (the caller's host/keyword filter drops them)."""
+    out = []
+    for match in _HREF_RE.finditer(html or ""):
+        href = html_module.unescape(match.group(1)).strip()
+        if not href or href.startswith("#") or href.lower().startswith("javascript:"):
+            continue
+        out.append((urljoin(base_url, href), html_to_text(match.group(2))))
+    return out
+
+
+def select_docs_subpages(html, base_url, max_pages=MAX_DOCS_SUBPAGES):
+    """Same-host links one level down from a docs page whose URL or link
+    text matches a configuration/deployment-ish keyword (ADR-0063 Phase
+    109c B2: FINCHFS's `finchfs.readthedocs.io` top page alone did not carry
+    the deployment details a reviewer wanted -- the linked `configuration`/
+    `usage` pages did). Deterministic: document order, de-duplicated,
+    capped at `max_pages`."""
+    base_host = urlparse(base_url).netloc.lower()
+    seen = set()
+    picked = []
+    for url, text in extract_links(html, base_url):
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or parsed.netloc.lower() != base_host:
+            continue
+        if url in seen or url == base_url:
+            continue
+        if not _DOCS_KEYWORD_RE.search(f"{url} {text}"):
+            continue
+        seen.add(url)
+        picked.append(url)
+        if len(picked) >= max_pages:
+            break
+    return picked
+
+
 def build_primary_source_entries(must_read_urls, fetch=None, timeout=10):
     """Fetch each true `http(s)://` must-read URL once (ADR-0063 Phase 109b
     B1): a GitHub/GitLab repository URL's README (raw text, so no HTML
     stripping is needed), else the page's HTML converted to text. Returns
     `(section_markdown, entries)` where each entry is
-    `{"link", "title", "source": "must-read", "primary": True, "excerpt",
-    "fetch_error"}` (`excerpt` is `""` and `fetch_error` is set on failure).
-    A `must_read_urls` entry that is not `http(s)://` is dropped (ADR-0063
+    `{"link", "title", "source", "primary": True, "excerpt", "fetch_error"}`
+    (`excerpt` is `""` and `fetch_error` is set on failure). A
+    `must_read_urls` entry that is not `http(s)://` is dropped (ADR-0063
     Phase 109b B1: `human` and the like from the knowledge base). `fetch(url,
     timeout) -> bytes` is injected so tests never touch the network; `None`
     resolves `default_primary_source_fetch` at call time (not bound as a
     default at import time), so a test can also monkeypatch that name and
-    have `main()` -- which never passes its own `fetch` -- honor the fake."""
+    have `main()` -- which never passes its own `fetch` -- honor the fake.
+
+    ADR-0063 Phase 109c B2: a docs site (readthedocs / `doc.`/`docs.` /a
+    `/docs/` path) that was fetched as plain HTML also gets its same-host,
+    config/deploy-ish sub-pages followed one level deep (`source`:
+    `"must-read-docs"`), up to `MAX_DOCS_SUBPAGES` pages and
+    `DOCS_SUBPAGES_TOTAL_MAX_CHARS` combined characters across the whole
+    call (a shared budget, not per-page)."""
     if fetch is None:
         fetch = default_primary_source_fetch
     entries = []
     seen = set()
+    docs_budget = DOCS_SUBPAGES_TOTAL_MAX_CHARS
     for raw_url in must_read_urls or []:
         url = str(raw_url or "").strip()
         if not is_http_url(url) or url in seen:
@@ -616,6 +695,7 @@ def build_primary_source_entries(must_read_urls, fetch=None, timeout=10):
         title = url
         excerpt = ""
         error = None
+        raw_html = None
         try:
             body = fetch(fetch_target, timeout)
         except Exception as exc:
@@ -628,6 +708,7 @@ def build_primary_source_entries(must_read_urls, fetch=None, timeout=10):
                 match = _TITLE_TAG_RE.search(text)
                 if match:
                     title = _collapse_whitespace(match.group(1))
+                raw_html = text
                 excerpt = html_to_text(text)
             excerpt = excerpt[:PRIMARY_EXCERPT_MAX_CHARS]
         entries.append(
@@ -640,6 +721,45 @@ def build_primary_source_entries(must_read_urls, fetch=None, timeout=10):
                 "fetch_error": error,
             }
         )
+
+        if raw_html is not None and docs_budget > 0 and is_docs_site(url):
+            for sub_url in select_docs_subpages(raw_html, url):
+                if sub_url in seen or docs_budget <= 0:
+                    continue
+                seen.add(sub_url)
+                try:
+                    sub_body = fetch(sub_url, timeout)
+                except Exception as exc:
+                    entries.append(
+                        {
+                            "link": sub_url,
+                            "title": sub_url,
+                            "source": "must-read-docs",
+                            "primary": True,
+                            "excerpt": "",
+                            "fetch_error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                    continue
+                sub_text = (
+                    sub_body.decode("utf-8", errors="replace")
+                    if isinstance(sub_body, (bytes, bytearray))
+                    else str(sub_body)
+                )
+                sub_title_match = _TITLE_TAG_RE.search(sub_text)
+                sub_title = _collapse_whitespace(sub_title_match.group(1)) if sub_title_match else sub_url
+                sub_excerpt = html_to_text(sub_text)[: min(PRIMARY_EXCERPT_MAX_CHARS, docs_budget)]
+                docs_budget -= len(sub_excerpt)
+                entries.append(
+                    {
+                        "link": sub_url,
+                        "title": sub_title,
+                        "source": "must-read-docs",
+                        "primary": True,
+                        "excerpt": sub_excerpt,
+                        "fetch_error": None,
+                    }
+                )
     return render_primary_excerpts_section(entries), entries
 
 
@@ -820,6 +940,130 @@ def run_with_retries(attempt_once, sleep=None, delays=LDR_RETRY_DELAYS):
     raise last_exc  # pragma: no cover -- the loop above always returns or raises
 
 
+# ------------------------------------------------- ADR-0063 Phase 109c B3: structured synthesis
+
+
+SYNTHESIS_SYSTEM_PROMPT = (
+    "あなたは調査結果を対象ごとに整理するアシスタントです。与えられた資料の範囲だけで答え、"
+    "資料に無い事実を推測して書いてはいけません。各セルは「事実（出典）」か『未確認』のどちらかに"
+    "してください。"
+)
+
+
+def build_synthesis_messages(targets, aspects, material_text):
+    """The one prompt for the target x aspect synthesis call (ADR-0063
+    Phase 109c B3). `material_text` is the raw LDR findings plus the
+    must-read primary source excerpts -- the only thing the model may draw
+    on."""
+    targets_line = "、".join(targets)
+    aspects_line = "、".join(aspects)
+    user = (
+        f"対象: {targets_line}\n観点: {aspects_line}\n\n"
+        "以下の資料に基づき、まず Markdown の表（1 行目が観点の見出し行、1 列目が対象名）を書き、"
+        "続けて対象ごとに `### <対象名>` の見出しで観点ごとの整理を書いてください。"
+        "資料に無い観点は表のセルにも節にも『未確認』と書いてください（推測しないこと）。\n\n"
+        f"## 資料\n{material_text}\n"
+    )
+    return [
+        {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+        {"role": "user", "content": user},
+    ]
+
+
+def parse_chat_completion_text(body):
+    """The assistant's text out of an OpenAI-compatible `chat/completions`
+    response body (same shape/fallback order as `paperqa_acquire.py`'s
+    `message_text`: reasoning models can leave `content` empty)."""
+    payload = json.loads(body)
+    choices = payload.get("choices") or []
+    if not choices or not isinstance(choices[0], dict):
+        raise ValueError("no choices in the response")
+    message = choices[0].get("message") or {}
+    for key in ("content", "reasoning_content", "reasoning"):
+        text = message.get(key)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+    raise ValueError("the model returned an empty message")
+
+
+def default_synthesize(messages, base_url, api_key, model, timeout=120):
+    """The real `chat/completions` call to the LDR proxy (production only;
+    tests inject a fake `synthesize` instead)."""
+    url = str(base_url or "").rstrip("/")
+    if not url.endswith("/chat/completions"):
+        url = url + "/chat/completions"
+    body = json.dumps({"model": model, "messages": messages, "max_tokens": 4000}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return parse_chat_completion_text(response.read())
+
+
+def structured_synthesis_material(body_text, primary_entries, max_chars=20000):
+    """Assemble the material handed to the synthesis LLM: the LDR-written
+    report body, then each must-read primary source excerpt labeled with
+    its title/URL. Capped so the synthesis prompt stays a reasonable size
+    (`max_chars`; the body is never truncated below that on its own, only
+    the combined material)."""
+    parts = []
+    body_text = (body_text or "").strip()
+    if body_text:
+        parts.append(body_text)
+    for entry in primary_entries or []:
+        excerpt = (entry.get("excerpt") or "").strip()
+        if excerpt:
+            parts.append(f"### {entry.get('title') or entry.get('link')} — {entry.get('link')}\n{excerpt}")
+    material = "\n\n".join(parts)
+    return material[:max_chars]
+
+
+def render_structured_synthesis_section(text):
+    """`report.md` の先頭に置く「# 対象別の整理」節。合成結果が空なら節そのものを付けない
+    （呼び出し側はそのとき合成を諦め、LDR の生の findings をそのまま先頭に残す）。"""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    return "# 対象別の整理\n\n" + text + "\n\n---\n\n"
+
+
+def apply_structured_synthesis(report_path, targets, aspects, primary_entries, synthesize, model, base_url, api_key):
+    """Prepend a target x aspect synthesis to `report_path` (ADR-0063 Phase
+    109c B3). Best-effort: any failure (missing config, the synthesis LLM
+    call never succeeding after `run_with_retries`) leaves `report_path`
+    untouched and returns `False` -- LDR's own findings, already written,
+    are the fallback. Returns `True` if the file was rewritten."""
+    if not targets:
+        return False
+    try:
+        with open(report_path, "r", encoding="utf-8") as handle:
+            existing = handle.read()
+    except OSError:
+        return False
+    material = structured_synthesis_material(existing, primary_entries)
+    messages = build_synthesis_messages(targets, aspects, material)
+
+    def attempt():
+        try:
+            return synthesize(messages, base_url, api_key, model)
+        except UpstreamLlmError:
+            raise
+        except Exception as exc:
+            raise UpstreamLlmError(f"{type(exc).__name__}: {exc}") from exc
+
+    try:
+        text = run_with_retries(lambda: call_ldr_stage(attempt, lambda r: r or ""))
+    except UpstreamLlmError:
+        return False
+    section = render_structured_synthesis_section(text)
+    if not section:
+        return False
+    with open(report_path, "w", encoding="utf-8") as handle:
+        handle.write(section + existing)
+    return True
+
+
 def main():
     if len(sys.argv) < 2:
         print("usage: local_deep_research_run.py <input.json>", file=sys.stderr)
@@ -839,6 +1083,12 @@ def main():
     # task's objective/inputs and the knowledge base). Forced into `sources`/report.md/sources.json
     # after LDR answers -- LDR's own search is unaffected (this is not a search engine).
     must_read = [u for u in (payload.get("must_read_urls") or []) if str(u or "").strip()]
+    # ADR-0063 Phase 109c A/B3: targets/aspects the celeris adapter pulled out of the objective
+    # (`research_targets`/`research_aspects`, Rust side). Empty `targets` disables synthesis --
+    # this run degrades to Phase 109b behavior (LDR's raw findings only).
+    targets = [str(t).strip() for t in (payload.get("targets") or []) if str(t or "").strip()]
+    aspects = [str(a).strip() for a in (payload.get("aspects") or []) if str(a or "").strip()]
+    structured_synthesis_enabled = bool(payload.get("structured_synthesis", True))
 
     try:
         from local_deep_research.api import (
@@ -975,6 +1225,31 @@ def main():
         else:
             print(f"unknown mode: {mode}", file=sys.stderr)
             return 2
+
+        # ADR-0063 Phase 109c B3: if the objective named targets, synthesize a target x aspect
+        # table + per-target sections from the LDR findings and the must-read excerpts, and
+        # prepend it to report.md. Best-effort (`apply_structured_synthesis` never raises) --
+        # LDR's own findings, already written above, are the fallback either way.
+        if targets and structured_synthesis_enabled:
+            synth_model = settings.get("llm.model")
+            synth_base_url = settings.get("llm.openai_endpoint.url")
+            synth_api_key = settings.get("llm.openai_endpoint.api_key")
+            if synth_model and synth_base_url:
+                if apply_structured_synthesis(
+                    report_path,
+                    targets,
+                    aspects,
+                    primary_entries,
+                    default_synthesize,
+                    synth_model,
+                    synth_base_url,
+                    synth_api_key,
+                ):
+                    progress(f"structured synthesis: {len(targets)} target(s) x {len(aspects)} aspect(s)")
+                else:
+                    progress("structured synthesis skipped or failed; keeping the raw findings")
+            else:
+                progress("structured synthesis skipped (llm.model / llm.openai_endpoint.url not set)")
 
         # ADR-0063 Phase 109b B1: whichever must-read excerpt shows up in the report actually
         # written counts as cited, even though LDR's own `[n]` markers never point past its own

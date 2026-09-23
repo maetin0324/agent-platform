@@ -80,6 +80,13 @@ questions_per_iteration = 2
 # failed になった）: `attempts >= 1`（前回 reviewer 不合格）の run はここではなく下の値を使う。
 retry_mode = "detailed"
 retry_iterations = 5
+# ADR-0063 Phase 109c B3（実機の失敗、2026-09-23: 再挑戦の報告が BeeOND だけの節になり、他 4 システムは
+# README の逐語ダンプだけで対象ごとの整理が無かった）: 目的文から対象（`CHFS/FINCHFS/...` のような
+# 列挙）が取れたとき、LDR の findings と必読の一次情報の抜粋を材料に、`settings` の `llm.model`/
+# `llm.openai_endpoint` で対象×観点の表と対象ごとの節を合成し report.md の先頭に置く。既定 true。
+# 失敗しても（LLM 呼び出しが尽きる・`llm.model`/`llm.openai_endpoint.url` 未設定）best-effort で
+# 諦め、LDR の生の findings がそのまま残る（run 自体は失敗にしない）。
+structured_synthesis = true
 # `RES_OPTIONS = "single-request"`: glibc に A と AAAA を**順番に**問い合わせさせる。
 # 実機（2026-09-17）で判明した罠 — ルータの DNS が A/AAAA の並行送信を取りこぼすと、プロセスで
 # 最初の名前解決だけが必ず 5.01 秒かかる。LDR の DNS ピン留めは 5 秒で fail-closed するため、

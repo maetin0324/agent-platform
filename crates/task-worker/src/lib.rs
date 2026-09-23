@@ -33,6 +33,7 @@ pub mod probe;
 mod progress;
 pub mod protocol;
 pub mod provider;
+pub mod research_targets;
 pub mod result_report;
 /// ADR-0056 D3（Phase 79）: mount された skills を run にアダプタごとに届ける。
 pub mod skills;

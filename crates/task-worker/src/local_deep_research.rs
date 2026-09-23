@@ -145,6 +145,11 @@ pub struct LdrConfig {
     /// ADR-0063 D2: 同じく再挑戦の run で使う `iterations`（既定 `Some(5)`）。`mode`/`iterations` の
     /// 通常値より優先する。
     pub retry_iterations: Option<u32>,
+    /// ADR-0063 Phase 109c B3: 目的文から対象（`research_targets`）が取れたとき、LDR の答えと必読の
+    /// 一次情報の抜粋を材料に、プロキシの LLM（LDR と同じ `settings` の `llm.model` /
+    /// `llm.openai_endpoint`）で対象×観点の表と対象ごとの節を合成し、`report.md` の先頭に置く
+    /// （既定 `true`）。`false` にすると Phase 109b までどおり LDR の生の findings だけ。
+    pub structured_synthesis: bool,
 }
 
 impl Default for LdrConfig {
@@ -160,6 +165,7 @@ impl Default for LdrConfig {
             evidence: EvidenceThresholds::default(),
             retry_mode: LdrMode::Detailed,
             retry_iterations: Some(5),
+            structured_synthesis: true,
         }
     }
 }
@@ -213,17 +219,19 @@ fn must_cover_items(prior_review: &[crate::protocol::PriorReview]) -> Vec<String
         .collect()
 }
 
-/// ADR-0063 D2: 「必ず埋める項目」節。空なら空文字（従来どおりの問いのまま）。
+/// ADR-0063 Phase 109c B1: 「前回からの改善点」節。空なら空文字（従来どおりの問いのまま）。
+/// Phase 109 まではこの節を問いの**先頭**に置いていたが、本番観測（2026-09-23）で LDR が
+/// この節だけに検索・合成を引きずられ、目的文の他の対象を落とすことが分かった。以後は
+/// `build_query` が目的文の**後ろ**に置く（置き換えない）。
 fn build_must_cover_section(items: &[String]) -> String {
     if items.is_empty() {
         return String::new();
     }
-    let mut out = String::from("## 必ず埋める項目（前回の不合格理由）\n");
+    let mut out = String::from("## 前回からの改善点（必ず埋める）\n");
     for item in items {
         out.push_str(&format!("- {item}\n"));
     }
-    out.push('\n');
-    out
+    out.trim_end().to_string()
 }
 
 /// テキストの中の `http(s)://` で始まるトークンを全て拾う（`paperqa.rs::extract_urls` と同じ決定的な
@@ -289,17 +297,29 @@ pub fn must_read_urls(
 /// 役割の指示文とタイトルは `runs/<run_id>/request.json` に残るので記録は失われない。
 ///
 /// ADR-0063 D2（Phase 109）: 前回 reviewer に不合格にされた run（`context.prior_review` に
-/// `pass = false` の条件がある）では、その理由を「必ず埋める項目」として先頭に置く。これも問いの
-/// 一部になる（LDR が検索にもそのまま使う）ため、次に再挑戦するときに何が足りなかったかを検索語にも
-/// 反映させる狙い。
-pub fn build_query(task: &Task, context: &RunContext) -> String {
+/// `pass = false` の条件がある）では、その理由を「前回からの改善点」として問いに足す。
+///
+/// ADR-0063 Phase 109c B1（本番観測 2026-09-23）: この節を目的文の**先頭**に置くと、LDR がそこだけに
+/// 検索・合成を引きずられ、目的文が挙げる他の対象を落とすことが分かった（BeeOND のみの報告になった
+/// 事故）。以後は**目的文をそのまま先に置き、置き換えない**。前回の `report.md`（`is_retry` のときだけ、
+/// 先頭 20 KB）があれば、それを改善する材料として続けて足す。
+pub fn build_query(task: &Task, context: &RunContext, prior_report: Option<&str>) -> String {
     // ADR-0029 / Phase 19 / ADR-0033 D6（Phase 27 の監査 M-2）: 検索ハーネスに渡すのは**素の目的だけ**。
     // 役職・記憶・直近のやり取り・記憶の書式指示は載せない（問いを濁すと検索が何も返さない）。
     let mut out = String::new();
-    out.push_str(&build_must_cover_section(&must_cover_items(
-        &context.prior_review,
-    )));
     out.push_str(task.objective.trim());
+    let must_cover = build_must_cover_section(&must_cover_items(&context.prior_review));
+    if !must_cover.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&must_cover);
+    }
+    if let Some(report) = prior_report {
+        let trimmed = report.trim();
+        if !trimmed.is_empty() {
+            out.push_str("\n\n## 前回の報告（これを改善する。削らない）\n");
+            out.push_str(trimmed);
+        }
+    }
     if !context.answers.is_empty() {
         out.push_str("\n\n補足（人間の回答）:");
         for Answer { question, answer } in &context.answers {
@@ -343,6 +363,26 @@ fn redact_secret_settings(
     (redacted, extra_env)
 }
 
+/// ADR-0063 Phase 109c B1: 前回の run の `report.md`（先頭 20 KB。文字境界で安全に切る）を読む。
+/// 無い・空・読めない場合は `None`（run は止めない。あくまで再挑戦の材料）。
+const PRIOR_REPORT_MAX_BYTES: usize = 20 * 1024;
+
+async fn read_prior_report(report_path: &Path) -> Option<String> {
+    let text = tokio::fs::read_to_string(report_path).await.ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() <= PRIOR_REPORT_MAX_BYTES {
+        return Some(trimmed.to_string());
+    }
+    let mut end = PRIOR_REPORT_MAX_BYTES;
+    while end > 0 && !trimmed.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(format!("{}\n\n…（以下省略）", &trimmed[..end]))
+}
+
 async fn run_ldr(
     config: &LdrConfig,
     req: &RunRequest,
@@ -361,18 +401,24 @@ async fn run_ldr(
     let artifacts_rel = req.artifacts_rel();
     tokio::fs::create_dir_all(&artifacts_dir).await?;
     let report_path = artifacts_dir.join("report.md");
+    // ADR-0063 D2（Phase 109）: 前回 reviewer に不合格にされた run（`attempts >= 1`）は、mode /
+    // iterations を強く（既定 `detailed` / 5 周）する。
+    let is_retry = req.task.attempts >= 1;
+    // ADR-0063 Phase 109c B1: 前回の run の `report.md` は、消す前に読んでおく（再挑戦のときだけ。
+    // 「削らない」ための材料として問いに足す）。
+    let prior_report = if is_retry {
+        read_prior_report(&report_path).await
+    } else {
+        None
+    };
     // 前回の run（リトライ）の名残を今回の結果と誤読しない（paperqa/claude_code/codex と同じ理由。ADR-0006 D3）。
     let _ = tokio::fs::remove_file(&report_path).await;
     let _ = tokio::fs::remove_file(artifacts_dir.join("result.json")).await;
 
-    let query = build_query(&req.task, &req.context);
+    let query = build_query(&req.task, &req.context, prior_report.as_deref());
     // ADR-0023 D2 / M1: この run で何を渡したかを残す。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &query, run_id).await;
-
-    // ADR-0063 D2（Phase 109）: 前回 reviewer に不合格にされた run（`attempts >= 1`）は、mode /
-    // iterations を強く（既定 `detailed` / 5 周）する。
-    let is_retry = req.task.attempts >= 1;
     let mode = if is_retry { config.retry_mode } else { config.mode };
     let iterations = if is_retry {
         config.retry_iterations.or(config.iterations)
@@ -412,6 +458,22 @@ async fn run_ldr(
     // 環境変数名へのプレースホルダだけを書く（`ldr_run.py::convert_setting_value` が解決する）。
     let (json_settings, secret_env) = redact_secret_settings(&settings);
 
+    // ADR-0063 Phase 109c A/B3: 目的文から取れた対象・観点。`targets` が空なら `ldr_run.py` は
+    // 構造化合成をせず、従来どおり LDR の生の findings だけを report.md に書く。
+    let targets = crate::research_targets::research_targets(&req.task.objective);
+    let aspects = crate::research_targets::research_aspects(&req.task.objective);
+    if !targets.is_empty() {
+        progress::emit_status(
+            sink,
+            &format!(
+                "{} target(s), {} aspect(s) for structured synthesis: {}",
+                targets.len(),
+                aspects.len(),
+                targets.join(" / ")
+            ),
+        );
+    }
+
     let input = serde_json::json!({
         "query": query,
         "mode": mode.as_str(),
@@ -420,6 +482,9 @@ async fn run_ldr(
         "questions_per_iteration": config.questions_per_iteration,
         "report_path": report_path.to_string_lossy(),
         "must_read_urls": must_read,
+        "targets": targets,
+        "aspects": aspects,
+        "structured_synthesis": config.structured_synthesis,
     });
     let script_path = run_dir.join("ldr_run.py");
     let input_path = run_dir.join("ldr_input.json");
@@ -1260,7 +1325,7 @@ while true; do sleep 0.1; done
             standing_rules: vec!["1 ノードで始めてよい".into()],
             ..Default::default()
         };
-        let query = build_query(&task, &context);
+        let query = build_query(&task, &context, None);
         assert_eq!(query, "What is Kubernetes and what problem does it solve?");
         assert!(!query.contains("gate pass check"), "{query}");
         assert!(!query.contains("Web 調査担当"), "{query}");
@@ -1273,7 +1338,7 @@ while true; do sleep 0.1; done
             question: "対象は?".into(),
             answer: "v1.31".into(),
         }];
-        let with_answers = build_query(&task, &context);
+        let with_answers = build_query(&task, &context, None);
         assert!(
             with_answers.starts_with("What is Kubernetes"),
             "{with_answers}"
@@ -1281,10 +1346,11 @@ while true; do sleep 0.1; done
         assert!(with_answers.contains("対象は? → v1.31"), "{with_answers}");
     }
 
-    /// ADR-0063 D2（Phase 109）: 前回不合格になった条件の理由が「必ず埋める項目」として問いの先頭に付く。
-    /// 合格した条件（`pass = true`）や空の理由は載せない。
+    /// ADR-0063 Phase 109c B1（本番観測 2026-09-23）: 前回不合格になった条件の理由が「前回からの
+    /// 改善点」として**目的文の後ろ**に付く（先頭に置いて目的文を実質置き換えると、LDR がそこだけに
+    /// 引きずられ他の対象を落とす事故があった）。合格した条件（`pass = true`）や空の理由は載せない。
     #[test]
-    fn build_query_prepends_must_cover_items_from_a_failed_prior_review() {
+    fn build_query_appends_a_must_cover_section_after_the_objective_from_a_failed_prior_review() {
         let mut task = crate::protocol::tests::sample_task();
         task.objective = "CHFS と FinchFS を比べよ".into();
         let context = RunContext {
@@ -1307,11 +1373,11 @@ while true; do sleep 0.1; done
             ],
             ..Default::default()
         };
-        let query = build_query(&task, &context);
-        assert!(query.starts_with("## 必ず埋める項目"), "{query}");
+        let query = build_query(&task, &context, None);
+        assert!(query.starts_with("CHFS と FinchFS を比べよ"), "{query}");
+        assert!(query.contains("## 前回からの改善点（必ず埋める）"), "{query}");
         assert!(query.contains("CHFS の一次情報（GitHub）が無い"), "{query}");
         assert!(!query.contains("満たしている"), "{query}");
-        assert!(query.trim_end().ends_with("CHFS と FinchFS を比べよ"), "{query}");
 
         // prior_review が全部合格、または空なら従来どおり素の目的だけ。
         let all_passed = RunContext {
@@ -1322,7 +1388,27 @@ while true; do sleep 0.1; done
             }],
             ..Default::default()
         };
-        assert_eq!(build_query(&task, &all_passed), task.objective);
+        assert_eq!(build_query(&task, &all_passed, None), task.objective);
+    }
+
+    /// ADR-0063 Phase 109c B1: 再挑戦のときの前回の報告（先頭 20 KB）は「これを改善する。削らない」
+    /// 節として目的文の後ろに足す。前回の報告が無ければこの節は付かない。
+    #[test]
+    fn build_query_appends_the_previous_report_when_given_one() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.objective = "CHFS を調べよ".into();
+        let context = RunContext::default();
+
+        let without_prior = build_query(&task, &context, None);
+        assert_eq!(without_prior, "CHFS を調べよ");
+
+        let with_prior = build_query(&task, &context, Some("# 前回の報告\n本文の抜粋"));
+        assert!(with_prior.starts_with("CHFS を調べよ"), "{with_prior}");
+        assert!(
+            with_prior.contains("## 前回の報告（これを改善する。削らない）"),
+            "{with_prior}"
+        );
+        assert!(with_prior.contains("本文の抜粋"), "{with_prior}");
     }
 
     /// ADR-0063 D2: 必読の一次情報 = 目的文中の URL + 知識ベースの `primary-sources` / `一次情報`
@@ -1462,13 +1548,14 @@ while true; do sleep 0.1; done
             seen["must_read_urls"],
             serde_json::json!(["https://github.com/otatebe/chfs"])
         );
+        let query = seen["query"].as_str().unwrap();
+        // ADR-0063 Phase 109c B1: 目的文を置き換えず、後ろに「前回からの改善点」を足す。
         assert!(
-            seen["query"]
-                .as_str()
-                .unwrap()
-                .starts_with("## 必ず埋める項目"),
+            query.starts_with("CHFS（https://github.com/otatebe/chfs）を調べる"),
             "{seen}"
         );
+        assert!(query.contains("## 前回からの改善点（必ず埋める）"), "{seen}");
+        assert!(query.contains("CHFS の一次情報が出典に無い"), "{seen}");
         assert_eq!(
             seen["settings"]["llm.openai_endpoint.api_key"],
             "<env:LDR_LLM_OPENAI_ENDPOINT_API_KEY>"
@@ -1522,7 +1609,7 @@ while true; do sleep 0.1; done
         let seen = read_json(&dir.path().join("seen_input.json"));
         assert_eq!(
             seen["query"],
-            serde_json::Value::String(build_query(&req.task, &req.context))
+            serde_json::Value::String(build_query(&req.task, &req.context, None))
         );
         assert_eq!(seen["mode"], "detailed");
         assert_eq!(seen["iterations"], 3);
@@ -3093,6 +3180,126 @@ print(json.dumps({
         );
     }
 
+    /// エンドツーエンド: ADR-0063 Phase 109c B3。目的文から対象が取れた（`targets` が非空の）run は
+    /// `main()` の中で構造化合成を呼び、`report.md` の先頭が「# 対象別の整理」になる。`targets` が
+    /// 空なら（従来どおり）合成を呼ばず、LDR の生の findings だけが残る。
+    #[test]
+    fn main_applies_structured_synthesis_when_targets_are_present() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r###"
+import contextlib, importlib.util, io, json, os, sys, tempfile, types
+
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+mod.time.sleep = lambda s: None
+synth_calls = []
+
+def fake_synthesize(messages, base_url, api_key, model, timeout=120):
+    synth_calls.append({"base_url": base_url, "model": model})
+    return "| 対象 | 配置 |\n|---|---|\n| CHFS | 事実(readme) |\n\n### CHFS\n配置: 事実"
+
+mod.default_synthesize = fake_synthesize
+
+def fake_quick_summary(query, **kwargs):
+    return {
+        "summary": "CHFS is a persistent-memory ad-hoc file system for HPC. [1]",
+        "sources": [{"link": "https://example.org/blog", "title": "Blog", "engine": "tavily"}],
+        "findings": [],
+        "iterations": 1,
+        "questions": {},
+    }
+
+fake_api = types.ModuleType("local_deep_research.api")
+fake_api.quick_summary = fake_quick_summary
+fake_api.detailed_research = lambda *a, **k: (_ for _ in ()).throw(AssertionError("not used"))
+fake_api.generate_report = lambda *a, **k: (_ for _ in ()).throw(AssertionError("not used"))
+fake_api.create_settings_snapshot = lambda **k: {}
+fake_pkg = types.ModuleType("local_deep_research")
+fake_pkg.api = fake_api
+sys.modules["local_deep_research"] = fake_pkg
+sys.modules["local_deep_research.api"] = fake_api
+
+
+def run_once(targets, aspects):
+    with tempfile.TemporaryDirectory() as d:
+        report_path = os.path.join(d, "artifacts", "report.md")
+        input_path = os.path.join(d, "input.json")
+        payload = {
+            "query": "CHFS について調べる",
+            "mode": "quick",
+            "settings": {
+                "llm.model": "celeris/cheap",
+                "llm.openai_endpoint.url": "http://127.0.0.1:18100/v1",
+            },
+            "report_path": report_path,
+            "targets": targets,
+            "aspects": aspects,
+        }
+        with open(input_path, "w") as f:
+            json.dump(payload, f)
+        sys.argv = ["local_deep_research_run.py", input_path]
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = mod.main()
+        report_text = open(report_path, "r", encoding="utf-8").read()
+        return rc, report_text
+
+
+rc_with_targets, report_with_targets = run_once(["CHFS"], ["配置"])
+synth_calls_with_targets = len(synth_calls)
+rc_without_targets, report_without_targets = run_once([], [])
+
+print(json.dumps({
+    "rc_with_targets": rc_with_targets,
+    "report_with_targets": report_with_targets,
+    "synth_calls_with_targets": synth_calls_with_targets,
+    "rc_without_targets": rc_without_targets,
+    "report_without_targets": report_without_targets,
+    "synth_calls_total": len(synth_calls),
+}))
+"###;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["rc_with_targets"], 0, "{v}");
+        assert_eq!(v["synth_calls_with_targets"], 1, "{v}");
+        let report_with_targets = v["report_with_targets"].as_str().unwrap();
+        assert!(
+            report_with_targets.starts_with("# 対象別の整理"),
+            "{report_with_targets}"
+        );
+        assert!(
+            report_with_targets.contains("CHFS is a persistent-memory"),
+            "生の findings も後段に残る: {report_with_targets}"
+        );
+
+        assert_eq!(v["rc_without_targets"], 0, "{v}");
+        // `targets` が無い run では合成を呼ばない（呼び出し回数は前段の 1 回のままで増えない）。
+        assert_eq!(v["synth_calls_total"], 1, "{v}");
+        let report_without_targets = v["report_without_targets"].as_str().unwrap();
+        assert!(
+            !report_without_targets.starts_with("# 対象別の整理"),
+            "{report_without_targets}"
+        );
+    }
+
     /// エンドツーエンド: ADR-0063 Phase 109b B3 の再試行が尽きた場合、`report.md` を書かず（残さず）、
     /// exit code 1 と `llm: ...` のメッセージで終わる（`run_ldr` はこれを retryable な
     /// `Terminal::Error` にする）。バックオフは全て偽の `sleep` なので実時間は待たない。
@@ -3172,5 +3379,257 @@ print(json.dumps({
             v["stderr"].as_str().unwrap().starts_with("llm: "),
             "{v}"
         );
+    }
+
+    /// ADR-0063 Phase 109c B2: `is_docs_site` recognizes readthedocs/`doc.`/`docs.`/`/docs/`;
+    /// `select_docs_subpages` follows only same-host, config/deploy-ish-keyword links, capped,
+    /// de-duplicated, and never the page itself.
+    #[test]
+    fn runner_docs_site_detection_and_subpage_selection_are_deterministic() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+out = {}
+out["readthedocs"] = mod.is_docs_site("https://finchfs.readthedocs.io/en/latest/")
+out["doc_subdomain"] = mod.is_docs_site("https://doc.beegfs.io/latest/index.html")
+out["docs_path"] = mod.is_docs_site("https://example.org/docs/x")
+out["not_a_docs_site"] = mod.is_docs_site("https://example.org/x")
+
+html = (
+    '<a href="/en/latest/configuration.html">Configuration</a>'
+    '<a href="/en/latest/other.html">Other page</a>'
+    '<a href="https://another.example/deploy">External deploy</a>'
+    '<a href="/en/latest/install.html">Install</a>'
+    '<a href="/en/latest/usage.html">Usage</a>'
+    '<a href="/en/latest/faq.html">FAQ</a>'
+    '<a href="/en/latest/index.html">Home</a>'
+)
+base = "https://finchfs.readthedocs.io/en/latest/index.html"
+out["subpages"] = mod.select_docs_subpages(html, base)
+out["subpages_capped"] = mod.select_docs_subpages(html, base, max_pages=2)
+print(json.dumps(out))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["readthedocs"], true, "{v}");
+        assert_eq!(v["doc_subdomain"], true, "{v}");
+        assert_eq!(v["docs_path"], true, "{v}");
+        assert_eq!(v["not_a_docs_site"], false, "{v}");
+
+        let subpages: Vec<String> = v["subpages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            subpages,
+            vec![
+                "https://finchfs.readthedocs.io/en/latest/configuration.html",
+                "https://finchfs.readthedocs.io/en/latest/install.html",
+                "https://finchfs.readthedocs.io/en/latest/usage.html",
+            ],
+            "外部ホスト・キーワード無し・自分自身は落ちる: {v}"
+        );
+        assert_eq!(
+            v["subpages_capped"].as_array().unwrap().len(),
+            2,
+            "max_pages で打ち切る: {v}"
+        );
+    }
+
+    /// ADR-0063 Phase 109c B2: docs サイトのトップページを取ったら、同一ホストの config/deploy 系
+    /// サブページも 1 階層分取り込む（`source: "must-read-docs"`）。合計文字数の予算を使い切ったら
+    /// それ以上は追加しない。
+    #[test]
+    fn runner_builds_primary_source_excerpts_follow_docs_subpages_within_a_budget() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# 予算を小さくして、2 ページ目で使い切ることを確認する（本番の 48 KB は大きすぎてテストできない）。
+mod.DOCS_SUBPAGES_TOTAL_MAX_CHARS = 10
+
+top_html = (
+    "<html><body>"
+    '<a href="/en/latest/configuration.html">Configuration</a>'
+    '<a href="/en/latest/install.html">Install</a>'
+    "</body></html>"
+)
+
+def fetch(url, timeout):
+    if url.endswith("index.html"):
+        return top_html.encode()
+    if url.endswith("configuration.html"):
+        return b"<html><head><title>Config</title></head><body>0123456789ABCDEF</body></html>"
+    if url.endswith("install.html"):
+        raise AssertionError("budget should already be exhausted before fetching install.html")
+    raise AssertionError("unexpected url: " + url)
+
+section, entries = mod.build_primary_source_entries(
+    ["https://finchfs.readthedocs.io/en/latest/index.html"], fetch=fetch
+)
+print(json.dumps({"section": section, "entries": entries}))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        let entries = v["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2, "トップページ + config サブページのみ: {v}");
+        assert_eq!(entries[0]["source"], "must-read");
+        assert_eq!(entries[1]["source"], "must-read-docs");
+        assert_eq!(
+            entries[1]["link"],
+            "https://finchfs.readthedocs.io/en/latest/configuration.html"
+        );
+        assert!(entries[1]["primary"].as_bool().unwrap());
+        assert!(
+            entries[1]["excerpt"].as_str().unwrap().len() <= 10,
+            "予算でセルフキャップされる: {v}"
+        );
+    }
+
+    /// ADR-0063 Phase 109c B3: 対象が取れているとき、`apply_structured_synthesis` は合成 LLM の答え
+    /// （表 + 対象ごとの節）を report.md の先頭に足し、生の findings は後段に残す。合成が最後まで
+    /// 失敗すれば `report.md` はそのまま（best-effort、run 自体は失敗にしない）。
+    #[test]
+    fn runner_structured_synthesis_prepends_a_table_and_is_best_effort() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, os, sys, tempfile
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+mod.time.sleep = lambda s: None  # never really wait in a test
+
+out = {}
+messages = mod.build_synthesis_messages(["CHFS", "FinchFS"], ["配置", "cache"], "資料本文")
+out["system_role"] = messages[0]["role"]
+out["mentions_targets"] = "CHFS" in messages[1]["content"] and "FinchFS" in messages[1]["content"]
+out["mentions_aspects"] = "配置" in messages[1]["content"] and "cache" in messages[1]["content"]
+out["material"] = mod.structured_synthesis_material(
+    "raw findings", [{"title": "CHFS README", "link": "https://x", "excerpt": "CHFS excerpt"}]
+)
+
+with tempfile.TemporaryDirectory() as d:
+    path = os.path.join(d, "report.md")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("# raw findings\n\nCHFS is ...\n")
+
+    calls = {"n": 0}
+    def flaky_synth(messages, base_url, api_key, model, timeout=120):
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise RuntimeError("transient")
+        return "| 対象 | 配置 |\n|---|---|\n| CHFS | 事実(readme) |\n\n### CHFS\n配置: 事実"
+
+    applied = mod.apply_structured_synthesis(
+        path, ["CHFS"], ["配置"], [], flaky_synth, "celeris/cheap", "http://127.0.0.1:18100/v1", "k"
+    )
+    with open(path, encoding="utf-8") as f:
+        rewritten = f.read()
+    out["applied"] = applied
+    out["retried_once"] = calls["n"] == 2
+    out["table_comes_first"] = rewritten.startswith("# 対象別の整理")
+    out["raw_findings_kept_after"] = "raw findings" in rewritten and rewritten.index(
+        "raw findings"
+    ) > rewritten.index("対象別の整理")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("untouched")
+
+    def always_fails(*a, **k):
+        raise RuntimeError("nope")
+
+    out["gives_up_without_touching_the_file"] = (
+        mod.apply_structured_synthesis(
+            path, ["CHFS"], ["配置"], [], always_fails, "m", "http://x", "k"
+        )
+        is False
+    )
+    with open(path, encoding="utf-8") as f:
+        out["file_after_giving_up"] = f.read()
+
+    out["skips_without_targets"] = (
+        mod.apply_structured_synthesis(path, [], ["配置"], [], always_fails, "m", "http://x", "k")
+        is False
+    )
+
+print(json.dumps(out, ensure_ascii=False))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["system_role"], "system", "{v}");
+        assert_eq!(v["mentions_targets"], true, "{v}");
+        assert_eq!(v["mentions_aspects"], true, "{v}");
+        assert!(
+            v["material"].as_str().unwrap().contains("raw findings")
+                && v["material"].as_str().unwrap().contains("CHFS excerpt"),
+            "{v}"
+        );
+        assert_eq!(v["applied"], true, "{v}");
+        assert_eq!(v["retried_once"], true, "2/4/8 秒バックオフで再試行する: {v}");
+        assert_eq!(v["table_comes_first"], true, "{v}");
+        assert_eq!(v["raw_findings_kept_after"], true, "{v}");
+        assert_eq!(v["gives_up_without_touching_the_file"], true, "{v}");
+        assert_eq!(v["file_after_giving_up"], "untouched", "{v}");
+        assert_eq!(v["skips_without_targets"], true, "{v}");
     }
 }

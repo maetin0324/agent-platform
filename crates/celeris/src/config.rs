@@ -1422,6 +1422,10 @@ pub struct LdrAdapterConfig {
     /// 通常の `iterations` のまま（再挑戦でも上げない）。
     #[serde(default = "default_ldr_retry_iterations")]
     pub retry_iterations: Option<u32>,
+    /// ADR-0063 Phase 109c B3: 目的文から対象が取れたとき、LDR の答えと必読の一次情報の抜粋を材料に
+    /// プロキシの LLM で対象×観点の表と対象ごとの節を合成し `report.md` の先頭に置くか。既定 `true`。
+    #[serde(default = "default_ldr_structured_synthesis")]
+    pub structured_synthesis: bool,
 }
 
 fn default_ldr_retry_mode() -> task_worker::LdrMode {
@@ -1430,6 +1434,10 @@ fn default_ldr_retry_mode() -> task_worker::LdrMode {
 
 fn default_ldr_retry_iterations() -> Option<u32> {
     Some(5)
+}
+
+fn default_ldr_structured_synthesis() -> bool {
+    true
 }
 
 impl Default for LdrAdapterConfig {
@@ -1445,6 +1453,7 @@ impl Default for LdrAdapterConfig {
             evidence: task_worker::EvidenceThresholds::default(),
             retry_mode: default_ldr_retry_mode(),
             retry_iterations: default_ldr_retry_iterations(),
+            structured_synthesis: default_ldr_structured_synthesis(),
         }
     }
 }
