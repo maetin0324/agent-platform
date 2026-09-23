@@ -42,7 +42,7 @@ async fn create_task_with_role_applies_role_defaults() {
     let body = json!({
         "title": "lead the phase",
         "objective": "split the work and review it",
-        "acceptance": [{"type": "human", "text": "the plan is sound"}],
+        "acceptance": [{"type": "human", "text": "the plan is sound"}, {"type": "artifact_exists", "name": "result.md"}],
         "role": "lead",
     });
     let resp = send(&app, post_admin("/api/v1/tasks", &body)).await;
@@ -82,7 +82,7 @@ async fn task_values_win_over_role_defaults_and_aggregate_is_stored() {
     let body = json!({
         "title": "write the code",
         "objective": "make it work",
-        "acceptance": [{"type": "human", "text": "it works"}],
+        "acceptance": [{"type": "human", "text": "it works"}, {"type": "artifact_exists", "name": "result.md"}],
         "role": "implementer",
         "tier": "standard",
         "aggregate": true,
@@ -112,7 +112,7 @@ async fn unknown_role_is_stored_without_defaults() {
     let body = json!({
         "title": "research",
         "objective": "read the papers",
-        "acceptance": [{"type": "human", "text": "a summary exists"}],
+        "acceptance": [{"type": "human", "text": "a summary exists"}, {"type": "artifact_exists", "name": "result.md"}],
         "role": "researcher",
     });
     let resp = send(&app, post_admin("/api/v1/tasks", &body)).await;

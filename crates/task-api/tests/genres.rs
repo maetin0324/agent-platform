@@ -42,10 +42,14 @@ fn env_with_coding_genre() -> TestEnv {
 }
 
 fn task_body(genre: Option<&str>, role: Option<&str>) -> serde_json::Value {
+    // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
     let mut body = json!({
         "title": "do the thing",
         "objective": "make it work",
-        "acceptance": [{"type": "human", "text": "it works"}],
+        "acceptance": [
+            {"type": "human", "text": "it works"},
+            {"type": "artifact_exists", "name": "result.md"},
+        ],
     });
     if let Some(g) = genre {
         body["genre"] = json!(g);

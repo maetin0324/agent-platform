@@ -49,6 +49,7 @@
             "evidence": [],
             "other_verdicts": [],
             "artifacts": [],
+            "knowledge_pages": [],
             "previous_decisions": []
         }
     ],

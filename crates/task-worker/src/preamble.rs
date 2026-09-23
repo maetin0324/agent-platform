@@ -65,6 +65,7 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
         out.push_str(&knowledge_section(&knowledge.mounts, &knowledge.index));
     }
     out.push_str(&role_section(context));
+    out.push_str(&deliverables_placement_note());
     out.push_str(&memory_instructions(context, artifacts));
     // ADR-0044 D2（Phase 53）: コメントの書き方（`comments_enabled` の run にだけ）。
     out.push_str(&comment_instructions(context));
@@ -773,6 +774,17 @@ fn role_section(context: &RunContext) -> String {
     out
 }
 
+/// ADR-0067 D1: 人が読む成果物の置き場の規則（全 run 共通、短く固定）。本番事故
+/// （BenchFS 案件のタスクが判断材料をリポジトリの `docs/` に書き、GUI から見えなかった）の再発防止。
+pub(crate) fn deliverables_placement_note() -> String {
+    "## 成果物の置き場所 (where human deliverables live)\n\
+     調査報告・framing 案・比較表・提案書など**人が読んで判断する材料**は、成果物ディレクトリ\
+     （`artifacts/`）か知識ベース（`projects/<project>/…` のページ）に置いてください。対象リポジトリの\
+     追跡ファイル（`docs/` を含む）には Celeris 自身の判断過程・候補案・決定パケットを置かないこと\
+     （そのリポジトリに書いてよいのはそのリポジトリ自身の成果 — コード・テスト・決定後の本文など）。\n\n"
+        .to_string()
+}
+
 /// 6. 記憶の書き方（ADR-0033 D6）。記憶が有効な run（`context.memory` がある）にだけ出す。
 fn memory_instructions(context: &RunContext, artifacts: &str) -> String {
     if context.memory.is_none() {
@@ -872,6 +884,10 @@ fn actions_instructions() -> String {
      `add_milestone`。判断に必要な情報が欠けるときは `ask_human`。通常の実装判断は担当に任せます。案件・担当が分かっていれば `project` / `assignee` \
      を書いてください（`assignee` を省けば celeris が skills と harness から決定的に選びます）。\
      検証に落ちた action（知らない harness / repos / 案件など）は実行されず、理由が人に見えます。\n\
+     人の確認が要る `acceptance`（`\"human\"`）を書くときは、必ず `artifact_exists` か\
+     `knowledge_page`（知識ベースのページ参照）の条件も添えてください。人が読む決定材料は登録済みの\
+     artifacts か知識ベースのページに置き（GUI から見える場所）、対象リポジトリの `docs/` などの\
+     追跡ファイルには置きません（ADR-0067）。\n\
      調査系（`literature` / `web-research`）の `create_task` を書くときは、`objective` の 1 行目を \
      **`対象: <対象1> / <対象2> / …（観点: <観点1>、<観点2>、…）`** の明示形にしてください \
      （例: `対象: CHFS / FINCHFS / GekkoFS / UnifyFS / BeeOND（観点: server/client 配置、\
@@ -1068,10 +1084,14 @@ mod tests {
         assert!(!render(&no_node, "artifacts").contains("あなたの仕事で使う道具"));
     }
 
-    /// 空の `RunContext` では前置きは空文字（Phase 23 までの出力と 1 バイトも変わらない）。
+    /// 空の `RunContext` では前置きは「成果物の置き場所」の節だけ（ADR-0067 D1。Phase 23〜110 の出力は
+    /// 空文字だったが、この節だけは context に関わらず常に出る）。
     #[test]
-    fn an_empty_context_renders_nothing_at_all() {
-        assert_eq!(render(&RunContext::default(), "artifacts"), "");
+    fn an_empty_context_renders_only_the_deliverables_placement_note() {
+        assert_eq!(
+            render(&RunContext::default(), "artifacts"),
+            deliverables_placement_note()
+        );
     }
 
     /// ADR-0044 D2（Phase 53）: コメントの節は**前置きの先頭**。人の割り込みがいちばん先に来て、
@@ -1159,7 +1179,10 @@ mod tests {
         };
         assert_eq!(
             render(&with_instructions, "artifacts"),
-            "## Role: lead\nYou coordinate.\n\n"
+            format!(
+                "## Role: lead\nYou coordinate.\n\n{}",
+                deliverables_placement_note()
+            )
         );
         let bare = RunContext {
             role: Some(RoleContext {
@@ -1168,7 +1191,10 @@ mod tests {
             }),
             ..RunContext::default()
         };
-        assert_eq!(render(&bare, "artifacts"), "## Role: lead\n\n");
+        assert_eq!(
+            render(&bare, "artifacts"),
+            format!("## Role: lead\n\n{}", deliverables_placement_note())
+        );
     }
 
     /// Phase 28（ADR-0033 D4 追記）: 対話 run にだけ、末尾に「返事だけをする」指示が付く。
@@ -1206,7 +1232,10 @@ mod tests {
         );
 
         // 対話でない run（既定値の `None`）では何も足さない。
-        assert_eq!(render(&RunContext::default(), "artifacts"), "");
+        assert_eq!(
+            render(&RunContext::default(), "artifacts"),
+            deliverables_placement_note()
+        );
     }
 
     /// Phase 98（ADR-0018、実機障害 2026-09-22）: CoS の対話にだけ「クラスタ作業は自分でやらず
@@ -1243,7 +1272,10 @@ mod tests {
         let out = render(&other, "artifacts");
         assert!(!out.contains("cluster:<id>"), "{out}");
 
-        assert_eq!(render(&RunContext::default(), "artifacts"), "");
+        assert_eq!(
+            render(&RunContext::default(), "artifacts"),
+            deliverables_placement_note()
+        );
     }
 
     /// Phase 98（ADR-0046 D8）: CoS 宛ての「組織」一覧に、各ノードの tools（`cluster:<id>` を含む）が
@@ -1500,7 +1532,10 @@ mod tests {
         };
         assert!(!render(&without, "artifacts").contains("あなたの直近の仕事"));
         // 対話でない通常 run の前置きは 1 バイトも変わらない（既定値には `recent_work` が無い）。
-        assert_eq!(render(&RunContext::default(), "artifacts"), "");
+        assert_eq!(
+            render(&RunContext::default(), "artifacts"),
+            deliverables_placement_note()
+        );
     }
 
     /// Phase 41（ADR-0038 D1）: レビューの対話 run にだけ、途中目標とそこまでの成果の節が出て、
@@ -1720,9 +1755,13 @@ mod tests {
             at("## 知識 (knowledge base") < at("## Role: literature-reader"),
             "{rendered}"
         );
-        // 知識を渡さない run の前置きは 1 バイトも変わらない。
-        assert!(!render(&full_context(), "artifacts").contains("知識"));
-        assert_eq!(render(&RunContext::default(), "artifacts"), "");
+        // 知識を渡さない run には `knowledge_section` の見出しが出ない（ADR-0067 D1 の「成果物の置き場所」
+        // の節は知識ベースに触れるので、素朴な「知識」という文字列の有無ではなく見出しそのものを見る）。
+        assert!(!render(&full_context(), "artifacts").contains("## 知識 (knowledge base"));
+        assert_eq!(
+            render(&RunContext::default(), "artifacts"),
+            deliverables_placement_note()
+        );
     }
 
     /// ADR-0047 D2: 索引は最大 200 件（溢れた分は件数だけ）。

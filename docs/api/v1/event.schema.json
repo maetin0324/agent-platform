@@ -3,6 +3,11 @@
     "ArtifactRef": {
       "description": "DESIGN §4.4 の `ArtifactRef`。実体は `workspace/<task_id>/artifacts/` 配下。",
       "properties": {
+        "declared": {
+          "default": true,
+          "description": "ADR-0067 D3: `result.json`/プロトコルの `{\"type\":\"artifact\"}` で申告されたものは `true`。\ndispatcher が作業場所を走査して見つけた「未申告の成果物」は `false`。",
+          "type": "boolean"
+        },
         "kind": {
           "type": "string"
         },
@@ -87,6 +92,23 @@
           "required": [
             "type",
             "name"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0067 D2: 知識ベースのページ参照（`task_core::knowledge::page_path` と同じ形。KB の根からの\n相対、`.md`、`..` 不可。実在の検証は組み立て時には行わない — `Check::ArtifactExists` と同様、\n人が確認するときに知識ベース側で気付く）。",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "const": "knowledge_page",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
           ],
           "type": "object"
         },

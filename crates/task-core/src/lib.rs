@@ -94,7 +94,7 @@ pub use model::{
     ProgressKind, RoleSpec, RunMetrics, RunRole, Status, Task, TaskCategory, TaskId, TaskKind,
     TaskMode, Tier, Usage, WorkerHint, WorkspaceMode, WorkspaceSpec, artifact_entry_description,
     artifact_entry_name, expand_home, home_dir, is_valid_label, normalize_labels, normalize_skills,
-    priority_from_label, priority_label,
+    priority_from_label, priority_label, validate_human_checks_have_deliverable,
 };
 // ---- ADR-0061（Phase 104）: harness routing 基盤（cost 推定・タスク特性ベースの routing）----
 pub mod pricing;

@@ -16706,3 +16706,188 @@ ADR-0066 を書いてから実装。branch は worktree のブランチ（`workt
   可能性がある。人手で確認する頻度の低い操作なので許容範囲と判断したが、`toml` crate で読み書き
   する小さな Rust ツール（`celerisctl config set-db-path` のようなサブコマンド）に置き換えると
   堅くなる。
+
+## Phase 111（完了日 2026-09-23）: 人が読む成果物の置き場の規則と、承認画面からの可視化
+
+ADR-0067（`docs/adr/0067-human-deliverables-policy-and-approval-visibility.md`）を先に書いてから実装した。
+本番事故（BenchFS 案件のタスク 01M35X86XTK84F97QW0CN5PGMR。CoS の framing 案が対象リポジトリの `docs/` に
+書かれ、`artifacts/` にも知識ベースにも無く、承認が来たのに GUI から成果物が見えなかった）の再発防止。
+
+### 条件ごとの実施
+
+**D1（置き場の規則をプロンプトに反映）**
+- `crates/task-worker/src/preamble.rs::deliverables_placement_note()`: 全 run 共通で常に出る短い節（4 行）。
+  `render()` に組み込み。
+- `crates/task-worker/src/preamble.rs::actions_instructions()`: CoS の `create_task` 節に 1 段落追記。
+- `crates/task-worker/src/claude_code.rs::build_plan_prompt()`: `plan.json` の `check` スキーマ節に
+  `knowledge_page` を追加し、`human` チェックには `artifact_exists`/`knowledge_page` を添える旨を追記。
+- `crates/task-ops/src/project_plan.rs::compose_goal()`: Plan タスクの `goal` に同じ規則を短いフッターで追記。
+- 実行コマンド: `cargo test -p task-worker --lib preamble` → `test result: ok. 22 passed; 0 failed`（既存の
+  「context が空なら前置きは空文字」系のテスト 6 件を「空なら `deliverables_placement_note()` だけ」に更新）。
+
+**D2（計画時の検証）**
+- `crates/task-core/src/model.rs`: `Check::KnowledgePage { path: String }` を追加、
+  `validate_human_checks_have_deliverable(acceptance: &[Criterion]) -> Result<(), String>`（純粋関数）を追加。
+- 呼び出し箇所: `task_ops::add::build_acceptance`（`POST /tasks`・`celerisctl add`）、
+  `task_core::plan::validate`（`PlanError::NoHumanDeliverable`）、
+  `task_core::delegate::validate_one`（`DelegateError::NoHumanDeliverable`）。
+- 実行コマンド: `cargo test -p task-core --lib` → `241 passed; 0 failed`。
+  `cargo test -p task-ops --lib` → `280 passed; 0 failed`（`add.rs`/`retry.rs` の `base_spec()` に
+  `artifact_exists` を追加）。
+
+**D3（ワーカーの取りこぼし防止）**
+- `crates/task-dispatch/src/undeclared_artifacts.rs`（新規）: `scan_undeclared_markdown_artifacts()`。
+  git worktree ではない local の作業場所に限り、`run_worker` 完了後に `artifacts_dir` の外の `*.md` を
+  走査して `declared: false` の `ArtifactRef` として返す（件数 20・1 ファイル 1 MiB の上限、
+  `node_modules`/`.venv`/`target`/`.git`/`.taskd` は見ない。`.taskd` を除外リストに入れたのは、共有
+  workspace で兄弟タスクの成果物〈`.taskd/artifacts/<id>/`〉まで拾ってしまう回帰をテストで踏んだため）。
+- `crates/task-dispatch/src/dispatcher.rs::run_worker()`: run 成功後、`remote.is_none() &&
+  worktree.is_none()` のときだけ走査し、既存の `Event::ArtifactProduced`（全 run 分）と重ならないものを
+  `declared: false` で登録する。
+- `ArtifactRef` に `declared: bool`（`#[serde(default)]`、既定 `true`）を追加。既存の 24 か所の構築コードに
+  `declared: true` を追記（`sed`/Python での機械的な追記 + 2 か所は手直し）。
+- 実行コマンド: `cargo test -p task-dispatch --lib undeclared_artifacts` → `3 passed; 0 failed`
+  （未申告の md を拾う・`node_modules`等を除外・1 MiB 超を除外の 3 ケース）。
+  `cargo test -p task-dispatch --lib` → `238 passed; 0 failed`
+  （`siblings_sharing_one_workspace_do_not_mix_their_result_files_or_artifacts` で上記の `.taskd` 回帰を検出・修正）。
+
+**D4（GUI の承認画面）**
+- `crates/task-ops/src/inbox.rs`: `ApprovalItem.artifacts` の要素型を `ArtifactRef` →
+  `ApprovalArtifact { idx: usize, #[serde(flatten)] artifact: ArtifactRef }`（`idx` は
+  `GET /tasks/{parent_id}/artifacts/{idx}` と同じ添字）。`ApprovalItem.knowledge_pages:
+  Vec<KnowledgePageRef>`（親タスクの `acceptance` の `knowledge_page` 参照）を追加。
+  `crates/task-ops/src/derive.rs::artifacts_for_run_with_idx()`（新規）で添字を求める。
+- 本文取得 API は既存の `GET /tasks/{id}/artifacts/{idx}`（`crates/task-api/src/files.rs`）と GUI 中継
+  `gui/app/routes/files.artifacts.ts` をそのまま使う（新規エンドポイントは不要と判断。ADR 参照）。
+- `gui/app/components/ApprovalArtifactPreview.tsx`（新規）: Markdown の成果物をその場で
+  `~/components/MarkdownViewer` で描画する開閉トグル。`gui/app/components/HumanReviewPanel.tsx` と
+  `gui/app/routes/inbox.tsx` の両方に組み込み、`knowledge_page` 条件へのリンク
+  （`~/lib/knowledge.ts::knowledgeHref`）と「未申告」バッジ（`declared: false`）も追加。
+- フィクスチャの追随: `gui/scripts/lib/celeris-fixture.mjs`、`gui/scripts/check-human-review.mjs`、
+  `gui/test/fixtures/api/inbox.json`、`gui/test/unit/tasks.detail.loader.test.ts` に
+  `knowledge_pages: []` と `artifacts[].idx`/`declared` を追加。
+- 実行コマンド: `cd gui && corepack pnpm@11.27.0 typecheck`（exit 0）、
+  `corepack pnpm@11.27.0 lint`（`biome check .`、257 files、fixes 0。初回は 2 件のフォーマット崩れを
+  `biome check --write .` で直した）、`corepack pnpm@11.27.0 test`（vitest、68 files / 1065 tests
+  passed）、`corepack pnpm@11.27.0 gen:types` を 2 回実行し差分が安定することを確認
+  （`ApprovalArtifact`/`KnowledgePageRef`/`Check.knowledge_page`/`ArtifactRef.declared` が
+  `app/celeris/types.ts` に追加。2 回目の実行で追加差分なし）。
+  `corepack pnpm@11.27.0 build && corepack pnpm@11.27.0 mobile-audit` →
+  `gui/test/mobile-audit/report.json` の `violations` は 0 件（52 ルート検査）。
+
+**D5（`celerisctl plan-lint`）**
+- `crates/celerisctl/src/commands/plan_lint.rs`（新規）: `lint(store)` が DB 上の `draft`/`ready`
+  タスクを D2 の規則で点検し違反（task_id・title・status・reason）を返す純粋な読み取り。
+  `celerisctl plan-lint` として配線（既存の `celerisctl plan <goal>` が `goal` を必須位置引数に取るため
+  `plan lint` は衝突する。`plan-lint` という独立コマンドにした。詳細は ADR-0067 D5）。
+- 実行コマンド: `cargo test -p celerisctl --bin celerisctl commands::plan_lint` →
+  `2 passed; 0 failed`（違反検出・draft/ready 以外は対象外・`no_violations` の 2 ケース）。
+  手動確認: `celerisctl --db <tmp> plan-lint` → 空 DB で
+  「違反はありません（draft/ready のタスクの human チェックには全て artifacts か知識ベースの参照が
+  付いています）。」
+
+### ゲート
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（全 79 の `test result:` 行がすべて `ok`。主な内訳: task-core 241、task-ops 280、task-worker 480、task-dispatch 238、task-api 461〈全 test バイナリ合計〉、celerisctl 60、e2e 39〈4 シナリオファイル全て込み〉、celeris 系 45） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0。`task-ops/src/derive.rs` の `filter_map_bool_then` と `celerisctl/src/commands/plan_lint.rs` の `unnecessary_sort_by` を修正） |
+| スキーマ再生成 | `UPDATE_SCHEMA=1 cargo test -p task-worker --lib protocol::tests::committed_schema_matches_generated`、同 task-api の `schema::tests::committed_schema_matches_generated`、同 task-core の `committed_schema_matches_generated`・`event_row_schema_matches_committed` | 全て ok。`docs/protocol/worker-protocol.schema.json`・`docs/protocol/plan-output.schema.json`・`docs/api/v1/api-v1.schema.json`・`docs/api/v1/event.schema.json` を再生成 |
+| GUI typecheck | `pnpm -C gui typecheck` | exit 0 |
+| GUI lint | `pnpm -C gui lint`（`biome check --write .` で 2 件のフォーマットを先に直した） | exit 0（Checked 257 files、fixes 0） |
+| GUI test | `pnpm -C gui test` | exit 0（vitest: 68 files / 1065 tests passed） |
+| GUI gen:types | `pnpm -C gui gen:types`（2 回実行して差分が安定することを確認） | `Check`/`CriterionSpec` に `knowledge_page`、`ArtifactRef` に `declared`、`ApprovalItem` に
+  `knowledge_pages`・`artifacts: ApprovalArtifact[]`、`KnowledgePageRef`/`ApprovalArtifact` を新設。
+  2 回目は追加差分なし |
+| GUI mobile-audit | `pnpm -C gui build && pnpm -C gui mobile-audit` | `gui/test/mobile-audit/report.json` の `violations.length === 0`（52 ルート） |
+
+### 変更ファイル
+
+- `docs/adr/0067-human-deliverables-policy-and-approval-visibility.md`（新規）
+- `crates/task-core/src/model.rs`（`Check::KnowledgePage`、`ArtifactRef.declared`、
+  `validate_human_checks_have_deliverable`）
+- `crates/task-core/src/lib.rs`（re-export）
+- `crates/task-core/src/plan.rs`（`PlanError::NoHumanDeliverable` + 呼び出し。2 件の JSON フィクスチャを
+  `human`→`reviewer` に変更、`a_plan_can_only_name_repositories_the_project_has` は repos 検証が主眼のため）
+- `crates/task-core/src/delegate.rs`（`DelegateError::NoHumanDeliverable` + 呼び出し）
+- `crates/task-core/src/store.rs`（テストの `ArtifactRef` に `declared: true`）
+- `crates/task-dispatch/src/undeclared_artifacts.rs`（新規。D3）
+- `crates/task-dispatch/src/dispatcher.rs`（D3 の `run_worker()` 配線、`delegate_to()`/plan.json フィクスチャに
+  artifact_exists を追加、`declared: true` の追記）
+- `crates/task-dispatch/src/lib.rs`（モジュール追加）
+- `crates/task-dispatch/src/review.rs`（`Check::KnowledgePage` の判定、plan.json フィクスチャ修正、
+  `declared: true`）
+- `crates/task-ops/src/add.rs`（`CriterionSpec::KnowledgePage`、`build_acceptance` の検証呼び出し、
+  `base_spec()` に artifact_exists）
+- `crates/task-ops/src/retry.rs`（`base_spec()` に artifact_exists）
+- `crates/task-ops/src/derive.rs`（`artifacts_for_run_with_idx`）
+- `crates/task-ops/src/inbox.rs`（`ApprovalArtifact`/`KnowledgePageRef`/`ApprovalItem.knowledge_pages`）
+- `crates/task-ops/src/project_plan.rs`（`compose_goal` に D1 のフッター）
+- `crates/task-ops/src/gate.rs`・`replay.rs`・`view.rs`（テストの `ArtifactRef` に `declared: true`）
+- `crates/task-worker/src/preamble.rs`（D1: `deliverables_placement_note`、`actions_instructions` 追記、
+  既存テスト更新）
+- `crates/task-worker/src/claude_code.rs`（D1: `build_plan_prompt` の `check` スキーマ節、
+  `Check::KnowledgePage` の match 分岐、byte-exact テスト 2 件の更新、`declared: true`）
+- `crates/task-worker/src/artifact.rs`・`workspace.rs`（`declared: true`）
+- `crates/task-worker/src/paperqa.rs`（テストの `declared: true`）
+- `crates/celerisctl/src/commands/plan_lint.rs`（新規。D5）
+- `crates/celerisctl/src/commands/mod.rs`・`main.rs`（`plan-lint` の配線）
+- `crates/celerisctl/src/commands/add.rs`（`Check::KnowledgePage` match 分岐、テストの `base_args()` に
+  `--check-artifact`）
+- `crates/celerisctl/src/commands/query.rs`（`check_kind_name` に `knowledge_page`）
+- `crates/celerisctl/tests/pipe.rs`（`declared: true`）
+- `crates/celeris-mcp/tests/mcp_integration.rs`（`declared: true`）
+- `crates/task-api/tests/{auth_and_guards,concurrency,docs,files,genres,operations,organization,repos,
+  roles,stream}.rs`（`human` のみの acceptance フィクスチャに `artifact_exists` を追加）
+- `tests/e2e/tests/{api_scenarios,delegation_scenarios,phase7_scenarios,plan_scenarios}.rs`
+  （同上。`phase7_scenarios.rs` は fake worker script も `artifacts/result.md` を書くよう修正）
+- `docs/gui/api.md`（`ApprovalItem`/`ApprovalArtifact` のシグネチャ更新、ADR-0067 の注記）
+- `docs/api/v1/api-v1.schema.json`・`event.schema.json`、`docs/protocol/worker-protocol.schema.json`・
+  `plan-output.schema.json`（`UPDATE_SCHEMA=1` で再生成）
+- `gui/app/components/ApprovalArtifactPreview.tsx`（新規。D4）
+- `gui/app/components/HumanReviewPanel.tsx`（D4: 成果物のプレビュー・`declared` バッジ・
+  `knowledge_page` リンク）
+- `gui/app/routes/inbox.tsx`（D4: 同上、`ApprovalRow` に成果物・知識ページの節を追加）
+- `gui/app/celeris/types.ts`（`gen:types` の生成物）
+- `gui/scripts/lib/celeris-fixture.mjs`・`check-human-review.mjs`（`knowledge_pages: []`、
+  `artifacts[].idx`/`declared` を追加）
+- `gui/test/fixtures/api/inbox.json`・`gui/test/unit/tasks.detail.loader.test.ts`（同上）
+
+### 未解決事項
+
+- P-111-1（D3・軽微）: `scan_undeclared_markdown_artifacts` は `artifacts_dir` の外を毎回フルスキャンする
+  （早期に `.git`/`node_modules`/`.venv`/`target`/`.taskd` は打ち切るが、それ以外のディレクトリは全部
+  見る）。本番の 204 個・最大 31 GB の作業場所のうち、コードのリポジトリを含む local タスク（git
+  worktree なので今回は対象外）ではなく「空のローカルディレクトリに人が読む文書だけを書く」タスク
+  （今回の事故のパターン）に限れば通常は小さいはずだが、大きなデータセットを local workspace に
+  置くタスクがあると走査コストが無視できなくなる可能性がある。実測はしていない（ADR-0009 P-34、
+  実機確認は人に依頼）。
+- P-111-2（D2）: `Check::KnowledgePage` は組み立て時にページの実在を検証しない（ADR の「却下した案」
+  参照）。計画時に存在しないページを指す `knowledge_page` 条件を書いても通ってしまい、レビューも
+  常に pass 扱いになる（`review.rs` の実装）。人が承認画面でリンクを踏んで初めて 404 に気付く設計。
+  意図的な選択だが、運用してみて「気付くのが遅い」という声が出たら、レビュー時に KB のページ存在を
+  見る（`task_core::knowledge` への依存を `task-dispatch` に足す）方向の見直しを検討してよい。
+- P-111-3（D4）: `gui/app/routes/inbox.tsx` の `ApprovalRow`（受信箱）は `ApprovalItem.knowledge_pages`
+  を使えるが、`HumanReviewPanel`（タスク詳細の人レビューパネル）は代わりに `criteria`（`CriterionView[]`）
+  から `knowledge_page` 条件を探して表示している（データの出どころが違うだけで、見え方はどちらも
+  「知識ベース: <path>」のリンク）。ふたつの経路で表示ロジックが多少重複しているが、
+  `ApprovalItem`/`TaskDetail` それぞれの既存の型を素直に使う形を優先した。
+- 実機未確認（ADR-0009 P-34）。本番の Celeris インスタンスに触れず（CLAUDE.md の制約）、以下は
+  ローカルのユニット/E2E テストと `celerisctl`/`mobile-audit` の手動実行で代替した:
+  1. 本番の実際の worker（claude-code）が `docs/paper/...` のような場所に成果物を書いた run で、
+     D3 の走査が実際にそのファイルを拾って GUI の「成果物」一覧に「未申告」として出ること。
+  2. 人が実際に受信箱・タスク詳細の承認パネルを開き、Markdown のプレビューが読みやすく開閉できること
+     （393px の実機、`mobile-audit` はヘッドレス Chromium での機械検査であり人の目視ではない）。
+  3. `celerisctl plan-lint` を本番 DB（`~/.local/share/celeris` 配下）に対して実行し、既存の
+     draft/ready タスクに実際に違反があるかどうかの現況。
+
+### 提案
+
+- P-111-4: D3 の「未申告の成果物」は今回 `*.md` だけを対象にした（BenchFS 事故が Markdown だったため）。
+  実際には人が読む決定材料が `.txt`/`.pdf`/画像として書かれることもありうる。対象拡張子を増やすなら
+  上限（20 件・1 MiB）や除外ディレクトリの規則は流用できるが、「人が読む」という判定基準を拡張子だけに
+  頼るのが妥当かは要検討（`.pdf` は 1 MiB を超えることが多く、上限の見直しも要る）。
+- P-111-5: `celerisctl plan-lint` は今回「読み取りだけ」の指示どおり直しはしないが、違反が見つかった
+  タスクに対して「`artifact_exists` を 1 件足す」のような機械的な修復コマンド（`plan-lint --fix`）を
+  用意すると、本番で既存タスクの是正が楽になる可能性がある。今回は D5 の指示文の範囲を超えるため
+  やっていない。

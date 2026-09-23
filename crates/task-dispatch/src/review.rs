@@ -315,6 +315,11 @@ pub async fn review_task(
                     (false, format!("artifact {name:?} not found at {rel}"))
                 }
             }
+            // ADR-0067 D2: 知識ベースのページ参照。実在の検証は組み立て時にはしない（`ArtifactExists`
+            // と違い、人が確認する時点で GUI がリンクを 404 で示せば気付ける。ADR-0067 §2 却下した案）。
+            Check::KnowledgePage { path } => {
+                (true, format!("knowledge base page: {path} (existence not checked automatically)"))
+            }
             Check::Reviewer => {
                 // 決定的条件の結果を見てから判定する（後段）。
                 reviewer_criteria.push(idx);
@@ -881,6 +886,7 @@ mod tests {
             path: "artifacts/sub/bench.json".into(),
             sha256: String::new(),
             kind: "json".into(),
+            declared: true,
         }];
         let task = task_with(
             vec![
@@ -1187,6 +1193,7 @@ mod tests {
             path: "artifacts/a".into(),
             sha256: "0".into(),
             kind: "file".into(),
+            declared: true,
         }];
         let subject = ReviewSubject {
             summary: "did the thing".into(),
@@ -1428,9 +1435,10 @@ mod tests {
         );
 
         // 妥当。acceptance に Command 条件があれば idx 0、plan は idx 1。
+        // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
         std::fs::write(
             dir.path().join("artifacts").join(PLAN_FILE_NAME),
-            r#"{"tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"reviewer"}}]},{"title":"b","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"depends_on":[0]}]}"#,
+            r#"{"tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"reviewer"}}]},{"title":"b","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}},{"text":"d","check":{"type":"artifact_exists","name":"result.md"}}],"depends_on":[0]}]}"#,
         )
         .unwrap();
         task.acceptance.push(Criterion {

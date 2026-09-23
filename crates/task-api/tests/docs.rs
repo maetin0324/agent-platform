@@ -584,6 +584,7 @@ fn produced(env: &TestEnv, task: &Task, name: &str, body: &[u8]) {
                     path: format!("artifacts/{name}"),
                     sha256: "0".repeat(64),
                     kind: "file".into(),
+            declared: true,
                 },
             },
         )

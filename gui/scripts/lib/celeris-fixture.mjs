@@ -604,6 +604,8 @@ export async function setupMockCeleris() {
             title: "本番のクラスタに接続してよいですか",
           },
           artifacts: [],
+          // ADR-0067 D4（Phase 111）: `Check::KnowledgePage` の参照一覧。
+          knowledge_pages: [],
           criterion_idx: 0,
           criterion_text: "pegasus への接続を許可する",
           evidence: [],

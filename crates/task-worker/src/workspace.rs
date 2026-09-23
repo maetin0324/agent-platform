@@ -250,6 +250,7 @@ impl Workspace for LocalWorkspace {
                 path: rel_str,
                 sha256,
                 kind,
+                declared: true,
             });
         }
 
@@ -369,6 +370,7 @@ mod tests {
             path: abs_input_path.to_string_lossy().into_owned(),
             sha256: String::new(),
             kind: "txt".into(),
+            declared: true,
         }];
 
         let prepared = ws.prepare(&task).await.expect("prepare");
@@ -403,6 +405,7 @@ mod tests {
             path: "scripts/run.sh".into(),
             sha256: String::new(),
             kind: "sh".into(),
+            declared: true,
         }];
 
         ws.prepare(&task).await.expect("prepare");
@@ -422,6 +425,7 @@ mod tests {
             path: "does/not/exist.txt".into(),
             sha256: String::new(),
             kind: "txt".into(),
+            declared: true,
         }];
 
         let err = ws.prepare(&task).await.expect_err("expected InputNotFound");

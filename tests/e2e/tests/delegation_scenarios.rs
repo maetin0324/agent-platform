@@ -278,7 +278,7 @@ case "$ROLE" in
 '{"title":"impl-a","objective":"implement a","acceptance":[{"text":"a.txt exists","check":{"type":"command","cmd":"test -f impl-a.txt","expect_exit":0}}],"role":"implementer"},'\
 '{"title":"impl-b","objective":"implement b","acceptance":[{"text":"b.txt exists","check":{"type":"command","cmd":"test -f impl-b.txt","expect_exit":0}}],"role":"implementer","depends_on":[0]},'\
 '{"title":"  ","objective":"blank title","acceptance":[{"text":"c","check":{"type":"human"}}]},'\
-'{"title":"self-ref","objective":"depends on the lead itself","acceptance":[{"text":"c","check":{"type":"human"}}],"depends_on":["'"$TASK_ID"'"]}'\
+'{"title":"self-ref","objective":"depends on the lead itself","acceptance":[{"text":"c","check":{"type":"human"}},{"text":"d","check":{"type":"artifact_exists","name":"result.md"}}],"depends_on":["'"$TASK_ID"'"]}'\
 ']}'
       echo '{"type":"done","summary":"delegated","evidence":[]}'
     fi

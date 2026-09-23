@@ -189,7 +189,7 @@ fn worker_script(plan_source: &str, invalid_first: bool) -> String {
             r#"N=$(ls plan-run-*.marker 2>/dev/null | wc -l)
     cp "$RUN" "plan-run-$N.marker"
     if [ "$N" -eq 0 ]; then
-      printf '%s' '{{"tasks":[{{"title":"bad","objective":"o","acceptance":[{{"text":"c","check":{{"type":"human"}}}}],"depends_on":[9]}}]}}' > "$A/plan.json"
+      printf '%s' '{{"tasks":[{{"title":"bad","objective":"o","acceptance":[{{"text":"c","check":{{"type":"human"}}}},{{"text":"d","check":{{"type":"artifact_exists","name":"result.md"}}}}],"depends_on":[9]}}]}}' > "$A/plan.json"
     else
       cp "{plan_source}" "$A/plan.json"
     fi"#

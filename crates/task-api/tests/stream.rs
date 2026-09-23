@@ -62,7 +62,7 @@ async fn hello_then_created_event_arrives_within_two_seconds() {
 
     // `celerisctl add` 相当（別接続で task-ops を通して作る）。
     let spec: task_ops::add::NewTaskSpec = serde_json::from_value(serde_json::json!({
-        "title": "sse probe", "objective": "x", "acceptance": [{"type": "human", "text": "y"}]
+        "title": "sse probe", "objective": "x", "acceptance": [{"type": "human", "text": "y"}, {"type": "artifact_exists", "name": "result.md"}]
     }))
     .expect("spec");
     let started = tokio::time::Instant::now();

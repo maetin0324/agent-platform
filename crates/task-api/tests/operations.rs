@@ -633,18 +633,19 @@ async fn create_task_returns_201_with_location_and_cli_defaults() {
         .expect("stored");
     assert_eq!(serde_json::to_value(&stored).expect("json"), task);
 
-    let approval = json!({"title": "gate", "objective": "o", "kind": "approval", "acceptance": [{"type": "human", "text": "ok"}]});
+    // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
+    let approval = json!({"title": "gate", "objective": "o", "kind": "approval", "acceptance": [{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}]});
     let resp = send(&app, post_admin("/api/v1/tasks", &approval)).await;
     assert_eq!(resp.status, 201);
     assert_eq!(resp.json()["status"], "ready");
 
     // ADR-0044 D1: `status: "draft"` を明示したときだけ Go 待ちの draft で始まる。
-    let drafted = json!({"title": "later", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}], "status": "draft"});
+    let drafted = json!({"title": "later", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}], "status": "draft"});
     let resp = send(&app, post_admin("/api/v1/tasks", &drafted)).await;
     assert_eq!(resp.status, 201);
     assert_eq!(resp.json()["status"], "draft");
     // `running` のような初期状態は 422。
-    let bogus = json!({"title": "x", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}], "status": "running"});
+    let bogus = json!({"title": "x", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}], "status": "running"});
     assert_eq!(
         send(&app, post_admin("/api/v1/tasks", &bogus)).await.status,
         422
@@ -660,7 +661,8 @@ async fn create_task_validation_errors_insert_nothing() {
     env.seed(&failed);
     env.seed(&cancelled);
     let missing = TaskId::new();
-    let human = json!([{"type": "human", "text": "ok"}]);
+    // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
+    let human = json!([{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}]);
 
     let cases: Vec<(Value, u16, &str, Option<Value>)> = vec![
         (
@@ -760,9 +762,13 @@ async fn create_plan_returns_201_and_rejects_blank_goals() {
 async fn replay_reports_zero_mismatches_after_api_operations() {
     let env = admin_env();
     let app = env.router();
+    // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
     let created = send(
         &app,
-        post_admin("/api/v1/tasks", &json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}]})),
+        post_admin(
+            "/api/v1/tasks",
+            &json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}]}),
+        ),
     )
     .await
     .json();
@@ -880,8 +886,8 @@ async fn every_mutating_endpoint_requires_a_bearer_token() {
     let failed = new_task(TaskKind::Execute, Status::Failed);
     env.seed(&failed);
 
-    let task_body =
-        json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}]});
+    // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
+    let task_body = json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}]});
     let cases: Vec<(String, Value)> = vec![
         ("/api/v1/tasks".to_string(), task_body.clone()),
         (format!("/api/v1/tasks/{}/approve", ready.id), json!({})),

@@ -29,8 +29,12 @@ async fn api_reads_do_not_see_database_locked_while_another_connection_writes() 
             let store = SqliteStore::open(&db_path).map_err(|e| e.to_string())?;
             let mut i = 0u64;
             while !stop.load(Ordering::SeqCst) {
+                // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
                 let spec: task_ops::add::NewTaskSpec = serde_json::from_value(json!({
-                    "title": format!("writer {i}"), "objective": "o", "acceptance": [{"type": "human", "text": "ok"}]
+                    "title": format!("writer {i}"), "objective": "o", "acceptance": [
+                        {"type": "human", "text": "ok"},
+                        {"type": "artifact_exists", "name": "result.md"},
+                    ]
                 }))
                 .map_err(|e| e.to_string())?;
                 let task = task_ops::add::create_task(&store, spec, OffsetDateTime::now_utc())

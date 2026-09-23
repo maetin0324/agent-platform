@@ -789,7 +789,7 @@ async fn project_detail_returns_the_milestones_and_the_work_tree() {
             "/api/v1/tasks",
             &json!({
                 "title": "調べる", "objective": "関連研究を洗う",
-                "acceptance": [{"type": "human", "text": "読んだ"}],
+                "acceptance": [{"type": "human", "text": "読んだ"}, {"type": "artifact_exists", "name": "result.md"}],
                 "project_id": project_id, "milestone_id": milestone_id, "assignee": "research-survey",
             }),
         ),
@@ -810,7 +810,7 @@ async fn project_detail_returns_the_milestones_and_the_work_tree() {
             "/api/v1/tasks",
             &json!({
                 "title": "まとめる", "objective": "報告を書く",
-                "acceptance": [{"type": "human", "text": "読んだ"}],
+                "acceptance": [{"type": "human", "text": "読んだ"}, {"type": "artifact_exists", "name": "result.md"}],
                 "project_id": project_id,
                 "parent": parent["id"],
                 "depends_on": [parent["id"]],
@@ -825,7 +825,7 @@ async fn project_detail_returns_the_milestones_and_the_work_tree() {
         &app,
         p(
             "/api/v1/tasks",
-            &json!({"title": "無関係", "objective": "o", "acceptance": [{"type": "human", "text": "x"}]}),
+            &json!({"title": "無関係", "objective": "o", "acceptance": [{"type": "human", "text": "x"}, {"type": "artifact_exists", "name": "result.md"}]}),
         ),
     )
     .await;
@@ -919,10 +919,14 @@ async fn posting_a_task_with_an_unknown_assignee_or_project_is_rejected() {
     .await;
     assert_problem(&resp, 422, "validation");
 
-    // 3 つとも省略した従来の本文はそのまま通る（互換）。
+    // 3 つとも省略した従来の本文はそのまま通る（互換）。ADR-0067 D2: `human` チェックには
+    // artifacts か知識ベースの参照が要る。
     let resp = send(
         &app,
-        p("/api/v1/tasks", &json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "x"}]})),
+        p(
+            "/api/v1/tasks",
+            &json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "x"}, {"type": "artifact_exists", "name": "result.md"}]}),
+        ),
     )
     .await;
     assert_eq!(resp.status.as_u16(), 201);

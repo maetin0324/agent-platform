@@ -57,6 +57,7 @@ pub fn resolve(
         path: rel_path.to_string(),
         sha256,
         kind,
+        declared: true,
     })
 }
 

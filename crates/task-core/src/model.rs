@@ -211,6 +211,10 @@ pub struct Lease {
 pub enum Check {
     Command { cmd: String, expect_exit: i32 },
     ArtifactExists { name: String },
+    /// ADR-0067 D2: 知識ベースのページ参照（`task_core::knowledge::page_path` と同じ形。KB の根からの
+    /// 相対、`.md`、`..` 不可。実在の検証は組み立て時には行わない — `Check::ArtifactExists` と同様、
+    /// 人が確認するときに知識ベース側で気付く）。
+    KnowledgePage { path: String },
     Reviewer,
     Human,
 }
@@ -222,6 +226,11 @@ pub struct Criterion {
     pub check: Check,
 }
 
+/// ADR-0067 D2: `declared_default` の既定値（過去のイベント JSON との互換のため `#[serde(default)]`）。
+fn declared_default() -> bool {
+    true
+}
+
 /// DESIGN §4.4 の `ArtifactRef`。実体は `workspace/<task_id>/artifacts/` 配下。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ArtifactRef {
@@ -229,6 +238,34 @@ pub struct ArtifactRef {
     pub path: String,
     pub sha256: String,
     pub kind: String,
+    /// ADR-0067 D3: `result.json`/プロトコルの `{"type":"artifact"}` で申告されたものは `true`。
+    /// dispatcher が作業場所を走査して見つけた「未申告の成果物」は `false`。
+    #[serde(default = "declared_default")]
+    pub declared: bool,
+}
+
+/// ADR-0067 D2: `Check::Human` を持つ受け入れ条件が 1 つでもあれば、同じ `acceptance` のどれかが
+/// `Check::ArtifactExists` か `Check::KnowledgePage` でなければならない（人が確認する成果物が GUI から
+/// 見える場所に無い受け入れ条件を計画段階で拒否する。ADR-0036 の本番事故の再発防止）。純粋関数。
+pub fn validate_human_checks_have_deliverable(acceptance: &[Criterion]) -> Result<(), String> {
+    let has_human = acceptance.iter().any(|c| c.check == Check::Human);
+    if !has_human {
+        return Ok(());
+    }
+    let has_deliverable = acceptance.iter().any(|c| {
+        matches!(
+            c.check,
+            Check::ArtifactExists { .. } | Check::KnowledgePage { .. }
+        )
+    });
+    if has_deliverable {
+        Ok(())
+    } else {
+        Err(
+            "人が確認する成果物が GUI から見える場所（artifacts か知識ベース）に無い"
+                .to_string(),
+        )
+    }
 }
 
 /// ADR-0044 D3: タスクの種類。既定は `Other`。状態機械は見ない（人とボードのための分類）。

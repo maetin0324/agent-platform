@@ -41,6 +41,23 @@
           "type": "object"
         },
         {
+          "description": "ADR-0067 D2: 知識ベースのページ参照（`task_core::knowledge::page_path` と同じ形。KB の根からの\n相対、`.md`、`..` 不可。実在の検証は組み立て時には行わない — `Check::ArtifactExists` と同様、\n人が確認するときに知識ベース側で気付く）。",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "const": "knowledge_page",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "type": {
               "const": "reviewer",

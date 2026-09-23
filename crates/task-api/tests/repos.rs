@@ -334,7 +334,7 @@ async fn a_task_picks_repos_by_name_and_blocks_their_deletion_until_it_finishes(
         let mut task = json!({
             "title": "実装",
             "objective": "やる",
-            "acceptance": [{"type": "human", "text": "ok"}],
+            "acceptance": [{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}],
         });
         if let Some(project) = project {
             task["project_id"] = json!(project);
@@ -423,7 +423,7 @@ async fn mixing_a_remote_repo_with_a_local_one_is_rejected() {
     let task = |repos: Value| {
         json!({
             "title": "t", "objective": "o",
-            "acceptance": [{"type": "human", "text": "ok"}],
+            "acceptance": [{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}],
             "project_id": project, "repos": repos,
         })
     };

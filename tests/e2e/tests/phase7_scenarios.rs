@@ -388,13 +388,18 @@ fn cancel_is_limited_to_non_terminal_tasks_and_failures_cancel_dependents() {
 #[test]
 fn human_check_asks_again_after_a_retry_and_orphaned_approvals_are_cancelled() {
     let env = Env::new();
+    // ADR-0067 D2: `--check-artifact result.md` を H タスクに足したので、この fake ワーカーは
+    // `artifacts/result.md` も書く。
     let script = env.write_script(
         r#"cat >/dev/null
+mkdir -p artifacts
+echo '# result' > artifacts/result.md
 if [ -f first-run-done ]; then touch second; else touch first-run-done; fi
 echo '{"type":"done","summary":"ok","evidence":[]}'"#,
     );
     let config = env.write_config(&script);
     let ws_h = env.workspace("ws-h");
+    // ADR-0067 D2: `--accept`（human）チェックには `--check-artifact` か知識ベースの参照が要る。
     let h = env.add_approved(&[
         "--title",
         "H",
@@ -402,6 +407,8 @@ echo '{"type":"done","summary":"ok","evidence":[]}'"#,
         "a human agrees",
         "--check-cmd",
         "test -f second",
+        "--check-artifact",
+        "result.md",
         "--max-retries",
         "1",
         "--workspace",
@@ -431,11 +438,14 @@ echo '{"type":"done","summary":"ok","evidence":[]}'"#,
     assert_eq!(env.task(h).status, Status::Done);
 
     let ws_o = env.workspace("ws-o");
+    // ADR-0067 D2: `--accept`（human）チェックには `--check-artifact` か知識ベースの参照が要る。
     let o = env.add_approved(&[
         "--title",
         "O",
         "--accept",
         "someone signs off",
+        "--check-artifact",
+        "result.md",
         "--workspace",
         &ws_o,
     ]);

@@ -303,6 +303,7 @@ mod tests {
                 path: "spec.md".to_string(),
                 sha256: "abc".to_string(),
                 kind: "doc".to_string(),
+            declared: true,
             }],
             depends_on: vec![],
             status,

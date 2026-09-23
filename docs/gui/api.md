@@ -2743,6 +2743,12 @@ data: {"reason":"cursor_too_old","cursor":20000}
 
 ## 6. 型
 
+ADR-0067（Phase 111）: `Check` に `KnowledgePage { path: String }` を追加、`ArtifactRef` に `declared: bool`
+（既定 `true`。dispatcher が作業場所の走査で見つけた未申告の成果物だけ `false`）を追加、`ApprovalItem.artifacts`
+の要素型が `ArtifactRef` → `ApprovalArtifact { idx: usize, #[serde(flatten)] artifact: ArtifactRef }` に変わった
+（§6.2 参照）。この節の表は主要な型の出所を書いた 9b 時点のもので、以降の個々のフィールド追加は網羅的には
+追記していない（`docs/api/v1/api-v1.schema.json` が正）。
+
 ### 6.1 型の出所
 
 | 出所 | 型 | 備考 |
@@ -2939,8 +2945,11 @@ pub struct Inbox { pub approvals: Vec<ApprovalItem>, pub questions: Vec<Question
 pub struct InboxCounts { pub approvals: u32, pub questions: u32, pub drafts: u32, pub attention: u32, pub by_status: BTreeMap<Status, u64> }
 pub struct ApprovalItem { pub approval: TaskRef, pub parent: Option<TaskRef>, pub criterion_text: String,
     pub criterion_idx: Option<usize>, pub attempt: Option<u32>, pub requested_at: String, pub last_run: Option<RunSummary>,
-    pub evidence: Vec<EvidenceView>, pub other_verdicts: Vec<VerdictView>, pub artifacts: Vec<ArtifactRef>,
+    pub evidence: Vec<EvidenceView>, pub other_verdicts: Vec<VerdictView>, pub artifacts: Vec<ApprovalArtifact>,
     pub previous_decisions: Vec<ApprovalDecisionView> }
+// ADR-0067 D4（Phase 111）: `idx` は `GET /tasks/{parent_id}/artifacts/{idx}` と同じ添字（全 run を通じた出現順）。
+// `#[serde(flatten)]` で ArtifactRef のフィールド（name/path/sha256/kind/declared）はトップレベルに並ぶ。
+pub struct ApprovalArtifact { pub idx: usize, /* flatten */ ArtifactRef }
 pub struct EvidenceView { pub criterion: usize, pub command: Option<String>, pub exit: Option<i32>, pub stdout_tail: Option<String> }  // task_worker::Evidence と同形
 pub struct QuestionItem { pub task: TaskRef, pub question: String, pub asked_at: Option<String>, pub run_id: Option<String>, pub previous: Vec<AnswerNote> }
 pub struct DraftGroup { pub parent: Option<TaskRef>, pub plan_summary: Option<String>, pub drafts: Vec<TaskSummary> }

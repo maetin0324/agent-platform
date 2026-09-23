@@ -6,14 +6,17 @@ import { getCelerisClient } from "~/celeris/client.server";
 import { celerisErrorResponse, isCelerisUnavailable } from "~/celeris/errors";
 import { runInboxAction } from "~/celeris/route-actions.server";
 import type { ApprovalItem, AttentionItem, DraftGroup, Inbox, QuestionItem } from "~/celeris/types";
+import { ApprovalArtifactPreview } from "~/components/ApprovalArtifactPreview";
 import { RetryFlash, TransitionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { LocalTime } from "~/components/LocalTime";
+import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { checkboxClass, hintClass, textareaClass } from "~/components/ui/form";
 import { Icon, type IconName } from "~/components/ui/Icon";
 import { Alert, EmptyState, PageHeader, SectionTitle, StatCard } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
+import { knowledgeHref } from "~/lib/knowledge";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import type { Route } from "./+types/inbox";
 
@@ -280,6 +283,48 @@ function ApprovalRow({ item, fetchedAt }: { item: ApprovalItem; fetchedAt: strin
           同 run の他条件:{" "}
           {item.other_verdicts.map((v) => `#${v.criterion_idx} ${v.pass ? "pass" : "fail"}`).join(", ")}
         </p>
+      )}
+      {/* ADR-0067 D4: Markdown の成果物はその場で本文を描画する（本文取得は既存の
+          `GET /files/tasks/:id/artifacts/:idx` を idx で呼ぶ）。 */}
+      {item.artifacts.length > 0 && (
+        <div className="mt-1" data-testid="approval-artifacts">
+          <p className="text-fg-muted">成果物（{item.artifacts.length} 件）</p>
+          <ul className="mt-1 space-y-1">
+            {item.artifacts.map((a) => (
+              <li key={`${a.idx}-${a.name}`} className="text-xs">
+                <span className="break-all font-mono text-fg">
+                  {a.name}
+                  {!a.declared && (
+                    <Badge tone="neutral" className="ml-1.5">
+                      未申告
+                    </Badge>
+                  )}
+                </span>
+                <ApprovalArtifactPreview taskId={item.parent?.id ?? item.approval.id} idx={a.idx} name={a.name} />
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {/* ADR-0067 D4: 知識ベースのページ参照（`Check::KnowledgePage`）はその場へのリンクを出す。 */}
+      {item.knowledge_pages.length > 0 && (
+        <div className="mt-1" data-testid="approval-knowledge-pages">
+          <p className="text-fg-muted">知識ベースのページ</p>
+          <ul className="mt-1 space-y-0.5">
+            {item.knowledge_pages.map((k) => (
+              <li key={`${k.criterion_idx}-${k.path}`}>
+                <Link
+                  to={knowledgeHref({ path: k.path })}
+                  data-testid="approval-knowledge-page-link"
+                  className="inline-flex items-center gap-1 font-medium text-primary hover:underline"
+                >
+                  <Icon name="book" />
+                  {k.path}
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {item.previous_decisions.length > 0 && (
         <p className="mt-1 text-fg-muted">

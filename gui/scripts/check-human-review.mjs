@@ -141,7 +141,11 @@ const base = await new Promise((resolve) => {
           other_verdicts: [
             { criterion_idx: 0, pass: true, reason: "exit 0", run_id: "R1", ts: "2026-09-21T00:05:00Z" },
           ],
-          artifacts: [{ kind: "report", name: "report.md", path: "artifacts/report.md", sha256: "abc" }],
+          artifacts: [
+            { idx: 0, kind: "report", name: "report.md", path: "artifacts/report.md", sha256: "abc", declared: true },
+          ],
+          // ADR-0067 D4（Phase 111）。
+          knowledge_pages: [],
           previous_decisions: [],
         },
       ],

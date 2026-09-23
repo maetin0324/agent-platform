@@ -3087,6 +3087,7 @@ while true; do sleep 0.1; done
                 .into(),
             sha256: String::new(),
             kind: "text".into(),
+            declared: true,
         }];
         let seeds = extract_seed_urls(
             "CHFS (https://github.com/otatebe/chfs) と https://arxiv.org/abs/2101.00001 を調べる",

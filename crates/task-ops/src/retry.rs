@@ -133,9 +133,15 @@ mod tests {
             repos: Vec::new(),
             title: title.to_string(),
             objective: "do it".to_string(),
-            acceptance: vec![crate::add::CriterionSpec::Human {
-                text: "looks right".to_string(),
-            }],
+            // ADR-0067 D2: `human` チェックには成果物か知識ベースの参照が要る。
+            acceptance: vec![
+                crate::add::CriterionSpec::Human {
+                    text: "looks right".to_string(),
+                },
+                crate::add::CriterionSpec::ArtifactExists {
+                    name: "result.md".to_string(),
+                },
+            ],
             kind: TaskKind::Execute,
             tier: None,
             priority: Some(crate::add::PriorityInput::Number(0)),
@@ -205,6 +211,7 @@ mod tests {
                 path: "spec.md".to_string(),
                 sha256: "abc".to_string(),
                 kind: "doc".to_string(),
+            declared: true,
             }],
             depends_on,
             status,

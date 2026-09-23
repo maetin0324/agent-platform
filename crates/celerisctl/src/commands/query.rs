@@ -125,6 +125,7 @@ fn check_kind_name(check: &Check) -> &'static str {
     match check {
         Check::Command { .. } => "command",
         Check::ArtifactExists { .. } => "artifact_exists",
+        Check::KnowledgePage { .. } => "knowledge_page",
         Check::Reviewer => "reviewer",
         Check::Human => "human",
     }

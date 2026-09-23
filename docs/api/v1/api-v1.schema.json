@@ -605,6 +605,41 @@
       ],
       "type": "object"
     },
+    "ApprovalArtifact": {
+      "description": "ADR-0067 D4: 成果物 1 件と、`GET /tasks/{parent_id}/artifacts/{idx}` の添字（GUI がその場で本文を\n取りに行くのに使う。`derive::artifacts_for_run_with_idx` と同じ番号づけ）。",
+      "properties": {
+        "declared": {
+          "default": true,
+          "description": "ADR-0067 D3: `result.json`/プロトコルの `{\"type\":\"artifact\"}` で申告されたものは `true`。\ndispatcher が作業場所を走査して見つけた「未申告の成果物」は `false`。",
+          "type": "boolean"
+        },
+        "idx": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "idx",
+        "name",
+        "path",
+        "sha256",
+        "kind"
+      ],
+      "type": "object"
+    },
     "ApprovalDecideBody": {
       "additionalProperties": false,
       "description": "`POST /approvals/{id}/decide` の要求本文。",
@@ -700,7 +735,7 @@
         },
         "artifacts": {
           "items": {
-            "$ref": "#/$defs/ArtifactRef"
+            "$ref": "#/$defs/ApprovalArtifact"
           },
           "type": "array"
         },
@@ -726,6 +761,13 @@
         "evidence": {
           "items": {
             "$ref": "#/$defs/EvidenceView"
+          },
+          "type": "array"
+        },
+        "knowledge_pages": {
+          "description": "ADR-0067 D4: 親タスクの `acceptance` にある `knowledge_page` の参照（この承認の判断材料の一部かも\nしれない、知識ベースのページへのリンク。GUI が「知識ベースを見る」ボタンを出すのに使う）。",
+          "items": {
+            "$ref": "#/$defs/KnowledgePageRef"
           },
           "type": "array"
         },
@@ -772,6 +814,7 @@
         "evidence",
         "other_verdicts",
         "artifacts",
+        "knowledge_pages",
         "previous_decisions"
       ],
       "type": "object"
@@ -878,6 +921,11 @@
     "ArtifactRef": {
       "description": "DESIGN §4.4 の `ArtifactRef`。実体は `workspace/<task_id>/artifacts/` 配下。",
       "properties": {
+        "declared": {
+          "default": true,
+          "description": "ADR-0067 D3: `result.json`/プロトコルの `{\"type\":\"artifact\"}` で申告されたものは `true`。\ndispatcher が作業場所を走査して見つけた「未申告の成果物」は `false`。",
+          "type": "boolean"
+        },
         "kind": {
           "type": "string"
         },
@@ -1253,6 +1301,23 @@
           "required": [
             "type",
             "name"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0067 D2: 知識ベースのページ参照（`task_core::knowledge::page_path` と同じ形。KB の根からの\n相対、`.md`、`..` 不可。実在の検証は組み立て時には行わない — `Check::ArtifactExists` と同様、\n人が確認するときに知識ベース側で気付く）。",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "const": "knowledge_page",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
           ],
           "type": "object"
         },
@@ -2828,6 +2893,24 @@
           "required": [
             "type",
             "name"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "`Check::KnowledgePage`（ADR-0067 D2: 知識ベースのページ参照）。",
+          "properties": {
+            "path": {
+              "type": "string"
+            },
+            "type": {
+              "const": "knowledge_page",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "path"
           ],
           "type": "object"
         },
@@ -5344,6 +5427,24 @@
       "required": [
         "path",
         "body"
+      ],
+      "type": "object"
+    },
+    "KnowledgePageRef": {
+      "description": "ADR-0067 D4: `Check::KnowledgePage` 1 件（どの受け入れ条件の話かと、そのページの KB 相対パス）。",
+      "properties": {
+        "criterion_idx": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion_idx",
+        "path"
       ],
       "type": "object"
     },

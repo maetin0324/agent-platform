@@ -211,6 +211,13 @@ pub fn compose_goal(
         }
     }
 
+    // ADR-0067 D1: 人が読む決定材料の置き場ルール（分解される子タスクの acceptance に反映させる）。
+    out.push_str(
+        "\n\n人が確認する成果物（調査報告・候補案・比較表など）は artifacts か知識ベースのページに置き、\
+         対象リポジトリの追跡ファイル（docs/ を含む）には置かないこと。human チェックを持つ子タスクの \
+         acceptance には artifact_exists か knowledge_page の条件を必ず添えること（ADR-0067）。\n",
+    );
+
     out.trim_end().to_string()
 }
 

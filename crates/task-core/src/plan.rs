@@ -140,6 +140,9 @@ pub enum PlanError {
     NoAcceptance { index: usize },
     #[error("tasks[{index}].acceptance[{criterion}].text must not be empty")]
     EmptyCriterion { index: usize, criterion: usize },
+    /// ADR-0067 D2: `human` チェックには `artifact_exists`/`knowledge_page` の参照が要る。
+    #[error("tasks[{index}]: {reason}")]
+    NoHumanDeliverable { index: usize, reason: String },
     #[error("tasks[{index}].depends_on[{position}] = {target} is out of range (0..{len})")]
     DependencyOutOfRange {
         index: usize,
@@ -245,6 +248,10 @@ pub fn validate(
             if c.text.trim().is_empty() {
                 return Err(PlanError::EmptyCriterion { index, criterion });
             }
+        }
+        // ADR-0067 D2: `human` チェックを持つなら、成果物か知識ベースの参照が要る。
+        if let Err(reason) = crate::model::validate_human_checks_have_deliverable(&t.acceptance) {
+            return Err(PlanError::NoHumanDeliverable { index, reason });
         }
         for (position, &target) in t.depends_on.iter().enumerate() {
             if target >= len {
@@ -1614,11 +1621,11 @@ mod tests {
         ));
 
         // `parse_and_validate` 経由でも同じ（Plan run の暗黙条件から見えるエラー文言）。
-        let json = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"repos":["nope"]}]}"#;
+        let json = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"reviewer"}}],"repos":["nope"]}]}"#;
         let err = parse_and_validate(json, 1, &PlanLimits::default(), &[], &known).unwrap_err();
         assert!(err.contains("nope"), "{err}");
         // 書かなければ従来どおり通る（既存の計画はそのまま）。
-        let json = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}]}]}"#;
+        let json = r#"{"tasks":[{"title":"t","objective":"o","acceptance":[{"text":"c","check":{"type":"reviewer"}}]}]}"#;
         assert!(parse_and_validate(json, 1, &PlanLimits::default(), &[], &[]).is_ok());
     }
 

@@ -7237,6 +7237,11 @@ async fn run_worker(
     // ADR-0036 D1: 成果物ディレクトリはタスクごと（共有 workspace では `.taskd/artifacts/<task_id>/`）。
     // 決めるのはディスパッチャで、アダプタは `req.artifacts_dir` に書くだけ。
     let artifacts_dir = task_core::artifacts::artifacts_dir_for(&task, &workspace);
+    // ADR-0067 D3: run 完了後に未申告の成果物を拾うための控え（`workspace`/`artifacts_dir` はこの後
+    // `req` に移る）。git worktree ではない local の作業場所に限る（`remote.is_none() &&
+    // worktree.is_none()` を後段で見る）。
+    let workspace_for_undeclared_scan = workspace.clone();
+    let artifacts_dir_for_undeclared_scan = artifacts_dir.clone();
     if task.kind == TaskKind::Plan {
         // ADR-0007 D1: 前回の run の plan.json を今回の出力と誤読しない。
         let _ = tokio::fs::remove_file(artifacts_dir.join(PLAN_FILE_NAME)).await;
@@ -7340,6 +7345,8 @@ async fn run_worker(
         .session
         .is_some()
         .then(|| (task_core::COS_ID.to_string(), task_core::SessionKind::Conversation, None));
+    // ADR-0067 D3: `store` は `sink` に move されるので、後段の未申告成果物の登録用に控えておく。
+    let store_for_undeclared_scan = Arc::clone(&store);
     let sink = StoreSink {
         store,
         task_id,
@@ -7355,7 +7362,35 @@ async fn run_worker(
         account_book,
         session_key,
     };
-    adapter.run(req, run_id, limits, &sink).await
+    let outcome = adapter.run(req, run_id, limits, &sink).await;
+    // ADR-0067 D3: run が成功したら、git worktree ではない local の作業場所（`remote`/`worktree` どちらも
+    // 無い）に限り、`artifacts_dir` の外に書かれた `*.md` を「未申告の成果物」として登録する
+    // （取りこぼし防止。取りに行くのは登録済みの結果ではなく、result.json が触れない場所に人向けの
+    // 決定材料を残す run に対する保険）。
+    if outcome.is_ok() && remote.is_none() && worktree.is_none() {
+        let existing_paths: std::collections::HashSet<String> = events
+            .iter()
+            .filter_map(|(_, ev)| match ev {
+                Event::ArtifactProduced { artifact, .. } => Some(artifact.path.clone()),
+                _ => None,
+            })
+            .collect();
+        let found = crate::undeclared_artifacts::scan_undeclared_markdown_artifacts(
+            &workspace_for_undeclared_scan,
+            &artifacts_dir_for_undeclared_scan,
+            &existing_paths,
+        );
+        for artifact in found {
+            let ev = Event::ArtifactProduced {
+                run_id: run_id.to_string(),
+                artifact,
+            };
+            if let Err(e) = store_for_undeclared_scan.append_event(task_id, &ev) {
+                tracing::warn!(task_id = %task_id, error = %e, "failed to record an undeclared artifact (ADR-0067 D3)");
+            }
+        }
+    }
+    outcome
 }
 
 /// ワーカー run 中のリース延長パラメータ（ADR-0010 D7）。
@@ -8447,8 +8482,11 @@ mod tests {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
         let plan = plan_task(dir.path(), 1);
         store.insert(&plan).unwrap();
+        // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る（この plan.json は
+        // `depends_on` の範囲外エラーだけを狙っているので、`human` 側の違反を出さないよう
+        // `artifact_exists` を添えておく）。
         let adapter = Arc::new(FileAdapter {
-            plan_json: r#"{"tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}}],"depends_on":[9]}]}"#.into(),
+            plan_json: r#"{"tasks":[{"title":"a","objective":"o","acceptance":[{"text":"c","check":{"type":"human"}},{"text":"d","check":{"type":"artifact_exists","name":"result.md"}}],"depends_on":[9]}]}"#.into(),
             review_json: String::new(),
             delay: Duration::ZERO,
         });
@@ -13471,10 +13509,19 @@ mod tests {
         DelegateTask {
             title: "任せたい仕事".into(),
             objective: "やっておいて".into(),
-            acceptance: vec![Criterion {
-                text: "できた".into(),
-                check: Check::Human,
-            }],
+            // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
+            acceptance: vec![
+                Criterion {
+                    text: "できた".into(),
+                    check: Check::Human,
+                },
+                Criterion {
+                    text: "result.md exists".into(),
+                    check: Check::ArtifactExists {
+                        name: "result.md".into(),
+                    },
+                },
+            ],
             role: None,
             genre: None,
             depends_on: vec![],
@@ -15514,6 +15561,7 @@ mod tests {
                         path: "artifacts/survey.md".into(),
                         sha256: String::new(),
                         kind: "text".into(),
+            declared: true,
                     },
                 },
             )

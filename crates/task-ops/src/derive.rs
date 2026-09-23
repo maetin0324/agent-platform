@@ -123,6 +123,25 @@ pub fn artifacts_for_run(events: &[(u64, Event)], run_id: &str) -> Vec<ArtifactR
         .collect()
 }
 
+/// ADR-0067 D4: その run の `ArtifactProduced` を、`GET /tasks/{id}/artifacts/{idx}` と同じ添字
+/// （`ArtifactProduced` を**全 run を通じて**出現順に 0 始まりで数えたもの。`crates/task-api/src/files.rs`
+/// の `produced(rows).enumerate()` と同じ規則）付きで返す。GUI が承認画面からその場で本文を取りに行くのに使う。
+pub fn artifacts_for_run_with_idx(
+    events: &[(u64, Event)],
+    run_id: &str,
+) -> Vec<(usize, ArtifactRef)> {
+    events
+        .iter()
+        .filter_map(|(_, ev)| match ev {
+            Event::ArtifactProduced { run_id: r, artifact } => Some((r, artifact)),
+            _ => None,
+        })
+        .enumerate()
+        .filter(|(_, (r, _))| *r == run_id)
+        .map(|(idx, (_, artifact))| (idx, artifact.clone()))
+        .collect()
+}
+
 /// `role` が Reviewer run を指すか（`None` はワーカー run。ADR-0014 D1）。
 pub fn is_reviewer(role: Option<RunRole>) -> bool {
     role == Some(RunRole::Reviewer)
@@ -385,6 +404,7 @@ mod tests {
             path: format!("artifacts/{name}"),
             sha256: "abc".to_string(),
             kind: "doc".to_string(),
+            declared: true,
         }
     }
 

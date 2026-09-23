@@ -1,6 +1,7 @@
 import { Link, useFetcher } from "react-router";
 import type { TransitionOutcome } from "~/celeris/action-types";
 import type { ApprovalItem, CriterionView, ReviewNote } from "~/celeris/types";
+import { ApprovalArtifactPreview } from "~/components/ApprovalArtifactPreview";
 import { TransitionFlash } from "~/components/Flash";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
@@ -8,6 +9,7 @@ import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { hintClass, textareaClass, touchLinkClass } from "~/components/ui/form";
 import { Icon } from "~/components/ui/Icon";
 import { Mono } from "~/components/ui/misc";
+import { knowledgeHref } from "~/lib/knowledge";
 import { cn } from "~/lib/utils";
 
 /**
@@ -111,6 +113,17 @@ function HumanReviewItem({
                 {c.latest_verdict && (
                   <span className="w-full break-words text-fg-muted sm:w-auto">— {c.latest_verdict.reason}</span>
                 )}
+                {/* ADR-0067 D4: 知識ベースのページ参照は、その場で画面に飛べるリンクを添える。 */}
+                {c.check.type === "knowledge_page" && (
+                  <Link
+                    to={knowledgeHref({ path: c.check.path })}
+                    data-testid="human-review-knowledge-page-link"
+                    className={cn(touchLinkClass, "font-medium text-primary hover:underline")}
+                  >
+                    <Icon name="book" />
+                    知識ベース: {c.check.path}
+                  </Link>
+                )}
               </li>
             ))}
           </ul>
@@ -154,10 +167,19 @@ function HumanReviewItem({
       <div data-testid="human-review-artifacts">
         <p className="text-fg-muted">成果物（{item.artifacts.length} 件）</p>
         {item.artifacts.length > 0 && (
-          <ul className="mt-1 space-y-0.5">
+          <ul className="mt-1 space-y-1">
             {item.artifacts.map((a) => (
-              <li key={`${a.name}-${a.sha256}`} className="break-all font-mono text-xs text-fg">
-                {a.name}
+              <li key={`${a.idx}-${a.name}`} className="text-xs">
+                <span className="break-all font-mono text-fg">
+                  {a.name}
+                  {!a.declared && (
+                    <Badge tone="neutral" className="ml-1.5">
+                      未申告
+                    </Badge>
+                  )}
+                </span>
+                {/* ADR-0067 D4: Markdown ならその場で本文を描画する。 */}
+                <ApprovalArtifactPreview taskId={reviewTaskId} idx={a.idx} name={a.name} />
               </li>
             ))}
           </ul>

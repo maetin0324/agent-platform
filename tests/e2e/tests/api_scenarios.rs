@@ -441,7 +441,7 @@ esac"#,
     // `status: "draft"` を明示したときだけ従来どおり draft で止まる。
     let drafted = env.post(
         "/tasks",
-        json!({"title": "draft on purpose", "objective": "api", "acceptance": [{"type": "human", "text": "t"}], "status": "draft"}),
+        json!({"title": "draft on purpose", "objective": "api", "acceptance": [{"type": "human", "text": "t"}, {"type": "artifact_exists", "name": "result.md"}], "status": "draft"}),
     );
     assert_eq!(drafted.status, 201, "{}", drafted.body);
     assert_eq!(drafted.json()["status"], "draft");
@@ -465,7 +465,7 @@ esac"#,
     )
     .assert_problem(422, "validation");
     // ADR-0014 D3（P-G16）: 空白だけの title と存在しない親は 422（field 付き）で、何も作らない。
-    let human = json!([{"type": "human", "text": "t"}]);
+    let human = json!([{"type": "human", "text": "t"}, {"type": "artifact_exists", "name": "result.md"}]);
     let v = env
         .post(
             "/tasks",
@@ -483,7 +483,7 @@ esac"#,
     // ADR-0044 D4（Phase 53）: ラベル・種類・優先度で絞れる（AND）。
     let labelled = env.post(
         "/tasks",
-        json!({"title": "board card", "objective": "board", "acceptance": [{"type": "human", "text": "t"}],
+        json!({"title": "board card", "objective": "board", "acceptance": [{"type": "human", "text": "t"}, {"type": "artifact_exists", "name": "result.md"}],
                "labels": ["infra", "urgent"], "category": "ops", "priority": "P0"}),
     );
     assert_eq!(labelled.status, 201, "{}", labelled.body);
@@ -500,7 +500,7 @@ esac"#,
         env.get("/tasks?label=infra&label=nope").json()["total"].as_u64(),
         Some(0)
     );
-    env.post("/tasks", json!({"title": "x", "objective": "y", "acceptance": [{"type": "human", "text": "t"}], "bogus": 1}))
+    env.post("/tasks", json!({"title": "x", "objective": "y", "acceptance": [{"type": "human", "text": "t"}, {"type": "artifact_exists", "name": "result.md"}], "bogus": 1}))
         .assert_problem(400, "bad_request");
 
     // expected_status の不一致は状態を変えずに 409 conflict。
@@ -576,7 +576,7 @@ esac"#,
     let approval = |title: &str| {
         let r = env.post(
             "/tasks",
-            json!({"title": title, "objective": "decide", "kind": "approval", "acceptance": [{"type": "human", "text": "ok?"}]}),
+            json!({"title": title, "objective": "decide", "kind": "approval", "acceptance": [{"type": "human", "text": "ok?"}, {"type": "artifact_exists", "name": "result.md"}]}),
         );
         assert_eq!(r.status, 201, "{}", r.body);
         assert_eq!(r.json()["status"], "ready");
@@ -608,7 +608,7 @@ esac"#,
     );
 
     // cancel は非終端だけ（`status: "draft"` を明示して draft のまま止めておく。ADR-0044 D1）。
-    let draft = id_of(&env.post("/tasks", json!({"title": "c", "objective": "o", "acceptance": [{"type": "human", "text": "t"}], "status": "draft"})).json());
+    let draft = id_of(&env.post("/tasks", json!({"title": "c", "objective": "o", "acceptance": [{"type": "human", "text": "t"}, {"type": "artifact_exists", "name": "result.md"}], "status": "draft"})).json());
     let r = env.post(
         &format!("/tasks/{draft}/cancel"),
         json!({"expected_status": "draft"}),
@@ -967,7 +967,7 @@ fn api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values()
         Path::new(&ws).join("link.txt"),
     )
     .unwrap();
-    let created = env.post("/tasks", json!({"title": "files", "objective": "o", "acceptance": [{"type": "human", "text": "t"}], "workspace": ws}));
+    let created = env.post("/tasks", json!({"title": "files", "objective": "o", "acceptance": [{"type": "human", "text": "t"}, {"type": "artifact_exists", "name": "inside.txt"}], "workspace": ws}));
     assert_eq!(created.status, 201, "{}", created.body);
     let id = id_of(&created.json());
     let run_id = TaskId::new().to_string();
@@ -977,6 +977,7 @@ fn api_enforces_token_host_and_workspace_boundaries_without_leaking_env_values()
             path: path.into(),
             sha256: "0".repeat(64),
             kind: "file".into(),
+            declared: true,
         };
         env.store
             .append_event(

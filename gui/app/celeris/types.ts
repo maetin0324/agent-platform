@@ -438,6 +438,10 @@ export type Check =
       type: "artifact_exists";
     }
   | {
+      path: string;
+      type: "knowledge_page";
+    }
+  | {
       type: "reviewer";
     }
   | {
@@ -547,6 +551,10 @@ export type CriterionSpec =
   | {
       name: string;
       type: "artifact_exists";
+    }
+  | {
+      path: string;
+      type: "knowledge_page";
     }
   | {
       text: string;
@@ -1088,6 +1096,11 @@ export interface ArtifactView {
  * DESIGN §4.4 の `ArtifactRef`。実体は `workspace/<task_id>/artifacts/` 配下。
  */
 export interface ArtifactRef {
+  /**
+   * ADR-0067 D3: `result.json`/プロトコルの `{"type":"artifact"}` で申告されたものは `true`。
+   * dispatcher が作業場所を走査して見つけた「未申告の成果物」は `false`。
+   */
+  declared?: boolean;
   kind: string;
   name: string;
   path: string;
@@ -2649,16 +2662,37 @@ export interface Inbox {
 }
 export interface ApprovalItem {
   approval: TaskRef;
-  artifacts: ArtifactRef[];
+  artifacts: ApprovalArtifact[];
   attempt?: number | null;
   criterion_idx?: number | null;
   criterion_text: string;
   evidence: EvidenceView[];
+  /**
+   * ADR-0067 D4: 親タスクの `acceptance` にある `knowledge_page` の参照（この承認の判断材料の一部かも
+   * しれない、知識ベースのページへのリンク。GUI が「知識ベースを見る」ボタンを出すのに使う）。
+   */
+  knowledge_pages: KnowledgePageRef[];
   last_run?: RunSummary | null;
   other_verdicts: VerdictView[];
   parent?: TaskRef | null;
   previous_decisions: ApprovalDecisionView[];
   requested_at: string;
+}
+/**
+ * ADR-0067 D4: 成果物 1 件と、`GET /tasks/{parent_id}/artifacts/{idx}` の添字（GUI がその場で本文を
+ * 取りに行くのに使う。`derive::artifacts_for_run_with_idx` と同じ番号づけ）。
+ */
+export interface ApprovalArtifact {
+  /**
+   * ADR-0067 D3: `result.json`/プロトコルの `{"type":"artifact"}` で申告されたものは `true`。
+   * dispatcher が作業場所を走査して見つけた「未申告の成果物」は `false`。
+   */
+  declared?: boolean;
+  idx: number;
+  kind: string;
+  name: string;
+  path: string;
+  sha256: string;
 }
 /**
  * `task_worker::Evidence` と同じ形。
@@ -2668,6 +2702,13 @@ export interface EvidenceView {
   criterion: number;
   exit?: number | null;
   stdout_tail?: string | null;
+}
+/**
+ * ADR-0067 D4: `Check::KnowledgePage` 1 件（どの受け入れ条件の話かと、そのページの KB 相対パス）。
+ */
+export interface KnowledgePageRef {
+  criterion_idx: number;
+  path: string;
 }
 export interface RunSummary {
   /**

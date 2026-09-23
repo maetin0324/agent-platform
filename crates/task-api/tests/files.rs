@@ -36,6 +36,7 @@ fn produced(env: &TestEnv, task: &Task, run_id: &str, path: &str, sha: &str) {
                     path: path.to_string(),
                     sha256: sha.to_string(),
                     kind: "file".into(),
+            declared: true,
                 },
             },
         )

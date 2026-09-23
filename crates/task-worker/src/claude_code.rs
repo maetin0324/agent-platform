@@ -478,6 +478,9 @@ fn build_execute_prompt(
             Check::ArtifactExists { name } => {
                 format!(" (a reviewer will check that the file `{artifacts}/{name}` exists)")
             }
+            Check::KnowledgePage { path } => {
+                format!(" (a human will check the knowledge base page `{path}`)")
+            }
             Check::Reviewer | Check::Human => String::new(),
         };
         out.push_str(&format!("{}. {}{}\n", i, c.text, detail));
@@ -536,14 +539,18 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
          \"tier\":\"frontier\"|\"standard\"|\"cheap\" (optional)}}]}}\n\
          ```\n\
          `check` may also be `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, \
+         `{{\"type\":\"knowledge_page\",\"path\":\"...\"}}` (a page in the knowledge base), \
          `{{\"type\":\"reviewer\"}}`, or `{{\"type\":\"human\"}}`. Unknown fields are rejected, so do not \
          add any field not shown above. `depends_on` indices refer to positions within this same \
          `tasks` array and must form a DAG (no self-reference, no cycles). Every child task must have \
-         at least one `acceptance` entry. `kind:\"plan\"` children are only allowed while the total \
-         decomposition depth stays within {} (DESIGN §5.6 \"分解の深さは上限 3\"; this plan itself \
-         already counts toward that limit). Any `command` check will later be re-run for real inside \
-         the child task's own working directory by an independent reviewer, so do not fabricate a \
-         command whose result you have not actually observed.\n\n",
+         at least one `acceptance` entry. If a child has a `human` check, its `acceptance` must also \
+         include an `artifact_exists` or `knowledge_page` check pointing at the human-readable material \
+         (ADR-0067: it must live in registered artifacts or the knowledge base, not in the target \
+         repository's tracked files, so a human can see it from the GUI). `kind:\"plan\"` children are \
+         only allowed while the total decomposition depth stays within {} (DESIGN §5.6 \"分解の深さは \
+         上限 3\"; this plan itself already counts toward that limit). Any `command` check will later be \
+         re-run for real inside the child task's own working directory by an independent reviewer, so \
+         do not fabricate a command whose result you have not actually observed.\n\n",
         task_core::plan::MAX_PLAN_DEPTH
     ));
     let schema = serde_json::to_string(&task_core::plan::schema_value())
@@ -1453,6 +1460,7 @@ mod tests {
                 path: "artifacts/readme.diff".into(),
                 sha256: "deadbeef".into(),
                 kind: "diff".into(),
+            declared: true,
             }],
             ..RunContext::default()
         };
@@ -2521,17 +2529,25 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             prompt.contains("`{\"kind\":\"remote\",\"cluster\":\"...\",\"path\":\"...\"}`"),
             "{prompt}"
         );
-        // 作業場所の 2 節を取り除けば、Phase 42 までのプロンプトとバイト単位で一致する。
+        // 作業場所の 2 節（と、両方に共通する前置き）を取り除けば、Phase 42 までのプロンプトと
+        // バイト単位で一致する（ADR-0067 D1: 前置きに常に「成果物の置き場所」の節が付くようになったので、
+        // `bare` 側の前置きも同じだけ取り除いて比べる）。
         let preamble = crate::preamble::render(&context, "artifacts");
         assert!(!preamble.is_empty());
         let stripped = prompt
             .replace(&workspace_section_for_plan(&context), "")
             .replace(&preamble, "");
-        assert_eq!(stripped.len(), bare.len());
-        assert!(stripped == bare, "作業場所の節以外は 1 バイトも変わらない");
+        let bare_preamble = crate::preamble::render(&RunContext::default(), "artifacts");
+        let bare_stripped = bare.replace(&bare_preamble, "");
+        assert_eq!(stripped.len(), bare_stripped.len());
+        assert!(
+            stripped == bare_stripped,
+            "作業場所の節・共通の前置き以外は 1 バイトも変わらない"
+        );
     }
 
-    /// Phase 43: 案件が作業場所を決めていない run（既存のタスク）は、Execute プロンプトも従来どおり。
+    /// Phase 43: 案件が作業場所を決めていない run（既存のタスク）は、Execute プロンプトも従来どおり
+    /// （ADR-0067 D1 で前置きに常に付く「成果物の置き場所」の節を除けば Phase 42 までと変わらない）。
     #[test]
     fn a_project_without_a_workspace_keeps_the_previous_prompt_byte_for_byte() {
         let task = crate::protocol::tests::sample_task();
@@ -2540,7 +2556,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert_eq!(delegate_workspace_instruction(&RunContext::default()), "");
         assert_eq!(
             crate::preamble::render(&RunContext::default(), "artifacts"),
-            ""
+            crate::preamble::deliverables_placement_note()
         );
     }
 

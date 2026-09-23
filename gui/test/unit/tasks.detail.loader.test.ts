@@ -180,6 +180,7 @@ describe("loadTaskDetail", () => {
       evidence: [],
       other_verdicts: [],
       artifacts: [],
+      knowledge_pages: [],
       previous_decisions: [],
     });
     mock.on("GET", "/api/v1/inbox", (_req, res) =>

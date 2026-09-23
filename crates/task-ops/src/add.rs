@@ -41,6 +41,8 @@ pub enum CriterionSpec {
     },
     /// `Check::ArtifactExists`。
     ArtifactExists { name: String },
+    /// `Check::KnowledgePage`（ADR-0067 D2: 知識ベースのページ参照）。
+    KnowledgePage { path: String },
     /// `Check::Reviewer`。
     Reviewer { text: String },
 }
@@ -59,6 +61,10 @@ impl CriterionSpec {
             CriterionSpec::ArtifactExists { name } => Criterion {
                 text: format!("artifact {name} exists"),
                 check: Check::ArtifactExists { name },
+            },
+            CriterionSpec::KnowledgePage { path } => Criterion {
+                text: format!("knowledge base page {path} exists"),
+                check: Check::KnowledgePage { path },
             },
             CriterionSpec::Reviewer { text } => Criterion {
                 text,
@@ -249,10 +255,14 @@ fn build_acceptance(specs: Vec<CriterionSpec>) -> Result<Vec<Criterion>, OpsErro
                 .to_string(),
         ));
     }
-    Ok(specs
+    let acceptance: Vec<Criterion> = specs
         .into_iter()
         .map(CriterionSpec::into_criterion)
-        .collect())
+        .collect();
+    // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照を伴わせる（本番事故の再発防止）。
+    task_core::validate_human_checks_have_deliverable(&acceptance)
+        .map_err(OpsError::Validation)?;
+    Ok(acceptance)
 }
 
 /// `depends_on` の各 ID が存在し、かつ `failed`/`cancelled` でないことを検証する
@@ -577,9 +587,15 @@ mod tests {
             repos: Vec::new(),
             title: "do something".to_string(),
             objective: "make it work".to_string(),
-            acceptance: vec![CriterionSpec::Human {
-                text: "it works".to_string(),
-            }],
+            // ADR-0067 D2: `human` チェックには成果物か知識ベースの参照が要る。
+            acceptance: vec![
+                CriterionSpec::Human {
+                    text: "it works".to_string(),
+                },
+                CriterionSpec::ArtifactExists {
+                    name: "result.md".to_string(),
+                },
+            ],
             kind: TaskKind::Execute,
             tier: None,
             priority: Some(PriorityInput::Number(0)),

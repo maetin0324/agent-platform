@@ -5,7 +5,8 @@ use std::collections::{HashMap, HashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
 use task_core::{
-    ArtifactRef, Event, Status, Task, TaskId, TaskKind, TaskStore, WorkerHint, WorkspaceSpec,
+    ArtifactRef, Check, Event, Status, Task, TaskId, TaskKind, TaskStore, WorkerHint,
+    WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -47,8 +48,27 @@ pub struct ApprovalItem {
     pub last_run: Option<RunSummary>,
     pub evidence: Vec<EvidenceView>,
     pub other_verdicts: Vec<VerdictView>,
-    pub artifacts: Vec<ArtifactRef>,
+    pub artifacts: Vec<ApprovalArtifact>,
+    /// ADR-0067 D4: 親タスクの `acceptance` にある `knowledge_page` の参照（この承認の判断材料の一部かも
+    /// しれない、知識ベースのページへのリンク。GUI が「知識ベースを見る」ボタンを出すのに使う）。
+    pub knowledge_pages: Vec<KnowledgePageRef>,
     pub previous_decisions: Vec<ApprovalDecisionView>,
+}
+
+/// ADR-0067 D4: 成果物 1 件と、`GET /tasks/{parent_id}/artifacts/{idx}` の添字（GUI がその場で本文を
+/// 取りに行くのに使う。`derive::artifacts_for_run_with_idx` と同じ番号づけ）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ApprovalArtifact {
+    pub idx: usize,
+    #[serde(flatten)]
+    pub artifact: ArtifactRef,
+}
+
+/// ADR-0067 D4: `Check::KnowledgePage` 1 件（どの受け入れ条件の話かと、そのページの KB 相対パス）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct KnowledgePageRef {
+    pub criterion_idx: usize,
+    pub path: String,
 }
 
 /// `task_worker::Evidence` と同じ形。
@@ -153,7 +173,7 @@ fn build_approvals(
             .unwrap_or_else(|| view::to_rfc3339(t.created_at));
 
         let mut last_run: Option<RunSummary> = None;
-        let mut artifacts: Vec<ArtifactRef> = Vec::new();
+        let mut artifacts: Vec<ApprovalArtifact> = Vec::new();
         let mut other_verdicts: Vec<VerdictView> = Vec::new();
         let mut evidence_items: Vec<EvidenceView> = Vec::new();
 
@@ -163,7 +183,11 @@ fn build_approvals(
             if let Some(run_id) = derive::last_run_id(&parent_events) {
                 let run_summaries = view::runs(&parent_rows);
                 last_run = run_summaries.into_iter().find(|r| r.run_id == run_id);
-                artifacts = derive::artifacts_for_run(&parent_events, &run_id);
+                // ADR-0067 D4: `idx` は `GET /tasks/{parent_id}/artifacts/{idx}` と同じ添字。
+                artifacts = derive::artifacts_for_run_with_idx(&parent_events, &run_id)
+                    .into_iter()
+                    .map(|(idx, artifact)| ApprovalArtifact { idx, artifact })
+                    .collect();
                 for r in &parent_rows {
                     if let Event::ReviewVerdict {
                         run_id: rid,
@@ -216,6 +240,23 @@ fn build_approvals(
             previous_decisions.sort_by(|a, b| a.ts.cmp(&b.ts));
         }
 
+        // ADR-0067 D4: 親タスクの `knowledge_page` 参照（人が判断材料としてリンクを開けるように）。
+        let knowledge_pages: Vec<KnowledgePageRef> = parent
+            .map(|p| {
+                p.acceptance
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, c)| match &c.check {
+                        Check::KnowledgePage { path } => Some(KnowledgePageRef {
+                            criterion_idx: idx,
+                            path: path.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         items.push(ApprovalItem {
             approval: view::task_ref(t),
             parent: parent.map(view::task_ref),
@@ -227,6 +268,7 @@ fn build_approvals(
             evidence: evidence_items,
             other_verdicts,
             artifacts,
+            knowledge_pages,
             previous_decisions,
         });
     }

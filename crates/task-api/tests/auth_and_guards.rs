@@ -9,7 +9,11 @@ use serde_json::json;
 use task_core::{SCHEMA_VERSION, TaskStore};
 
 fn valid_task_body() -> serde_json::Value {
-    json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}]})
+    // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
+    json!({"title": "t", "objective": "o", "acceptance": [
+        {"type": "human", "text": "ok"},
+        {"type": "artifact_exists", "name": "result.md"},
+    ]})
 }
 
 /// ADR-0044 §5 Phase 53 追記（Phase 55）: **変更を伴う API はすべて管理系**なので、

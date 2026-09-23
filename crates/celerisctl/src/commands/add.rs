@@ -260,9 +260,10 @@ mod tests {
         AddArgs {
             title: "do something".to_string(),
             objective: "make it work".to_string(),
+            // ADR-0067 D2: `--accept`（human）チェックには artifacts か知識ベースの参照が要る。
             accept: vec!["it works".to_string()],
             check_cmd: vec![],
-            check_artifact: vec![],
+            check_artifact: vec!["result.md".to_string()],
             check_reviewer: vec![],
             kind: KindArg::Execute,
             tier: Some(TierArg::Standard),
@@ -355,6 +356,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open store");
         let mut args = base_args();
         args.accept = vec![];
+        args.check_artifact = vec![];
 
         let result = run(&store, args);
         assert!(matches!(result, Err(CliError::Message(_))));
