@@ -863,7 +863,11 @@ fn actions_instructions() -> String {
      十分です。「案件として」「途中目標に」のように人が儀式を求めていれば `propose_project` /\
      `add_milestone`。判断に必要な情報が欠けるときは `ask_human`。通常の実装判断は担当に任せます。案件・担当が分かっていれば `project` / `assignee` \
      を書いてください（`assignee` を省けば celeris が skills と harness から決定的に選びます）。\
-     検証に落ちた action（知らない harness / repos / 案件など）は実行されず、理由が人に見えます。\n\n"
+     検証に落ちた action（知らない harness / repos / 案件など）は実行されず、理由が人に見えます。\n\
+     調査系（`literature` / `web-research`）の `create_task` を書くときは、受け入れ条件を対象ごとに \
+     分けるか、レビュアー条件（`acceptance` のうち `check` が reviewer のもの）に「一次情報で確認できな \
+     かった項目は『未確認』と明記されていれば不合格の理由にしない」という一文を含めてください \
+     （ADR-0063 D3）。1 件の欠落で全体を落とさないためです。\n\n"
         .to_string()
 }
 
@@ -1381,6 +1385,11 @@ mod tests {
             out.contains("tier: \"standard\", mode: \"production\""),
             "{out}"
         );
+        // ADR-0063 D3（Phase 109）: 調査系の受け入れ条件は「未確認」の一文（または `partial_ok`）で
+        // 1 件の欠落による全体不合格を避ける、という案内が付く。
+        assert!(out.contains("未確認"), "{out}");
+        assert!(out.contains("literature"), "{out}");
+        assert!(out.contains("web-research"), "{out}");
 
         // CoS 以外の対話には「進行中の案件」も `actions` の説明も出ない。
         let other = RunContext {

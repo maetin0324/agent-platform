@@ -129,6 +129,12 @@ pub struct LdrConfig {
     pub env: Vec<(String, String)>,
     /// ADR-0031 D2: 決定的な証拠ゲートの閾値。
     pub evidence: EvidenceThresholds,
+    /// ADR-0063 D2（Phase 109）: `attempts >= 1`（前回が reviewer 不合格）の run で使う `mode`
+    /// （既定 `Detailed`）。
+    pub retry_mode: LdrMode,
+    /// ADR-0063 D2: 同じく再挑戦の run で使う `iterations`（既定 `Some(5)`）。`mode`/`iterations` の
+    /// 通常値より優先する。
+    pub retry_iterations: Option<u32>,
 }
 
 impl Default for LdrConfig {
@@ -142,6 +148,8 @@ impl Default for LdrConfig {
             model: None,
             env: Vec::new(),
             evidence: EvidenceThresholds::default(),
+            retry_mode: LdrMode::Detailed,
+            retry_iterations: Some(5),
         }
     }
 }
@@ -184,6 +192,79 @@ impl WorkerAdapter for LdrAdapter {
     }
 }
 
+/// ADR-0063 D2（Phase 109）: 前回 reviewer に不合格にされた条件の理由（`context.prior_review` で
+/// `pass = false` のもの）。空欄・空白だけの理由は落とす。
+fn must_cover_items(prior_review: &[crate::protocol::PriorReview]) -> Vec<String> {
+    prior_review
+        .iter()
+        .filter(|p| !p.pass)
+        .map(|p| p.reason.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+/// ADR-0063 D2: 「必ず埋める項目」節。空なら空文字（従来どおりの問いのまま）。
+fn build_must_cover_section(items: &[String]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## 必ず埋める項目（前回の不合格理由）\n");
+    for item in items {
+        out.push_str(&format!("- {item}\n"));
+    }
+    out.push('\n');
+    out
+}
+
+/// テキストの中の `http(s)://` で始まるトークンを全て拾う（`paperqa.rs::extract_urls` と同じ決定的な
+/// トークナイズ。正規表現は使わない）。
+fn extract_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, '「' | '」' | '（' | '）' | '(' | ')' | '<' | '>' | '"' | '\'' | '　')
+    }) {
+        let trimmed = token.trim_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+/// ADR-0063 D2: 必読の一次情報の URL。目的文中の URL に加え、知識ベースの索引
+/// （`context.knowledge.index`）のうち `primary-sources` / `一次情報` タグを持つページの
+/// `sources`（前置きの出典。`celerisctl knowledge record --source` で人が付けたもの）を拾う。
+/// 重複は落とし、出現順を保つ（決定的。LLM は使わない）。
+pub fn must_read_urls(
+    objective: &str,
+    knowledge: Option<&crate::protocol::KnowledgeContext>,
+) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for url in extract_urls(objective) {
+        if seen.insert(url.clone()) {
+            out.push(url);
+        }
+    }
+    if let Some(k) = knowledge {
+        for item in &k.index {
+            let is_primary = item.tags.iter().any(|t| {
+                let t = t.to_ascii_lowercase();
+                t.contains("primary-source") || t.contains("一次情報")
+            });
+            if !is_primary {
+                continue;
+            }
+            for url in &item.sources {
+                if seen.insert(url.clone()) {
+                    out.push(url.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
 /// LDR に渡す**問い**を組み立てる。
 ///
 /// 実機で分かったこと（2026-09-17）: ここにタスクのタイトルの見出し（`# ...`）や役割の指示文まで入れると、
@@ -191,10 +272,18 @@ impl WorkerAdapter for LdrAdapter {
 /// LDR は受け取った問いをそのまま検索にも使うので、**素の目的だけ**を渡す。
 /// 人間の回答履歴は短い補足として後ろに付ける（検索語としての邪魔が少ない）。
 /// 役割の指示文とタイトルは `runs/<run_id>/request.json` に残るので記録は失われない。
+///
+/// ADR-0063 D2（Phase 109）: 前回 reviewer に不合格にされた run（`context.prior_review` に
+/// `pass = false` の条件がある）では、その理由を「必ず埋める項目」として先頭に置く。これも問いの
+/// 一部になる（LDR が検索にもそのまま使う）ため、次に再挑戦するときに何が足りなかったかを検索語にも
+/// 反映させる狙い。
 pub fn build_query(task: &Task, context: &RunContext) -> String {
     // ADR-0029 / Phase 19 / ADR-0033 D6（Phase 27 の監査 M-2）: 検索ハーネスに渡すのは**素の目的だけ**。
     // 役職・記憶・直近のやり取り・記憶の書式指示は載せない（問いを濁すと検索が何も返さない）。
     let mut out = String::new();
+    out.push_str(&build_must_cover_section(&must_cover_items(
+        &context.prior_review,
+    )));
     out.push_str(task.objective.trim());
     if !context.answers.is_empty() {
         out.push_str("\n\n補足（人間の回答）:");
@@ -203,6 +292,40 @@ pub fn build_query(task: &Task, context: &RunContext) -> String {
         }
     }
     out
+}
+
+/// ADR-0063 D4（Phase 109）: `settings` の値のうち秘密らしいもの（キーが `api_key` / `token` /
+/// `password` / `secret` で終わる）は `ldr_input.json` に平文で書かない。実際の値は、LDR 自身が
+/// `LDR_` + 設定キーの大文字化（`.` は `_`）で環境変数から読む規則（ADR-0031 の実測）に沿った名前の
+/// 環境変数として子プロセスに渡し、JSON にはその環境変数名へのプレースホルダ（`"<env:NAME>"`）だけを
+/// 書く。戻り値は `(JSON に書く settings, 子プロセスへ追加する env)`。
+fn redact_secret_settings(
+    settings: &std::collections::BTreeMap<String, String>,
+) -> (
+    std::collections::BTreeMap<String, String>,
+    Vec<(String, String)>,
+) {
+    fn is_secret_key(key: &str) -> bool {
+        let lower = key.to_ascii_lowercase();
+        ["api_key", "token", "password", "secret"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+    }
+    fn env_name(key: &str) -> String {
+        format!("LDR_{}", key.to_ascii_uppercase().replace('.', "_"))
+    }
+    let mut redacted = std::collections::BTreeMap::new();
+    let mut extra_env = Vec::new();
+    for (key, value) in settings {
+        if is_secret_key(key) && !value.is_empty() {
+            let name = env_name(key);
+            redacted.insert(key.clone(), format!("<env:{name}>"));
+            extra_env.push((name, value.clone()));
+        } else {
+            redacted.insert(key.clone(), value.clone());
+        }
+    }
+    (redacted, extra_env)
 }
 
 async fn run_ldr(
@@ -232,20 +355,56 @@ async fn run_ldr(
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &query, run_id).await;
 
+    // ADR-0063 D2（Phase 109）: 前回 reviewer に不合格にされた run（`attempts >= 1`）は、mode /
+    // iterations を強く（既定 `detailed` / 5 周）する。
+    let is_retry = req.task.attempts >= 1;
+    let mode = if is_retry { config.retry_mode } else { config.mode };
+    let iterations = if is_retry {
+        config.retry_iterations.or(config.iterations)
+    } else {
+        config.iterations
+    };
+    if is_retry {
+        progress::emit_status(
+            sink,
+            &format!(
+                "retrying (attempt {}); escalating to mode={} iterations={:?}",
+                req.task.attempts + 1,
+                mode.as_str(),
+                iterations
+            ),
+        );
+    }
+
+    // ADR-0063 D2: 必読の一次情報（目的文中の URL + 知識ベースの primary-sources / 一次情報 タグ）。
+    // `ldr_run.py` が LDR の検索の前に直接 fetch して sources に含める。
+    let must_read = must_read_urls(&req.task.objective, req.context.knowledge.as_ref());
+    if !must_read.is_empty() {
+        progress::emit_status(
+            sink,
+            &format!("{} must-read primary source(s)", must_read.len()),
+        );
+    }
+
     // `model` は `settings` の `llm.model` より優先する（ADR-0029 D1）。`BTreeMap` で決定的な順序にする。
     let mut settings: std::collections::BTreeMap<String, String> =
         config.settings.iter().cloned().collect();
     if let Some(model) = &config.model {
         settings.insert("llm.model".to_string(), model.clone());
     }
+    // ADR-0063 D4（Phase 109）: 秘密らしい値（`api_key`/`token`/`password`/`secret` で終わるキー）は
+    // `ldr_input.json` に平文で書かない。実際の値は子プロセスの環境変数として渡し、JSON にはその
+    // 環境変数名へのプレースホルダだけを書く（`ldr_run.py::convert_setting_value` が解決する）。
+    let (json_settings, secret_env) = redact_secret_settings(&settings);
 
     let input = serde_json::json!({
         "query": query,
-        "mode": config.mode.as_str(),
-        "settings": settings,
-        "iterations": config.iterations,
+        "mode": mode.as_str(),
+        "settings": json_settings,
+        "iterations": iterations,
         "questions_per_iteration": config.questions_per_iteration,
         "report_path": report_path.to_string_lossy(),
+        "must_read_urls": must_read,
     });
     let script_path = run_dir.join("ldr_run.py");
     let input_path = run_dir.join("ldr_input.json");
@@ -258,6 +417,7 @@ async fn run_ldr(
         .arg(&script_path)
         .arg(&input_path)
         .envs(config.env.iter().cloned())
+        .envs(secret_env)
         .current_dir(req.cwd())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -999,6 +1159,202 @@ while true; do sleep 0.1; done
         assert!(with_answers.contains("対象は? → v1.31"), "{with_answers}");
     }
 
+    /// ADR-0063 D2（Phase 109）: 前回不合格になった条件の理由が「必ず埋める項目」として問いの先頭に付く。
+    /// 合格した条件（`pass = true`）や空の理由は載せない。
+    #[test]
+    fn build_query_prepends_must_cover_items_from_a_failed_prior_review() {
+        let mut task = crate::protocol::tests::sample_task();
+        task.objective = "CHFS と FinchFS を比べよ".into();
+        let context = RunContext {
+            prior_review: vec![
+                crate::protocol::PriorReview {
+                    criterion: 0,
+                    pass: false,
+                    reason: "CHFS の一次情報（GitHub）が無い".into(),
+                },
+                crate::protocol::PriorReview {
+                    criterion: 1,
+                    pass: true,
+                    reason: "満たしている".into(),
+                },
+                crate::protocol::PriorReview {
+                    criterion: 2,
+                    pass: false,
+                    reason: "  ".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let query = build_query(&task, &context);
+        assert!(query.starts_with("## 必ず埋める項目"), "{query}");
+        assert!(query.contains("CHFS の一次情報（GitHub）が無い"), "{query}");
+        assert!(!query.contains("満たしている"), "{query}");
+        assert!(query.trim_end().ends_with("CHFS と FinchFS を比べよ"), "{query}");
+
+        // prior_review が全部合格、または空なら従来どおり素の目的だけ。
+        let all_passed = RunContext {
+            prior_review: vec![crate::protocol::PriorReview {
+                criterion: 0,
+                pass: true,
+                reason: "ok".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(build_query(&task, &all_passed), task.objective);
+    }
+
+    /// ADR-0063 D2: 必読の一次情報 = 目的文中の URL + 知識ベースの `primary-sources` / `一次情報`
+    /// タグを持つページの `sources`（そのタグを持たないページや通常の URL 以外は拾わない）。
+    #[test]
+    fn must_read_urls_collects_objective_urls_and_primary_source_tagged_knowledge_sources() {
+        let objective = "CHFS（https://github.com/otatebe/chfs）と一般的な比較資料を調べる";
+        assert_eq!(
+            must_read_urls(objective, None),
+            vec!["https://github.com/otatebe/chfs".to_string()]
+        );
+
+        let knowledge = crate::protocol::KnowledgeContext {
+            mounts: vec![],
+            index: vec![
+                task_core::KnowledgeItem {
+                    path: "projects/benchfs/primary-sources.md".into(),
+                    title: "一次情報".into(),
+                    tags: vec!["primary-sources".into()],
+                    scope: None,
+                    sources: vec![
+                        "https://github.com/tsukuba-hpcs/finchfs".into(),
+                        // 目的文の URL と重複するものは 1 回だけ。
+                        "https://github.com/otatebe/chfs".into(),
+                    ],
+                    updated: None,
+                    confidence: None,
+                },
+                task_core::KnowledgeItem {
+                    path: "environment/notes.md".into(),
+                    title: "雑記".into(),
+                    tags: vec!["environment".into()],
+                    scope: None,
+                    sources: vec!["https://example.org/should-not-appear".into()],
+                    updated: None,
+                    confidence: None,
+                },
+            ],
+        };
+        let urls = must_read_urls(objective, Some(&knowledge));
+        assert_eq!(
+            urls,
+            vec![
+                "https://github.com/otatebe/chfs".to_string(),
+                "https://github.com/tsukuba-hpcs/finchfs".to_string(),
+            ],
+            "{urls:?}"
+        );
+    }
+
+    /// ADR-0063 D4: 秘密らしいキー（`api_key`/`token`/`password`/`secret` で終わる）は
+    /// `LDR_<KEY>` の環境変数名に変換され、JSON にはプレースホルダだけが残る。それ以外の設定はそのまま。
+    #[test]
+    fn redact_secret_settings_replaces_secret_looking_values_with_env_placeholders() {
+        let mut settings = std::collections::BTreeMap::new();
+        settings.insert(
+            "llm.openai_endpoint.api_key".to_string(),
+            "sk-should-not-leak".to_string(),
+        );
+        settings.insert("llm.provider".to_string(), "openai_endpoint".to_string());
+        settings.insert(
+            "search.engine.web.tavily.api_key".to_string(),
+            "tvly-secret".to_string(),
+        );
+        let (redacted, env) = redact_secret_settings(&settings);
+        assert_eq!(
+            redacted["llm.openai_endpoint.api_key"],
+            "<env:LDR_LLM_OPENAI_ENDPOINT_API_KEY>"
+        );
+        assert_eq!(
+            redacted["search.engine.web.tavily.api_key"],
+            "<env:LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY>"
+        );
+        assert_eq!(redacted["llm.provider"], "openai_endpoint", "秘密でない値はそのまま");
+        let env_map: std::collections::BTreeMap<&str, &str> = env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        assert_eq!(
+            env_map["LDR_LLM_OPENAI_ENDPOINT_API_KEY"],
+            "sk-should-not-leak"
+        );
+        assert_eq!(
+            env_map["LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY"],
+            "tvly-secret"
+        );
+        assert_eq!(env.len(), 2, "秘密でない設定は env に足さない");
+    }
+
+    /// ADR-0063 D2: `attempts >= 1` の run は `mode`/`iterations` を再挑戦用の値に上げる。
+    /// `ldr_input.json` にも `must_read_urls` が入る。秘密（`api_key`）は JSON に平文で残らない。
+    #[tokio::test]
+    async fn retry_run_escalates_mode_and_iterations_and_redacts_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_ldr(
+            dir.path(),
+            "cp \"$2\" \"$(dirname \"$0\")/seen_input.json\"\n\
+             mkdir -p artifacts && echo hi > artifacts/report.md\n\
+             echo 'CELERIS_RESULT {\"summary\": \"ok\", \"sources\": 0}'\n",
+        );
+        config.settings = vec![(
+            "llm.openai_endpoint.api_key".to_string(),
+            "sk-should-not-leak".to_string(),
+        )];
+        config.evidence = EvidenceThresholds {
+            min_search_results: 0,
+            min_sources: 0,
+            min_cited: 0,
+            min_domains: 0,
+        };
+        let adapter = LdrAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.task.objective = "CHFS（https://github.com/otatebe/chfs）を調べる".to_string();
+        req.task.attempts = 1;
+        req.context.prior_review.push(crate::protocol::PriorReview {
+            criterion: 0,
+            pass: false,
+            reason: "CHFS の一次情報が出典に無い".to_string(),
+        });
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-retry", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+
+        let input_path = dir.path().join("seen_input.json");
+        let input_text = std::fs::read_to_string(&input_path).unwrap();
+        let seen: serde_json::Value = serde_json::from_str(&input_text).unwrap();
+        assert_eq!(seen["mode"], "detailed");
+        assert_eq!(seen["iterations"], 5);
+        assert_eq!(
+            seen["must_read_urls"],
+            serde_json::json!(["https://github.com/otatebe/chfs"])
+        );
+        assert!(
+            seen["query"]
+                .as_str()
+                .unwrap()
+                .starts_with("## 必ず埋める項目"),
+            "{seen}"
+        );
+        assert_eq!(
+            seen["settings"]["llm.openai_endpoint.api_key"],
+            "<env:LDR_LLM_OPENAI_ENDPOINT_API_KEY>"
+        );
+        assert!(
+            !input_text.contains("sk-should-not-leak"),
+            "秘密が ldr_input.json に平文で残ってはいけない: {input_text}"
+        );
+        let progress = sink.progress.lock().unwrap().join("\n");
+        assert!(progress.contains("retrying (attempt 2)"), "{progress}");
+    }
+
     /// 入力 JSON の組み立てを argv 経由で確認する: `query`/`mode`/`settings`（`model` が `llm.model` を
     /// 上書き）/`iterations`/`questions_per_iteration`/`report_path`（ADR-0029 D1）。
     #[tokio::test]
@@ -1434,6 +1790,109 @@ print(json.dumps([mod.convert_setting_value(c) for c in cases]))
                 "plain",
             ])
         );
+    }
+
+    /// ADR-0063 D4（Phase 109）: `convert_setting_value` は `"<env:...>"` プレースホルダを環境変数
+    /// から解決してから型変換する。未設定なら空文字（値としては安全側）。
+    #[test]
+    fn runner_convert_setting_value_resolves_env_placeholders() {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
+            eprintln!("skipping: python3 not available");
+            return;
+        };
+        if !python.status.success() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r#"
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+os.environ["CELERIS_TEST_LDR_KEY"] = "real-secret-value"
+print(json.dumps([
+    mod.convert_setting_value("<env:CELERIS_TEST_LDR_KEY>"),
+    mod.convert_setting_value("<env:CELERIS_TEST_LDR_MISSING>"),
+    mod.resolve_env_placeholder("plain-string"),
+    mod.resolve_env_placeholder(42),
+]))
+"#;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let values: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(
+            values,
+            serde_json::json!(["real-secret-value", "", "plain-string", 42])
+        );
+    }
+
+    /// ADR-0063 D2/D3（Phase 109）: 必読の一次情報を `sources` の末尾に足す（既存の URL は重複させ
+    /// ない。既存の `[n]` 引用番号を崩さないよう先頭には差し込まない）。`fetch_title` は注入するので
+    /// ネットワークには出ない。
+    #[test]
+    fn runner_add_must_read_sources_appends_new_urls_without_touching_existing_citation_numbers() {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
+            eprintln!("skipping: python3 not available");
+            return;
+        };
+        if !python.status.success() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r#"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+result = {"summary": "A [1].", "sources": [{"link": "https://a.example.com/x", "title": "A"}]}
+added = mod.add_must_read_sources(
+    result,
+    ["https://github.com/otatebe/chfs", "https://a.example.com/x", ""],
+    lambda u: "T:" + u,
+)
+print(json.dumps({"added": added, "sources": result["sources"]}))
+"#;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["added"], 1, "既存の URL と空文字は数えない: {v}");
+        let sources = v["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 2, "{v}");
+        assert_eq!(sources[0]["link"], "https://a.example.com/x", "元の [1] のまま先頭: {v}");
+        assert_eq!(sources[1]["link"], "https://github.com/otatebe/chfs", "{v}");
+        assert_eq!(sources[1]["title"], "T:https://github.com/otatebe/chfs", "{v}");
     }
 
     // --- ADR-0031 D2: 決定的な証拠ゲート ---

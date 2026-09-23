@@ -99,3 +99,10 @@ min_domains = 2           # 出典の異なるドメイン数
    使えない」という実測は、この前提で読み直す必要がある**（少なくとも 0 件系はこれが原因の可能性が高い）。
    この切り分けができたのは D2 のゲートが「0 件なのに done」を止めていたからである。
 5. `cargo test --workspace` / `cargo clippy --workspace --all-targets -- -D warnings` / GUI の検査一式。
+
+## 関連（ADR-0063 追記、2026-09-23）
+
+reviewer 不合格で再試行になった run の `mode`/`iterations` を強くする仕組み・`prior_review` の
+「必ず埋める項目」化・必読の一次情報（知識ベースの `primary-sources`/`一次情報` タグ）の強制注入・
+`ldr_input.json` から秘密の平文を除く対応は **ADR-0063** に書いた（本 ADR の D2 の証拠ゲート自体は
+変えていない）。

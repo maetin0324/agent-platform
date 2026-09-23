@@ -5138,6 +5138,13 @@ impl Dispatcher {
         ) {
             tracing::warn!(task_id = %task.id, "{note}");
         }
+        // ADR-0063 D3（Phase 109）: 調査系（literature/web-research）の受け入れ条件に部分達成の
+        // 逃げ道が無ければ**警告**（拒否はしない。決定的、LLM は使わない）。
+        for note in
+            task_core::warn_missing_partial_ok(plan, task, org, &self.config.roles, &self.config.genres)
+        {
+            tracing::warn!(task_id = %task.id, "{note}");
+        }
     }
 
     /// Phase 33（ADR-0033 D4 追記）: `node_id` の直近の仕事（対話・まとめ・承認・レビューは除く）を
@@ -11974,6 +11981,7 @@ mod tests {
                 workspace: None,
                 category: None,
                 labels: Vec::new(),
+                partial_ok: None,
             }],
         };
         d.fix_plan_for_harness(&plan_parent, &mut plan, &[]);

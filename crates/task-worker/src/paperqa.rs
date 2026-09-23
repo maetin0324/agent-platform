@@ -106,6 +106,12 @@ pub struct AcquireConfig {
     /// 計算機科学以外の分野で使うときだけ書き換える。
     #[serde(default)]
     pub openalex_filter: Option<String>,
+    /// ADR-0063 D1（Phase 109）: 本文（PDF）が取れない候補は**アブストラクトで妥協する**（既定 `true`）。
+    /// OpenAlex / arXiv / Unpaywall / Semantic Scholar のメタデータにある abstract をテキスト文書として
+    /// corpus に入れる（`<key>_abstract.txt`。本文ではないことを明記した注記付き）。`false` にすると
+    /// Phase 108 までどおり、PDF が無い候補は corpus に入らない。
+    #[serde(default = "default_abstract_fallback")]
+    pub abstract_fallback: bool,
 }
 
 impl Default for AcquireConfig {
@@ -121,6 +127,7 @@ impl Default for AcquireConfig {
             query_model: None,
             query_timeout_secs: default_query_timeout_secs(),
             openalex_filter: None,
+            abstract_fallback: default_abstract_fallback(),
         }
     }
 }
@@ -143,6 +150,9 @@ fn default_query_llm() -> bool {
 fn default_query_timeout_secs() -> u64 {
     300
 }
+fn default_abstract_fallback() -> bool {
+    true
+}
 
 /// `[adapters.paperqa.evidence]`（ADR-0035 D3）: 決定的な証拠ゲートの閾値（ADR-0031 D2 の literature 版）。
 /// ハーネス（このアダプタ）が取得の結果と答えの引用を機械的に見る（LLM に判断させない）。
@@ -159,6 +169,13 @@ pub struct PaperQaEvidence {
     /// 答えが引用した出典の数の下限。
     #[serde(default = "default_min_cited")]
     pub min_cited: u32,
+    /// ADR-0063 D1（Phase 109）: 閾値未達（`min_cited` 等）を hard error にするか（既定 `false`）。
+    /// `false`（既定）なら証拠不足でも `Terminal::Done` にし、`research.json` の `evidence` と
+    /// `answer.md` の「証拠の質」節に内訳と代替案を書いて reviewer / 受け入れ条件の判断に委ねる。
+    /// `true` にすると Phase 108 までどおり `Terminal::Error{retryable: true}`。
+    /// 取得が 0 件（検索経路の問題）は、この設定に関係なく常に hard error のまま。
+    #[serde(default)]
+    pub insufficient_is_error: bool,
 }
 
 impl Default for PaperQaEvidence {
@@ -167,6 +184,7 @@ impl Default for PaperQaEvidence {
             min_candidates: default_min_candidates(),
             min_pdfs: default_min_pdfs(),
             min_cited: default_min_cited(),
+            insufficient_is_error: false,
         }
     }
 }
@@ -311,6 +329,87 @@ pub fn project_key(task: &Task) -> String {
     } else {
         safe
     }
+}
+
+/// ADR-0063 D1（Phase 109）: 起点の資料（目的文や `inputs` に含まれる URL）の種類。決定的な分類
+/// （LLM は使わない）。`Pdf` / `Doi` / `Arxiv` は取得ランナーに渡して論文として取り込み、`Github` は
+/// 「一次情報（実装）」として `answer.md` の参照節に載せる（corpus には入れない）。`Other` は何もしない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeedUrlKind {
+    Pdf,
+    Doi,
+    Arxiv,
+    Github,
+    Other,
+}
+
+impl SeedUrlKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            SeedUrlKind::Pdf => "pdf",
+            SeedUrlKind::Doi => "doi",
+            SeedUrlKind::Arxiv => "arxiv",
+            SeedUrlKind::Github => "github",
+            SeedUrlKind::Other => "other",
+        }
+    }
+}
+
+/// ADR-0063 D1: 目的文や `inputs` から拾った 1 件の起点 URL。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedUrl {
+    pub url: String,
+    pub kind: SeedUrlKind,
+}
+
+/// URL を種類ごとに分類する（決定的。ADR-0063 D1）。
+pub fn classify_seed_url(url: &str) -> SeedUrlKind {
+    let lower = url.to_ascii_lowercase();
+    let without_query = lower.split(['?', '#']).next().unwrap_or(&lower);
+    if lower.contains("arxiv.org") {
+        SeedUrlKind::Arxiv
+    } else if lower.contains("github.com") || lower.contains("gitlab.com") {
+        SeedUrlKind::Github
+    } else if lower.contains("doi.org/") {
+        SeedUrlKind::Doi
+    } else if without_query.ends_with(".pdf") {
+        SeedUrlKind::Pdf
+    } else {
+        SeedUrlKind::Other
+    }
+}
+
+/// テキストの中の `http(s)://` で始まるトークンを全て拾う（決定的、正規表現は使わない。ADR-0063 D1）。
+/// 前後の日本語の括弧・句読点や引用符は落とす。
+pub fn extract_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in text.split(|c: char| {
+        c.is_whitespace() || matches!(c, '「' | '」' | '（' | '）' | '(' | ')' | '<' | '>' | '"' | '\'' | '　')
+    }) {
+        let trimmed = token.trim_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+/// 起点の資料（目的文 + `inputs` の `path`）から seed URL を集める（重複排除、出現順。ADR-0063 D1）。
+pub fn extract_seed_urls(objective: &str, inputs: &[task_core::ArtifactRef]) -> Vec<SeedUrl> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    let mut candidates: Vec<String> = extract_urls(objective);
+    for input in inputs {
+        candidates.extend(extract_urls(&input.path));
+    }
+    for url in candidates {
+        if seen.insert(url.clone()) {
+            let kind = classify_seed_url(&url);
+            out.push(SeedUrl { url, kind });
+        }
+    }
+    out
 }
 
 /// 依頼文（`objective`）から検索語を決定的に作る（ADR-0035 D1 手順 1。**LLM は使わない**）。
@@ -576,6 +675,13 @@ pub struct Candidate {
     pub pdf_downloaded: bool,
     #[serde(default)]
     pub source_engine: String,
+    /// ADR-0063 D1（Phase 109）: メタデータの abstract（OpenAlex / arXiv / Semantic Scholar）。
+    #[serde(default, rename = "abstract")]
+    pub abstract_text: String,
+    /// ADR-0063 D1: `true` なら corpus に入っているのは本文ではなくこの abstract（`file` はその
+    /// テキストファイル）。`pdf_downloaded` と排他（両方 true にはならない）。
+    #[serde(default)]
+    pub abstract_only: bool,
 }
 
 /// 取得の段の結果（`CELERIS_ACQUIRE` の中身）。
@@ -583,6 +689,8 @@ pub struct Candidate {
 struct AcquireCounts {
     candidates: u32,
     pdfs: u32,
+    /// ADR-0063 D1（Phase 109）: 本文が取れず abstract で corpus に入れた件数。
+    abstracts: u32,
 }
 
 /// 子プロセスの標準出力を 1 行ずつ読み、生存監視（壁時計・無出力）を行う（両方の段で共用）。
@@ -725,6 +833,7 @@ async fn run_acquire(
     run_dir: &Path,
     artifacts_dir: &Path,
     paper_directory: &Path,
+    seed_urls: &[SeedUrl],
 ) -> Result<(AcquireCounts, Option<Terminal>), AdapterError> {
     // ADR-0035 D5（Phase 36）: 検索語はランナーの中で LLM が立てる。ここで作るのは
     // **LLM の答えが壊れていたときの受け皿**（Phase 34 までの決定的な抽出）。
@@ -757,13 +866,23 @@ async fn run_acquire(
 
     let script_path = run_dir.join("paperqa_acquire.py");
     let input_path = run_dir.join("acquire_input.json");
+    // ADR-0063 D4（Phase 109）: `acquire_input.json` はワーカー/レビュアーが読める run ディレクトリに
+    // 平文で残る（権限 664）。API キーの実際の値はここには書かず、子プロセスの環境変数（`.envs(config.env)`
+    // で既に渡っている）だけで受け渡す。JSON にはプレースホルダだけを書く（`paperqa_acquire.py` の
+    // `resolve_env_placeholder` が解決する）。
+    let api_key_placeholder = env_value(config, "OPENAI_API_KEY").map(|_| "<env:OPENAI_API_KEY>".to_string());
+    let seed_urls_json: Vec<serde_json::Value> = seed_urls
+        .iter()
+        .filter(|s| matches!(s.kind, SeedUrlKind::Pdf | SeedUrlKind::Doi | SeedUrlKind::Arxiv))
+        .map(|s| serde_json::json!({"url": s.url, "kind": s.kind.as_str()}))
+        .collect();
     let input = serde_json::json!({
         "queries": queries,
         "query_llm": {
             "enabled": model.is_some(),
             "model": model,
             "base_url": env_value(config, "OPENAI_BASE_URL"),
-            "api_key": env_value(config, "OPENAI_API_KEY"),
+            "api_key": api_key_placeholder,
             "timeout_secs": config.acquire.query_timeout_secs,
             "max_tokens": QUERY_LLM_MAX_TOKENS,
             "max_queries": MAX_LLM_SEARCH_QUERIES,
@@ -779,6 +898,8 @@ async fn run_acquire(
         "per_query": config.acquire.per_query,
         "timeout_secs": config.acquire.timeout_secs,
         "mailto": config.acquire.mailto,
+        "abstract_fallback": config.acquire.abstract_fallback,
+        "seed_urls": seed_urls_json,
     });
     tokio::fs::write(&script_path, ACQUIRE_SCRIPT).await?;
     let input_text = serde_json::to_string_pretty(&input)?;
@@ -852,6 +973,7 @@ async fn run_acquire(
                         counts = Some(AcquireCounts {
                             candidates: number("candidates"),
                             pdfs: number("pdfs"),
+                            abstracts: number("abstracts"),
                         });
                     }
                     Err(e) => warn!("run {run_id}: could not parse CELERIS_ACQUIRE line: {e}"),
@@ -884,8 +1006,8 @@ async fn run_acquire(
     progress::emit_status(
         sink,
         &format!(
-            "acquire: {} candidate(s), {} PDF(s) in the corpus",
-            counts.candidates, counts.pdfs
+            "acquire: {} candidate(s), {} PDF(s), {} abstract(s) in the corpus",
+            counts.candidates, counts.pdfs, counts.abstracts
         ),
     );
     Ok((counts, None))
@@ -1014,8 +1136,74 @@ fn render_sources_section(candidates: &[(Candidate, bool)]) -> String {
         if !url.is_empty() {
             parts.push(url.clone());
         }
-        let marker = if *cited { " (引用)" } else { "" };
+        let marker = match (*cited, candidate.abstract_only) {
+            (true, true) => " (引用・アブストのみ)",
+            (true, false) => " (引用)",
+            (false, _) => "",
+        };
         out.push_str(&format!("[{}] {}{}\n", index + 1, parts.join(". "), marker));
+    }
+    out
+}
+
+/// `answer.md` に足す「一次情報（実装）」節（ADR-0063 D1）。目的文中の GitHub / GitLab の URL は
+/// PaperQA の corpus には入れず（論文ではないため）、参照節に載せるだけ。
+fn render_primary_sources_section(urls: &[String]) -> String {
+    if urls.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\n## 一次情報（実装）\n\n");
+    for url in urls {
+        out.push_str(&format!("- {url}\n"));
+    }
+    out
+}
+
+/// ADR-0063 D1: `research.json` の `evidence`（`insufficient_is_error` の値に関わらず、acquire が
+/// 動いた run では必ず書く）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+struct EvidenceSummary {
+    cited: u32,
+    cited_fulltext: u32,
+    cited_abstract_only: u32,
+    min_cited: u32,
+    insufficient: bool,
+}
+
+/// `evidence_gate` の結果。`error` が `Some` なら run は `Terminal::Error{retryable: true}`
+/// （検索が 0 件、または `insufficient_is_error = true` で閾値未達）。`summary` は常に埋まる
+/// （`research.json` に書く。ADR-0063 D1）。
+struct EvidenceGateResult {
+    error: Option<String>,
+    summary: EvidenceSummary,
+}
+
+/// `artifacts/research.json` を書く（ADR-0063 D1。取得の段が動いた run では常に書く）。
+async fn write_research_json(path: &Path, summary: &EvidenceSummary, run_id: &str) {
+    let value = serde_json::json!({ "evidence": summary });
+    match serde_json::to_string_pretty(&value) {
+        Ok(text) => {
+            if let Err(e) = tokio::fs::write(path, format!("{text}\n")).await {
+                warn!("run {run_id}: could not write artifacts/research.json: {e}");
+            }
+        }
+        Err(e) => warn!("run {run_id}: could not serialize artifacts/research.json: {e}"),
+    }
+}
+
+/// `answer.md` に足す「証拠の質」節（ADR-0063 D1: 本文 / アブストのみの内訳を必ず書く）。
+fn render_evidence_section(summary: &EvidenceSummary) -> String {
+    let mut out = String::from("\n\n## 証拠の質\n\n");
+    out.push_str(&format!(
+        "- 引用された出典: {} 件（本文からの引用: {} 件、アブストラクトのみ: {} 件）\n",
+        summary.cited, summary.cited_fulltext, summary.cited_abstract_only
+    ));
+    if summary.insufficient {
+        out.push_str(&format!(
+            "- 証拠不足（cited={} < min {}）。代替案: Web 調査（`web-research` / Local Deep Research）に \
+             切り替えるか、人が著者版 PDF の URL を与えてください。\n",
+            summary.cited, summary.min_cited
+        ));
     }
     out
 }
@@ -1036,12 +1224,14 @@ async fn run_paperqa(
     let artifacts_dir = req.artifacts_dir.clone();
     let artifacts_rel = req.artifacts_rel();
     // ADR-0035 D5: `queries.json`（どの検索語で探したか）も前回の残りを消す。
+    // ADR-0063 D1（Phase 109）: `research.json`（証拠の内訳）も同様。
     for stale in [
         "result.json",
         "answer.md",
         "papers.json",
         "sources.json",
         "queries.json",
+        "research.json",
     ] {
         let _ = tokio::fs::remove_file(artifacts_dir.join(stale)).await;
     }
@@ -1050,6 +1240,20 @@ async fn run_paperqa(
     // ADR-0023 D2 / M1: この run で何を渡したかを残す。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &question, run_id).await;
+
+    // ADR-0063 D1: 起点の資料（目的文 + `inputs` の URL）。PDF / DOI / arXiv は取得ランナーへの seed に、
+    // GitHub / GitLab は「一次情報（実装）」として答えの参照節に載せる（corpus には入れない）。
+    let seed_urls = extract_seed_urls(&req.task.objective, &req.task.inputs);
+    let fetchable_seeds: Vec<SeedUrl> = seed_urls
+        .iter()
+        .filter(|s| matches!(s.kind, SeedUrlKind::Pdf | SeedUrlKind::Doi | SeedUrlKind::Arxiv))
+        .cloned()
+        .collect();
+    let github_urls: Vec<String> = seed_urls
+        .iter()
+        .filter(|s| s.kind == SeedUrlKind::Github)
+        .map(|s| s.url.clone())
+        .collect();
 
     // ADR-0035 D1 / D2: corpus も索引も**案件ごと**（同じ案件の別タスク・リトライで使い回せる。
     // ADR-0027 D3 の「索引はタスクごと」からの変更）。
@@ -1087,6 +1291,7 @@ async fn run_paperqa(
             &run_dir,
             &artifacts_dir,
             &absolute_papers,
+            &fetchable_seeds,
         )
         .await?;
         if let Some(terminal) = timeout {
@@ -1205,13 +1410,42 @@ async fn run_paperqa(
                 (c, cited)
             })
             .collect();
-        let cited_count = marked.iter().filter(|(_, cited)| *cited).count() as u32;
+        // ADR-0063 D1: 本文からの引用とアブストのみの引用を区別する（`research.json` / `answer.md` の
+        // 「証拠の質」節に内訳を書くため）。
+        let cited_fulltext = marked
+            .iter()
+            .filter(|(c, cited)| *cited && c.pdf_downloaded)
+            .count() as u32;
+        let cited_abstract_only = marked
+            .iter()
+            .filter(|(c, cited)| *cited && c.abstract_only)
+            .count() as u32;
         if acquiring {
             write_sources_json(&artifacts_dir.join("sources.json"), &marked, run_id).await;
         }
 
+        // ADR-0063 D1: 決定的な証拠ゲート（LLM には判断させない）。取得の段を行わない構成では見ない。
+        let evidence = if acquiring {
+            Some(evidence_gate(
+                &config.evidence,
+                acquired,
+                cited_fulltext,
+                cited_abstract_only,
+            ))
+        } else {
+            None
+        };
+        if let Some(ev) = &evidence {
+            write_research_json(&artifacts_dir.join("research.json"), &ev.summary, run_id).await;
+        }
+
         let answer_md = if acquiring {
-            format!("{answer}{}", render_sources_section(&marked))
+            let mut body = format!("{answer}{}", render_sources_section(&marked));
+            if let Some(ev) = &evidence {
+                body.push_str(&render_evidence_section(&ev.summary));
+            }
+            body.push_str(&render_primary_sources_section(&github_urls));
+            body
         } else {
             answer.clone()
         };
@@ -1220,7 +1454,7 @@ async fn run_paperqa(
         }
         // 書いたものは celeris にも知らせる（run の成果物一覧と `Check::ArtifactExists` の解決に使われる）。
         // 他のアダプタではワーカー自身が `artifact` メッセージで申告するが、pqa は申告しないのでアダプタが行う。
-        // ADR-0035 D3: ゲートに落ちても成果物は残す（人が読めるように）ので、申告はゲートより前に行う。
+        // ADR-0035 D3 / ADR-0063 D1: ゲートに落ちても成果物は残す（人が読めるように）ので、申告はゲートより前に行う。
         // ADR-0036 D4: 申告する `path` は workspace 相対のまま（`artifacts_dir` 基準で組む）。
         let mut to_register: Vec<(&str, String, &str)> = vec![(
             "answer.md",
@@ -1244,6 +1478,12 @@ async fn run_paperqa(
                 format!("{artifacts_rel}/queries.json"),
                 "json",
             ));
+            // ADR-0063 D1: 証拠の質の内訳。
+            to_register.push((
+                "research.json",
+                format!("{artifacts_rel}/research.json"),
+                "json",
+            ));
         }
         for (name, rel_path, kind) in to_register {
             if !req.workspace.join(&rel_path).is_file() {
@@ -1255,12 +1495,7 @@ async fn run_paperqa(
             }
         }
 
-        // ADR-0035 D3: 決定的な証拠ゲート（LLM には判断させない）。取得の段を行わない構成では見ない。
-        let gate_message = if acquiring {
-            evidence_gate(&config.evidence, acquired, cited_count)
-        } else {
-            None
-        };
+        let gate_message = evidence.as_ref().and_then(|ev| ev.error.clone());
 
         if let Some(message) = gate_message {
             // ADR-0031 D2 と同じ: retryable な `Terminal::Error`。供給側の失敗（`AdapterError`）にはしない。
@@ -1308,23 +1543,51 @@ async fn run_paperqa(
     })
 }
 
-/// ADR-0035 D3: 閾値を満たさなければメッセージを返す（満たせば `None`）。
+/// ADR-0035 D3 / ADR-0063 D1: 証拠の内訳を集計し、閾値未達をどう扱うか決める。
+///
+/// - 取得が 0 件（`acquired.candidates == 0`）は「検索経路の問題」を示す固有のメッセージで**常に**
+///   hard error（`insufficient_is_error` に関わらず）。
+/// - それ以外の閾値未達（`min_candidates` / `min_pdfs` / `min_cited`）は、`insufficient_is_error`
+///   が `true` のときだけ hard error。既定（`false`）では `summary.insufficient = true` のまま
+///   `error = None` を返し、呼び出し側は `Terminal::Done` にして reviewer / 受け入れ条件に委ねる
+///   （`research.json` の `evidence` と `answer.md` の「証拠の質」節で内訳を残す）。
 fn evidence_gate(
     thresholds: &PaperQaEvidence,
     acquired: AcquireCounts,
-    cited: u32,
-) -> Option<String> {
+    cited_fulltext: u32,
+    cited_abstract_only: u32,
+) -> EvidenceGateResult {
+    let cited = cited_fulltext + cited_abstract_only;
     let enabled =
         thresholds.min_candidates > 0 || thresholds.min_pdfs > 0 || thresholds.min_cited > 0;
     if !enabled {
-        return None;
+        return EvidenceGateResult {
+            error: None,
+            summary: EvidenceSummary {
+                cited,
+                cited_fulltext,
+                cited_abstract_only,
+                min_cited: thresholds.min_cited,
+                insufficient: false,
+            },
+        };
     }
     if acquired.candidates == 0 {
         // 「論文が見つからなかった」と「検索経路が壊れている」を運用者が区別できるようにする
         // （ADR-0031 D2 と同じ理由）。
-        return Some(
-            "literature search returned nothing (possible network or API problem)".to_string(),
-        );
+        return EvidenceGateResult {
+            error: Some(
+                "literature search returned nothing (possible network or API problem)"
+                    .to_string(),
+            ),
+            summary: EvidenceSummary {
+                cited,
+                cited_fulltext,
+                cited_abstract_only,
+                min_cited: thresholds.min_cited,
+                insufficient: true,
+            },
+        };
     }
     let mut problems = Vec::new();
     if thresholds.min_candidates > 0 && acquired.candidates < thresholds.min_candidates {
@@ -1342,13 +1605,24 @@ fn evidence_gate(
     if thresholds.min_cited > 0 && cited < thresholds.min_cited {
         problems.push(format!("cited={cited} (min {})", thresholds.min_cited));
     }
-    if problems.is_empty() {
-        None
-    } else {
+    let insufficient = !problems.is_empty();
+    let error = if insufficient && thresholds.insufficient_is_error {
         Some(format!(
             "insufficient literature evidence: {}",
             problems.join(", ")
         ))
+    } else {
+        None
+    };
+    EvidenceGateResult {
+        error,
+        summary: EvidenceSummary {
+            cited,
+            cited_fulltext,
+            cited_abstract_only,
+            min_cited: thresholds.min_cited,
+            insufficient,
+        },
     }
 }
 
@@ -2163,6 +2437,80 @@ while true; do sleep 0.1; done
         assert!(build_search_queries("   ").is_empty());
     }
 
+    /// ADR-0063 D1: URL の種類分け（PDF / DOI / arXiv / GitHub / それ以外）は決定的。
+    #[test]
+    fn classify_seed_url_recognizes_pdf_doi_arxiv_and_github() {
+        assert_eq!(
+            classify_seed_url("https://arxiv.org/abs/2101.00001"),
+            SeedUrlKind::Arxiv
+        );
+        assert_eq!(
+            classify_seed_url("https://github.com/otatebe/chfs"),
+            SeedUrlKind::Github
+        );
+        assert_eq!(
+            classify_seed_url("https://gitlab.com/foo/bar"),
+            SeedUrlKind::Github
+        );
+        assert_eq!(
+            classify_seed_url("https://doi.org/10.1109/CHFS"),
+            SeedUrlKind::Doi
+        );
+        assert_eq!(
+            classify_seed_url("https://example.org/paper.pdf?download=1"),
+            SeedUrlKind::Pdf
+        );
+        assert_eq!(
+            classify_seed_url("https://example.org/blog/post"),
+            SeedUrlKind::Other
+        );
+    }
+
+    /// ADR-0063 D1: 目的文中の URL をトークナイズして拾う（日本語の括弧・句読点は落とす）。
+    #[test]
+    fn extract_urls_pulls_http_tokens_out_of_japanese_text() {
+        let text = "一次情報は（https://github.com/otatebe/chfs）と \
+             https://doi.org/10.1109/CHFS.2022.1 を参照。arXiv は https://arxiv.org/abs/2101.00001v1 。";
+        let urls = extract_urls(text);
+        assert_eq!(
+            urls,
+            vec![
+                "https://github.com/otatebe/chfs".to_string(),
+                "https://doi.org/10.1109/CHFS.2022.1".to_string(),
+                "https://arxiv.org/abs/2101.00001v1".to_string(),
+            ]
+        );
+    }
+
+    /// ADR-0063 D1: 起点の資料の集約。重複は落とし、出現順を保つ（目的文 + `inputs` の path）。
+    #[test]
+    fn extract_seed_urls_dedupes_objective_and_inputs() {
+        let inputs = vec![task_core::ArtifactRef {
+            name: "primary".into(),
+            path: "https://github.com/tsukuba-hpcs/finchfs (see also https://arxiv.org/abs/2101.00001)"
+                .into(),
+            sha256: String::new(),
+            kind: "text".into(),
+        }];
+        let seeds = extract_seed_urls(
+            "CHFS (https://github.com/otatebe/chfs) と https://arxiv.org/abs/2101.00001 を調べる",
+            &inputs,
+        );
+        let urls: Vec<&str> = seeds.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://github.com/otatebe/chfs",
+                "https://arxiv.org/abs/2101.00001",
+                "https://github.com/tsukuba-hpcs/finchfs",
+            ],
+            "重複（arxiv の URL）は 1 回だけ"
+        );
+        assert_eq!(seeds[0].kind, SeedUrlKind::Github);
+        assert_eq!(seeds[1].kind, SeedUrlKind::Arxiv);
+        assert_eq!(seeds[2].kind, SeedUrlKind::Github);
+    }
+
     /// corpus と索引の鍵は案件（`project_id`）。案件が無ければ `_shared`（ADR-0035 D1）。
     #[test]
     fn project_key_uses_the_project_id_or_shared() {
@@ -2235,7 +2583,8 @@ while true; do sleep 0.1; done
         assert!(!answer_cites("unrelated text", &arxiv));
     }
 
-    /// ゲートの閾値の見方（ADR-0035 D3）。
+    /// ゲートの閾値の見方（ADR-0035 D3 / ADR-0063 D1）。既定は `insufficient_is_error = false` なので、
+    /// 閾値未達でも `error` は `None`（`summary.insufficient` は `true` になる）。
     #[test]
     fn evidence_gate_counts_candidates_pdfs_and_citations() {
         let thresholds = PaperQaEvidence::default();
@@ -2244,34 +2593,66 @@ while true; do sleep 0.1; done
             PaperQaEvidence {
                 min_candidates: 5,
                 min_pdfs: 3,
-                min_cited: 2
+                min_cited: 2,
+                insufficient_is_error: false,
             }
         );
-        assert!(
-            evidence_gate(
-                &thresholds,
-                AcquireCounts {
-                    candidates: 6,
-                    pdfs: 3
-                },
-                2
-            )
-            .is_none()
+        let ok = evidence_gate(
+            &thresholds,
+            AcquireCounts {
+                candidates: 6,
+                pdfs: 3,
+                abstracts: 0,
+            },
+            2,
+            0,
         );
-        let message = evidence_gate(
+        assert!(ok.error.is_none());
+        assert!(!ok.summary.insufficient);
+        assert_eq!(ok.summary.cited, 2);
+
+        // 既定（insufficient_is_error = false）: 閾値未達でも hard error にはしない。
+        let soft = evidence_gate(
             &thresholds,
             AcquireCounts {
                 candidates: 4,
                 pdfs: 1,
+                abstracts: 0,
+            },
+            0,
+            1,
+        );
+        assert!(soft.error.is_none(), "{:?}", soft.error);
+        assert!(soft.summary.insufficient);
+        assert_eq!(soft.summary.cited, 1);
+        assert_eq!(soft.summary.cited_fulltext, 0);
+        assert_eq!(soft.summary.cited_abstract_only, 1);
+        assert_eq!(soft.summary.min_cited, 2);
+
+        // `insufficient_is_error = true`（Phase 108 までの挙動）: 実数と閾値入りのメッセージで hard error。
+        let strict = PaperQaEvidence {
+            insufficient_is_error: true,
+            ..thresholds
+        };
+        let hard = evidence_gate(
+            &strict,
+            AcquireCounts {
+                candidates: 4,
+                pdfs: 1,
+                abstracts: 0,
             },
             1,
-        )
-        .unwrap();
+            0,
+        );
+        let message = hard.error.unwrap();
         assert!(message.contains("candidates=4 (min 5)"), "{message}");
         assert!(message.contains("pdfs=1 (min 3)"), "{message}");
         assert!(message.contains("cited=1 (min 2)"), "{message}");
-        // 0 件は別メッセージ（検索経路の問題と区別する）。
-        let zero = evidence_gate(&thresholds, AcquireCounts::default(), 0).unwrap();
+
+        // 0 件は別メッセージ（検索経路の問題と区別する）。`insufficient_is_error` に関わらず常に hard error。
+        let zero = evidence_gate(&thresholds, AcquireCounts::default(), 0, 0)
+            .error
+            .unwrap();
         assert!(
             zero.contains("literature search returned nothing"),
             "{zero}"
@@ -2281,8 +2662,11 @@ while true; do sleep 0.1; done
             min_candidates: 0,
             min_pdfs: 0,
             min_cited: 0,
+            insufficient_is_error: true,
         };
-        assert!(evidence_gate(&off, AcquireCounts::default(), 0).is_none());
+        let disabled = evidence_gate(&off, AcquireCounts::default(), 0, 0);
+        assert!(disabled.error.is_none());
+        assert!(!disabled.summary.insufficient);
     }
 
     /// ADR-0035 D2 / D4: 取得 → pqa の順に起動し、成果物 3 つを申告し、`answer.md` の末尾に `## 出典` が付き、
@@ -2354,15 +2738,29 @@ while true; do sleep 0.1; done
         // 決定的な検索語だけで検索する。
         assert_eq!(input["query_llm"]["enabled"], false, "{input}");
 
-        // 3. 成果物 4 つの申告（ADR-0035 D5: `queries.json` も）
+        // 3. 成果物 5 つの申告（ADR-0035 D5: `queries.json`、ADR-0063 D1: `research.json` も）
         let artifacts = sink.artifacts.lock().unwrap();
         let names: Vec<&str> = artifacts.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["answer.md", "papers.json", "sources.json", "queries.json"],
+            vec![
+                "answer.md",
+                "papers.json",
+                "sources.json",
+                "queries.json",
+                "research.json"
+            ],
             "{names:?}"
         );
         drop(artifacts);
+
+        // ADR-0063 D1: 閾値を満たしているので `research.json` の証拠は「不足なし」。
+        let research: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(research["evidence"]["cited"], 2, "{research}");
+        assert_eq!(research["evidence"]["insufficient"], false, "{research}");
 
         // 4. `cited` の突き合わせ（答えが引用した 2 件だけ true）
         let sources: serde_json::Value = serde_json::from_str(
@@ -2415,20 +2813,66 @@ while true; do sleep 0.1; done
             "引用されていないものは後ろ: {}",
             lines[2]
         );
+        // ADR-0063 D1: 「証拠の質」節が付く（閾値を満たしているので「証拠不足」の注記は無い）。
+        assert!(answer_md.contains("## 証拠の質"), "{answer_md}");
+        assert!(!answer_md.contains("証拠不足"), "{answer_md}");
 
         assert!(dir.path().join("artifacts/result.json").is_file());
         assert!(dir.path().join("runs/run-a1/acquire.stdout.log").is_file());
+    }
+
+    /// ADR-0063 D1: 目的文中の起点 URL は種類ごとに扱いが分かれる — PDF / DOI / arXiv は取得ランナーへの
+    /// `seed_urls` に渡し、GitHub は corpus に入れず `answer.md` の「一次情報（実装）」節に載せる。
+    #[tokio::test]
+    async fn seed_urls_split_between_the_acquire_runner_and_the_primary_sources_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_pqa_with_acquire(
+            dir.path(),
+            &format!("cat >/dev/null\nprintf 'Answer: {STUB_ANSWER}\\n'\n"),
+            &acquire_stub_script(6, 3),
+        );
+        let adapter = PaperQaAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.task.objective = "CHFS（https://github.com/otatebe/chfs）の関連研究として \
+             https://arxiv.org/abs/2101.00001 と https://doi.org/10.1109/CHFS.2022.1 を調べる"
+            .to_string();
+        let sink = RecordingSink::default();
+        adapter
+            .run(req, "run-a1b", default_limits(), &sink)
+            .await
+            .unwrap();
+
+        let input: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("runs/run-a1b/acquire_input.json")).unwrap(),
+        )
+        .unwrap();
+        let seed_urls = input["seed_urls"].as_array().unwrap();
+        let kinds: Vec<&str> = seed_urls
+            .iter()
+            .map(|s| s["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["arxiv", "doi"], "GitHub は渡さない: {input}");
+
+        let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
+        assert!(answer_md.contains("## 一次情報（実装）"), "{answer_md}");
+        assert!(
+            answer_md.contains("https://github.com/otatebe/chfs"),
+            "{answer_md}"
+        );
     }
 
     /// ADR-0035 D3: 閾値に足りなければ `Error{retryable}`。**成果物は残す**（`artifacts/result.json` は書かない）。
     #[tokio::test]
     async fn gate_rejects_short_evidence_but_keeps_the_artifacts() {
         let dir = tempfile::tempdir().unwrap();
-        let config = stub_pqa_with_acquire(
+        let mut config = stub_pqa_with_acquire(
             dir.path(),
             &format!("cat >/dev/null\nprintf 'Answer: {STUB_ANSWER}\\n'\n"),
             &acquire_stub_script(3, 1),
         );
+        // ADR-0063 D1: 既定（`insufficient_is_error = false`）では hard error にならないので、
+        // Phase 108 までの挙動（`true`）を明示して確かめる。
+        config.evidence.insufficient_is_error = true;
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -2454,9 +2898,15 @@ while true; do sleep 0.1; done
         assert!(dir.path().join("artifacts/answer.md").is_file());
         assert!(dir.path().join("artifacts/papers.json").is_file());
         assert!(dir.path().join("artifacts/sources.json").is_file());
-        // 成果物の申告はゲートより前に行うので、落ちても 4 件（`queries.json` を含む）申告される。
+        // 成果物の申告はゲートより前に行うので、落ちても 5 件（`queries.json` / `research.json` を含む）申告される。
         assert!(dir.path().join("artifacts/queries.json").is_file());
-        assert_eq!(sink.artifacts.lock().unwrap().len(), 4);
+        assert!(dir.path().join("artifacts/research.json").is_file());
+        assert_eq!(sink.artifacts.lock().unwrap().len(), 5);
+        let research: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(research["evidence"]["insufficient"], true, "{research}");
         // ワーカープロトコル上は done ではないので `artifacts/result.json` は書かない。
         assert!(!dir.path().join("artifacts/result.json").exists());
         // 供給側の失敗にはしない（プロバイダを cooldown にする話ではない）。
@@ -2511,6 +2961,7 @@ while true; do sleep 0.1; done
             min_candidates: 0,
             min_pdfs: 0,
             min_cited: 0,
+            insufficient_is_error: false,
         };
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -3005,6 +3456,185 @@ print(json.dumps(out))
         assert!(!corpus.join("roe2021_arxiv-2101-00001v1.pdf").exists());
     }
 
+    // ------------------------------------------------ ADR-0063 D1 (Phase 109)
+
+    /// ランナーの純粋な部分（`resolve_env_placeholder` / seed の分類と組み立て / Unpaywall・
+    /// Semantic Scholar の応答の読み方 / abstract のテキスト整形）を python3 で直接確認する
+    /// （ネットワーク無し）。
+    #[test]
+    fn runner_abstract_fallback_and_oa_lookup_helpers_are_deterministic() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("paperqa_acquire.py");
+        std::fs::write(&script_path, ACQUIRE_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("acq", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+out = {}
+
+# 秘密は環境変数から解決し、それ以外の文字列はそのまま通す（ADR-0063 D4）。
+os.environ["CELERIS_TEST_KEY"] = "real-secret-value"
+out["placeholder_resolved"] = mod.resolve_env_placeholder("<env:CELERIS_TEST_KEY>")
+out["placeholder_missing"] = mod.resolve_env_placeholder("<env:CELERIS_TEST_NOT_SET>")
+out["placeholder_passthrough"] = mod.resolve_env_placeholder("unused")
+out["placeholder_none"] = mod.resolve_env_placeholder(None)
+
+# seed の分類と組み立て。
+out["seed_arxiv_id"] = mod.seed_arxiv_id("https://arxiv.org/abs/2101.00001v2")
+out["seed_doi"] = mod.seed_doi("https://doi.org/10.1109/CHFS.2022.1")
+progress = []
+out["seed_arxiv"] = mod.candidate_from_seed({"url": "https://arxiv.org/abs/2101.00001", "kind": "arxiv"}, progress.append)
+out["seed_doi_candidate"] = mod.candidate_from_seed({"url": "https://doi.org/10.1/x", "kind": "doi"}, progress.append)
+out["seed_pdf"] = mod.candidate_from_seed({"url": "https://example.org/paper.pdf", "kind": "pdf"}, progress.append)
+out["seed_github_is_none"] = mod.candidate_from_seed({"url": "https://github.com/otatebe/chfs", "kind": "github"}, progress.append) is None
+out["seed_no_url_is_none"] = mod.candidate_from_seed({"url": "", "kind": "pdf"}, progress.append) is None
+out["seed_progress_count"] = len(progress)
+
+# Unpaywall / Semantic Scholar の応答の読み方（決定的、HTTP は出ない）。
+out["unpaywall_pdf"] = mod.parse_unpaywall(json.dumps({"best_oa_location": {"url_for_pdf": "https://good.example/x.pdf"}}))
+out["unpaywall_none"] = mod.parse_unpaywall(json.dumps({"best_oa_location": {}}))
+s2_pdf, s2_title, s2_abstract, s2_year, s2_authors = mod.parse_semantic_scholar(json.dumps({
+    "title": "T", "abstract": "A", "year": 2021, "authors": [{"name": "Jane Roe"}],
+    "openAccessPdf": {"url": "https://s2.example/y.pdf"},
+}))
+out["s2"] = [s2_pdf, s2_title, s2_abstract, s2_year, s2_authors]
+
+# アブストのテキスト整形（本文でないことを明記する）。
+text = mod.abstract_document_text({"title": "T", "authors": ["A"], "year": 2020, "doi": "10.1/x", "abstract": "the abstract"})
+out["abstract_marks_not_full_text"] = "abstract only" in text
+out["abstract_has_text"] = "the abstract" in text
+print(json.dumps(out))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["placeholder_resolved"], "real-secret-value");
+        assert_eq!(v["placeholder_missing"], "");
+        assert_eq!(v["placeholder_passthrough"], "unused");
+        assert_eq!(v["placeholder_none"], serde_json::Value::Null);
+
+        assert_eq!(v["seed_arxiv_id"], "2101.00001v2");
+        assert_eq!(v["seed_doi"], "10.1109/CHFS.2022.1");
+        assert_eq!(v["seed_arxiv"]["arxiv_id"], "2101.00001");
+        assert_eq!(v["seed_arxiv"]["pdf_url"], "https://arxiv.org/pdf/2101.00001");
+        assert_eq!(v["seed_arxiv"]["source_engine"], "seed:arxiv");
+        assert_eq!(v["seed_doi_candidate"]["doi"], "10.1/x");
+        assert_eq!(v["seed_doi_candidate"]["url"], "https://doi.org/10.1/x");
+        assert_eq!(v["seed_pdf"]["pdf_url"], "https://example.org/paper.pdf");
+        assert_eq!(v["seed_github_is_none"], true, "{v}");
+        assert_eq!(v["seed_no_url_is_none"], true, "{v}");
+        assert_eq!(v["seed_progress_count"], 3, "{v}");
+
+        assert_eq!(v["unpaywall_pdf"], "https://good.example/x.pdf");
+        assert_eq!(v["unpaywall_none"], "");
+        assert_eq!(
+            v["s2"],
+            serde_json::json!(["https://s2.example/y.pdf", "T", "A", 2021, ["Jane Roe"]])
+        );
+
+        assert_eq!(v["abstract_marks_not_full_text"], true, "{v}");
+        assert_eq!(v["abstract_has_text"], true, "{v}");
+    }
+
+    /// エンドツーエンド（`--fixture`）: 本文が取れない候補は abstract で妥協し（`_abstract.txt` を
+    /// corpus に書き、`abstract_only = true`）、DOI がある候補は Unpaywall 経由で OA PDF が見つかれば
+    /// それを使う（ADR-0063 D1）。**ネットワークには出ない**。
+    #[test]
+    fn runner_falls_back_to_the_abstract_and_finds_an_oa_pdf_via_unpaywall() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = dir.path().join("fixture");
+        std::fs::create_dir_all(&fixture).unwrap();
+        // 1 件目: OpenAlex は PDF の URL を持たないが、DOI があるので Unpaywall で見つかる。
+        // 2 件目: 見つからず、要旨があるので abstract で妥協する。
+        std::fs::write(
+            fixture.join("openalex-1.json"),
+            r#"{"results": [
+  {"id": "https://openalex.org/W1", "doi": "https://doi.org/10.1/found",
+   "title": "Found via Unpaywall", "publication_year": 2021,
+   "primary_location": {"source": {"display_name": "J"}},
+   "abstract_inverted_index": {"Found": [0], "via": [1], "Unpaywall": [2]},
+   "best_oa_location": {}, "open_access": {}, "authorships": [{"author": {"display_name": "Jane Roe"}}]},
+  {"id": "https://openalex.org/W2", "doi": "https://doi.org/10.1/notfound",
+   "title": "Only An Abstract", "publication_year": 2022,
+   "primary_location": {"source": {"display_name": "J"}},
+   "abstract_inverted_index": {"Only": [0], "an": [1], "abstract": [2]},
+   "best_oa_location": {}, "open_access": {}, "authorships": [{"author": {"display_name": "Max Mustermann"}}]}
+]}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.join("unpaywall-1.json"),
+            r#"{"best_oa_location": {"url_for_pdf": "https://oa.example/found.pdf"}}"#,
+        )
+        .unwrap();
+        std::fs::write(fixture.join("unpaywall-2.json"), r#"{"best_oa_location": {}}"#).unwrap();
+        // Semantic Scholar のフォールバック（`{"results": []}`）は `parse_semantic_scholar` が
+        // 空の値として安全に読めるので、専用のフィクスチャは要らない。
+        std::fs::write(fixture.join("pdf-found.pdf"), b"%PDF-1.4\nfound\n").unwrap();
+
+        let dir_path = dir.path().to_path_buf();
+        let corpus = dir_path.join("papers/_shared");
+        let input = serde_json::json!({
+            "queries": ["ad hoc file system"],
+            "paper_directory": corpus.to_string_lossy(),
+            "papers_path": dir_path.join("artifacts/papers.json").to_string_lossy(),
+            "sources_path": dir_path.join("artifacts/sources.json").to_string_lossy(),
+            "max_candidates": 30,
+            "max_pdfs": 5,
+            "per_query": 20,
+            "mailto": "who@example.org",
+            "abstract_fallback": true,
+        });
+        let stdout = run_acquire_runner(&dir_path, &input, &fixture);
+        let counts = acquire_counts(&stdout);
+        assert_eq!(counts["pdfs"], 1, "{counts}");
+        assert_eq!(counts["abstracts"], 1, "{counts}");
+
+        let candidates: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string(dir_path.join("artifacts/papers.json")).unwrap(),
+        )
+        .unwrap();
+        let found = candidates
+            .iter()
+            .find(|c| c["title"] == "Found via Unpaywall")
+            .unwrap();
+        assert_eq!(found["pdf_downloaded"], true, "{found}");
+        assert_eq!(found["pdf_url"], "https://oa.example/found.pdf", "{found}");
+        assert_eq!(found["abstract_only"], false, "{found}");
+
+        let abstract_only = candidates
+            .iter()
+            .find(|c| c["title"] == "Only An Abstract")
+            .unwrap();
+        assert_eq!(abstract_only["pdf_downloaded"], false, "{abstract_only}");
+        assert_eq!(abstract_only["abstract_only"], true, "{abstract_only}");
+        let abstract_file = abstract_only["file"].as_str().unwrap();
+        assert!(abstract_file.ends_with("_abstract.txt"), "{abstract_file}");
+        let text = std::fs::read_to_string(corpus.join(abstract_file)).unwrap();
+        assert!(text.contains("full text could not be retrieved"), "{text}");
+        assert!(text.contains("Only an abstract"), "{text}");
+    }
+
     // ------------------------------------------------ Phase 36 / ADR-0035 D5
 
     /// LiteLLM の `provider/model` の接頭辞だけを落とす（`chat/completions` に渡すのは口が出している名前）。
@@ -3086,7 +3716,10 @@ print(json.dumps(out))
                 "OPENAI_BASE_URL".to_string(),
                 "http://127.0.0.1:18000/v1".to_string(),
             ),
-            ("OPENAI_API_KEY".to_string(), "unused".to_string()),
+            (
+                "OPENAI_API_KEY".to_string(),
+                "sk-should-not-leak-in-json".to_string(),
+            ),
         ];
         let adapter = PaperQaAdapter::new(config);
         let mut req = sample_req(dir.path().to_path_buf());
@@ -3100,10 +3733,9 @@ print(json.dumps(out))
             .await
             .unwrap();
 
-        let input: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(dir.path().join("runs/run-a6/acquire_input.json")).unwrap(),
-        )
-        .unwrap();
+        let input_path = dir.path().join("runs/run-a6/acquire_input.json");
+        let input_text = std::fs::read_to_string(&input_path).unwrap();
+        let input: serde_json::Value = serde_json::from_str(&input_text).unwrap();
         let llm = &input["query_llm"];
         assert_eq!(llm["enabled"], true, "{input}");
         assert_eq!(
@@ -3111,7 +3743,14 @@ print(json.dumps(out))
             "settings の llm から供給者の接頭辞を落として渡す: {input}"
         );
         assert_eq!(llm["base_url"], "http://127.0.0.1:18000/v1");
-        assert_eq!(llm["api_key"], "unused");
+        // ADR-0063 D4（Phase 109）: 実際のキーは JSON に書かない。プレースホルダだけ
+        // （実際の値は子プロセスの環境変数として渡っている。`paperqa_acquire.py` の
+        // `resolve_env_placeholder` が解決する）。
+        assert_eq!(llm["api_key"], "<env:OPENAI_API_KEY>");
+        assert!(
+            !input_text.contains("sk-should-not-leak-in-json"),
+            "秘密が acquire_input.json に平文で残ってはいけない: {input_text}"
+        );
         assert_eq!(llm["max_queries"], 6);
         assert_eq!(llm["timeout_secs"], 300);
         assert_eq!(input["request"]["title"], req.task.title);

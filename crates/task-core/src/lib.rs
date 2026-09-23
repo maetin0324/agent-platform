@@ -117,6 +117,7 @@ pub use org::{
 };
 pub use plan::{
     MAX_PLAN_DEPTH, NewTask, NewTaskKind, PlanError, PlanLimits, PlanOutput, fix_harness_artifacts,
+    warn_missing_partial_ok,
 };
 pub use report::{
     COMPACTION_ROLE, Report, ReportFilter, ReportId, ReportKind, ReportStore, ReportsLive,

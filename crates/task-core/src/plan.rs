@@ -88,6 +88,12 @@ pub struct NewTask {
     /// **ハーネス**と呼ぶので、計画はどちらの名前で書いてもよい。両方書いたら `genre` が勝つ。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// ADR-0063 D3（Phase 109）: 調査系（`literature`/`web-research`）の子に対する
+    /// 「一次情報で確認できなかった項目は『未確認』と明記されていれば不合格の理由にしない」の宣言。
+    /// `acceptance` の文面に同義の一文を書く代わりにこのフラグだけで満たせる（`warn_missing_partial_ok`
+    /// が見る）。それ以外の分野では無視される。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_ok: Option<bool>,
 }
 
 impl NewTask {
@@ -412,6 +418,63 @@ pub fn fix_harness_artifacts(
     warnings
 }
 
+/// 調査系（`literature` / `web-research`）の子タスクの genre id（ADR-0063 D3。決め打ち。分野が
+/// 増えたら足す）。
+const RESEARCH_GENRES: [&str; 2] = ["literature", "web-research"];
+
+/// ADR-0063 D3（Phase 109）: 「一次情報で確認できなかった項目は『未確認』と明記されていれば不合格の
+/// 理由にしない」の一文（キーワードでの近似判定: `未確認` または `対象ごと`）も `partial_ok: true` も
+/// 無い調査系の子タスクに**警告**を出す（**拒否はしない**。実装は決定的、LLM は使わない）。
+///
+/// `resolve_child_defaults` で決まる分野が `RESEARCH_GENRES` に含まれない子・`partial_ok = Some(true)`
+/// の子・受け入れ条件のどれかにキーワードを含む子には触れない。
+pub fn warn_missing_partial_ok(
+    plan: &PlanOutput,
+    parent: &Task,
+    org: &[OrgNode],
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (index, t) in plan.tasks.iter().enumerate() {
+        if t.partial_ok == Some(true) {
+            continue;
+        }
+        let resolved = resolve_child_defaults(
+            parent,
+            ChildSpec {
+                genre: t.genre.as_deref(),
+                role: t.role.as_deref(),
+                tier: t.tier,
+                assignee: t.assignee.as_deref(),
+            },
+            org,
+            roles,
+            genres,
+        );
+        let Some(genre_id) = resolved.genre.as_deref() else {
+            continue;
+        };
+        if !RESEARCH_GENRES.contains(&genre_id) {
+            continue;
+        }
+        let has_marker = t
+            .acceptance
+            .iter()
+            .any(|c| c.text.contains("未確認") || c.text.contains("対象ごと"));
+        if has_marker {
+            continue;
+        }
+        warnings.push(format!(
+            "plan tasks[{index}] ({}): genre {genre_id:?} は調査系だが、受け入れ条件に「一次情報で \
+             確認できなかった項目は『未確認』と明記されていれば不合格の理由にしない」（または同義の文） \
+             も `partial_ok: true` も無い。1 件の欠落で全体を落とさないよう見直すことを勧める",
+            t.title
+        ));
+    }
+    warnings
+}
+
 /// 検証済みの `PlanOutput` から子タスクを組み立てる（ADR-0007 D2, ADR-0028 D3）。`validate` を通した
 /// plan だけを渡すこと（`genre`/`role` の不整合は既に無いという前提で、ここではエラーを返さない）。
 /// `tier` / `adapter` / `budget` と分野は、委譲（`materialize_delegated`）と同じ決め方
@@ -599,6 +662,7 @@ mod tests {
             workspace: None,
             category: None,
             labels: Vec::new(),
+            partial_ok: None,
         }
     }
 
@@ -1219,6 +1283,64 @@ mod tests {
         let warnings = fix_harness_artifacts(&mut plan, &parent(), &org, &roles, &genres);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(plan, before);
+    }
+
+    /// ADR-0063 D3（Phase 109）: 調査系（literature/web-research）の子で、受け入れ条件に
+    /// 「未確認」等の一文も `partial_ok: true` も無ければ**警告**（拒否はしない。plan は変更されない）。
+    #[test]
+    fn warn_missing_partial_ok_flags_research_children_without_the_escape_hatch() {
+        let (org, roles, genres) = harness_setup();
+        let mut t = new_task("CHFS の関連研究", vec![]);
+        t.assignee = Some("research-literature".into());
+        t.acceptance = vec![Criterion {
+            text: "CHFS/FinchFS/GekkoFS/UnifyFS の関連研究をまとめている".into(),
+            check: Check::Reviewer,
+        }];
+        let plan = PlanOutput { tasks: vec![t] };
+        let before = plan.clone();
+        let warnings = warn_missing_partial_ok(&plan, &parent(), &org, &roles, &genres);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("literature"), "{}", warnings[0]);
+        assert!(warnings[0].contains("未確認"), "{}", warnings[0]);
+        // 拒否はしない: plan はそのまま。
+        assert_eq!(plan, before);
+    }
+
+    /// 逃げ道（受け入れ条件の一文、または `partial_ok: true`）があれば警告しない。coding のような
+    /// 調査系でない分野は対象外。
+    #[test]
+    fn warn_missing_partial_ok_is_quiet_when_the_escape_hatch_is_present_or_the_genre_is_not_research() {
+        let (org, roles, genres) = harness_setup();
+
+        let mut with_marker = new_task("CHFS の関連研究", vec![]);
+        with_marker.assignee = Some("research-literature".into());
+        with_marker.acceptance = vec![Criterion {
+            text: "一次情報で確認できなかった項目は「未確認」と明記されていれば不合格にしない".into(),
+            check: Check::Reviewer,
+        }];
+
+        let mut with_flag = new_task("Web 調査", vec![]);
+        with_flag.genre = Some("web-research".into());
+        with_flag.partial_ok = Some(true);
+        with_flag.acceptance = vec![Criterion {
+            text: "出典付きで書く".into(),
+            check: Check::Reviewer,
+        }];
+
+        let mut coding = new_task("実装", vec![]);
+        coding.assignee = Some("coding-poc".into());
+        coding.acceptance = vec![Criterion {
+            text: "design.md がある".into(),
+            check: Check::ArtifactExists {
+                name: "design.md".into(),
+            },
+        }];
+
+        let plan = PlanOutput {
+            tasks: vec![with_marker, with_flag, coding],
+        };
+        let warnings = warn_missing_partial_ok(&plan, &parent(), &org, &roles, &genres);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     /// ADR-0028 D3: 知らない `genre`、または `genre` + `role` の不整合は Plan の失敗になる。

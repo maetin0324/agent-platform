@@ -1414,6 +1414,22 @@ pub struct LdrAdapterConfig {
     /// 意味は `task_worker::EvidenceThresholds` と同じ。
     #[serde(default)]
     pub evidence: task_worker::EvidenceThresholds,
+    /// ADR-0063 D2（Phase 109）: `attempts >= 1`（前回が reviewer 不合格）の run で使う `mode`。
+    /// 既定 `detailed`。
+    #[serde(default = "default_ldr_retry_mode")]
+    pub retry_mode: task_worker::LdrMode,
+    /// ADR-0063 D2: 同じく再挑戦の run で使う `iterations`。既定 `Some(5)`。`null` を書けば
+    /// 通常の `iterations` のまま（再挑戦でも上げない）。
+    #[serde(default = "default_ldr_retry_iterations")]
+    pub retry_iterations: Option<u32>,
+}
+
+fn default_ldr_retry_mode() -> task_worker::LdrMode {
+    task_worker::LdrMode::Detailed
+}
+
+fn default_ldr_retry_iterations() -> Option<u32> {
+    Some(5)
 }
 
 impl Default for LdrAdapterConfig {
@@ -1427,6 +1443,8 @@ impl Default for LdrAdapterConfig {
             env: HashMap::new(),
             env_from_secrets: HashMap::new(),
             evidence: task_worker::EvidenceThresholds::default(),
+            retry_mode: default_ldr_retry_mode(),
+            retry_iterations: default_ldr_retry_iterations(),
         }
     }
 }
@@ -3701,7 +3719,8 @@ host = "h"
             task_worker::PaperQaEvidence {
                 min_candidates: 5,
                 min_pdfs: 3,
-                min_cited: 2
+                min_cited: 2,
+                insufficient_is_error: false,
             }
         );
     }
@@ -3731,7 +3750,8 @@ host = "h"
             task_worker::PaperQaEvidence {
                 min_candidates: 0,
                 min_pdfs: 1,
-                min_cited: 0
+                min_cited: 0,
+                insufficient_is_error: false,
             }
         );
         // 部分指定でも残りは既定値。
@@ -3792,6 +3812,12 @@ host = "h"
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_sources, 3);
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_cited, 2);
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_domains, 2);
+        // ADR-0063 D2（Phase 109）: 再挑戦の既定値。
+        assert_eq!(
+            cfg.adapters.local_deep_research.retry_mode,
+            task_worker::LdrMode::Detailed
+        );
+        assert_eq!(cfg.adapters.local_deep_research.retry_iterations, Some(5));
     }
 
     #[test]
@@ -4082,9 +4108,12 @@ host = "h"
             task_worker::PaperQaEvidence {
                 min_candidates: 5,
                 min_pdfs: 3,
-                min_cited: 2
+                min_cited: 2,
+                insufficient_is_error: false,
             }
         );
+        // ADR-0063 D1（Phase 109）: 既定でアブストの妥協を許す。
+        assert!(cfg.adapters.paperqa.acquire.abstract_fallback);
         assert_eq!(
             cfg.adapters
                 .paperqa
@@ -4154,6 +4183,12 @@ host = "h"
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_sources, 3);
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_cited, 2);
         assert_eq!(cfg.adapters.local_deep_research.evidence.min_domains, 2);
+        // ADR-0063 D2（Phase 109）: 例の設定でも既定値を明示している。
+        assert_eq!(
+            cfg.adapters.local_deep_research.retry_mode,
+            task_worker::LdrMode::Detailed
+        );
+        assert_eq!(cfg.adapters.local_deep_research.retry_iterations, Some(5));
         let genre = cfg
             .genres
             .iter()
