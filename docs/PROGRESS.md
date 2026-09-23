@@ -16275,3 +16275,9 @@ Phase 109f の本番反映後、7 回目のやり直し（上記 2026-09-23 15:1
   `architecture-overview.md` が拾われること、(2) `answer.md` の「## BenchFS との比較分類」節に対象
   ごとの『公平比較可能』/『背景比較のみ』と確度が出ること、(3) reviewer が「BenchFS との比較分類」観点を
   合格と判定すること。
+
+### Phase 109g の本番反映（2026-09-23 16:00 UTC、ライブ切替）
+
+- merge: `worktree-agent-a9f4507b50cb99305` → main `5df5815`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1977 / failed 0）、`cargo clippy` exit 0。push 済み。
+- `release.sh main` → exit 0、`sha12=5df58158b50a schema_version=25`、`changes.json: base=d29909d81743 commits=4 files=8 sensitive=1`（`config/celeris.research.example.toml` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = d29909d81743）, 6 すべて true、`ok=true live_ok=true`。`promote.sh 5df58158b50a` → mode=live、新 celeris 2 秒で active、GUI 切替 2 秒。
+- 文献調査の 8 回目のやり直しを起動（比較分類は BenchFS の設計条件〈知識ベース〉と対象別の答えを材料に必ず二択、`primary-sources` の DOI / arXiv / PDF を種に）。結果は次節に追記。
