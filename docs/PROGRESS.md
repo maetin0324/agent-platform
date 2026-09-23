@@ -16138,3 +16138,9 @@ io_uring」が「(必要ならDAOS/Lustre)」の括弧に阻まれて落ちて�
 - `MAX_ASPECT_CANDIDATE_CHARS`（24 文字）は指示書の目安「10 文字」と意図的に一致させていない（複合語の
   観点を落とさないことを優先した判断）。もし今後さらに長いプロセの混入が観測されたら、閾値の調整では
   なく「候補が句点や助詞を含む＝文らしい」という構造的な判定に切り替えることを検討する。
+
+### Phase 109f の本番反映（2026-09-23 15:11 UTC、ライブ切替）
+
+- merge: `worktree-agent-a48062c79dbd2d540` → main `d29909d`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1970 / failed 0）、`cargo clippy` exit 0。push 済み。
+- `release.sh main` → exit 0、`sha12=d29909d81743 schema_version=25`、`changes.json: base=62cc3985c29a commits=5 files=6 sensitive=0`。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 62cc3985c29a）, 6 すべて true、`ok=true live_ok=true`。`promote.sh d29909d81743` → mode=live、新 celeris 2 秒で active、GUI 切替 2 秒。
+- 文献調査の 7 回目のやり直しを起動（6 回目と同じ明示形の目的文。抽出は最初の段落に限定、明示の「対象:」「観点:」を最優先、質問のエコーを表に貼らない）。結果は次節に追記。
