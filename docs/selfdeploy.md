@@ -478,7 +478,7 @@ scripts/selfdeploy/relocate-db.sh /var/lib/celeris/celeris.sqlite3 --dry-run   #
 scripts/selfdeploy/relocate-db.sh /var/lib/celeris/celeris.sqlite3            # 実行
 ```
 
-手順（`docs/adr/0065-db-local-disk-and-store-resilience.md` D2）:
+手順（`docs/adr/0064-db-local-disk-and-store-resilience.md` D2）:
 
 1. `GET /api/v1/tasks` の `counts_by_status`（`running` + `reviewing`）が 0 であることを確認する。
    0 でなければ何もせず止まる（待つか、`--dry-run` で様子を見てから改めて実行する）。

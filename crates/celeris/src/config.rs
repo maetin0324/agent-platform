@@ -1560,7 +1560,7 @@ fn default_db() -> PathBuf {
 /// （`[db]` に `path` と `busy_timeout_ms` / `checkpoint_interval_secs` / `backup_dir` /
 /// `backup_interval_secs` / `backup_keep` を書く）のどちらでも受け付ける。状態ディレクトリ
 /// （`~/.local/celeris`）は `/home` のままで、DB ファイルだけローカルディスクに置けるようにする
-/// のが狙い（本番で観測した I/O 遅延。`docs/adr/0065-db-local-disk-and-store-resilience.md`）。
+/// のが狙い（本番で観測した I/O 遅延。`docs/adr/0064-db-local-disk-and-store-resilience.md`）。
 #[derive(Debug, Clone, PartialEq)]
 pub struct DbConfig {
     pub path: PathBuf,
