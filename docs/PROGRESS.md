@@ -15080,3 +15080,11 @@ Phase 104（本番、2026-09-22）の delivery は merge 後 push を行わず�
 - `verify.sh a6e12d813f3b` → exit 0、check 1〜4, 4b, 5（N-1 = 5b80f99a8042）, 6（smoke 5.1s）すべて true、`ok=true live_ok=true`。
 - `promote.sh a6e12d813f3b` → mode=live、DB バックアップ 18M、新 celeris が 2 秒で active、GUI 切替 1 秒、`current -> releases/a6e12d813f3b`。`GET /health` release=a6e12d813f3b role=active schema_version=25。pegasus の ssh master は生存（4 回目の昇格をまたいだ確認）。
 - 本番で新たに有効になったもの: 自己改善の delivery は main への merge 直後・`release.sh` の前に `git push origin main`（非対話、120 秒、失敗は release 準備を止めず記録・通知・1 度だけ再試行。既定 `[selfdeploy] push = true`、`push_remote = "origin"`。本番 config は既定のまま）。受け入れは次の自己改善 delivery で origin/main が自動で進むことで確認する（親が観測して追記）。GUI の「変更」タブへの push 状態表示は提案 P-106-1。
+
+### 2026-09-23 03:50 UTC: sirius の接続がちょくちょく切れる件の調査（Phase 107 へ）
+
+- 観測: sirius は 01:01 接続 → 01:10:08 に `-O check` 失敗（約 8 分で切断）→ 人が再接続 → 03:42 に run が `mux_client_request_session: read from master failed: Broken pipe` → ssh が新規接続に倒れ `Permission denied (keyboard-interactive)` → master 消滅 → 人が再接続。pegasus は同じ期間ずっと接続維持。
+- 原因の見立て: celeris が起こす master は `ssh -o BatchMode=yes -M -N <host>` だけで keepalive 無し（`ssh -G sirius`: `serveraliveinterval 0`）。NAT / ファイアウォールの idle timeout や経路断で TCP が黙って死んでも master は気づかず、`-O check` は unix socket を見るだけなので「Master running」を返し続ける。pegasus が切れないのは `[[clusters.forwards]]` の listener probe（30 秒ごと）が master 越しの通信を常に発生させているため。sirius には forward が無い。
+- 副次的に見つけた不整合: (1) CoS の計画が BenchFS の子タスク 6 件を `remote(sirius)` で作り、担当 software-engineering ×2（tools: gh, cluster:pegasus）と web-research（tavily, exa）は D8 で sirius を使えず「no such cluster in the config; task left ready」（文言が誤解を招く）→ ready のまま放置され、D8 の warn が 2 秒ごとに出続ける（2 時間で 1,500 行超）。人には知らされない。tools 空の systems-performance / literature-research は「従来どおり許す」で実行し、死んだ master に当たって失敗・requeue。(2) Phase 103 で Drop の kill を外した結果、`cluster_login` のテストが起こす偽 ssh master（`/tmp/.tmpXXXX/ssh -M -N cluster-host`）がテスト後も残り、本番ホストに 35 プロセス（ppid 1、親の tmux scope 内）溜まっていた → 親が kill（0 に）。
+- 対応: Phase 107（ADR-0062）を Sonnet で起動。A. master に `ServerAliveInterval` 等を付け、`ssh <host> true` の実通信 probe を足し、master 終了を `ClusterMasterExited`（stderr 付き）で可視化。B. 担当に `cluster:<id>` が無い remote タスクは blocked + 人への質問（1 回）、`create_task`/plan の検証で落とす、matching は道具を持つノードだけ。C. テストの偽 ssh の後片付け。
+- 人の判断待ち: BenchFS 案件を進めるには software-engineering（と systems-performance）の tools に `cluster:sirius` を足すか、担当を cluster-hpc に寄せる必要がある。
