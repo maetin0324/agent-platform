@@ -29,7 +29,7 @@ const browser = await chromium.launch();
 const results = [];
 const record = (name, ok, note = "") => {
   results.push({ name, ok });
-  console.log(`${ok ? "PASS" : "FAIL"} ${name}${note ? ` — ${note}` : ""}`);
+  process.stdout.write(`${ok ? "PASS" : "FAIL"} ${name}${note ? ` — ${note}` : ""}` + "\n");
 };
 const isError = (page) =>
   page.locator("text=予期しないエラーが起きました").or(page.locator("text=/^エラー/")).first().isVisible();
@@ -121,5 +121,5 @@ await browser.close();
 proc.kill();
 await mock.close();
 const failed = results.filter((r) => !r.ok).length;
-console.log(`${results.length - failed}/${results.length} passed`);
+process.stdout.write(`${results.length - failed}/${results.length} passed` + "\n");
 process.exit(failed ? 1 : 0);
