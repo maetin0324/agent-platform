@@ -15893,3 +15893,10 @@ venv で `paperqa==2026.8.12` を実際に `inspect` して確認した API 面�
   venv の `python`（`paperqa` パッケージ入り）に向け、対象の取れる目的文（BenchFS の文献調査）で
   再実行し、`research.json.evidence.cited_from_contexts > 0`、`answer.md` の「# 対象別の整理」（表）、
   「## 引用された文献（contexts）」が出ることを確認する。
+
+### Phase 109d の本番反映（2026-09-23 13:50 UTC、ライブ切替）
+
+- merge: `worktree-agent-a34e04887975c335f` → main `bbd5f21`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1960 / failed 0）、`cargo clippy` exit 0（型変更なし）。push 済み。
+- `release.sh main` → exit 0、`sha12=bbd5f21188b0 schema_version=25`、`changes.json: base=3e0991661ee0 commits=4 files=8 sensitive=1`（`config/celeris.research.example.toml` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 3e0991661ee0）, 6 すべて true、`ok=true live_ok=true`。`promote.sh bbd5f21188b0` → mode=live、新 celeris 2 秒で active、GUI 切替 5 秒。
+- 本番設定: `[adapters.paperqa] command` を `.venv/bin/pqa` → `.venv/bin/python`（バックアップ `config.toml.bak-20260923k`、文献調査の run が無いことを確認して変更。venv の python が paperqa 2026.8.12 を import できることを確認）。旧値のままでも新コードは同じディレクトリの python に置き換えるが、明示した。
+- 文献調査の 4 回目のやり直しを起動（PaperQA Python API、contexts 由来の cited、対象ごとの質問、対象 × 観点の表）。結果は次節に追記。
