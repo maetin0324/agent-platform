@@ -365,6 +365,12 @@ export type Event =
       type: "cluster_unavailable";
     }
   | {
+      cluster: string;
+      exit_code?: number | null;
+      stderr_tail?: string;
+      type: "cluster_master_exited";
+    }
+  | {
       provider: string;
       /**
        * 供給側失敗の種別（ADR-0013 D9）: `throttled | auth_failed | exhausted | spawn`。

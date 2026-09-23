@@ -192,6 +192,7 @@ fn execute_one(
             workspace,
         } => create_task_action(
             store,
+            org,
             roles,
             genres,
             known_clusters,
@@ -220,20 +221,18 @@ fn execute_one(
             description,
         } => add_milestone_action(store, project, title, description),
         ConsoleAction::AskHuman { text } => ask_human_action(text),
-        // `org` は matching に使わない（D5 の matching は `assignee` 省略時にディスパッチャの
-        // `assign_if_needed` が別途走る）。ここでは `assignee` の検証だけ `add::create_task_with_roles`
-        // に任せる。
+        // 明示の `assignee` を持たない場合の担当決定（D5 の matching）は `assignee` 省略時に
+        // ディスパッチャの `assign_if_needed` が別途走る。`org` はここでは ADR-0062 B1/B3 の
+        // 「明示の assignee + 明示の remote workspace」の検証にだけ使う。
         #[allow(unreachable_patterns)]
-        _ => {
-            let _ = org;
-            Err("unknown action".to_string())
-        }
+        _ => Err("unknown action".to_string()),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn create_task_action(
     store: &dyn TaskStore,
+    org: &[OrgNode],
     roles: &[task_core::RoleSpec],
     genres: &[task_core::GenreSpec],
     known_clusters: &[String],
@@ -295,6 +294,28 @@ fn create_task_action(
                         known_clusters.join(", ")
                     }
                 ));
+            }
+            // ADR-0062 B1/B3（Phase 107）: 明示の `assignee` があり、その担当が `cluster:<id>` を
+            // 持たないなら action 全体を検証で落とす（`assignee` 省略時は matching が
+            // `cluster:<id>` を持つノードだけを候補にするので、ここでは触らない）。
+            if let Some(assignee_id) = assignee.as_deref().filter(|a| !a.trim().is_empty()) {
+                let wanted = format!("{}{cluster}", task_core::CLUSTER_TOOL_PREFIX);
+                let effective = task_core::resolve_profile(org, assignee_id);
+                if !effective.has_tool(&wanted) {
+                    let holders: Vec<&str> = org
+                        .iter()
+                        .filter(|n| task_core::resolve_profile(org, &n.id).has_tool(&wanted))
+                        .map(|n| n.id.as_str())
+                        .collect();
+                    return Err(format!(
+                        "assignee {assignee_id:?} には {wanted} が無い。{wanted} を持つノード: {}",
+                        if holders.is_empty() {
+                            "なし".to_string()
+                        } else {
+                            holders.join(", ")
+                        }
+                    ));
+                }
             }
             (Some(path.clone()), Some(cluster.clone()), *mode)
         }
@@ -738,6 +759,93 @@ mod tests {
         assert!(outcome.executed.is_empty());
         assert_eq!(outcome.failed.len(), 1);
         assert!(outcome.failed[0].reason.contains("unknown cluster"), "{:?}", outcome.failed);
+        assert!(store.list(None).unwrap().is_empty(), "何も作らない");
+    }
+
+    /// ADR-0062 B1/B3（Phase 107）: 明示の `assignee` と明示の remote workspace が両方あり、
+    /// その担当が `cluster:<id>` を持たなければ action 全体を検証で落とす（タスクは作られない）。
+    #[test]
+    fn create_task_with_an_explicit_assignee_lacking_the_cluster_tool_is_rejected() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_engineering(&store);
+        let now_t = now();
+        let org = vec![
+            OrgNode {
+                profile: Default::default(),
+                id: "cos".into(),
+                parent_id: None,
+                name: "Chief of Staff".into(),
+                kind: OrgKind::Secretary,
+                genre: None,
+                brief: String::new(),
+                position: 0,
+                created_at: now_t,
+                updated_at: now_t,
+            },
+            OrgNode {
+                profile: task_core::Profile {
+                    tools: vec!["tavily".to_string(), "exa".to_string()],
+                    ..Default::default()
+                },
+                id: "web-research".into(),
+                parent_id: Some("cos".into()),
+                name: "Web Research".into(),
+                kind: OrgKind::Department,
+                genre: None,
+                brief: String::new(),
+                position: 0,
+                created_at: now_t,
+                updated_at: now_t,
+            },
+            OrgNode {
+                profile: task_core::Profile {
+                    tools: vec!["cluster:sirius".to_string()],
+                    ..Default::default()
+                },
+                id: "cluster-hpc".into(),
+                parent_id: Some("cos".into()),
+                name: "Cluster & HPC".into(),
+                kind: OrgKind::Department,
+                genre: None,
+                brief: String::new(),
+                position: 1,
+                created_at: now_t,
+                updated_at: now_t,
+            },
+        ];
+        let task = cos_task();
+        let parsed = parse(
+            r#"{"actions":[{"type":"create_task","title":"sirius で計測","objective":"計測して",
+               "acceptance":["結果が分かる"],"assignee":"web-research",
+               "workspace":{"kind":"remote","cluster":"sirius","path":"~"}}]}"#,
+        );
+        let known_clusters = vec!["sirius".to_string()];
+        let outcome = execute(
+            &store,
+            &org,
+            &[],
+            &[],
+            &known_clusters,
+            &task,
+            "run-cluster-tool",
+            &parsed.0,
+            &parsed.1,
+            now(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(outcome.executed.is_empty());
+        assert_eq!(outcome.failed.len(), 1);
+        assert!(
+            outcome.failed[0].reason.contains("cluster:sirius"),
+            "{:?}",
+            outcome.failed
+        );
+        assert!(
+            outcome.failed[0].reason.contains("cluster-hpc"),
+            "候補ノードを挙げる: {:?}",
+            outcome.failed
+        );
         assert!(store.list(None).unwrap().is_empty(), "何も作らない");
     }
 

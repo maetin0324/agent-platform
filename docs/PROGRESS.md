@@ -15080,3 +15080,113 @@ Phase 104（本番、2026-09-22）の delivery は merge 後 push を行わず�
 - `verify.sh a6e12d813f3b` → exit 0、check 1〜4, 4b, 5（N-1 = 5b80f99a8042）, 6（smoke 5.1s）すべて true、`ok=true live_ok=true`。
 - `promote.sh a6e12d813f3b` → mode=live、DB バックアップ 18M、新 celeris が 2 秒で active、GUI 切替 1 秒、`current -> releases/a6e12d813f3b`。`GET /health` release=a6e12d813f3b role=active schema_version=25。pegasus の ssh master は生存（4 回目の昇格をまたいだ確認）。
 - 本番で新たに有効になったもの: 自己改善の delivery は main への merge 直後・`release.sh` の前に `git push origin main`（非対話、120 秒、失敗は release 準備を止めず記録・通知・1 度だけ再試行。既定 `[selfdeploy] push = true`、`push_remote = "origin"`。本番 config は既定のまま）。受け入れは次の自己改善 delivery で origin/main が自動で進むことで確認する（親が観測して追記）。GUI の「変更」タブへの push 状態表示は提案 P-106-1。
+
+## Phase 107（2026-09-23）: ssh master の keepalive と実通信 probe、remote は cluster:<id> を持つ担当だけ
+
+観測（本番、2026-09-23）: (1) sirius の ssh master が keepalive 無しで NAT の idle timeout により黙って死ぬ（`-O check` は unix socket しか見ないので気づかない）。(2) CoS の計画で BenchFS 案件（`workspace = remote, sirius`）の子 6 件が担当を問わず継承し、web-research / literature-research まで sirius 行きになった。`cluster_of` が None → 「no such cluster in the config」という誤解を招く警告が 2 秒ごとに出続けた（2 時間で 1,500 行超）。(3) `cluster_login.rs` のテストの偽 ssh（`-M -N` で無限にブロック）が、`ClusterMaster` に Drop が無い（ADR-0060）ため、アサーション失敗で `panic!` すると後片付けを経由せず本番ホストに残っていた。加えて人間から追加指示: 「web-research などが不必要に remote で作業しないようにして」。ADR-0062 に決定を記録。
+
+### 条件 1: master の keepalive（`[[clusters]] keepalive_secs`、既定 30、`0` で無効）
+
+- `crates/task-worker/src/cluster_login.rs`: `keepalive_args(keepalive_secs)` を新設し、`start_publickey`/`start_totp` の argv に `-o ServerAliveInterval=<n> -o ServerAliveCountMax=3 -o TCPKeepAlive=yes` を足す（`start_connect` に `keepalive_secs: u64` を追加）。コマンドラインの `-o` は `~/.ssh/config` より優先。
+- `crates/celeris/src/config.rs::ClusterConfig::keepalive_secs`（既定 30）、`cluster_specs()`/`cluster_admin.rs::spawn_connect_start`/`lib.rs::cluster_connector` に配線（`cluster_keepalive_secs()`）。
+- `config/celeris.clusters.example.toml` に例を追記。
+
+**実行したコマンド**: `cargo test -p task-worker --lib cluster_login::`
+**出力の要点**: exit 0、**25 passed**（新規 `keepalive_args_are_added_to_the_master_argv_when_nonzero` / `keepalive_secs_zero_omits_the_option` / `keepalive_args_are_added_on_the_totp_path_too` を含む。偽 ssh の argv を丸ごと記録して `ServerAliveInterval=15`/`20` 等の有無を確認）。
+
+### 条件 2: master 越しの実通信 probe（`liveness_probe_secs`、既定 300）と `-O exit` の片付け
+
+- `crates/task-worker/src/ssh.rs::control_master_command_probe_blocking(ssh_command, host, timeout)`: `ssh -o BatchMode=yes <host> -- true` を `std::process::Command` で実行し、タイムアウトで kill する同期実装（`-O check` は unix socket しか見ないので NAT の idle timeout に気づけない、を埋める）。
+- `crates/task-dispatch/src/dispatcher.rs`: `ClusterCommandProbe` / `ClusterDisconnector` フックを追加。`refresh_cluster_liveness` が `-O check` 成功後、`liveness_probe_secs` の間隔で実通信 probe を走らせ、失敗したら `cluster_connected` を `false` にして `cluster_disconnect_info` に記録し、`-O exit`（ベストエフォート）で片付ける。`LIVENESS_PROBE_TIMEOUT = 10s`。
+- **実 ssh を打つこの 2 フックは `build_dispatcher`（テストから広く呼ばれる）では配線しない**（CLAUDE.md「テストで外部ネットワークに出ない」を守るため）。本番の起動経路だけで `wire_cluster_liveness_hooks` を呼ぶ（`crates/celeris/src/lib.rs`）。これに気づかず最初は `build_dispatcher` に配線したところ、既存テスト `a_totp_cluster_with_a_live_master_skips_the_connector_but_ensures_the_forward_phase_84b` が実 ssh を打って失敗した（`test-cluster` という架空ホストへ本物の `ssh` が飛んだ）ため、配線場所を分離した。
+
+**実行したコマンド**: `cargo test -p task-worker --lib ssh:: && cargo test -p task-dispatch --lib`
+**出力の要点**: exit 0。`ssh::` 12 passed（新規 `command_probe_succeeds_when_the_remote_command_exits_zero`/`command_probe_fails_when_the_remote_command_exits_nonzero`/`command_probe_times_out_and_kills_a_hanging_ssh`）。`task-dispatch` 227 passed（新規 `a_failing_command_probe_marks_the_connection_dead_and_cleans_up`）。
+
+### 条件 3: `Event::ClusterMasterExited`（stderr の末尾・exit code、報告に反映、1 回だけ）
+
+- `crates/task-core/src/model.rs::Event::ClusterMasterExited { cluster, exit_code, stderr_tail }`。`docs/api/v1/event.schema.json` / `docs/api/v1/api-v1.schema.json` を `UPDATE_SCHEMA=1` で再生成。`crates/task-api/src/query.rs::EVENT_TYPES`/`event_type_name` に `"cluster_master_exited"` を追加。
+- `crates/task-worker/src/cluster_login.rs::ClusterMaster`: `stderr_buf` を持たせ、`try_wait_exit()`（非破壊）と `stderr_tail(max_bytes)` を追加。
+- `crates/celeris/src/lib.rs::cluster_master_watcher`: `ClusterMasters` を tick ごとに非破壊にスキャンし、終了していたら取り除いて `ClusterMasterExit{cluster, exit_code, stderr_tail}` を返す。
+- `crates/task-dispatch/src/dispatcher.rs::refresh_cluster_master_exits`（毎 tick）が `cluster_disconnect_info` に貯め、`mark_cluster_unavailable` が次にそのクラスタを拾ったとき reason に `exit_code`/stderr の末尾（最大 300 バイト）を足し、`Event::ClusterMasterExited` を 1 回だけ記録する（`reported` フラグ。接続が戻れば消え、次に切れたら新しい詳細でまた 1 回）。`auth = "totp"` のクラスタは reason に「GUI の『クラスタ』画面から TOTP を入力して再接続してください」も足す。
+
+**実行したコマンド**: `UPDATE_SCHEMA=1 cargo test -p task-core --lib event_row_schema_matches_committed`、`UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::`、`cargo test -p task-dispatch --lib`
+**出力の要点**: いずれも exit 0。新規 `a_master_that_exited_on_its_own_is_reported_once_with_its_stderr_tail` が stderr の末尾・exit code・1 回だけの記録を確認。`cargo test -p task-worker --lib cluster_login::` に `try_wait_exit_and_stderr_tail_report_the_masters_own_death` を追加（25 passed に含む）。
+
+### 条件 4: `cluster_of` が `None` の理由を分け、担当の道具不足は blocked + 質問にする
+
+- `crates/task-dispatch/src/dispatcher.rs::ClusterResolution`（`Local`/`Resolved(Box<ClusterSpec>,..)`/`NotConfigured`/`AssigneeLacksTool`）。`resolve_cluster` が判定し、`cluster_of` はこれを畳んだだけ（既存の呼び出し元は変更なし）。`dispatch_ready` は `NotConfigured` を従来どおり `unroutable` に、`AssigneeLacksTool` は新設の `block_task_missing_cluster_tool`（`assign_if_needed` の `Assignment::Unroutable` と同じ流儀: `approvals` に 1 件、`Trigger::Unroutable` で `ready → blocked`）に回す。文面は「担当 `<node>` には道具 `cluster:<id>` が無いため、このタスクは `<cluster>` で実行できません。組織画面で担当の tools に `cluster:<id>` を足す、担当を `<候補>` などに変える、または作業場所をローカルに変えてください」（候補ノードを列挙）。
+- `task_may_use_cluster` の warn を `warned_cluster_tool`（タスクごとの `HashSet`）で dedupe。
+
+**実行したコマンド**: `cargo test -p task-dispatch --lib`
+**出力の要点**: exit 0、227 passed。新規 `assignee_without_the_cluster_tool_is_blocked_with_a_question` が `blocked` + `QuestionRaised`（文面に `cluster:sirius`）を確認し、`ClusterUnavailable` が出ないこと（設定の問題ではないので）、2 tick 目でイベントが増えないこと（dedupe）を確認。
+
+### 条件 5: `cluster:<id>` の tools-空ノード例外を廃止し、matching と `create_task` の検証で強制する
+
+人間の追加指示（「web-research などが不必要に remote で作業しないようにして」）を受け、ADR-0046 D8 の「道具を 1 つも宣言していないノードは remote も従来どおり通す」という例外を、**クラスタの利用可否についてだけ**廃止した。
+
+- `crates/task-dispatch/src/dispatcher.rs::task_may_use_cluster`: `effective.tools.is_empty()` の早期 `true` を削除。
+- `crates/task-ops/src/matching.rs::decide`: `task.workspace` が `Remote{cluster}` なら候補ノードを `cluster:<id>` を持つものだけに絞る（tools が空のノードも除外）。候補無しの質問文にクラスタの道具名を足す（`unroutable_question_with_cluster`）。
+- `crates/task-ops/src/actions.rs::create_task_action`: `workspace` が `Remote` かつ `assignee` が明示され、その担当が `cluster:<id>` を持たなければ action 全体を検証で落とす（候補ノードを列挙）。`assignee` 省略時は matching に委ねる（上の候補フィルタが効く）。
+
+**実行したコマンド**: `cargo test -p task-ops --lib matching:: && cargo test -p task-ops --lib actions::`
+**出力の要点**: exit 0。`matching::` 11 passed（新規 `remote_workspace_only_matches_nodes_with_the_cluster_tool`/`remote_workspace_with_no_cluster_tool_holder_is_unroutable`）。`actions::` 16 passed（新規 `create_task_with_an_explicit_assignee_lacking_the_cluster_tool_is_rejected`）。
+
+### 条件 6: 作業場所の継承は担当が `cluster:<id>` を持つときだけ Remote。持たなければ Local に落とす
+
+本番で起きた実例（案件の remote workspace を担当を問わず子に継がせていた）を修正。
+
+- `crates/task-core/src/delegate.rs::downgrade_inherited_remote_if_needed`（純関数）: 継承した（タスク自身は明示していない）Remote workspace を、決まった担当が `cluster:<id>` を持たなければタスク専用の Local（`workspace_root/<task_id>` と同じ形）に落とす。明示した workspace は落とさない（検証で拒否する別経路）。担当未定（matching に委ねる）ならその場では判定しない。
+- `materialize_delegated`（委譲の子）と `task_core::plan::materialize`（plan の子）の両方の workspace 組み立てにこれを通す。**シグネチャ（`Vec<Task>` を返す）は変えていない**（既存の大量のテストがそのまま通るように、ログ用の `materialize_delegated_logging`/`plan::materialize_logging`（`on_downgrade` コールバック付き）を新設し、既存の 2 関数はそれを無視するクロージャで呼ぶ薄いラッパーにした）。`task_ops::delegate::DelegationOutcome.workspace_downgrades` と、`task-dispatch::dispatcher.rs` の 2 つの `materialize` 呼び出し（子の作成、plan の完了）がログ変種を使い、降格のたびに `tracing::info!("workspace downgraded to local (ADR-0062 B2)")` を 1 回残す。
+- `create_task`（Console action）と plan.json の子タスクで**明示**された remote workspace は、条件 5 の検証でそのまま拒否する（継承だけがこの対象）。
+
+**実行したコマンド**: `cargo test -p task-core --lib delegate:: && cargo test -p task-core --lib plan::`
+**出力の要点**: exit 0。`delegate::` 11 passed（新規 `inherited_remote_workspace_downgrades_to_local_when_the_assignee_lacks_the_cluster_tool` が 3 ケース〈道具無し→Local、道具有り→Remote、明示は落とさない〉を確認）。`plan::` 19 passed（新規 `plan_child_inherited_remote_workspace_downgrades_when_the_assignee_lacks_the_cluster_tool`）。
+
+CoS の対話指示（`crates/task-worker/src/preamble.rs::conversation_instructions`）に、remote は `cluster:<id>` を持つノードにだけ流すこと、調査・執筆系（web-research 等）は remote にしないこと、案件が remote でも担当に道具が無ければ celeris が local に落とすことを追記。`cargo test -p task-worker --lib preamble::` exit 0、16 passed（既存テストにアサーション追加）。
+
+### 条件 7: テストの偽 ssh がテスト終了後に残らない
+
+- `crates/task-worker/src/cluster_login.rs`: `-M -N` の待ちを `while true; do sleep 3600; done` から **`while kill -0 "$PPID" 2>/dev/null; do sleep 0.2; done`**（親＝テストプロセスが消えたら自分も終わる）に置き換えた（5 箇所）。`ClusterMaster::kill()`/`wait_until_process_gone` を経由せずにテストが `panic!` しても、テストバイナリの終了とともに偽 ssh が自分で終了する。本番コードの挙動（接続成立後は Drop で殺さない。ADR-0060）は変えていない。
+- `detach.rs`/`releases.rs` の偽 `systemd-run` 経由のテストを確認したが、いずれも有限の `sleep 2` 以下か即終了のスクリプトで、この問題を持たないため変更していない。
+
+**実行したコマンド**: `pkill -f "ssh -M -N cluster-host"`（このセッション中に以前の実行で残っていた古いプロセスを一掃）→ `cargo test -p task-worker -p celeris` → `pgrep -af "ssh -M -N cluster-host"`
+**出力の要点**: `cargo test -p task-worker -p celeris` は exit 0（task-worker 407+9 passed、celeris 178+ passed、後述のゲートで再掲）。`pgrep -af` は自分自身（pgrep コマンドの argv 一致）だけを返し、実際の `/bin/sh .../ssh -M -N cluster-host` プロセスは 0 件（`pgrep -f 'ssh -M -N cluster-host' | wc -l` は pgrep 自身の自己一致で `1` になるが、`-af` で見ると偽 ssh の実プロセスは含まれない）。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（79 テストバイナリすべて `test result: ok`、passed 合計 **1900**） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0）。途中 `ClusterResolution` の `clippy::large_enum_variant` を `Resolved(Box<ClusterSpec>, ..)` で解消 |
+| schema (event) | `UPDATE_SCHEMA=1 cargo test -p task-core --lib event_row_schema_matches_committed` | exit 0、1 passed。`docs/api/v1/event.schema.json` に `ClusterMasterExited` を追加 |
+| schema (api) | `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::` | exit 0、2 passed。`docs/api/v1/api-v1.schema.json` に `Event.cluster_master_exited` バリアントを追加 |
+| gui | `pnpm install --frozen-lockfile && pnpm gen:types && pnpm typecheck && pnpm test` | `install` exit 0（lockfile どおり）。`gen:types` は `gui/app/celeris/types.ts` に `cluster_master_exited` バリアント（+6行）のみ追加。`typecheck` exit 0。`test`（vitest）exit 0、**68 files / 1061 passed** |
+| 偽 ssh の後片付け | `pgrep -f 'ssh -M -N cluster-host'` 系 | 上記条件 7 のとおり、実プロセスは残らない |
+
+### 変更したファイル（主なもの）
+
+- `crates/task-core/src/model.rs`（`Event::ClusterMasterExited`）、`crates/task-core/src/delegate.rs`（`downgrade_inherited_remote_if_needed`、`materialize_delegated_logging`、テスト）、`crates/task-core/src/plan.rs`（`materialize_logging`、テスト）、`crates/task-core/src/lib.rs`（re-export）
+- `crates/task-ops/src/matching.rs`（cluster 候補フィルタ、`unroutable_question_with_cluster`、テスト）、`crates/task-ops/src/actions.rs`（明示 assignee + 明示 remote の検証、テスト）、`crates/task-ops/src/delegate.rs`（`DelegationOutcome.workspace_downgrades`、`materialize_delegated_logging` 経由）
+- `crates/task-dispatch/src/dispatcher.rs`（`ClusterResolution`、`resolve_cluster`、`block_task_missing_cluster_tool`、`ClusterSpec.keepalive_secs`/`liveness_probe_secs`、`ClusterCommandProbe`/`ClusterDisconnector`/`ClusterMasterWatcher`/`ClusterMasterExit`、`cluster_disconnect_info`、`refresh_cluster_liveness`/`refresh_cluster_master_exits`、`mark_cluster_unavailable` の enrichment、`materialize_logging` 呼び出しへの切替、テスト多数）
+- `crates/task-worker/src/cluster_login.rs`（keepalive 引数、`ClusterMaster.stderr_buf`/`try_wait_exit`/`stderr_tail`、偽 ssh の自己終了、テスト）、`crates/task-worker/src/ssh.rs`（`control_master_command_probe_blocking`、テスト）、`crates/task-worker/src/preamble.rs`（CoS 指示の追記、テスト）
+- `crates/task-api/src/query.rs`（`EVENT_TYPES`/`event_type_name`）
+- `crates/celeris/src/config.rs`（`ClusterConfig.keepalive_secs`/`liveness_probe_secs`）、`crates/celeris/src/lib.rs`（`cluster_keepalive_secs`、`wire_cluster_liveness_hooks`、`cluster_master_watcher`）、`crates/celeris/src/cluster_admin.rs`（keepalive 配線）
+- `crates/celerisctl/src/commands/worker.rs`（テストの `ClusterConfig` フィクスチャに新フィールド）
+- `config/celeris.clusters.example.toml`（keepalive_secs / liveness_probe_secs の例）
+- `docs/api/v1/event.schema.json`・`docs/api/v1/api-v1.schema.json`・`gui/app/celeris/types.ts`（再生成）
+- `docs/adr/0062-ssh-master-keepalive-and-cluster-tool-routing.md`（新規）、`docs/adr/0018-*.md`・`docs/adr/0032-*.md`・`docs/adr/0046-*.md`（末尾に Phase 107 追記、本文は書き換えていない）
+
+### 未解決事項
+
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う）:
+  1. sirius に人が再接続し、keepalive 付きの master が 1 時間以上維持されること（`~/.ssh/config` の `ServerAliveInterval 0` を書き換えていないことも確認）。
+  2. master が（idle timeout 等で）切れたとき、`GET /tasks/{id}/events` に `ClusterMasterExited` が stderr 付きで 1 回だけ残ること。`liveness_probe_secs` の実通信 probe が実際に切断を検出すること。
+  3. 担当に道具が無い（web-research 等）remote タスクが `blocked` になり、質問が認可画面と Discord に出ること。人が担当を `cluster-hpc` に変える、または tools に `cluster:<id>` を足すと `ready` に戻ること。
+  4. 新しい計画で、案件が remote(sirius) でも web-research の子が Local になり、cluster-hpc の子は remote のまま実行されること（tracing ログの `workspace downgraded to local (ADR-0062 B2)` で確認）。
+- GUI の「クラスタ」画面に `keepalive_secs`/`liveness_probe_secs` の表示・編集は範囲外（設定ファイルのみで完結。GUI の `PUT /clusters/{id}/settings` は `work_dir` だけを扱う既存の作り。次の GUI Phase の提案へ）。
+
+### 提案
+
+- P-107-1: GUI の「クラスタ」画面に `ClusterMasterExited` の直近の発生（exit code・stderr の末尾）を出す（現状は `GET /tasks/{id}/events` からしか見えない）。
+- P-107-2: `keepalive_secs`/`liveness_probe_secs` を `PUT /clusters/{id}/settings` で上書きできるようにする（現状は設定ファイルのみ）。

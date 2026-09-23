@@ -868,6 +868,17 @@ pub enum Event {
         host: String,
         reason: String,
     },
+    /// ADR-0062 A（Phase 107）: celeris が保持していた ssh master（`ClusterMaster`）のプロセスが、
+    /// 明示的な切断（`DELETE /clusters/{id}/connect`）を経ずに自分で終了した。`exit_code` は分かる
+    /// ときだけ（シグナルで落ちた場合は `None`）、`stderr_tail` は master の stderr の末尾（最大 300
+    /// バイト。ADR-0032 D4 のとおり検証コードはここには出ない）。同じ切断について 1 回だけ記録する
+    /// （`Dispatcher` 側で dedupe する。`mark_cluster_unavailable` から呼ぶ）。
+    ClusterMasterExited {
+        cluster: String,
+        exit_code: Option<i32>,
+        #[serde(default)]
+        stderr_tail: String,
+    },
     ProviderThrottled {
         provider: String,
         #[serde(with = "time::serde::rfc3339")]

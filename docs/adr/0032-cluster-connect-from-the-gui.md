@@ -188,3 +188,10 @@ D2 で「`ControlPersist` があると ssh は自分を切り離す」と訂正�
 `celeris@<sha12>` unit の cgroup に残ったままだったため、昇格のたびに systemd が道連れに殺していた
 （本番の観測）。master を celeris の cgroup の外（`systemd-run --user --scope`）で起こすようにし、
 `ClusterMaster` も接続成立後は Drop で殺さないようにした。詳細は ADR-0060。
+
+## Phase 107 追記（2026-09-23）
+
+master の keepalive（`[[clusters]] keepalive_secs`）と、master 越しの実通信による生存確定
+（`liveness_probe_secs`）、celeris が保持する master の終了検出（`Event::ClusterMasterExited`）は
+ADR-0062 を見よ。D2 で `-O check` は unix socket しか見ないと書いたことの帰結（NAT の idle timeout
+では気づけない）を埋める。

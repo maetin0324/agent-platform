@@ -537,6 +537,47 @@ pub fn control_master_alive_blocking(ssh_command: &[String], host: &str) -> bool
         .unwrap_or(false)
 }
 
+/// ADR-0062 A（Phase 107）: master 越しの実通信で生存を確定させる（`ssh -o BatchMode=yes <host> -- true`）。
+/// `control_master_alive_blocking`（`-O check`）は unix ソケットを見るだけなので、NAT / ファイアウォールの
+/// idle timeout で TCP が黙って死んでいても「Master running」を返し続ける。こちらは実際にリモートへ
+/// コマンドを 1 つ流すので確定できる。`timeout` を超えたら子を kill して `false`（`std::process::Command`
+/// を使う同期の実装。tick ループからは `run_cluster_hooks_off_async` 経由で OS スレッドに逃がして呼ぶ）。
+pub fn control_master_command_probe_blocking(
+    ssh_command: &[String],
+    host: &str,
+    timeout: Duration,
+) -> bool {
+    let Some((program, rest)) = ssh_command.split_first() else {
+        return false;
+    };
+    let mut child = match std::process::Command::new(program)
+        .args(rest)
+        .args(["-o", "BatchMode=yes", host, "--", "true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
 /// 外部コマンドを 1 つ動かし、末尾の出力と終了コードを返す（`LocalWorkspace::exec` と同じ流儀）。
 async fn run_command(args: &[String], timeout: Duration) -> Result<ExecResult, WorkspaceError> {
     let Some((program, rest)) = args.split_first() else {
@@ -753,5 +794,70 @@ mod tests {
     fn sync_always_excluded_keeps_the_legacy_taskd_alongside_celeris() {
         assert!(SYNC_ALWAYS_EXCLUDED.contains(&".taskd/"));
         assert!(SYNC_ALWAYS_EXCLUDED.contains(&".celeris/"));
+    }
+
+    // ---- ADR-0062 A（Phase 107）: 実通信 probe（`ssh -o BatchMode=yes <host> -- true`） ----
+
+    fn fake_ssh_probe(dir: &Path, script: &str) -> Vec<String> {
+        let path = dir.join("ssh");
+        crate::test_support::write_executable(&path, script);
+        vec![path.to_string_lossy().into_owned()]
+    }
+
+    #[test]
+    fn command_probe_succeeds_when_the_remote_command_exits_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = fake_ssh_probe(dir.path(), "#!/bin/sh\nexit 0\n");
+        assert!(control_master_command_probe_blocking(
+            &ssh,
+            "cluster-host",
+            Duration::from_secs(2)
+        ));
+    }
+
+    #[test]
+    fn command_probe_fails_when_the_remote_command_exits_nonzero() {
+        let dir = tempfile::tempdir().unwrap();
+        let ssh = fake_ssh_probe(dir.path(), "#!/bin/sh\nexit 255\n");
+        assert!(!control_master_command_probe_blocking(
+            &ssh,
+            "cluster-host",
+            Duration::from_secs(2)
+        ));
+    }
+
+    /// NAT の idle timeout で TCP が黙って死んだ状況を模す: ssh が応答せずハングし続ける。
+    /// `timeout` を超えたら kill されて `false` になる（ハングしたまま残らない）。
+    #[test]
+    fn command_probe_times_out_and_kills_a_hanging_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let script = format!(
+            "#!/bin/sh\necho $$ > {state:?}/pid\nwhile true; do sleep 3600; done\n",
+            state = state.path()
+        );
+        let ssh = fake_ssh_probe(dir.path(), &script);
+        let start = std::time::Instant::now();
+        assert!(!control_master_command_probe_blocking(
+            &ssh,
+            "cluster-host",
+            Duration::from_millis(300)
+        ));
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "probe must not block past the timeout"
+        );
+        let pid: u32 = std::fs::read_to_string(state.path().join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        for _ in 0..150 {
+            if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("hanging ssh process {pid} was not killed");
     }
 }

@@ -62,6 +62,16 @@ delete_on_push = false            # 既定 false。既存プロジェクトの�
 # ADR-0032 §1 実機確認: pegasus は既存の ControlMaster が生きていて未確認だが、人間の申告どおり sirius と
 # 同じ扱い（publickey の後に keyboard-interactive = TOTP が来る）にする。
 auth = "totp"                     # GUI の「接続」→ 検証コードの入力で張る（ADR-0032 D4）
+# keepalive_secs = 30             # ADR-0062 A（Phase 107）: master の argv に -o ServerAliveInterval=30
+#                                  # -o ServerAliveCountMax=3 -o TCPKeepAlive=yes を足す（既定 30 秒、0 で
+#                                  # 無効）。sirius のように ~/.ssh/config が ServerAliveInterval 0 のホストで、
+#                                  # NAT / ファイアウォールの idle timeout により TCP が黙って死ぬ事故を防ぐ。
+#                                  # コマンドラインの -o は ~/.ssh/config より優先されるので人の設定は変えない。
+# liveness_probe_secs = 300       # ADR-0062 A: master 越しの実通信（ssh -o BatchMode=yes <host> -- true）
+#                                  # による生存確認の間隔（既定 300 秒、0 で無効）。`-O check` は unix ソケット
+#                                  # を見るだけなので、NAT の idle timeout で接続が死んでいても「Master
+#                                  # running」を返し続ける。実通信で確定させ、失敗したら ssh -O exit で
+#                                  # 片付けてから再ログイン待ちにする。
 # master_launcher = "auto"        # ADR-0060: 既定 "auto"（systemd-run が PATH にあり XDG_RUNTIME_DIR が
 #                                  # 設定されていれば "systemd-run" を使う。celeris@.service の環境ならそう
 #                                  # なる）。ssh の ControlMaster を celeris の unit の cgroup の外（一時

@@ -810,7 +810,13 @@ fn conversation_instructions(context: &RunContext) -> String {
                  `~` は使わないでください（HPC のホームは作業用ではないのが普通です）。指したいクラスタの\
                  作業ディレクトリが「未登録」なら `path` を省略し（celeris が登録され次第その場所を使い\
                  ます）、返事で人に「cluster-hpc へ依頼したが、<id> クラスタの作業ディレクトリが未登録\
-                 なのでクラスタ画面で登録してほしい」のように一言添えてください。\n\n\
+                 なのでクラスタ画面で登録してほしい」のように一言添えてください。\
+                 remote の仕事は `cluster:<id>` を持つノード（クラスタ一覧の道具欄）に流してください。\
+                 持たないノードに名指しで流すと検証で落ちます。調査・執筆・分析の仕事（web-research /\
+                 literature-research / scientific-writing / experiment-data など、`cluster:<id>` を\
+                 持たないノード）は remote にしないでください。クラスタで実行する仕事だけを\
+                 `cluster:<id>` を持つノードに `workspace.mode: shared` で流してください。案件の作業場所が\
+                 remote でも、担当に道具が無ければ celeris が local に落とします（ADR-0062 B）。\n\n\
                  {}",
                 actions_instructions()
             )
@@ -1203,6 +1209,10 @@ mod tests {
         // ADR-0059 D6: `~` を既定にしない・未登録なら `path` を省略して人に登録を頼む規則が入る。
         assert!(out.contains("`~` は使わないでください"), "{out}");
         assert!(out.contains("path` を省略し"), "{out}");
+        // ADR-0062 B（Phase 107）: 持たないノードに流すと検証で落ちる、調査・執筆系は remote にしない。
+        assert!(out.contains("検証で落ちます"), "{out}");
+        assert!(out.contains("web-research"), "{out}");
+        assert!(out.contains("celeris が local に落とします"), "{out}");
 
         let other = RunContext {
             conversation_addressee: Some(ConversationAddressee::Other),

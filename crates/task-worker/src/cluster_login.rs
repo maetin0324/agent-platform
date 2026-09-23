@@ -43,6 +43,9 @@ const CHECK_POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// 明示的な切断（`DELETE /clusters/{id}/connect`）だけが [`ClusterMaster::kill`] を呼ぶ。
 pub struct ClusterMaster {
     child: Child,
+    /// ADR-0062 A（Phase 107）: master の stderr の蓄積（`spawn_master` の汲み出しタスクと共有）。
+    /// 明示的な切断を経ずに master が終了したとき、`stderr_tail` で人に見せる手がかりにする。
+    stderr_buf: Arc<Mutex<Vec<u8>>>,
 }
 
 impl std::fmt::Debug for ClusterMaster {
@@ -60,6 +63,36 @@ impl ClusterMaster {
     pub async fn kill(mut self) {
         send_signal_to_group(&self.child, Signal::SIGKILL);
         let _ = self.child.wait().await;
+    }
+
+    /// ADR-0062 A（Phase 107）: master プロセスが終了したかを非破壊に調べる（ブロックしない）。
+    /// `Some(exit_code)` なら終了済み（シグナルで落ちた場合は `exit_code == None`）。まだ生きて
+    /// いる、または既に reap 済みで判定できない場合は `None` を返す（呼び出し側は「まだ生きている」
+    /// として扱ってよい。celeris はこれを毎 tick 呼んで、終了した master をマップから取り除く）。
+    pub fn try_wait_exit(&mut self) -> Option<Option<i32>> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.code()),
+            _ => None,
+        }
+    }
+
+    /// stderr の末尾 `max_bytes` バイト（UTF-8 の文字境界を壊さない）。ADR-0032 D4 のとおり、
+    /// 検証コードは ssh の stderr にはそもそも入らない。
+    pub fn stderr_tail(&self, max_bytes: usize) -> String {
+        let buf = self
+            .stderr_buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let text = String::from_utf8_lossy(&buf);
+        if text.len() <= max_bytes {
+            return text.into_owned();
+        }
+        let mut start = text.len() - max_bytes;
+        while start < text.len() && !text.is_char_boundary(start) {
+            start += 1;
+        }
+        text[start..].to_string()
     }
 }
 
@@ -180,7 +213,10 @@ impl ClusterConnectSession {
     /// 生きている子だけを `ClusterMaster` にする。ssh が切り離した後の抜け殻を掴むと、
     /// `Drop` が既に終了したプロセスグループへ signal を送るだけの無意味な保持になる。
     fn into_master(mut self) -> Option<ClusterMaster> {
-        self.child.take().and_then(master_if_alive)
+        let stderr_buf = self.stderr_buf.clone();
+        self.child
+            .take()
+            .and_then(|child| master_if_alive(child, stderr_buf))
     }
 
     fn stderr_detail(&self) -> String {
@@ -280,6 +316,13 @@ fn launch_master_command(
 ///
 /// `cluster_id` は `SystemdRun` のときの scope unit 名にだけ使う。`launcher` は
 /// [`resolve_master_launcher`] で解決した値を渡す。
+///
+/// ADR-0062 A（Phase 107）: `keepalive_secs` が 0 でなければ、master の argv に
+/// `-o ServerAliveInterval=<keepalive_secs> -o ServerAliveCountMax=3 -o TCPKeepAlive=yes` を足す
+/// （publickey / totp 両経路）。コマンドラインの `-o` は `~/.ssh/config` より優先されるので、
+/// 人の設定を変えずに効く。sirius のように NAT / ファイアウォールの idle timeout で TCP が黙って
+/// 死ぬホストでも、OS の keepalive プローブが先に切断を検出できるようにする。
+#[allow(clippy::too_many_arguments)]
 pub async fn start_connect(
     ssh_command: &[String],
     host: &str,
@@ -288,15 +331,47 @@ pub async fn start_connect(
     interactive: bool,
     prompt_timeout: Duration,
     connect_timeout: Duration,
+    keepalive_secs: u64,
 ) -> Result<ClusterConnectStart, ClusterConnectError> {
     if check_master(ssh_command, host).await {
         return Ok(ClusterConnectStart::Connected(None));
     }
     if interactive {
-        start_totp(ssh_command, host, cluster_id, launcher, prompt_timeout).await
+        start_totp(
+            ssh_command,
+            host,
+            cluster_id,
+            launcher,
+            prompt_timeout,
+            keepalive_secs,
+        )
+        .await
     } else {
-        start_publickey(ssh_command, host, cluster_id, launcher, connect_timeout).await
+        start_publickey(
+            ssh_command,
+            host,
+            cluster_id,
+            launcher,
+            connect_timeout,
+            keepalive_secs,
+        )
+        .await
     }
+}
+
+/// ADR-0062 A: master の argv に足す keepalive の `-o` オプション（`keepalive_secs == 0` なら空）。
+fn keepalive_args(keepalive_secs: u64) -> Vec<String> {
+    if keepalive_secs == 0 {
+        return Vec::new();
+    }
+    vec![
+        "-o".to_string(),
+        format!("ServerAliveInterval={keepalive_secs}"),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
+        "-o".to_string(),
+        "TCPKeepAlive=yes".to_string(),
+    ]
 }
 
 /// 接続を切る。`ssh -O exit <host>` を `BatchMode=yes` で呼ぶ（ADR-0032 D5: `DELETE /clusters/{id}/connect`）。
@@ -328,12 +403,14 @@ pub async fn disconnect(ssh_command: &[String], host: &str) -> Result<(), Cluste
 }
 
 /// ADR-0032 D3: `auth = "publickey"`。`BatchMode=yes` で askpass を使わずに張る。
+/// ADR-0062 A: `keepalive_secs` があれば master の argv に keepalive の `-o` を足す。
 async fn start_publickey(
     ssh_command: &[String],
     host: &str,
     cluster_id: &str,
     launcher: &MasterLauncher,
     connect_timeout: Duration,
+    keepalive_secs: u64,
 ) -> Result<ClusterConnectStart, ClusterConnectError> {
     let (program, rest) = ssh_command
         .split_first()
@@ -341,6 +418,7 @@ async fn start_publickey(
     let mut args: Vec<String> = rest.to_vec();
     args.push("-o".into());
     args.push("BatchMode=yes".into());
+    args.extend(keepalive_args(keepalive_secs));
     args.push("-M".into());
     args.push("-N".into());
     args.push(host.to_string());
@@ -355,7 +433,9 @@ async fn start_publickey(
             // ssh が自分を切り離した（`ControlPersist` あり）場合、この子はもう終了している。
             // そのときは持つべき master が無い（接続は切り離された側が持っている）ので `None` を返す。
             // 切るときは `ssh -O exit` を使う（`disconnect`）。
-            Ok(ClusterConnectStart::Connected(master_if_alive(child)))
+            Ok(ClusterConnectStart::Connected(master_if_alive(
+                child, stderr_buf,
+            )))
         }
         PollOutcome::TimedOut | PollOutcome::ChildExited => {
             let detail = finish_stderr(&mut child, stderr_buf, err_task).await;
@@ -365,12 +445,14 @@ async fn start_publickey(
 }
 
 /// ADR-0032 D4: `auth = "totp"`。`SSH_ASKPASS` でプロンプトとコードを中継する。
+/// ADR-0062 A: `keepalive_secs` があれば master の argv に keepalive の `-o` を足す。
 async fn start_totp(
     ssh_command: &[String],
     host: &str,
     cluster_id: &str,
     launcher: &MasterLauncher,
     prompt_timeout: Duration,
+    keepalive_secs: u64,
 ) -> Result<ClusterConnectStart, ClusterConnectError> {
     let dir =
         make_secure_tempdir().map_err(|e| ClusterConnectError::Spawn(format!("tempdir: {e}")))?;
@@ -396,6 +478,7 @@ async fn start_totp(
         }
     };
     let mut args: Vec<String> = rest.to_vec();
+    args.extend(keepalive_args(keepalive_secs));
     args.push("-M".into());
     args.push("-N".into());
     args.push(host.to_string());
@@ -535,10 +618,10 @@ enum PollOutcome {
 /// `-O check` を `CHECK_POLL_INTERVAL` 間隔でポーリングしつつ、子の終了も同時に見る（ADR-0032 D2/D4）。
 /// 子がまだ生きていれば `ClusterMaster` として保持する。既に終了していれば `None`
 /// （ssh が `ControlPersist` で master を切り離した後。接続は生きているが、こちらに持ち物は無い）。
-fn master_if_alive(mut child: Child) -> Option<ClusterMaster> {
+fn master_if_alive(mut child: Child, stderr_buf: Arc<Mutex<Vec<u8>>>) -> Option<ClusterMaster> {
     match child.try_wait() {
         Ok(Some(_)) => None,
-        _ => Some(ClusterMaster { child }),
+        _ => Some(ClusterMaster { child, stderr_buf }),
     }
 }
 
@@ -712,7 +795,7 @@ mod tests {
             "#!/bin/sh\nSTATE={state:?}\n{preamble}\
              if [ \"$is_master\" -ge 2 ]; then\n  \
                echo $$ > \"$STATE/pid\"\n  \
-               while true; do sleep 3600; done\nfi\n\
+               while kill -0 \"$PPID\" 2>/dev/null; do sleep 0.2; done\nfi\n\
              if [ \"$is_check\" = 1 ]; then exit 1; fi\n\
              exit 1\n",
             preamble = preamble(),
@@ -727,7 +810,7 @@ mod tests {
              if [ \"$is_master\" -ge 2 ]; then\n  \
                echo $$ > \"$STATE/pid\"\n  \
                date +%s%N > \"$STATE/started\"\n  \
-               while true; do sleep 3600; done\nfi\n\
+               while kill -0 \"$PPID\" 2>/dev/null; do sleep 0.2; done\nfi\n\
              if [ \"$is_check\" = 1 ]; then\n  \
                if [ ! -f \"$STATE/started\" ]; then exit 1; fi\n  \
                started=$(cat \"$STATE/started\")\n  \
@@ -747,7 +830,7 @@ mod tests {
              if [ \"$is_master\" -ge 2 ]; then\n  \
                code=$(\"$SSH_ASKPASS\" \"{prompt}\")\n  \
                if [ \"$code\" = \"{expected_code}\" ]; then echo ok > \"$STATE/authed\"; fi\n  \
-               while true; do sleep 3600; done\nfi\n\
+               while kill -0 \"$PPID\" 2>/dev/null; do sleep 0.2; done\nfi\n\
              if [ \"$is_check\" = 1 ]; then\n  \
                if [ -f \"$STATE/authed\" ]; then exit 0; else exit 1; fi\nfi\n\
              exit 1\n",
@@ -769,6 +852,7 @@ mod tests {
             false,
             Duration::from_millis(200),
             Duration::from_secs(2),
+            0,
         )
         .await;
         match result {
@@ -798,6 +882,7 @@ mod tests {
             false,
             Duration::from_millis(200),
             Duration::from_secs(5),
+            0,
         )
         .await;
         match result {
@@ -839,6 +924,7 @@ mod tests {
             false,
             Duration::from_millis(300),
             Duration::from_secs(5),
+            0,
         )
         .await;
         match result {
@@ -875,6 +961,7 @@ mod tests {
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
+            0,
         )
         .await
         .unwrap();
@@ -937,6 +1024,7 @@ mod tests {
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
+            0,
         )
         .await
         .unwrap();
@@ -972,6 +1060,7 @@ mod tests {
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
+            0,
         )
         .await
         .unwrap();
@@ -1004,6 +1093,7 @@ mod tests {
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
+            0,
         )
         .await
         .unwrap();
@@ -1039,6 +1129,7 @@ mod tests {
                 true,
                 Duration::from_secs(5),
                 Duration::from_secs(5),
+                0,
             )
             .await
             .unwrap();
@@ -1075,6 +1166,7 @@ mod tests {
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
+            0,
         )
         .await
         .unwrap();
@@ -1106,6 +1198,7 @@ mod tests {
             true,
             Duration::from_millis(300),
             Duration::from_secs(5),
+            0,
         )
         .await;
         assert!(
@@ -1307,6 +1400,7 @@ mod tests {
             true,
             Duration::from_secs(5),
             Duration::from_secs(5),
+            0,
         )
         .await
         .unwrap();
@@ -1341,6 +1435,7 @@ mod tests {
             false,
             Duration::from_millis(200),
             Duration::from_secs(5),
+            0,
         )
         .await
         .unwrap();
@@ -1350,5 +1445,150 @@ mod tests {
         let pid = master.child.id().expect("pid");
         master.kill().await;
         wait_until_process_gone(pid).await;
+    }
+
+    // ---- ADR-0062 A: keepalive ----
+
+    /// 偽 ssh の argv を丸ごと `$STATE/argv` に書き出す（`-M`/`-N` の判定用の `preamble()` は使わず、
+    /// 生の `"$@"` をそのまま記録する）。`-O check` は常に成功（`always_ok_script` と同じ判定）。
+    fn argv_recording_script(state: &Path) -> String {
+        format!(
+            "#!/bin/sh\nSTATE={state:?}\n{preamble}\
+             if [ \"$is_master\" -ge 2 ]; then\n  \
+               printf '%s\\n' \"$@\" > \"$STATE/argv\"\n  \
+               while kill -0 \"$PPID\" 2>/dev/null; do sleep 0.2; done\nfi\n\
+             if [ \"$is_check\" = 1 ]; then\n  \
+               if [ -f \"$STATE/argv\" ]; then exit 0; else exit 1; fi\nfi\n\
+             exit 1\n",
+            preamble = preamble(),
+        )
+    }
+
+    #[tokio::test]
+    async fn keepalive_args_are_added_to_the_master_argv_when_nonzero() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let ssh = fake_ssh(dir.path(), "ssh", &argv_recording_script(state.path()));
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
+            false,
+            Duration::from_millis(200),
+            Duration::from_secs(2),
+            15,
+        )
+        .await
+        .unwrap();
+        let ClusterConnectStart::Connected(Some(master)) = result else {
+            panic!("expected Connected(Some(_))");
+        };
+        let pid = master.child.id().expect("pid");
+        master.kill().await;
+        wait_until_process_gone(pid).await;
+        let argv = std::fs::read_to_string(state.path().join("argv")).unwrap();
+        assert!(argv.contains("ServerAliveInterval=15"), "{argv}");
+        assert!(argv.contains("ServerAliveCountMax=3"), "{argv}");
+        assert!(argv.contains("TCPKeepAlive=yes"), "{argv}");
+    }
+
+    #[tokio::test]
+    async fn keepalive_secs_zero_omits_the_option() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let ssh = fake_ssh(dir.path(), "ssh", &argv_recording_script(state.path()));
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
+            false,
+            Duration::from_millis(200),
+            Duration::from_secs(2),
+            0,
+        )
+        .await
+        .unwrap();
+        let ClusterConnectStart::Connected(Some(master)) = result else {
+            panic!("expected Connected(Some(_))");
+        };
+        let pid = master.child.id().expect("pid");
+        master.kill().await;
+        wait_until_process_gone(pid).await;
+        let argv = std::fs::read_to_string(state.path().join("argv")).unwrap();
+        assert!(!argv.contains("ServerAliveInterval"), "{argv}");
+    }
+
+    /// totp 経路でも同じ keepalive オプションが付く。
+    #[tokio::test]
+    async fn keepalive_args_are_added_on_the_totp_path_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let prompt = "(rmaeda@130.158.241.2) Verification code: ";
+        // askpass を経由しつつ argv も記録する。
+        let script = format!(
+            "#!/bin/sh\nSTATE={state:?}\n{preamble}\
+             if [ \"$is_master\" -ge 2 ]; then\n  \
+               printf '%s\\n' \"$@\" > \"$STATE/argv\"\n  \
+               code=$(\"$SSH_ASKPASS\" \"{prompt}\")\n  \
+               if [ \"$code\" = \"123456\" ]; then echo ok > \"$STATE/authed\"; fi\n  \
+               while kill -0 \"$PPID\" 2>/dev/null; do sleep 0.2; done\nfi\n\
+             if [ \"$is_check\" = 1 ]; then\n  \
+               if [ -f \"$STATE/authed\" ]; then exit 0; else exit 1; fi\nfi\n\
+             exit 1\n",
+            preamble = preamble(),
+            state = state.path(),
+        );
+        let ssh = fake_ssh(dir.path(), "ssh", &script);
+        let result = start_connect(
+            &ssh,
+            "cluster-host",
+            "c1",
+            &MasterLauncher::Inline,
+            true,
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            20,
+        )
+        .await
+        .unwrap();
+        let ClusterConnectStart::NeedsCode { session, .. } = result else {
+            panic!("expected NeedsCode");
+        };
+        let master = session
+            .submit_code("123456", Duration::from_secs(5))
+            .await
+            .unwrap();
+        let argv = std::fs::read_to_string(state.path().join("argv")).unwrap();
+        assert!(argv.contains("ServerAliveInterval=20"), "{argv}");
+        if let Some(master) = master {
+            master.kill().await;
+        }
+    }
+
+    /// ADR-0062 A: master が明示的な切断を経ずに自分で終了したとき、`try_wait_exit` が exit code を
+    /// 拾い、`stderr_tail` が stderr の末尾（`max_bytes` を超えない）を返す。
+    #[tokio::test]
+    async fn try_wait_exit_and_stderr_tail_report_the_masters_own_death() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = "#!/bin/sh\necho 'Broken pipe, master exiting' 1>&2\nexit 7\n";
+        let ssh = fake_ssh(dir.path(), "ssh", script);
+        // `-M -N` の張り自体がすぐ終了して exit 7 を返す（`never_authenticates_script` と違い、
+        // ブロックしない）。`poll_until_connected_or_timeout` は子の終了を見て `-O check` を試すが、
+        // このスクリプトは check にも常に失敗するので `ChildExited` → `Failed` になる。ここでは
+        // `spawn_master` の戻り値を直接使うため、`start_connect` は経由せず低レベルの挙動を確認する。
+        let (mut child, stderr_buf, err_task) =
+            spawn_master(&ssh[0], &["-M".into(), "-N".into(), "cluster-host".into()], &[])
+                .unwrap();
+        let status = child.wait().await.unwrap();
+        assert_eq!(status.code(), Some(7));
+        join_with_timeout(err_task, READER_JOIN_TIMEOUT).await;
+        let mut master = ClusterMaster { child, stderr_buf };
+        assert_eq!(master.try_wait_exit(), Some(Some(7)));
+        let tail = master.stderr_tail(300);
+        assert!(tail.contains("Broken pipe"), "{tail}");
+        let short = master.stderr_tail(5);
+        assert!(short.len() <= 5, "{short:?}");
     }
 }

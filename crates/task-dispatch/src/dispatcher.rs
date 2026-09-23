@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use task_core::plan::{PlanLimits, PlanOutput, materialize};
+use task_core::plan::{PlanLimits, PlanOutput, materialize_logging};
 use task_core::report::{HEADLINE_MAX_CHARS, first_line, truncate_chars};
 use task_core::{
     AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec,
@@ -103,6 +103,29 @@ pub struct ClusterSpec {
     /// ADR-0059 D6: 設定ファイルの `work_dir`（`[[clusters]] work_dir`）。DB の上書き
     /// （`cluster_settings`）があればそちらが勝つ（`Dispatcher::effective_work_dir` が決める）。
     pub work_dir: Option<PathBuf>,
+    /// ADR-0062 A（Phase 107）: master の argv に足す `-o ServerAliveInterval=<n> -o
+    /// ServerAliveCountMax=3 -o TCPKeepAlive=yes`（`0` なら keepalive を付けない）。既定 30 秒。
+    /// コマンドラインの `-o` は `~/.ssh/config` より優先されるので、人の設定を変えずに効く。
+    pub keepalive_secs: u64,
+    /// ADR-0062 A: master 越しの実通信（`ssh -o BatchMode=yes <host> -- true`）による生存確認を
+    /// この秒数ごとに行う（`0` で無効）。既定 300 秒。NAT / ファイアウォールの idle timeout で
+    /// TCP が黙って死んでも、`-O check`（unix socket を見るだけ）は気づかないので、実通信で確定させる。
+    pub liveness_probe_secs: u64,
+}
+
+/// ADR-0062 B1（Phase 107）: `resolve_cluster` の結果。`cluster_of`（従来の `Option` 契約）はこれを
+/// 畳んだだけだが、`dispatch_ready` は `NotConfigured`（設定にクラスタが無い）と
+/// `AssigneeLacksTool`（担当が `cluster:<id>` を持たない）を区別して扱う（前者は従来どおり
+/// `unroutable` の警告、後者は `blocked` にして人に聞く）。
+enum ClusterResolution {
+    /// `WorkspaceSpec::Local` のタスク。
+    Local,
+    /// `clippy::large_enum_variant`: `ClusterSpec` は大きいので `Box` に入れる。
+    Resolved(Box<ClusterSpec>, PathBuf, WorkspaceMode),
+    /// `[[clusters]]` にそのクラスタ id が無い。
+    NotConfigured,
+    /// クラスタは設定にあるが、担当が `cluster:<id>` を持たない（ADR-0062 B1）。
+    AssigneeLacksTool { cluster: String },
 }
 
 /// ADR-0053 D3: 1 本の port forward（`ssh -O forward -L <listen>:<target> <host>` 相当）。
@@ -164,6 +187,41 @@ pub type TunnelListenerProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 /// 状態に依存してはならないので、このフックで差し替え可能にした（テストは常に偽物を挿す。本物の
 /// `ssh -O check` を経由するのは本番だけ）。
 pub type ClusterLivenessProbe = Arc<dyn Fn(&[String], &str) -> bool + Send + Sync>;
+
+/// ADR-0062 A（Phase 107）: master 越しの実通信で生存を確定させるフック。引数は
+/// `(ssh_command, host, timeout)`。本物の実装は `ssh -o BatchMode=yes <host> -- true` を
+/// `timeout` で打ち切って呼ぶ（本番では `task_worker::ssh::control_master_command_probe_blocking`）。
+/// `-O check` は unix ソケットを見るだけなので、NAT / ファイアウォールの idle timeout で TCP が
+/// 黙って死んでいても気づかない。こちらは実際にリモートへコマンドを 1 つ流すので確定できる。
+pub type ClusterCommandProbe = Arc<dyn Fn(&[String], &str, Duration) -> bool + Send + Sync>;
+
+/// ADR-0062 A: 実通信 probe の打ち切りに使うタイムアウト（既定 10 秒）。
+const LIVENESS_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// ADR-0062 A: 死んだ接続の残骸を `ssh -O exit` で片付けるフック。引数は `(cluster_id, host)`。
+pub type ClusterDisconnector = Arc<dyn Fn(&str, &str) -> Result<(), String> + Send + Sync>;
+
+/// ADR-0062 A: celeris が保持している ssh master の終了を検出するフック。呼ぶたびに、その時点で
+/// 新たに終了が確認できた master の一覧を返す（同じ終了を二度返さない契約。本物の実装は
+/// `ClusterMasters` から exited のものを取り除きながら集める）。
+pub type ClusterMasterWatcher = Arc<dyn Fn() -> Vec<ClusterMasterExit> + Send + Sync>;
+
+/// ADR-0062 A: `ClusterMasterWatcher` が返す 1 件（自分で終了した master）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterMasterExit {
+    pub cluster: String,
+    pub exit_code: Option<i32>,
+    pub stderr_tail: String,
+}
+
+/// ADR-0062 A: 明示的な切断を経ずに失われた接続の詳細。`mark_cluster_unavailable` が読み、
+/// 報告に足してから `Event::ClusterMasterExited` を 1 回だけ残す（`reported`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClusterDisconnectInfo {
+    exit_code: Option<i32>,
+    detail: String,
+    reported: bool,
+}
 
 /// ADR-0053 D3: トンネル 1 本の状態遷移（Console / cluster API に出す。`take_tunnel_events` で取り出す）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -873,6 +931,10 @@ impl StoreSink {
         for reason in &outcome.rejected {
             self.note(format!("delegate rejected: {reason}"));
         }
+        // ADR-0062 B2（Phase 107）: 継承した Remote が担当の道具不足で Local に落ちたことをログに残す。
+        for (child_id, reason) in &outcome.workspace_downgrades {
+            tracing::info!(task_id = %self.task_id, child_id = %child_id, %reason, "workspace downgraded to local (ADR-0062 B2)");
+        }
         if outcome.accepted.is_empty() {
             return Ok(());
         }
@@ -1125,6 +1187,9 @@ pub struct Dispatcher {
     pending_subjects: HashMap<TaskId, ReviewSubject>,
     /// 「設定に合うプロバイダが無い」警告を出した（連続 tick で繰り返さない）タスク（ADR-0012 D2）。
     warned_unroutable: std::collections::HashSet<TaskId>,
+    /// ADR-0062 B1（Phase 107）: 「担当が cluster:<id> を持たない」警告を出した（連続 tick で
+    /// 繰り返さない）タスク。担当・道具が変わって使えるようになれば `task_may_use_cluster` が消す。
+    warned_cluster_tool: std::collections::HashSet<TaskId>,
     /// この tick で `NoMatchingProvider` だった ready タスク（`is_idle` で待ち対象から外す。ADR-0012 D2）。
     unroutable: std::collections::HashSet<TaskId>,
     /// ADR-0044 D2（Phase 53）: **この tick で run を打ち切った**タスク。次の tick まで dispatch しない。
@@ -1172,6 +1237,21 @@ pub struct Dispatcher {
     /// ADR-0032 D3: `auth = "publickey"` のクラスタに自動で接続を張るフック。`None` なら自動接続しない
     /// （celeris 側が `set_cluster_connector` で挿す。未設定＝従来どおりの挙動）。
     cluster_connector: Option<ClusterConnector>,
+    /// ADR-0062 A（Phase 107）: master 越しの実通信で生存を確定させるフック（`ssh -o BatchMode=yes
+    /// <host> -- true`）。`None` なら実通信の probe はしない（`-O check` だけの従来どおり）。
+    cluster_command_probe: Option<ClusterCommandProbe>,
+    /// ADR-0062 A: クラスタごとに最後に実通信 probe を行った時刻（`liveness_probe_secs` の間引きに使う）。
+    last_cluster_command_probe: HashMap<String, Instant>,
+    /// ADR-0062 A: 実通信 probe が失敗した／master が自分で終了したときに `-O exit` で残骸を片付ける
+    /// フック（引数は `(cluster_id, host)`）。`None` なら片付けを試みない。
+    cluster_disconnector: Option<ClusterDisconnector>,
+    /// ADR-0062 A: 明示的な切断を経ずに接続が失われたクラスタの詳細（exit code・stderr の末尾）。
+    /// `mark_cluster_unavailable` が拾って報告に足し、`Event::ClusterMasterExited` を 1 回だけ残す
+    /// （`reported`）。接続が戻れば消す。
+    cluster_disconnect_info: HashMap<String, ClusterDisconnectInfo>,
+    /// ADR-0062 A: celeris が保持している master（`Child`）の終了を検出するフック。`None` なら見ない
+    /// （celeris 側が `set_cluster_master_watcher` で挿す）。
+    cluster_master_watcher: Option<ClusterMasterWatcher>,
     /// ADR-0032 D4/D5: GUI 発の接続（`POST /clusters/{id}/connect`）が進行中のクラスタ id
     /// （celeris が `set_cluster_connect_pending` で反映する。D3 の自動接続とは別物）。
     connect_pending_clusters: std::collections::HashSet<String>,
@@ -1282,6 +1362,7 @@ impl Dispatcher {
             reviewing: HashMap::new(),
             pending_subjects: HashMap::new(),
             warned_unroutable: std::collections::HashSet::new(),
+            warned_cluster_tool: std::collections::HashSet::new(),
             just_aborted: std::collections::HashSet::new(),
             unroutable: std::collections::HashSet::new(),
             cluster_waiting: std::collections::HashSet::new(),
@@ -1303,6 +1384,11 @@ impl Dispatcher {
             login_pending_accounts: std::collections::HashSet::new(),
             container_probe: task_worker::RuntimeProbe::default(),
             cluster_connector: None,
+            cluster_command_probe: None,
+            last_cluster_command_probe: HashMap::new(),
+            cluster_disconnector: None,
+            cluster_disconnect_info: HashMap::new(),
+            cluster_master_watcher: None,
             connect_pending_clusters: std::collections::HashSet::new(),
             now_unix_fn: Arc::new(real_now_unix),
             accepting_new_work: true,
@@ -1475,6 +1561,21 @@ impl Dispatcher {
     /// 状態に依存しないよう、必ずこれで偽物に差し替える。
     pub fn set_cluster_liveness_probe(&mut self, probe: ClusterLivenessProbe) {
         self.cluster_liveness_probe = probe;
+    }
+
+    /// ADR-0062 A（Phase 107）: master 越しの実通信 probe を挿す（celeris 側の配線）。
+    pub fn set_cluster_command_probe(&mut self, probe: ClusterCommandProbe) {
+        self.cluster_command_probe = Some(probe);
+    }
+
+    /// ADR-0062 A: 死んだ接続を `-O exit` で片付けるフックを挿す（celeris 側の配線）。
+    pub fn set_cluster_disconnector(&mut self, disconnector: ClusterDisconnector) {
+        self.cluster_disconnector = Some(disconnector);
+    }
+
+    /// ADR-0062 A: celeris が保持している master の終了検出フックを挿す（celeris 側の配線）。
+    pub fn set_cluster_master_watcher(&mut self, watcher: ClusterMasterWatcher) {
+        self.cluster_master_watcher = Some(watcher);
     }
 
     /// ADR-0053 D3: 直近のトンネル状態遷移を取り出す（呼ぶと空になる。celeris はこれを Discord/Console に流す）。
@@ -1755,6 +1856,8 @@ impl Dispatcher {
         // Phase 66b: `ssh` を呼ぶ・ネストしたランタイムを `block_on` しうるので、async ワーカーから逃がす
         // （`run_cluster_hooks_off_async` の説明を参照）。
         run_cluster_hooks_off_async(|| self.refresh_cluster_liveness());
+        // ADR-0062 A: `try_wait` は非ブロッキングなので、他のフックと違いスレッドを逃がす必要は無い。
+        self.refresh_cluster_master_exits();
         let cluster_ms = lap(&mut at);
         run_cluster_hooks_off_async(|| self.refresh_cluster_tunnels());
         let tunnel_ms = lap(&mut at);
@@ -1794,6 +1897,40 @@ impl Dispatcher {
         spec: &ClusterSpec,
         reason: String,
     ) -> Result<(), DispatchError> {
+        let mut reason = reason;
+        // ADR-0062 A（Phase 107）: 明示的な切断を経ずに master が終了していた／実通信 probe が
+        // 失敗していたなら、その詳細（exit code・stderr の末尾）を報告に足し、`Event::ClusterMasterExited`
+        // を 1 回だけ残す（同じ切断について 2 回目以降は reason に足すだけ。cooldown が明けて接続が
+        // 戻れば `refresh_cluster_liveness` がこのエントリを消す）。
+        if let Some(info) = self.cluster_disconnect_info.get(&spec.id).cloned() {
+            let exit_str = info
+                .exit_code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown (signal?)".to_string());
+            reason = format!(
+                "{reason}\nssh master exited (exit_code={exit_str}): {}",
+                info.detail
+            );
+            if !info.reported {
+                self.store.append_event(
+                    task_id,
+                    &Event::ClusterMasterExited {
+                        cluster: spec.id.clone(),
+                        exit_code: info.exit_code,
+                        stderr_tail: info.detail.clone(),
+                    },
+                )?;
+                if let Some(entry) = self.cluster_disconnect_info.get_mut(&spec.id) {
+                    entry.reported = true;
+                }
+            }
+        }
+        // ADR-0062 A: TOTP のクラスタは人の入力が要るので、その場での自動復旧を待たせない。
+        if spec.auth == "totp" {
+            reason = format!(
+                "{reason}\nGUI の「クラスタ」画面から TOTP を入力して再接続してください。"
+            );
+        }
         let first = self
             .cluster_cooldown
             .insert(
@@ -1894,19 +2031,97 @@ impl Dispatcher {
         }
         self.last_cluster_liveness = Some(now);
         let ssh_command = SshSettings::new("", "", "/").ssh_command;
-        let mut specs: Vec<(String, String)> = self
+        let mut specs: Vec<(String, String, u64)> = self
             .config
             .clusters
             .values()
-            .map(|c| (c.id.clone(), c.host.clone()))
+            .map(|c| (c.id.clone(), c.host.clone(), c.liveness_probe_secs))
             .collect();
         specs.sort();
-        for (id, host) in specs {
-            let alive = (self.cluster_liveness_probe)(&ssh_command, &host);
-            self.cluster_connected.insert(id.clone(), alive);
-            if alive && self.cluster_cooldown.remove(&id).is_some() {
-                tracing::info!(cluster = %id, %host, "ssh ControlMaster connection is back; cluster cooldown cleared");
+        for (id, host, liveness_probe_secs) in specs {
+            let mut alive = (self.cluster_liveness_probe)(&ssh_command, &host);
+            // ADR-0062 A（Phase 107）: `-O check` は unix ソケットを見るだけで、NAT / ファイアウォールの
+            // idle timeout で TCP が黙って死んでいても「Master running」を返し続ける。master 越しの
+            // 実通信（`ssh -o BatchMode=yes <host> -- true`）で定期的に確定させる。
+            if alive
+                && liveness_probe_secs > 0
+                && let Some(probe) = self.cluster_command_probe.clone()
+            {
+                let due = self
+                    .last_cluster_command_probe
+                    .get(&id)
+                    .is_none_or(|last| now.duration_since(*last) >= Duration::from_secs(liveness_probe_secs));
+                if due {
+                    self.last_cluster_command_probe.insert(id.clone(), now);
+                    let ssh_command = ssh_command.clone();
+                    let host_for_probe = host.clone();
+                    let ok = run_cluster_hooks_off_async(move || {
+                        probe(&ssh_command, &host_for_probe, LIVENESS_PROBE_TIMEOUT)
+                    });
+                    if !ok {
+                        alive = false;
+                        tracing::warn!(
+                            cluster = %id, %host,
+                            "liveness probe (ssh -- true) failed; treating the connection as dead (ADR-0062 A)"
+                        );
+                        self.cluster_disconnect_info.insert(
+                            id.clone(),
+                            ClusterDisconnectInfo {
+                                exit_code: None,
+                                detail: format!(
+                                    "liveness probe: `ssh -o BatchMode=yes {host} -- true` failed or timed out"
+                                ),
+                                reported: false,
+                            },
+                        );
+                        // ADR-0062 A: 死んだ接続の残骸を片付ける（`-O exit`。ベストエフォート）。
+                        if let Some(disconnector) = self.cluster_disconnector.clone() {
+                            let id_for_disconnect = id.clone();
+                            let host_for_disconnect = host.clone();
+                            let _ = run_cluster_hooks_off_async(move || {
+                                disconnector(&id_for_disconnect, &host_for_disconnect)
+                            });
+                        }
+                    }
+                }
             }
+            self.cluster_connected.insert(id.clone(), alive);
+            if alive {
+                // ADR-0062 A: 接続が戻ったら、前回の切断の詳細は捨てる（次に切れたときは新しい詳細で
+                // 1 回だけ報告する）。
+                self.cluster_disconnect_info.remove(&id);
+                if self.cluster_cooldown.remove(&id).is_some() {
+                    tracing::info!(cluster = %id, %host, "ssh ControlMaster connection is back; cluster cooldown cleared");
+                }
+            }
+        }
+    }
+
+    /// ADR-0062 A（Phase 107）: celeris が保持している master（`Child`）の終了を検出する
+    /// フック（[`ClusterMasterWatcher`]）を、tick ごとに 1 回呼ぶ。見つかった終了はクラスタごとに
+    /// 記録し（[`ClusterDisconnectInfo`]）、次に `mark_cluster_unavailable` がそのクラスタを
+    /// 拾ったときに stderr の末尾・exit code を報告へ足し、`Event::ClusterMasterExited` を 1 回残す。
+    fn refresh_cluster_master_exits(&mut self) {
+        if self.eligible.is_some() {
+            return;
+        }
+        let Some(watcher) = self.cluster_master_watcher.clone() else {
+            return;
+        };
+        for exit in watcher() {
+            self.cluster_connected.insert(exit.cluster.clone(), false);
+            tracing::warn!(
+                cluster = %exit.cluster, exit_code = ?exit.exit_code,
+                "cluster ssh master exited on its own (ADR-0062 A)"
+            );
+            self.cluster_disconnect_info.insert(
+                exit.cluster.clone(),
+                ClusterDisconnectInfo {
+                    exit_code: exit.exit_code,
+                    detail: exit.stderr_tail,
+                    reported: false,
+                },
+            );
         }
     }
 
@@ -3115,7 +3330,7 @@ impl Dispatcher {
                     home: home.as_deref(),
                     repos: &project_repos,
                 };
-                let children = materialize(
+                let children = materialize_logging(
                     &task,
                     &plan,
                     &org,
@@ -3123,6 +3338,9 @@ impl Dispatcher {
                     &self.config.genres,
                     workspace,
                     OffsetDateTime::now_utc(),
+                    &mut |child_id, reason| {
+                        tracing::info!(task_id = %task_id, child_id = %child_id, %reason, "workspace downgraded to local (ADR-0062 B2)");
+                    },
                 );
                 let n = children.len();
                 let r = self.store.complete_plan(
@@ -3453,7 +3671,7 @@ impl Dispatcher {
                         home: home.as_deref(),
                         repos: &project_repos,
                     };
-                    let children = materialize(
+                    let children = materialize_logging(
                         &task,
                         &plan,
                         &org,
@@ -3461,6 +3679,9 @@ impl Dispatcher {
                         &self.config.genres,
                         workspace,
                         OffsetDateTime::now_utc(),
+                        &mut |child_id, reason| {
+                            tracing::info!(task_id = %task_id, child_id = %child_id, %reason, "workspace downgraded to local (ADR-0062 B2)");
+                        },
                     );
                     self.store.complete_plan(
                         task_id,
@@ -3752,18 +3973,28 @@ impl Dispatcher {
                 }
             }
             // ADR-0018: リモート実行のタスクは、クラスタの設定・cooldown・並列度・多重接続を先に確かめる。
-            let cluster = match &task.workspace {
-                WorkspaceSpec::Local { .. } => None,
-                WorkspaceSpec::Remote { cluster, .. } => match self.cluster_of(&task) {
-                    Some(resolved) => Some(resolved),
-                    None => {
-                        if self.warned_unroutable.insert(task.id) {
-                            tracing::warn!(task_id = %task.id, %cluster, "no such cluster in the config; task left ready");
-                        }
-                        self.unroutable.insert(task.id);
-                        continue;
+            // ADR-0062 B1（Phase 107）: `cluster_of` が `None` の理由を分ける。(a) 設定に無いクラスタ
+            // → 従来どおり `unroutable`（人が設定を直すまで進まない）。(b) 担当が `cluster:<id>` を
+            // 持たない → `blocked` にして人に質問を 1 件作る（設定の問題ではなく担当の問題なので、
+            // 「no such cluster in the config」という誤解を招く文言は出さない）。
+            let cluster = match self.resolve_cluster(&task) {
+                ClusterResolution::Local => None,
+                ClusterResolution::Resolved(spec, path, mode) => Some((spec, path, mode)),
+                ClusterResolution::NotConfigured => {
+                    if self.warned_unroutable.insert(task.id) {
+                        let cluster_id = match &task.workspace {
+                            WorkspaceSpec::Remote { cluster, .. } => cluster.clone(),
+                            WorkspaceSpec::Local { .. } => String::new(),
+                        };
+                        tracing::warn!(task_id = %task.id, cluster = %cluster_id, "no such cluster in the config; task left ready");
                     }
-                },
+                    self.unroutable.insert(task.id);
+                    continue;
+                }
+                ClusterResolution::AssigneeLacksTool { cluster } => {
+                    self.block_task_missing_cluster_tool(&task, &cluster)?;
+                    continue;
+                }
             };
             if let Some((spec, _, _)) = &cluster {
                 if self
@@ -6205,6 +6436,58 @@ impl Dispatcher {
         }
     }
 
+    /// ADR-0062 B1（Phase 107）: 担当が `cluster:<id>` を持たない remote タスクを `blocked` にし、
+    /// `assign_if_needed` の `Assignment::Unroutable` と同じ流儀（`approvals` に 1 件、
+    /// `Trigger::Unroutable` で `ready → blocked`）で人に質問する。人が答える（または担当・tools を
+    /// 変える）と次の tick で `ready` に戻り、そのとき改めて `cluster_of` が評価し直す。
+    fn block_task_missing_cluster_tool(
+        &mut self,
+        task: &Task,
+        cluster: &str,
+    ) -> Result<(), DispatchError> {
+        let assignee = task.assignee.as_deref().unwrap_or("(unknown)");
+        let wanted = format!("{}{cluster}", task_core::CLUSTER_TOOL_PREFIX);
+        let org = self.store.org_list().unwrap_or_default();
+        let holders: Vec<&str> = org
+            .iter()
+            .filter(|n| task_core::resolve_profile(&org, &n.id).has_tool(&wanted))
+            .map(|n| n.id.as_str())
+            .collect();
+        let question = format!(
+            "担当 `{assignee}` には道具 `{wanted}` が無いため、このタスクは {cluster} で実行できません。\
+             組織画面で担当の tools に `{wanted}` を足す{}、または作業場所をローカルに変えてください。",
+            if holders.is_empty() {
+                "か、担当を変える".to_string()
+            } else {
+                format!("、担当を `{}` などに変える", holders.join("` / `"))
+            }
+        );
+        let now = OffsetDateTime::now_utc();
+        if let Err(e) =
+            crate::approvals::record_question_approval(self.store.as_ref(), task, &question, now)
+        {
+            tracing::warn!(task_id = %task.id, error = %e, "failed to record the approval for the missing-cluster-tool question");
+        }
+        let run_id = format!("cluster-routing-{}", task.id);
+        let events = vec![Event::QuestionRaised {
+            run_id,
+            text: question,
+        }];
+        match self
+            .store
+            .apply_transition_with_events(task.id, Trigger::Unroutable, events)
+        {
+            Ok(_) => {
+                tracing::info!(task_id = %task.id, %assignee, %cluster, "assignee lacks the cluster tool; blocked and asked a human (ADR-0062 B1)");
+            }
+            Err(StoreError::InvalidTransition(e)) => {
+                tracing::warn!(task_id = %task.id, error = %e, "missing-cluster-tool transition could not be applied");
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
+
     fn default_checks(&self, task: &Task) -> Vec<String> {
         let Some(ws) = self.task_workspaces_for(task) else {
             return Vec::new();
@@ -6313,22 +6596,36 @@ impl Dispatcher {
 
     /// ADR-0018: `WorkspaceSpec::Remote` のタスクのクラスタ設定とリモートのパス。ローカルのタスクは `None`。
     ///
-    /// ADR-0046 D8（Phase 59）: **担当が `cluster:<id>` を持たないなら接続経路を渡さない**（remote を
-    /// 組まない）。ただし「道具を 1 つも宣言していない」ノード（Phase 59 より前の組織、profile を
-    /// 書いていないノード）は従来どおり通す — 宣言した許可リストだけを許可リストとして扱う。
+    /// ADR-0062 B1（Phase 107）: **担当が `cluster:<id>` を持たないなら接続経路を渡さない**（remote を
+    /// 組まない）。人間の指示により、ADR-0046 D8 の「道具を 1 つも宣言していないノードは従来どおり通す」
+    /// という例外は**クラスタの利用可否についてだけ**廃止した（`task_may_use_cluster`）。
     ///
     /// ADR-0059 D6: `path` が絶対・`~`/`~/…` ならそのまま、それ以外（省略・相対）は実効 `work_dir`
     /// （DB 上書き `cluster_settings` > 設定の `[[clusters]] work_dir` > 無し）からの相対に解決する。
     /// 解決できなければ `path` をそのまま返す（`remote_dir_is_resolved` で検出できる形のまま。
     /// ここでは `None` にしない — 「クラスタが無い」とは別の失敗なので `unroutable` に混ぜない）。
-    fn cluster_of(&self, task: &Task) -> Option<(ClusterSpec, PathBuf, WorkspaceMode)> {
+    fn cluster_of(&mut self, task: &Task) -> Option<(ClusterSpec, PathBuf, WorkspaceMode)> {
+        match self.resolve_cluster(task) {
+            ClusterResolution::Resolved(spec, path, mode) => Some((*spec, path, mode)),
+            ClusterResolution::Local
+            | ClusterResolution::NotConfigured
+            | ClusterResolution::AssigneeLacksTool { .. } => None,
+        }
+    }
+
+    /// `cluster_of` の中身。`None` の理由を dispatch_ready が区別できるようにする（ADR-0062 B1）。
+    fn resolve_cluster(&mut self, task: &Task) -> ClusterResolution {
         match &task.workspace {
-            WorkspaceSpec::Local { .. } => None,
+            WorkspaceSpec::Local { .. } => ClusterResolution::Local,
             WorkspaceSpec::Remote { cluster, path, .. } => {
                 if !self.task_may_use_cluster(task, cluster) {
-                    return None;
+                    return ClusterResolution::AssigneeLacksTool {
+                        cluster: cluster.clone(),
+                    };
                 }
-                let spec = self.config.clusters.get(cluster)?.clone();
+                let Some(spec) = self.config.clusters.get(cluster).cloned() else {
+                    return ClusterResolution::NotConfigured;
+                };
                 let db_work_dir = self
                     .store
                     .cluster_settings_get(cluster)
@@ -6339,13 +6636,17 @@ impl Dispatcher {
                 let work_dir = db_work_dir.or_else(|| spec.work_dir.clone());
                 let resolved =
                     resolve_remote_dir(path, work_dir.as_deref()).unwrap_or_else(|| path.clone());
-                Some((spec, resolved, task.workspace.remote_mode()))
+                ClusterResolution::Resolved(Box::new(spec), resolved, task.workspace.remote_mode())
             }
         }
     }
 
-    /// ADR-0046 D8: そのタスクの担当がそのクラスタを使えるか（決定的。組織の profile だけを見る）。
-    fn task_may_use_cluster(&self, task: &Task, cluster: &str) -> bool {
+    /// ADR-0062 B1: そのタスクの担当がそのクラスタを使えるか（決定的。組織の profile だけを見る）。
+    /// 人間の指示（Phase 107 追加指示）により、ADR-0046 D8 の「道具を 1 つも宣言していないノードは
+    /// 従来どおり通す」という例外はここでは**廃止した**（remote 作業場所でクラスタに繋いでよいのは、
+    /// 実効 profile に `cluster:<id>` を持つノードだけ）。warn はタスクごとに 1 回
+    /// （`warned_cluster_tool`。`warned_unroutable` と同じ流儀）。
+    fn task_may_use_cluster(&mut self, task: &Task, cluster: &str) -> bool {
         let Some(assignee) = task.assignee.as_deref() else {
             return true;
         };
@@ -6357,18 +6658,17 @@ impl Dispatcher {
             }
         };
         let effective = task_core::resolve_profile(&org, assignee);
-        // 道具を 1 つも宣言していないノードは従来どおり（Phase 59 より前の組織を壊さない）。
-        if effective.tools.is_empty() {
-            return true;
-        }
         let wanted = format!("{}{cluster}", task_core::CLUSTER_TOOL_PREFIX);
         if effective.has_tool(&wanted) {
+            self.warned_cluster_tool.remove(&task.id);
             return true;
         }
-        tracing::warn!(
-            task_id = %task.id, %assignee, %cluster,
-            "assignee does not have the cluster tool; not wiring the remote (ADR-0046 D8)"
-        );
+        if self.warned_cluster_tool.insert(task.id) {
+            tracing::warn!(
+                task_id = %task.id, %assignee, %cluster,
+                "assignee does not have the cluster tool; not wiring the remote (ADR-0062 B1)"
+            );
+        }
         false
     }
 
@@ -9537,6 +9837,8 @@ mod tests {
                 auth: "manual".into(),
                 forwards: vec![],
                 work_dir: None,
+                keepalive_secs: 0,
+                liveness_probe_secs: 0,
             },
         );
         if !control_master_alive_blocking(&["ssh".to_string()], "celeris-localhost") {
@@ -9615,6 +9917,8 @@ mod tests {
                 auth: "manual".into(),
                 forwards: vec![],
                 work_dir: None,
+                keepalive_secs: 0,
+                liveness_probe_secs: 0,
             },
         );
         let (tx, rx) = tokio::sync::watch::channel(None);
@@ -9683,6 +9987,234 @@ mod tests {
         );
     }
 
+    /// ADR-0062 B1（Phase 107）: 担当に `cluster:<id>` が無い remote タスクは、設定に無いクラスタ
+    /// （`ClusterUnavailable` / `unroutable`）とは違い、`blocked` にして人に質問する
+    /// （「no such cluster in the config」という誤解を招く文言は出さない）。
+    #[tokio::test]
+    async fn assignee_without_the_cluster_tool_is_blocked_with_a_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let now = OffsetDateTime::now_utc();
+        for (id, parent, tools) in [
+            ("cos", None, vec![]),
+            ("web-research", Some("cos"), vec!["tavily".to_string()]),
+        ] {
+            store
+                .org_upsert(&OrgNode {
+                    profile: task_core::Profile {
+                        tools,
+                        ..Default::default()
+                    },
+                    id: id.into(),
+                    parent_id: parent.map(str::to_string),
+                    name: id.into(),
+                    kind: if parent.is_none() {
+                        OrgKind::Secretary
+                    } else {
+                        OrgKind::Department
+                    },
+                    genre: None,
+                    brief: String::new(),
+                    position: 0,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .unwrap();
+        }
+
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: PathBuf::from("/remote/project"),
+            mode: None,
+        };
+        task.assignee = Some("web-research".into());
+        store.insert(&task).unwrap();
+
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.clusters.insert(
+            "sirius".into(),
+            cluster_spec_with_auth("sirius", "sirius", "manual"),
+        );
+
+        let report = d.tick().unwrap();
+        assert_eq!(report.dispatched, 0);
+
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!(t.status, Status::Blocked, "{t:?}");
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events.iter().any(
+                |(_, e)| matches!(e, Event::QuestionRaised { text, .. } if text.contains("cluster:sirius"))
+            ),
+            "{events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ClusterUnavailable { .. })),
+            "設定の問題ではないので ClusterUnavailable は出さない: {events:?}"
+        );
+
+        // warn の dedupe: 2 tick 目でも同じ 1 件のまま増えない（そもそも blocked なので ready_tasks に
+        // 出てこない。`warned_cluster_tool` の dedupe 自体は `task_may_use_cluster` の単体でも効く）。
+        let events_again = store.events_for(task.id).unwrap();
+        assert_eq!(events_again.len(), events.len());
+    }
+
+    /// ADR-0062 A（Phase 107）: celeris が保持していた master が明示的な切断を経ずに自分で終了した
+    /// ことを `set_cluster_master_watcher` で知らせると、次に `mark_cluster_unavailable` がそのクラスタを
+    /// 拾ったときに `Event::ClusterMasterExited`（stderr の末尾・exit code 付き）を 1 回だけ残す。
+    #[tokio::test]
+    async fn a_master_that_exited_on_its_own_is_reported_once_with_its_stderr_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: PathBuf::from("/remote/project"),
+            mode: None,
+        };
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.clusters.insert(
+            "sirius".into(),
+            cluster_spec_with_auth("sirius", "celeris-no-such-host-for-tests", "manual"),
+        );
+        d.set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| false));
+        let watcher_calls = Arc::new(AtomicUsize::new(0));
+        let calls = watcher_calls.clone();
+        d.set_cluster_master_watcher(Arc::new(move || {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                vec![ClusterMasterExit {
+                    cluster: "sirius".into(),
+                    exit_code: Some(255),
+                    stderr_tail: "mux_client_request_session: read from master failed: Broken pipe"
+                        .into(),
+                }]
+            } else {
+                vec![]
+            }
+        }));
+
+        d.tick().unwrap();
+        let events = store.events_for(task.id).unwrap();
+        let exits: Vec<_> = events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::ClusterMasterExited { .. }))
+            .collect();
+        assert_eq!(exits.len(), 1, "{events:?}");
+        let Event::ClusterMasterExited {
+            cluster,
+            exit_code,
+            stderr_tail,
+        } = &exits[0].1
+        else {
+            unreachable!()
+        };
+        assert_eq!(cluster, "sirius");
+        assert_eq!(*exit_code, Some(255));
+        assert!(stderr_tail.contains("Broken pipe"), "{stderr_tail}");
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::ClusterUnavailable { reason, .. } if reason.contains("Broken pipe") && reason.contains("255")
+            )),
+            "reason に exit code と stderr が入る: {events:?}"
+        );
+
+        // 2 tick 目: watcher はもう新しい終了を返さないので、`ClusterMasterExited` は増えない
+        // （cooldown 中でもあるので `mark_cluster_unavailable` 自体もう呼ばれない）。
+        d.tick().unwrap();
+        let events_again = store.events_for(task.id).unwrap();
+        let exits_again = events_again
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::ClusterMasterExited { .. }))
+            .count();
+        assert_eq!(exits_again, 1, "{events_again:?}");
+    }
+
+    /// ADR-0062 A（Phase 107）: `-O check` は生きている（unix ソケットはある）が、master 越しの実通信
+    /// probe（`ssh -- true`）が失敗するとき、`refresh_cluster_liveness` は接続を死んだと判定し、
+    /// `-O exit` の片付けフック（`cluster_disconnector`）を 1 回呼ぶ。
+    #[test]
+    fn a_failing_command_probe_marks_the_connection_dead_and_cleans_up() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store, adapter, 1);
+        let mut spec = cluster_spec_with_auth("sirius", "sirius", "manual");
+        spec.liveness_probe_secs = 30;
+        d.config.clusters.insert("sirius".into(), spec);
+        // `-O check` は常に成功（unix ソケットはある）。
+        d.set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| true));
+        // 実通信 probe は失敗（NAT の idle timeout で TCP が黙って死んでいる、を模す）。
+        d.set_cluster_command_probe(Arc::new(
+            |_ssh_command: &[String], _host: &str, _timeout: Duration| false,
+        ));
+        let disconnect_calls = Arc::new(AtomicUsize::new(0));
+        let calls = disconnect_calls.clone();
+        d.set_cluster_disconnector(Arc::new(move |_id: &str, _host: &str| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }));
+
+        d.refresh_cluster_liveness();
+        assert_eq!(
+            d.cluster_connected.get("sirius"),
+            Some(&false),
+            "実通信 probe が失敗したら死んだ扱いにする"
+        );
+        assert_eq!(
+            disconnect_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "-O exit で片付ける"
+        );
+        assert!(
+            d.cluster_disconnect_info
+                .get("sirius")
+                .is_some_and(|info| info.detail.contains("liveness probe")),
+            "{:?}",
+            d.cluster_disconnect_info
+        );
+    }
+
     fn cluster_spec_with_auth(id: &str, host: &str, auth: &str) -> ClusterSpec {
         ClusterSpec {
             id: id.into(),
@@ -9697,6 +10229,8 @@ mod tests {
             auth: auth.into(),
             forwards: vec![],
             work_dir: None,
+            keepalive_secs: 0,
+            liveness_probe_secs: 0,
         }
     }
 
@@ -10781,6 +11315,8 @@ mod tests {
                 auth: "manual".into(),
                 forwards: vec![],
                 work_dir: None,
+                keepalive_secs: 0,
+                liveness_probe_secs: 0,
             },
         );
         d.cluster_cooldown

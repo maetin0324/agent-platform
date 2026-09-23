@@ -51,7 +51,7 @@ pub use comment::{
 pub use console_action::ConsoleAction;
 pub use delegate::{
     DelegateDep, DelegateError, DelegateTask, DelegationLimits, OnChildFailure, WorkspaceContext,
-    materialize_delegated, validate_each,
+    materialize_delegated, materialize_delegated_logging, validate_each,
 };
 pub use instance::{DaemonInstance, DaemonMode, InstanceRole, SharedRole};
 // ---- ADR-0046 D3（Phase 59）: ハーネスのレジストリ ----

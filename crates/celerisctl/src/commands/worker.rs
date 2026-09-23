@@ -889,6 +889,8 @@ mod tests {
             remove_worktree_when: "never".into(),
             forwards: vec![],
             master_launcher: "auto".into(),
+            keepalive_secs: 0,
+            liveness_probe_secs: 0,
         }
     }
 

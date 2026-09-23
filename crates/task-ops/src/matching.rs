@@ -33,18 +33,38 @@ pub enum Assignment {
 }
 
 /// ADR-0046 D5: 候補が無いときに人へ出す質問（決定的な文面）。
+/// ADR-0062 B1（Phase 107）: `required_cluster_tool` が `Some` なら、原因がクラスタの道具不足で
+/// あることも分かるようにする（`cluster:<id>` を持つノードが 1 つも無い、または harness と両方を
+/// 満たすノードが無い）。
 pub fn unroutable_question(harness: &str, skills: &[String]) -> String {
+    unroutable_question_with_cluster(harness, skills, None)
+}
+
+fn unroutable_question_with_cluster(
+    harness: &str,
+    skills: &[String],
+    required_cluster_tool: Option<&str>,
+) -> String {
     let skills = if skills.is_empty() {
         "（指定なし）".to_string()
     } else {
         skills.join(", ")
     };
-    format!(
-        "担当が見つからない: harness {harness} / skills {skills}。\
-         この仕事を受けられる組織のノードが 1 つもありません。\
-         そのハーネスを `harnesses.allowed` に持つノードを作る（または既存のノードに足す）か、\
-         このタスクの担当を直接指定してください。"
-    )
+    match required_cluster_tool {
+        None => format!(
+            "担当が見つからない: harness {harness} / skills {skills}。\
+             この仕事を受けられる組織のノードが 1 つもありません。\
+             そのハーネスを `harnesses.allowed` に持つノードを作る（または既存のノードに足す）か、\
+             このタスクの担当を直接指定してください。"
+        ),
+        Some(tool) => format!(
+            "担当が見つからない: harness {harness} / skills {skills} / 道具 {tool}。\
+             このハーネスを受けられ、かつ {tool} を持つノードが組織に 1 つもありません\
+             （ADR-0062 B1: remote な作業場所は `cluster:<id>` を持つノードだけに流します）。\
+             {tool} を持つノードの `harnesses.allowed` にこのハーネスを足すか、\
+             このタスクの担当を直接指定するか、作業場所をローカルに変えてください。"
+        ),
+    }
 }
 
 /// ストアの組織図を読んで担当を決める（ADR-0046 D5）。判断そのものは [`decide`]（純粋関数）。
@@ -77,6 +97,17 @@ pub fn decide(org: &[OrgNode], task: &Task) -> Assignment {
         return Assignment::NotApplicable;
     }
 
+    // ADR-0062 B1（Phase 107）: remote な作業場所（`WorkspaceSpec::Remote{cluster}`）の仕事は、
+    // `cluster:<id>` を実効 profile に持つノードだけを候補にする（tools が空でも例外なし。
+    // 人間の指示により ADR-0046 D8 の「tools を 1 つも宣言していないノードは従来どおり通す」の
+    // 例外を、クラスタの利用可否についてだけ廃止した）。
+    let required_cluster_tool = match &task.workspace {
+        task_core::WorkspaceSpec::Remote { cluster, .. } => {
+            Some(format!("{}{cluster}", task_core::CLUSTER_TOOL_PREFIX))
+        }
+        task_core::WorkspaceSpec::Local { .. } => None,
+    };
+
     // 候補: 根を除く全ノードのうち、実効 profile がその harness を許すもの。
     let mut candidates: Vec<Candidate> = Vec::new();
     for node in org {
@@ -85,6 +116,11 @@ pub fn decide(org: &[OrgNode], task: &Task) -> Assignment {
         }
         let effective = task_core::resolve_profile(org, &node.id);
         if !effective.allows_harness(harness) {
+            continue;
+        }
+        if let Some(wanted) = &required_cluster_tool
+            && !effective.has_tool(wanted)
+        {
             continue;
         }
         let score = task
@@ -107,7 +143,11 @@ pub fn decide(org: &[OrgNode], task: &Task) -> Assignment {
     }
     if candidates.is_empty() {
         return Assignment::Unroutable {
-            question: unroutable_question(harness, &task.skills),
+            question: unroutable_question_with_cluster(
+                harness,
+                &task.skills,
+                required_cluster_tool.as_deref(),
+            ),
         };
     }
 
@@ -395,6 +435,47 @@ mod tests {
             question.starts_with("担当が見つからない: harness literature / skills paper-writing"),
             "{question}"
         );
+    }
+
+    /// ADR-0062 B1（Phase 107）: remote な作業場所は `cluster:<id>` を持つノードだけを候補にする。
+    /// `systems-performance`（`cluster:sirius` を持つ）だけが候補になり、`software-engineering`
+    /// （coding を許すが `cluster:sirius` を持たない）は候補から外れる。tools が空でも例外は無い。
+    #[test]
+    fn remote_workspace_only_matches_nodes_with_the_cluster_tool() {
+        let mut org = org();
+        // systems-performance に cluster:sirius を足す。
+        org.iter_mut()
+            .find(|n| n.id == "systems-performance")
+            .unwrap()
+            .profile
+            .tools = vec!["cluster:sirius".to_string()];
+        // coding を許す software-engineering には cluster:sirius が無い（tools は空のまま）。
+        let mut t = task(Some("coding"), &[]);
+        t.workspace = task_core::WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: std::path::PathBuf::from("~"),
+            mode: None,
+        };
+        match decide(&org, &t) {
+            Assignment::Assigned { node, .. } => assert_eq!(node, "systems-performance"),
+            other => panic!("expected Assigned(systems-performance), got {other:?}"),
+        }
+    }
+
+    /// クラスタを持つノードが 1 つも無ければ blocked + 質問（文言に道具名が入る）。
+    #[test]
+    fn remote_workspace_with_no_cluster_tool_holder_is_unroutable() {
+        let org = org();
+        let mut t = task(Some("coding"), &[]);
+        t.workspace = task_core::WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: std::path::PathBuf::from("~"),
+            mode: None,
+        };
+        let Assignment::Unroutable { question } = decide(&org, &t) else {
+            panic!("expected Unroutable");
+        };
+        assert!(question.contains("cluster:sirius"), "{question}");
     }
 
     /// 既に担当が居る・ハーネスが無いタスクは対象外（何もしない）。
