@@ -14994,3 +14994,11 @@ handoff」、`scripts/selfdeploy/promote.sh` 90〜100 行付近）で完了し�
 - `verify.sh 48a338a81f55` → exit 0、check 1〜4, 4b, 5（N-1 = 4fff25348ed6）, 6（smoke 5.1s）すべて true、`ok=true live_ok=true`。
 - `promote.sh 48a338a81f55`（素のコマンド）→ mode=live、DB バックアップ 18M、新 celeris が 4 秒で active、GUI 切替 2 秒、`current -> releases/48a338a81f55`。
 - 受け入れの実機確認（GUI と同じ経路 `POST /releases/{sha}/promote` で次のリリースを昇格し、`promote.log` が「promoted」まで進む・`celeris-promote-*` scope が現れて消える・`current` と GUI が切り替わる）は、この記録をコミットした次のリリースで親が行う（次節）。
+
+### Phase 105 の受け入れ確認（2026-09-23 00:09 UTC、GUI と同じ経路で昇格）
+
+- 追加リリース `5b80f99a8042`（docs のみ。`release.sh main` exit 0、`verify.sh` ok=true live_ok=true）を **`POST /releases/5b80f99a8042/promote`**（GUI の「昇格」と同じ管理系 API）で昇格 → 202 `{"script_from":"current", …}`。
+- 直後: `celeris-promote-5b80f99a8042-8ADA3WMM.scope` が active running。`promote.lock` の pid 3667271 は生存し、その cgroup は同 scope（`celeris@` unit の外）。
+- 約 10 秒後: `promoted.json` 作成、`promote.log` は「live handoff complete」→「promoted 5b80f99a8042 (mode=live)」まで到達。scope は消えた（プロセス終了で systemd が回収）。旧 unit `celeris@48a338a81f55` は drain して消え、新 `celeris@5b80f99a8042` のみ active。
+- 状態: `GET /health` release=5b80f99a8042 role=active schema_version=25、GUI `/healthz` 同 release、`current -> releases/5b80f99a8042`、`GET /releases` の当該項目は `promote_stale=false`、`is_current=true`。pegasus の ssh master は生存（`connected=true`、Phase 103 の 3 回目の確認）。
+- 21:55Z の事故（`setsid` の `promote.sh` が旧 unit の cgroup 回収で殺され、`current`/GUI が旧のまま止まる）と同じ条件（在庫 run 無し、旧デーモンが即 drain）で、今回は最後まで進んだ。GUI からの昇格は今後この経路で動く。
