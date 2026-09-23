@@ -18,6 +18,9 @@ pub struct DelegationOutcome {
     pub accepted: Vec<Task>,
     /// 拒否した提案の理由。書式は `tasks[<i>] "<title>": <reason>`。ディスパッチャが `WorkerProgress` に載せる。
     pub rejected: Vec<String>,
+    /// ADR-0062 B2（Phase 107）: 継承した Remote workspace を Local に落とした子（担当が
+    /// `cluster:<id>` を持たなかったもの）。`(task_id, reason)`。ディスパッチャが 1 回だけ tracing に残す。
+    pub workspace_downgrades: Vec<(TaskId, String)>,
 }
 
 fn reject(index: usize, title: &str, reason: impl std::fmt::Display) -> String {
@@ -161,6 +164,7 @@ pub fn plan_delegation(
         return Ok(DelegationOutcome {
             accepted: vec![],
             rejected,
+            ..Default::default()
         });
     }
     let root = tree_root(store, parent)?;
@@ -178,6 +182,7 @@ pub fn plan_delegation(
         return Ok(DelegationOutcome {
             accepted: vec![],
             rejected,
+            ..Default::default()
         });
     }
 
@@ -269,7 +274,8 @@ pub fn plan_delegation(
         project: project.as_ref(),
         home: home.as_deref(),
     };
-    let accepted = task_core::materialize_delegated(
+    let mut workspace_downgrades: Vec<(TaskId, String)> = Vec::new();
+    let accepted = task_core::materialize_delegated_logging(
         parent,
         proposals,
         &accepted_indices,
@@ -278,9 +284,14 @@ pub fn plan_delegation(
         genres,
         workspace,
         now,
+        &mut |task_id, reason| workspace_downgrades.push((task_id, reason.to_string())),
     );
 
-    Ok(DelegationOutcome { accepted, rejected })
+    Ok(DelegationOutcome {
+        accepted,
+        rejected,
+        workspace_downgrades,
+    })
 }
 
 #[cfg(test)]

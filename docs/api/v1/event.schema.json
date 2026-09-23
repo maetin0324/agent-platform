@@ -520,6 +520,34 @@
           "type": "object"
         },
         {
+          "description": "ADR-0062 A（Phase 107）: celeris が保持していた ssh master（`ClusterMaster`）のプロセスが、\n明示的な切断（`DELETE /clusters/{id}/connect`）を経ずに自分で終了した。`exit_code` は分かる\nときだけ（シグナルで落ちた場合は `None`）、`stderr_tail` は master の stderr の末尾（最大 300\nバイト。ADR-0032 D4 のとおり検証コードはここには出ない）。同じ切断について 1 回だけ記録する\n（`Dispatcher` 側で dedupe する。`mark_cluster_unavailable` から呼ぶ）。",
+          "properties": {
+            "cluster": {
+              "type": "string"
+            },
+            "exit_code": {
+              "format": "int32",
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "stderr_tail": {
+              "default": "",
+              "type": "string"
+            },
+            "type": {
+              "const": "cluster_master_exited",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "cluster"
+          ],
+          "type": "object"
+        },
+        {
           "properties": {
             "provider": {
               "type": "string"

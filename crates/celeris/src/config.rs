@@ -928,6 +928,14 @@ pub struct ClusterConfig {
     /// ならない。`"inline"`: 従来どおり celeris の直接の子として起こす（cgroup の中に留まる）。
     #[serde(default = "default_master_launcher")]
     pub master_launcher: String,
+    /// ADR-0062 A（Phase 107）: master の argv に足す `-o ServerAliveInterval=<n> -o
+    /// ServerAliveCountMax=3 -o TCPKeepAlive=yes`。既定 30 秒、`0` で無効。
+    #[serde(default = "default_keepalive_secs")]
+    pub keepalive_secs: u64,
+    /// ADR-0062 A: master 越しの実通信（`ssh -o BatchMode=yes <host> -- true`）による生存確認の間隔。
+    /// 既定 300 秒、`0` で無効。
+    #[serde(default = "default_liveness_probe_secs")]
+    pub liveness_probe_secs: u64,
 }
 
 /// `[[clusters.forwards]]`（ADR-0053 D3）: 1 本の port forward。
@@ -972,6 +980,12 @@ fn default_cluster_auth() -> String {
 }
 fn default_master_launcher() -> String {
     "auto".to_string()
+}
+fn default_keepalive_secs() -> u64 {
+    30
+}
+fn default_liveness_probe_secs() -> u64 {
+    300
 }
 fn default_worktree_base() -> String {
     "HEAD".to_string()
@@ -2875,6 +2889,9 @@ genre = {}
                         // ADR-0059 D6: 設定ファイルの `work_dir`。DB の上書きは dispatcher 側
                         // （`cluster_of`）が実行時に合成する。
                         work_dir: c.work_dir.clone(),
+                        // ADR-0062 A（Phase 107）。
+                        keepalive_secs: c.keepalive_secs,
+                        liveness_probe_secs: c.liveness_probe_secs,
                         // ADR-0053 D3（Phase 66）。
                         forwards: c
                             .forwards

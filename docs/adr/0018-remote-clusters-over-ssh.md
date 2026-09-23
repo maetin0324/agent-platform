@@ -141,3 +141,8 @@ run 1 回の順序（`sync = "rsync"` のとき）:
 - **M8. 「人のログイン待ち」は `unroutable` に混ぜない**（監査の指摘）。多重接続が無い／cooldown 中のクラスタを待つ ready タスクは、
   ディスパッチャ内の別の集合（`cluster_waiting`）で `--until-idle` の待ち対象から外す。`DaemonSnapshot.unroutable` は「設定に合うプロバイダ／
   クラスタが無い」タスクだけになり、受信箱で同じタスクが `unroutable` と `cluster_unavailable` の 2 件に出ることは無い。
+
+## Phase 107 追記（2026-09-23）
+
+master の keepalive（`-o ServerAliveInterval` 等）と実通信 probe、担当に `cluster:<id>` が無い
+remote タスクの扱い（blocked + 質問、matching・作業場所継承での強制）は ADR-0062 を見よ。

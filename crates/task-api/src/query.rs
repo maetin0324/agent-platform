@@ -149,7 +149,7 @@ pub(crate) fn parse_snake<T: DeserializeOwned>(what: &str, value: &str) -> Resul
 }
 
 /// `Event` の serde の `type` 名（`types` クエリの語彙）。
-pub(crate) const EVENT_TYPES: [&str; 18] = [
+pub(crate) const EVENT_TYPES: [&str; 19] = [
     "created",
     "transitioned",
     "worker_started",
@@ -170,6 +170,8 @@ pub(crate) const EVENT_TYPES: [&str; 18] = [
     "assigned",
     // ADR-0059 D3（Phase 99）: worktree が切れず `shared` に格下げした。
     "workspace_mode_downgraded",
+    // ADR-0062 A（Phase 107）: celeris が保持していた ssh master が明示的な切断を経ずに終了した。
+    "cluster_master_exited",
 ];
 
 pub(crate) fn event_type_name(event: &Event) -> &'static str {
@@ -192,6 +194,7 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::Edited { .. } => "edited",
         Event::Assigned { .. } => "assigned",
         Event::WorkspaceModeDowngraded { .. } => "workspace_mode_downgraded",
+        Event::ClusterMasterExited { .. } => "cluster_master_exited",
     }
 }
 

@@ -77,6 +77,7 @@ pub fn spawn_connect_start(
     }
     let host = cluster.host.clone();
     let interactive = cluster.auth == "totp";
+    let keepalive_secs = cluster.keepalive_secs;
     // ADR-0060（Phase 103）: master の起こし方を解決する（環境の判定は同期・軽いのでここで済ませる）。
     let launcher = task_worker::cluster_login::resolve_master_launcher(
         &cluster.master_launcher,
@@ -97,6 +98,7 @@ pub fn spawn_connect_start(
             interactive,
             PROMPT_TIMEOUT,
             CONNECT_TIMEOUT,
+            keepalive_secs,
         )
         .await;
         match outcome {

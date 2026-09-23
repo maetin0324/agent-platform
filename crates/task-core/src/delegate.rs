@@ -401,6 +401,43 @@ pub fn resolve_child_defaults(
     }
 }
 
+/// ADR-0062 B2（Phase 107）: 継承した（そのタスク自身は明示していない）Remote の workspace を、
+/// 担当が `cluster:<id>` を持たない場合は専用の Local（`workspace_root/<task_id>`）に落とす。
+/// 明示された workspace（`was_explicit == true`）はここでは触らない（検証で別途拒否する経路。
+/// `task_ops::actions::create_task_action` / matching の候補フィルタ）。
+/// `assignee` が未定（matching に任せる）なら、その場では判定せず Remote のまま返す
+/// （ADR-0046 D5 の matching が `cluster:<id>` を持つノードだけを候補にするので、後で矛盾しない）。
+pub(crate) fn downgrade_inherited_remote_if_needed(
+    workspace: WorkspaceSpec,
+    was_explicit: bool,
+    assignee: Option<&str>,
+    org: &[OrgNode],
+    task_id: TaskId,
+) -> (WorkspaceSpec, Option<String>) {
+    if was_explicit {
+        return (workspace, None);
+    }
+    let WorkspaceSpec::Remote { cluster, .. } = &workspace else {
+        return (workspace, None);
+    };
+    let Some(assignee) = assignee else {
+        return (workspace, None);
+    };
+    let effective = crate::profile::resolve(org, assignee);
+    let wanted = format!("{}{cluster}", crate::profile::CLUSTER_TOOL_PREFIX);
+    if effective.has_tool(&wanted) {
+        return (workspace, None);
+    }
+    let reason = format!("workspace inherited as local: assignee {assignee} has no {wanted}");
+    (
+        WorkspaceSpec::Local {
+            path: std::path::PathBuf::from(task_id.to_string()),
+            mode: None,
+        },
+        Some(reason),
+    )
+}
+
 /// 検証を通った提案（`accepted` はインデックス）から子タスクを組み立てる（ADR-0016 M2 / M3, ADR-0027 D1）。
 /// `tier` / `adapter` / `budget` はタスクの値 > 役割の既定 > 分野の既定（`default_role` の役割）> 親の値。
 /// 子の分野は `genre` > `role` の分野（`roles` に含む分野がちょうど 1 つのとき）> 親の分野の順で決める
@@ -419,6 +456,33 @@ pub fn materialize_delegated(
     genres: &[GenreSpec],
     workspace: WorkspaceContext<'_>,
     now: OffsetDateTime,
+) -> Vec<Task> {
+    materialize_delegated_logging(
+        parent,
+        tasks,
+        accepted,
+        org,
+        roles,
+        genres,
+        workspace,
+        now,
+        &mut |_, _| {},
+    )
+}
+
+/// [`materialize_delegated`] と同じだが、ADR-0062 B2 の「Remote → Local への降格」が起きるたびに
+/// `on_downgrade(task_id, reason)` を呼ぶ（呼び出し側が tracing で 1 回だけログに残すため）。
+#[allow(clippy::too_many_arguments)]
+pub fn materialize_delegated_logging(
+    parent: &Task,
+    tasks: &[DelegateTask],
+    accepted: &[usize],
+    org: &[OrgNode],
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+    workspace: WorkspaceContext<'_>,
+    now: OffsetDateTime,
+    on_downgrade: &mut dyn FnMut(TaskId, &str),
 ) -> Vec<Task> {
     let ids: HashMap<usize, TaskId> = accepted.iter().map(|&i| (i, TaskId::new())).collect();
     accepted
@@ -464,7 +528,21 @@ pub fn materialize_delegated(
                     adapter: defaults.adapter,
                 },
                 // ADR-0039 D2: 明示 > 案件の workspace > 親の workspace（従来）。
-                workspace: workspace.child_workspace(parent, t.workspace.as_ref()),
+                // ADR-0062 B2: 継承した Remote は、担当が cluster:<id> を持たなければ Local に落とす。
+                workspace: {
+                    let raw = workspace.child_workspace(parent, t.workspace.as_ref());
+                    let (ws, reason) = downgrade_inherited_remote_if_needed(
+                        raw,
+                        t.workspace.is_some(),
+                        defaults.assignee.as_deref(),
+                        org,
+                        ids[&i],
+                    );
+                    if let Some(reason) = reason {
+                        on_downgrade(ids[&i], &reason);
+                    }
+                    ws
+                },
                 // ADR-0043 D2: 委譲の子は親のリポジトリを継ぐ（親が持たなければ案件の primary）。
                 repos: workspace.child_repos(parent, &[]),
                 budget,
@@ -1087,6 +1165,100 @@ mod tests {
         };
         let out = materialize_delegated(&p, &[dt("c", vec![])], &[0], &[], &[], &[], ws, now);
         assert_eq!(out[0].workspace, explicit);
+    }
+
+    fn org_node_with_tools(id: &str, tools: &[&str]) -> OrgNode {
+        let now = OffsetDateTime::now_utc();
+        OrgNode {
+            id: id.into(),
+            parent_id: Some("cos".into()),
+            name: id.into(),
+            kind: crate::org::OrgKind::Department,
+            genre: None,
+            brief: String::new(),
+            profile: crate::profile::Profile {
+                tools: tools.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// ADR-0062 B2（Phase 107）: 案件から継いだ（明示していない）Remote workspace は、担当が
+    /// `cluster:<id>` を持たなければタスク専用の Local（`workspace_root/<task_id>`）に落ちる。
+    /// 道具を持つ担当なら Remote のまま。明示した子（`t.workspace = Some(..)`）は落とさない。
+    #[test]
+    fn inherited_remote_workspace_downgrades_to_local_when_the_assignee_lacks_the_cluster_tool() {
+        let p = parent();
+        let now = OffsetDateTime::now_utc();
+        let project = WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            mode: None,
+        };
+        let ws = WorkspaceContext {
+            repos: &[],
+            project: Some(&project),
+            home: None,
+        };
+        let org = vec![
+            org_node_with_tools("web-research", &["tavily", "exa"]),
+            org_node_with_tools("cluster-hpc", &["cluster:sirius"]),
+        ];
+
+        // 担当が cluster:sirius を持たない → Local(<task_id>) に落ちる。ログ用の reason も出る。
+        let mut without_tool = dt("survey", vec![]);
+        without_tool.assignee = Some("web-research".into());
+        let mut reasons: Vec<(TaskId, String)> = Vec::new();
+        let out = materialize_delegated_logging(
+            &p,
+            &[without_tool],
+            &[0],
+            &org,
+            &[],
+            &[],
+            ws,
+            now,
+            &mut |id, reason| reasons.push((id, reason.to_string())),
+        );
+        assert_eq!(
+            out[0].workspace,
+            WorkspaceSpec::Local {
+                path: PathBuf::from(out[0].id.to_string()),
+                mode: None,
+            }
+        );
+        assert_eq!(reasons.len(), 1);
+        assert_eq!(reasons[0].0, out[0].id);
+        assert!(reasons[0].1.contains("cluster:sirius"), "{}", reasons[0].1);
+
+        // 担当が cluster:sirius を持つ → Remote のまま、reason は出ない。
+        let mut with_tool = dt("compute", vec![]);
+        with_tool.assignee = Some("cluster-hpc".into());
+        let mut reasons2: Vec<(TaskId, String)> = Vec::new();
+        let out2 = materialize_delegated_logging(
+            &p,
+            &[with_tool],
+            &[0],
+            &org,
+            &[],
+            &[],
+            ws,
+            now,
+            &mut |id, reason| reasons2.push((id, reason.to_string())),
+        );
+        assert_eq!(out2[0].workspace, project);
+        assert!(reasons2.is_empty());
+
+        // 明示した子は落とさない（担当が道具を持たなくても、明示は明示のまま。検証は別経路で拒否する）。
+        let mut explicit_child = dt("explicit", vec![]);
+        explicit_child.assignee = Some("web-research".into());
+        explicit_child.workspace = Some(project.clone());
+        let out3 =
+            materialize_delegated(&p, &[explicit_child], &[0], &org, &[], &[], ws, now);
+        assert_eq!(out3[0].workspace, project);
     }
 
     /// ADR-0039 D5: `~` は `$HOME` で展開する。`Remote` の `~` はクラスタ側の home なので触らない。

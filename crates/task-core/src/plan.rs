@@ -425,6 +425,22 @@ pub fn materialize(
     workspace: WorkspaceContext<'_>,
     now: OffsetDateTime,
 ) -> Vec<Task> {
+    materialize_logging(parent, plan, org, roles, genres, workspace, now, &mut |_, _| {})
+}
+
+/// [`materialize`] と同じだが、ADR-0062 B2 の「Remote → Local への降格」が起きるたびに
+/// `on_downgrade(task_id, reason)` を呼ぶ（呼び出し側が tracing で 1 回だけログに残すため）。
+#[allow(clippy::too_many_arguments)]
+pub fn materialize_logging(
+    parent: &Task,
+    plan: &PlanOutput,
+    org: &[OrgNode],
+    roles: &[RoleSpec],
+    genres: &[GenreSpec],
+    workspace: WorkspaceContext<'_>,
+    now: OffsetDateTime,
+    on_downgrade: &mut dyn FnMut(TaskId, &str),
+) -> Vec<Task> {
     let ids: Vec<TaskId> = plan.tasks.iter().map(|_| TaskId::new()).collect();
     let index_to_id: HashMap<usize, TaskId> = ids.iter().copied().enumerate().collect();
     plan.tasks
@@ -467,7 +483,21 @@ pub fn materialize(
                     adapter: defaults.adapter,
                 },
                 // ADR-0039 D2: 明示 > 案件の workspace > 親の workspace（従来）。
-                workspace: workspace.child_workspace(parent, t.workspace.as_ref()),
+                // ADR-0062 B2: 継承した Remote は、担当が cluster:<id> を持たなければ Local に落とす。
+                workspace: {
+                    let raw = workspace.child_workspace(parent, t.workspace.as_ref());
+                    let (ws, reason) = crate::delegate::downgrade_inherited_remote_if_needed(
+                        raw,
+                        t.workspace.is_some(),
+                        defaults.assignee.as_deref(),
+                        org,
+                        ids[i],
+                    );
+                    if let Some(reason) = reason {
+                        on_downgrade(ids[i], &reason);
+                    }
+                    ws
+                },
                 // ADR-0043 D2: 明示（名前）> 親 > 案件の primary。
                 repos: workspace.child_repos(parent, &t.repos),
                 budget: Budget {
@@ -1294,6 +1324,79 @@ mod tests {
         let children = materialize(&p, &plan, &[], &[], &[], ws, OffsetDateTime::now_utc());
         assert_eq!(children[0].workspace, project);
         assert_eq!(children[1].workspace, explicit);
+    }
+
+    fn org_node_with_tools(id: &str, tools: &[&str]) -> OrgNode {
+        let now = OffsetDateTime::now_utc();
+        OrgNode {
+            id: id.into(),
+            parent_id: Some("cos".into()),
+            name: id.into(),
+            kind: crate::org::OrgKind::Department,
+            genre: None,
+            brief: String::new(),
+            profile: crate::profile::Profile {
+                tools: tools.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    /// ADR-0062 B2（Phase 107）: plan の子も、案件から継いだ Remote workspace を、担当が
+    /// `cluster:<id>` を持たなければ Local に落とす（委譲の子と同じ規則。`materialize_delegated` の
+    /// `inherited_remote_workspace_downgrades_to_local_when_the_assignee_lacks_the_cluster_tool` を参照）。
+    #[test]
+    fn plan_child_inherited_remote_workspace_downgrades_when_the_assignee_lacks_the_cluster_tool() {
+        let p = parent();
+        let project = WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: PathBuf::from("/work/NBB/rmaeda/workspace/rust/benchfs"),
+            mode: None,
+        };
+        let ws = WorkspaceContext {
+            repos: &[],
+            project: Some(&project),
+            home: None,
+        };
+        let org = vec![
+            org_node_with_tools("web-research", &["tavily", "exa"]),
+            org_node_with_tools("cluster-hpc", &["cluster:sirius"]),
+        ];
+        let mut without_tool = new_task("survey", vec![]);
+        without_tool.assignee = Some("web-research".into());
+        let plan = PlanOutput {
+            tasks: vec![without_tool],
+        };
+        let mut reasons: Vec<(TaskId, String)> = Vec::new();
+        let children = materialize_logging(
+            &p,
+            &plan,
+            &org,
+            &[],
+            &[],
+            ws,
+            OffsetDateTime::now_utc(),
+            &mut |id, reason| reasons.push((id, reason.to_string())),
+        );
+        assert_eq!(
+            children[0].workspace,
+            WorkspaceSpec::Local {
+                path: PathBuf::from(children[0].id.to_string()),
+                mode: None,
+            }
+        );
+        assert_eq!(reasons.len(), 1);
+
+        let mut with_tool = new_task("compute", vec![]);
+        with_tool.assignee = Some("cluster-hpc".into());
+        let plan2 = PlanOutput {
+            tasks: vec![with_tool],
+        };
+        let children2 = materialize(&p, &plan2, &org, &[], &[], ws, OffsetDateTime::now_utc());
+        assert_eq!(children2[0].workspace, project);
     }
 
     /// ADR-0039 D2: 案件が Remote なら子も Remote（従来の ADR-0018 経路に乗る）。D5: `~` は展開する。

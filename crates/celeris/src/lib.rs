@@ -576,7 +576,16 @@ pub fn build_dispatcher(
         config.account_pool_providers(),
         config.dispatch_config(),
     );
-    dispatcher.set_cluster_connector(cluster_connector(masters, master_launchers(config)));
+    dispatcher.set_cluster_connector(cluster_connector(
+        masters.clone(),
+        master_launchers(config),
+        cluster_keepalive_secs(config),
+    ));
+    // ADR-0062 A（Phase 107）: master 越しの実通信 probe・死んだ接続の片付け・celeris 保持 master の
+    // 終了検出は、ここ（テストからも広く呼ばれる `build_dispatcher`）では配線しない。実 ssh を打つ
+    // フックなので、テストの偽 `cluster_liveness_probe`（`alive = true`）だけでは防げず、本物の
+    // `ssh -o BatchMode=yes <host> -- true` が飛んでしまう（CLAUDE.md: テストで外部ネットワークに
+    // 出ない）。本番の起動経路（`wire_cluster_liveness_hooks`）だけで配線する。
     // ADR-0053 D3（Phase 66）: `[[clusters.forwards]]`（Qwen トンネル等）の(再)確立と生存監視。
     // 設定に forward が無ければ `refresh_cluster_tunnels` 自体が早期に戻るので、挿しても無害。
     let tunnel_forward_children: TunnelForwardChildren =
@@ -623,6 +632,18 @@ pub fn seed_org_if_empty(store: &dyn TaskStore, config: &Config) -> Result<usize
 pub type ClusterMasters =
     Arc<std::sync::Mutex<HashMap<String, task_worker::cluster_login::ClusterMaster>>>;
 
+/// ADR-0062 A（Phase 107）: クラスタ id ごとの keepalive の秒数（`[[clusters]] keepalive_secs`）。
+/// `[[clusters]]` は `POST /reload` で変わらないので、起動時に一度だけ表を作れば十分。
+fn cluster_keepalive_secs(config: &Config) -> Arc<HashMap<String, u64>> {
+    Arc::new(
+        config
+            .clusters
+            .iter()
+            .map(|c| (c.id.clone(), c.keepalive_secs))
+            .collect(),
+    )
+}
+
 /// ADR-0060（Phase 103）: `[[clusters]] master_launcher` を、クラスタ id ごとに実際の起こし方へ解決する。
 /// `[[clusters]]` は `POST /reload` で変わらない（起動時に再読込しない）ので、起動時に一度だけ計算すれば
 /// 十分（`cluster_connector` の呼び出しごとに `systemd-run` の PATH 検索をやり直さない）。
@@ -657,6 +678,7 @@ fn master_launchers(
 fn cluster_connector(
     masters: ClusterMasters,
     launchers: Arc<HashMap<String, task_worker::cluster_login::MasterLauncher>>,
+    keepalives: Arc<HashMap<String, u64>>,
 ) -> task_dispatch::dispatcher::ClusterConnector {
     /// 自動接続に使う上限。ディスパッチループを止めないために短くしてある（上の説明）。
     const AUTO_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
@@ -670,6 +692,8 @@ fn cluster_connector(
             .get(&cluster_id)
             .cloned()
             .unwrap_or(task_worker::cluster_login::MasterLauncher::Inline);
+        // ADR-0062 A（Phase 107）。
+        let keepalive_secs = keepalives.get(&cluster_id).copied().unwrap_or(0);
         // Phase 66b（本番 2026-09-21 の観測）: このクロージャは非同期の `start_connect` を専用ランタイムで
         // `block_on` する。呼び出し元（`task_dispatch::dispatcher::run_cluster_hooks_off_async`）は
         // tokio の文脈を持たない OS スレッドへ逃がしてから呼ぶ契約になっているが、万一これが破られて
@@ -700,6 +724,7 @@ fn cluster_connector(
             false, // publickey のみ。人の入力は要らない（要るクラスタはここに来ない）
             AUTO_CONNECT_TIMEOUT,
             AUTO_CONNECT_TIMEOUT,
+            keepalive_secs,
         ));
         match outcome {
             Ok(task_worker::cluster_login::ClusterConnectStart::Connected(master)) => {
@@ -726,6 +751,62 @@ fn cluster_connector(
             }
             Err(e) => Err(format!("{e}")),
         }
+    })
+}
+
+/// ADR-0062 A（Phase 107）: 実 ssh を打つ 3 つのフック（実通信 probe・死んだ接続の片付け・
+/// celeris 保持 master の終了検出）を配線する。**本番の起動経路からだけ**呼ぶこと
+/// （`build_dispatcher` は `accounts_admin`/`lib.rs` の多数のテストから呼ばれ、そこでは
+/// `cluster_liveness_probe` を偽物にすり替えるだけで済ませているため、実 ssh を打つこの 3 つを
+/// そこに混ぜると CLAUDE.md の「テストで外部ネットワークに出ない」を破る）。
+pub fn wire_cluster_liveness_hooks(dispatcher: &mut Dispatcher, masters: ClusterMasters) {
+    dispatcher.set_cluster_command_probe(Arc::new(
+        |ssh_command: &[String], host: &str, timeout: std::time::Duration| {
+            task_worker::ssh::control_master_command_probe_blocking(ssh_command, host, timeout)
+        },
+    ));
+    dispatcher.set_cluster_disconnector(Arc::new(move |_cluster_id: &str, host: &str| {
+        // `disconnect` は非同期なので、`cluster_connector` と同じく専用ランタイムで回す
+        // （tick ループの同期の文脈から呼ばれるため）。
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("could not build a runtime for the cluster disconnect: {e}"))?;
+        runtime
+            .block_on(task_worker::cluster_login::disconnect(
+                &["ssh".to_string()],
+                host,
+            ))
+            .map_err(|e| e.to_string())
+    }));
+    dispatcher.set_cluster_master_watcher(cluster_master_watcher(masters));
+}
+
+/// ADR-0062 A（Phase 107）: `ClusterMasters` から、明示的な切断を経ずに終了した master を集める
+/// フック。`try_wait_exit` は非破壊（ブロックしない）なので tick から直接呼んでよい。終了を見つけたら
+/// マップから取り除く（同じ終了を二度返さないため。`ClusterMaster::kill` と同じくもう保持する意味が無い）。
+fn cluster_master_watcher(masters: ClusterMasters) -> task_dispatch::dispatcher::ClusterMasterWatcher {
+    Arc::new(move || {
+        let mut exited = Vec::new();
+        let Ok(mut held) = masters.lock() else {
+            return exited;
+        };
+        let ids: Vec<String> = held.keys().cloned().collect();
+        for id in ids {
+            let Some(master) = held.get_mut(&id) else {
+                continue;
+            };
+            if let Some(exit_code) = master.try_wait_exit() {
+                let stderr_tail = master.stderr_tail(300);
+                held.remove(&id);
+                exited.push(task_dispatch::dispatcher::ClusterMasterExit {
+                    cluster: id,
+                    exit_code,
+                    stderr_tail,
+                });
+            }
+        }
+        exited
     })
 }
 
@@ -1359,6 +1440,9 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
     let identity = InstanceIdentity::new(opts.release.as_deref());
     let cluster_masters: ClusterMasters = Arc::new(std::sync::Mutex::new(HashMap::new()));
     let mut dispatcher = build_dispatcher(&config, Arc::clone(&cluster_masters))?;
+    // ADR-0062 A（Phase 107）: 実 ssh を打つフック（実通信 probe・死んだ接続の片付け）は本番の起動経路
+    // だけで配線する（`build_dispatcher` はテストからも広く呼ばれるため、そこでは配線しない）。
+    wire_cluster_liveness_hooks(&mut dispatcher, Arc::clone(&cluster_masters));
     let role = SharedRole::new(if verify {
         InstanceRole::Verify
     } else {
