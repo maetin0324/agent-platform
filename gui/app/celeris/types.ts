@@ -4551,6 +4551,7 @@ export interface ReportsReadResult {
  */
 export interface RetryBody {
   accept?: boolean;
+  workspace?: WorkspaceSpec | null;
 }
 /**
  * `POST /tasks/{id}/retry` の応答（201）。
@@ -4921,6 +4922,16 @@ export interface TaskEdit {
    */
   tier?: Tier | null;
   title?: string | null;
+  /**
+   * ADR-0062 Phase 108 追記: 作業場所の差し替え。検証は `POST /tasks` と同じ規則
+   * （`Remote.cluster` が設定に存在すること — API 層〈`validated_workspace`〉で見る、
+   * `Remote` かつ明示の担当が `cluster:<id>` を持たなければ 422、`Local.path` は空でないこと）。
+   * **この項目だけは `draft`/`ready`/`blocked`/`failed` でも受け付ける**（他の項目は従来どおり
+   * 終端〈`done`/`failed`/`cancelled`〉で 409。`running`/`reviewing` への `workspace` 編集は 409）。
+   * `blocked`（B1 の unroutable）だったタスクは、この編集または `assignee` の変更で経路が通れば
+   * その場で `ready` に戻す（下記 `edit_task` を見よ）。
+   */
+  workspace?: WorkspaceSpec | null;
 }
 /**
  * `PATCH /tasks/{id}` の結果。

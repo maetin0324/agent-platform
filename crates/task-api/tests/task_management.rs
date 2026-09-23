@@ -182,6 +182,63 @@ async fn patch_task_validates_and_refuses_terminal_tasks() {
     assert_eq!(env.status_of(running.id), Status::Running);
 }
 
+/// ADR-0062 Phase 108（本番の事故、2026-09-23）: `PATCH /tasks/{id}` の `workspace`。
+/// `ready` は `Local` に直せる。`running` への `workspace` 編集は 409（他の項目は受け付けるのに）。
+/// `Remote.cluster` が設定に無ければ 422（`PATCH /projects/{id}` と同じ `validated_workspace`）。
+#[tokio::test]
+async fn patch_task_workspace_switches_to_local_and_refuses_running_and_unknown_clusters() {
+    let env = env_with_token();
+    let app = env.router();
+
+    let ready = seeded(&env, Status::Ready);
+    let resp = send(
+        &app,
+        patch_json_with(
+            &format!("/api/v1/tasks/{}", ready.id),
+            &json!({"workspace": {"kind": "local", "path": "/tmp/patched-local"}}),
+            &admin(),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let body = resp.json();
+    assert_eq!(body["fields"], json!(["workspace"]));
+    assert_eq!(
+        env.store
+            .get(ready.id)
+            .expect("get")
+            .expect("task")
+            .workspace,
+        task_core::WorkspaceSpec::local("/tmp/patched-local")
+    );
+
+    // `running` への `workspace` 編集は 409（他の項目は受け付けるのと対照的）。
+    let running = seeded(&env, Status::Running);
+    let resp = send(
+        &app,
+        patch_json_with(
+            &format!("/api/v1/tasks/{}", running.id),
+            &json!({"workspace": {"kind": "local", "path": "/tmp/x"}}),
+            &admin(),
+        ),
+    )
+    .await;
+    assert_problem(&resp, 409, "invalid_transition");
+
+    // 設定に無いクラスタは 422。
+    let ready2 = seeded(&env, Status::Ready);
+    let resp = send(
+        &app,
+        patch_json_with(
+            &format!("/api/v1/tasks/{}", ready2.id),
+            &json!({"workspace": {"kind": "remote", "cluster": "no-such-cluster", "path": "~"}}),
+            &admin(),
+        ),
+    )
+    .await;
+    assert_problem(&resp, 422, "validation");
+}
+
 // ---- D2: コメントと割り込み・再開 ----
 
 /// 人のコメントの効き方の表（ADR-0044 D2）を API の層で全状態ぶん確かめる。

@@ -7,11 +7,17 @@
 //!   `TaskStore::update_task` 1 回で、`Event::Edited{fields, by:"human"}` を同じトランザクションに積む。
 //!
 //! LLM は呼ばない。検証は作成時（`add::build_task`）と同じ規則を使う。
+//!
+//! ADR-0062 Phase 108 追記: `workspace` は上記の例外で、`draft`/`ready`/`blocked`/`failed` を受け付ける
+//! （`running`/`reviewing`/`done`/`cancelled` は 409）。さらに `workspace`/`assignee` の変更で B1
+//! （担当に `cluster:<id>` が無い）の `blocked` の経路が通った場合だけ、`gate::answer` と同じ
+//! `Trigger::Answer` を使って `ready` に戻す（状態機械を通る唯一の例外。他の項目は従来どおり触らない）。
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    Budget, Event, GenreSpec, MilestoneId, Status, Task, TaskCategory, TaskId, TaskStore, Tier,
+    Budget, Event, GenreSpec, MilestoneId, Status, StoreError, Task, TaskCategory, TaskId,
+    TaskStore, Tier, Trigger, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -81,6 +87,15 @@ pub struct TaskEdit {
     /// 楽観的排他（現在の `status` と違えば 409）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_status: Option<Status>,
+    /// ADR-0062 Phase 108 追記: 作業場所の差し替え。検証は `POST /tasks` と同じ規則
+    /// （`Remote.cluster` が設定に存在すること — API 層〈`validated_workspace`〉で見る、
+    /// `Remote` かつ明示の担当が `cluster:<id>` を持たなければ 422、`Local.path` は空でないこと）。
+    /// **この項目だけは `draft`/`ready`/`blocked`/`failed` でも受け付ける**（他の項目は従来どおり
+    /// 終端〈`done`/`failed`/`cancelled`〉で 409。`running`/`reviewing` への `workspace` 編集は 409）。
+    /// `blocked`（B1 の unroutable）だったタスクは、この編集または `assignee` の変更で経路が通れば
+    /// その場で `ready` に戻す（下記 `edit_task` を見よ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceSpec>,
 }
 
 impl TaskEdit {
@@ -124,8 +139,24 @@ pub fn edit_task(
             actual: task.status,
         });
     }
-    // ADR-0044 D1: 終端のタスクは編集できない（やり直すなら `retry`、再開するなら `reopen`）。
-    if task.status.is_terminal() {
+    // ADR-0062 Phase 108: `workspace` を含む編集は draft/ready/blocked/failed だけ許す
+    // （running/reviewing/done/cancelled は 409）。`failed` は従来の終端チェックの対象だが、
+    // 作業場所を直してやり直せるようにするための例外。`workspace` を含まない編集は従来どおり
+    // 終端（done/failed/cancelled）を拒む。
+    if edit.workspace.is_some() {
+        if !matches!(
+            task.status,
+            Status::Draft | Status::Ready | Status::Blocked | Status::Failed
+        ) {
+            return Err(OpsError::InvalidState {
+                id,
+                context: format!("status={:?}", task.status),
+                action: "edited (workspace); only draft/ready/blocked/failed accept a workspace change"
+                    .to_string(),
+            });
+        }
+    } else if task.status.is_terminal() {
+        // ADR-0044 D1: 終端のタスクは編集できない（やり直すなら `retry`、再開するなら `reopen`）。
         return Err(OpsError::InvalidState {
             id,
             context: format!("status={:?}", task.status),
@@ -133,6 +164,7 @@ pub fn edit_task(
         });
     }
 
+    let original_status = task.status;
     let mut fields: Vec<String> = Vec::new();
 
     if let Some(title) = edit.title {
@@ -254,6 +286,22 @@ pub fn edit_task(
             fields.push("assignee".to_string());
         }
     }
+    // ADR-0062 Phase 108: 作業場所の差し替え。`Remote.cluster` が設定にあることは API 層
+    // （`validated_workspace`）が見る。ここでは `Local.path` が空でないことと、`Task` としての
+    // 整合（下の cluster:<id> の検証）だけを見る。
+    if let Some(workspace) = edit.workspace {
+        if let WorkspaceSpec::Local { path, .. } = &workspace
+            && path.as_os_str().is_empty()
+        {
+            return Err(OpsError::Validation(
+                "workspace.path must not be empty".to_string(),
+            ));
+        }
+        if workspace != task.workspace {
+            task.workspace = workspace;
+            fields.push("workspace".to_string());
+        }
+    }
     if let Some(role) = edit.role {
         // 作成時（`add::build_task`）と同じ規則: `genre` が設定にあり、その分野の `roles` に
         // 含まれない役割は拒否する（`genre` はこの API では変えられないので、片方だけ壊せてしまう）。
@@ -348,6 +396,16 @@ pub fn edit_task(
         crate::matching::assignee_accepts(&org, assignee, task.genre.as_deref())
             .map_err(OpsError::Validation)?;
     }
+    // ADR-0062 B1/B3・Phase 108 追記: `workspace` か `assignee` を変えて、その結果が明示の `Remote` で
+    // 担当が居るなら、その担当が `cluster:<id>` を持つこと（無ければ 422）。
+    if fields.iter().any(|f| f == "workspace" || f == "assignee")
+        && let WorkspaceSpec::Remote { cluster, .. } = &task.workspace
+        && let Some(assignee) = task.assignee.as_deref()
+    {
+        let org = store.org_list()?;
+        crate::matching::assignee_has_cluster_tool(&org, assignee, cluster)
+            .map_err(OpsError::Validation)?;
+    }
     let budget = Budget {
         max_turns: edit.max_turns.unwrap_or(task.budget.max_turns),
         max_wall_secs: edit.max_wall_secs.unwrap_or(task.budget.max_wall_secs),
@@ -365,13 +423,46 @@ pub fn edit_task(
     task.updated_at = now;
     // `status` / `attempts` / `lease` はストアが**トランザクションの中で読み直した**値で上書きする
     // （編集中にディスパッチャがリースを取っていても壊さない）。返ってくるのがその結果。
-    let task = store.update_task(
+    let mut task = store.update_task(
         &task,
         Event::Edited {
             fields: fields.clone(),
             by: "human".to_string(),
         },
     )?;
+
+    // ADR-0062 Phase 108: `blocked`（B1/ADR-0046 D5 の unroutable）だったタスクで、この編集が
+    // `workspace`/`assignee` を変えたなら、上の検証を通った時点で経路は解決している
+    // （明示 `Remote` は `cluster:<id>` の検証を済ませ、`assignee` の harness は D5 の検証を済ませて
+    // いる）。既存の「質問に答える」経路（`gate::answer` と同じ `Trigger::Answer` +
+    // `Event::Answered` + 未決の approvals を settle）に相乗りして `ready` に戻す。
+    // worker が聞いた質問による `blocked`（`Trigger::WorkerQuestion`）はここでは触らない
+    // （`latest_block_is_unroutable` が見分ける）。
+    if original_status == Status::Blocked
+        && fields.iter().any(|f| f == "workspace" || f == "assignee")
+    {
+        let events = store.events_for(id)?;
+        if crate::derive::latest_block_is_unroutable(&events) {
+            let question = crate::derive::latest_question(&events);
+            let answer = "解決済み（作業場所/担当の変更）".to_string();
+            match store.apply_transition(
+                id,
+                Trigger::Answer,
+                Some(Event::Answered {
+                    question,
+                    answer: answer.clone(),
+                }),
+            ) {
+                Ok(outcome) => {
+                    task.status = outcome.next;
+                    crate::gate::settle_pending_approvals(store, id, &answer)?;
+                }
+                // 競合（その間に別の何かが状態を動かした）は無視する。編集そのものは既に書けている。
+                Err(StoreError::InvalidTransition(_)) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
     Ok(EditResult { task, fields })
 }
 
@@ -402,7 +493,8 @@ fn reaches(
 mod tests {
     use super::*;
     use task_core::{
-        ArtifactRef, Check, Criterion, SqliteStore, TaskKind, WorkerHint, WorkspaceSpec,
+        ArtifactRef, Check, Criterion, OrgKind, OrgNode, Profile, SqliteStore, TaskKind,
+        WorkerHint, WorkspaceSpec,
     };
 
     fn task_with(status: Status) -> Task {
@@ -900,5 +992,237 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, OpsError::Validation(_)), "{err}");
+    }
+
+    // ---- ADR-0062 Phase 108: `PATCH /tasks/{id}` の `workspace` ----
+
+    /// `cos` の下に `web-research`（道具なし）と `cluster-hpc`（`cluster:sirius` を持つ）。
+    fn cluster_org() -> Vec<OrgNode> {
+        let now = OffsetDateTime::now_utc();
+        let dept = |id: &str, tools: &[&str]| OrgNode {
+            profile: Profile {
+                tools: tools.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            id: id.to_string(),
+            parent_id: Some("cos".to_string()),
+            name: id.to_string(),
+            kind: OrgKind::Department,
+            genre: None,
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        vec![
+            OrgNode {
+                profile: Default::default(),
+                id: "cos".into(),
+                parent_id: None,
+                name: "cos".into(),
+                kind: OrgKind::Secretary,
+                genre: None,
+                brief: String::new(),
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            },
+            dept("web-research", &[]),
+            dept("cluster-hpc", &["cluster:sirius"]),
+        ]
+    }
+
+    /// (a) `ready` のタスクを `Local` に PATCH → 200、`workspace` が変わる。
+    #[test]
+    fn workspace_can_be_switched_to_local_on_a_ready_task() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let task = task_with(Status::Ready);
+        let id = task.id;
+        store.insert(&task).expect("insert");
+
+        let result = edit_task(
+            &store,
+            id,
+            TaskEdit {
+                workspace: Some(WorkspaceSpec::local("/tmp/ws2")),
+                ..TaskEdit::default()
+            },
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .expect("edit");
+        assert_eq!(result.fields, vec!["workspace".to_string()]);
+        assert_eq!(result.task.workspace, WorkspaceSpec::local("/tmp/ws2"));
+        assert_eq!(
+            store.get(id).expect("get").expect("task").workspace,
+            WorkspaceSpec::local("/tmp/ws2")
+        );
+    }
+
+    /// (b) B1（unroutable）で `blocked` になったタスクを `Local` に PATCH すると `ready` に戻り、
+    /// 質問の approval が閉じる（既存の「質問に答える」経路に相乗り）。
+    #[test]
+    fn a_blocked_unroutable_task_returns_to_ready_when_the_workspace_resolves_it() {
+        use task_core::approval::{Approval, ApprovalId, ApprovalStore};
+
+        let store = SqliteStore::open_in_memory().expect("store");
+        let mut task = task_with(Status::Ready);
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: "~".into(),
+            mode: None,
+        };
+        task.assignee = Some("web-research".into());
+        let id = task.id;
+        store.insert(&task).expect("insert");
+
+        let question = "担当 `web-research` には道具 `cluster:sirius` が無いため…".to_string();
+        store
+            .apply_transition(
+                id,
+                Trigger::Unroutable,
+                Some(Event::QuestionRaised {
+                    run_id: format!("cluster-routing-{id}"),
+                    text: question.clone(),
+                }),
+            )
+            .expect("block");
+        assert_eq!(
+            store.get(id).expect("get").expect("task").status,
+            Status::Blocked
+        );
+        let approval = Approval {
+            id: ApprovalId::new(),
+            project_id: None,
+            node_id: "web-research".into(),
+            task_id: Some(id),
+            question: question.clone(),
+            decision: None,
+            answer: None,
+            created_at: OffsetDateTime::now_utc(),
+            decided_at: None,
+        };
+        store.approval_append(&approval).expect("append approval");
+
+        let result = edit_task(
+            &store,
+            id,
+            TaskEdit {
+                workspace: Some(WorkspaceSpec::local("/tmp/ws-local")),
+                ..TaskEdit::default()
+            },
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .expect("edit");
+        assert_eq!(result.task.status, Status::Ready, "経路が通ったので ready に戻る");
+        assert_eq!(
+            store.get(id).expect("get").expect("task").status,
+            Status::Ready
+        );
+        let decided = store.approval_get(approval.id).expect("get").expect("some");
+        assert!(!decided.is_pending(), "B1 の質問は解決済みとして閉じる");
+
+        let events = store.events_for(id).expect("events");
+        assert!(events.iter().any(|(_, e)| matches!(
+            e,
+            Event::Answered { answer, .. } if answer.contains("解決済み")
+        )));
+    }
+
+    /// (c) 明示の `Remote` で担当（`web-research`）が `cluster:sirius` を持たなければ 422。
+    #[test]
+    fn an_explicit_remote_workspace_is_rejected_when_the_assignee_lacks_the_cluster_tool() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        for node in cluster_org() {
+            store.org_upsert(&node).expect("seed org");
+        }
+        let mut task = task_with(Status::Ready);
+        task.assignee = Some("web-research".into());
+        let id = task.id;
+        store.insert(&task).expect("insert");
+
+        let err = edit_task(
+            &store,
+            id,
+            TaskEdit {
+                workspace: Some(WorkspaceSpec::Remote {
+                    cluster: "sirius".into(),
+                    path: "~".into(),
+                    mode: None,
+                }),
+                ..TaskEdit::default()
+            },
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap_err();
+        let OpsError::Validation(msg) = err else {
+            panic!("{err}");
+        };
+        assert!(msg.contains("cluster:sirius"), "{msg}");
+        assert!(msg.contains("cluster-hpc"), "候補ノードを挙げる: {msg}");
+        assert_eq!(
+            store.get(id).expect("get").expect("task").workspace,
+            WorkspaceSpec::local("/tmp/ws"),
+            "検証に落ちたので何も書かない"
+        );
+    }
+
+    /// (d) `running` への `workspace` 編集は 409（`draft`/`ready`/`blocked`/`failed` だけ許す）。
+    #[test]
+    fn workspace_edits_are_refused_on_running_tasks() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let task = task_with(Status::Running);
+        let id = task.id;
+        store.insert(&task).expect("insert");
+
+        let err = edit_task(
+            &store,
+            id,
+            TaskEdit {
+                workspace: Some(WorkspaceSpec::local("/tmp/ws2")),
+                ..TaskEdit::default()
+            },
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, OpsError::InvalidState { .. }), "{err}");
+        assert_eq!(
+            store.get(id).expect("get").expect("task").workspace,
+            WorkspaceSpec::local("/tmp/ws")
+        );
+    }
+
+    /// (e) `assignee` を `cluster-hpc`（`cluster:sirius` を持つ）に変えつつ `Remote` のまま → 200。
+    #[test]
+    fn changing_the_assignee_to_a_node_with_the_cluster_tool_is_accepted() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        for node in cluster_org() {
+            store.org_upsert(&node).expect("seed org");
+        }
+        let mut task = task_with(Status::Ready);
+        task.workspace = WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: "~".into(),
+            mode: None,
+        };
+        let id = task.id;
+        store.insert(&task).expect("insert");
+
+        let result = edit_task(
+            &store,
+            id,
+            TaskEdit {
+                assignee: Some(Some("cluster-hpc".into())),
+                ..TaskEdit::default()
+            },
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .expect("edit");
+        assert_eq!(result.fields, vec!["assignee".to_string()]);
+        assert_eq!(result.task.assignee.as_deref(), Some("cluster-hpc"));
     }
 }

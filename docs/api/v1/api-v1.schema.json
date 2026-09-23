@@ -9242,11 +9242,21 @@
     },
     "RetryBody": {
       "additionalProperties": false,
-      "description": "`POST /tasks/{id}/retry`（Phase 31）の本文。`accept: true` なら新しいタスクは `draft` を経ず `ready` で始まる。",
+      "description": "`POST /tasks/{id}/retry`（Phase 31）の本文。`accept: true` なら新しいタスクは `draft` を経ず `ready` で始まる。\nADR-0062 Phase 108 追記: `workspace`（省略可）を与えると、複製先の作業場所をそれに差し替える\n（検証は `PATCH /tasks/{id}` の `workspace` と同じ）。省略時は従来どおり元のタスクの `workspace` を複製する。",
       "properties": {
         "accept": {
           "default": false,
           "type": "boolean"
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "type": "object"
@@ -10533,6 +10543,17 @@
             "string",
             "null"
           ]
+        },
+        "workspace": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0062 Phase 108 追記: 作業場所の差し替え。検証は `POST /tasks` と同じ規則\n（`Remote.cluster` が設定に存在すること — API 層〈`validated_workspace`〉で見る、\n`Remote` かつ明示の担当が `cluster:<id>` を持たなければ 422、`Local.path` は空でないこと）。\n**この項目だけは `draft`/`ready`/`blocked`/`failed` でも受け付ける**（他の項目は従来どおり\n終端〈`done`/`failed`/`cancelled`〉で 409。`running`/`reviewing` への `workspace` 編集は 409）。\n`blocked`（B1 の unroutable）だったタスクは、この編集または `assignee` の変更で経路が通れば\nその場で `ready` に戻す（下記 `edit_task` を見よ）。"
         }
       },
       "type": "object"

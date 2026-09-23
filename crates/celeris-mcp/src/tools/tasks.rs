@@ -361,7 +361,8 @@ async fn retry_impl(
     let id = parse_task_id(&args.id)?;
     let result = state
         .blocking(move |store| {
-            task_ops::retry::retry_task(store, id, false, OffsetDateTime::now_utc()).map_err(map_ops_err)
+            task_ops::retry::retry_task(store, id, false, None, OffsetDateTime::now_utc())
+                .map_err(map_ops_err)
         })
         .await?;
     ToolOutput::from_serialize(&result)

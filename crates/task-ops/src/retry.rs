@@ -9,7 +9,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{Status, Task, TaskId, TaskStore};
+use task_core::{Status, Task, TaskId, TaskStore, WorkspaceSpec};
 use time::OffsetDateTime;
 
 use crate::error::OpsError;
@@ -26,10 +26,16 @@ pub struct RetryResult {
 
 /// `id` のタスクが `failed`/`cancelled` でなければ `OpsError::InvalidState`（API は 409）。
 /// それ以外の検証は無い（複製元は既に一度検証を通っている）。
+///
+/// ADR-0062 Phase 108 追記: `workspace` を与えると複製先の作業場所をそれに差し替える（省略時は従来どおり
+/// 元のタスクの `workspace` を複製する）。検証は `PATCH /tasks/{id}` の `workspace` と同じ規則
+/// （`Remote.cluster` は API 層〈`validated_workspace`〉が見る。ここでは `Local.path` が空でないこと、
+/// 明示の `Remote` で元の担当が `cluster:<id>` を持たなければ 422、を見る）。
 pub fn retry_task(
     store: &dyn TaskStore,
     id: TaskId,
     accept: bool,
+    workspace: Option<WorkspaceSpec>,
     now: OffsetDateTime,
 ) -> Result<RetryResult, OpsError> {
     let original = store.get(id)?.ok_or(OpsError::NotFound(id))?;
@@ -40,6 +46,27 @@ pub fn retry_task(
             action: "retried".to_string(),
         });
     }
+
+    let workspace = match workspace {
+        Some(ws) => {
+            if let WorkspaceSpec::Local { path, .. } = &ws
+                && path.as_os_str().is_empty()
+            {
+                return Err(OpsError::Validation(
+                    "workspace.path must not be empty".to_string(),
+                ));
+            }
+            if let WorkspaceSpec::Remote { cluster, .. } = &ws
+                && let Some(assignee) = original.assignee.as_deref()
+            {
+                let org = store.org_list()?;
+                crate::matching::assignee_has_cluster_tool(&org, assignee, cluster)
+                    .map_err(OpsError::Validation)?;
+            }
+            ws
+        }
+        None => original.workspace.clone(),
+    };
 
     let new_task = Task {
         // ADR-0043 D2: やり直しは元のタスクと同じリポジトリで作業する。
@@ -55,7 +82,7 @@ pub fn retry_task(
         status: if accept { Status::Ready } else { Status::Draft },
         priority: original.priority,
         worker_hint: original.worker_hint.clone(),
-        workspace: original.workspace.clone(),
+        workspace,
         budget: original.budget,
         attempts: 0,
         lease: None,
@@ -88,7 +115,7 @@ mod tests {
     use super::*;
     use task_core::{
         ArtifactRef, Budget, Check, Criterion, Event, MessageId, SqliteStore, TaskKind, Tier,
-        Trigger, WorkerHint, WorkspaceSpec,
+        Trigger, WorkerHint,
     };
 
     fn store() -> SqliteStore {
@@ -216,7 +243,7 @@ mod tests {
         let store = store();
         let original = make_failed(&store, "investigate incident");
 
-        let result = retry_task(&store, original.id, false, now()).expect("retry");
+        let result = retry_task(&store, original.id, false, None, now()).expect("retry");
         assert!(result.rewired.is_empty());
         let new_task = store.get(result.task_id).expect("get").expect("some");
         assert_eq!(new_task.status, Status::Draft);
@@ -254,9 +281,120 @@ mod tests {
     fn retry_with_accept_starts_ready() {
         let store = store();
         let original = make_failed(&store, "retry me");
-        let result = retry_task(&store, original.id, true, now()).expect("retry");
+        let result = retry_task(&store, original.id, true, None, now()).expect("retry");
         let new_task = store.get(result.task_id).expect("get").expect("some");
         assert_eq!(new_task.status, Status::Ready);
+    }
+
+    // ---- ADR-0062 Phase 108: `retry` の `workspace` ----
+
+    /// `cos` の下に `web-research`（道具なし）と `cluster-hpc`（`cluster:sirius` を持つ）。
+    fn cluster_org() -> Vec<task_core::OrgNode> {
+        use task_core::{OrgKind, OrgNode, Profile};
+        let now = now();
+        let dept = |id: &str, tools: &[&str]| OrgNode {
+            profile: Profile {
+                tools: tools.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            id: id.to_string(),
+            parent_id: Some("cos".to_string()),
+            name: id.to_string(),
+            kind: OrgKind::Department,
+            genre: None,
+            brief: String::new(),
+            position: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        vec![
+            OrgNode {
+                profile: Default::default(),
+                id: "cos".into(),
+                parent_id: None,
+                name: "cos".into(),
+                kind: OrgKind::Secretary,
+                genre: None,
+                brief: String::new(),
+                position: 0,
+                created_at: now,
+                updated_at: now,
+            },
+            dept("web-research", &[]),
+            dept("cluster-hpc", &["cluster:sirius"]),
+        ]
+    }
+
+    /// 失敗した remote タスクを `workspace` を渡して retry すると、複製が新しい `workspace` になる
+    /// （本番の事故: web-research / literature-research の remote タスクを Local に直してやり直す）。
+    #[test]
+    fn retry_can_override_the_workspace_of_the_new_task() {
+        let store = store();
+        let mut original = raw_task(Status::Failed, vec![], None);
+        original.workspace = WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: "~".into(),
+            mode: None,
+        };
+        store.insert(&original).expect("insert");
+
+        let result = retry_task(
+            &store,
+            original.id,
+            false,
+            Some(WorkspaceSpec::local("/tmp/retry-local")),
+            now(),
+        )
+        .expect("retry");
+        let new_task = store.get(result.task_id).expect("get").expect("some");
+        assert_eq!(new_task.workspace, WorkspaceSpec::local("/tmp/retry-local"));
+    }
+
+    /// `workspace.path` が空の `Local` は 422。
+    #[test]
+    fn retry_workspace_override_rejects_an_empty_local_path() {
+        let store = store();
+        let original = raw_task(Status::Failed, vec![], None);
+        store.insert(&original).expect("insert");
+
+        let err = retry_task(
+            &store,
+            original.id,
+            false,
+            Some(WorkspaceSpec::local("")),
+            now(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, OpsError::Validation(_)), "{err}");
+    }
+
+    /// 明示の `Remote` で元の担当が `cluster:<id>` を持たなければ 422（複製は作られない）。
+    #[test]
+    fn retry_workspace_override_rejects_remote_when_the_assignee_lacks_the_cluster_tool() {
+        let store = store();
+        for node in cluster_org() {
+            store.org_upsert(&node).expect("seed org");
+        }
+        let mut original = raw_task(Status::Failed, vec![], None);
+        original.assignee = Some("web-research".into());
+        store.insert(&original).expect("insert");
+
+        let err = retry_task(
+            &store,
+            original.id,
+            false,
+            Some(WorkspaceSpec::Remote {
+                cluster: "sirius".into(),
+                path: "~".into(),
+                mode: None,
+            }),
+            now(),
+        )
+        .unwrap_err();
+        let OpsError::Validation(msg) = err else {
+            panic!("{err}");
+        };
+        assert!(msg.contains("cluster:sirius"), "{msg}");
     }
 
     #[test]
@@ -307,7 +445,7 @@ mod tests {
             Status::Cancelled
         );
 
-        let result = retry_task(&store, original.id, false, now()).expect("retry");
+        let result = retry_task(&store, original.id, false, None, now()).expect("retry");
         let mut rewired = result.rewired.clone();
         rewired.sort();
         let mut expected = vec![conv_dependent.id, normal_dependent.id];
@@ -357,7 +495,7 @@ mod tests {
         let store = store();
         let draft =
             crate::add::create_task(&store, base_spec("still draft"), now()).expect("create");
-        let err = retry_task(&store, draft.id, false, now()).unwrap_err();
+        let err = retry_task(&store, draft.id, false, None, now()).unwrap_err();
         assert!(matches!(err, OpsError::InvalidState { .. }));
 
         let done =
@@ -376,14 +514,14 @@ mod tests {
             .expect("review_pass");
         let done = store.get(done.id).expect("get").expect("some");
         assert_eq!(done.status, Status::Done);
-        let err = retry_task(&store, done.id, false, now()).unwrap_err();
+        let err = retry_task(&store, done.id, false, None, now()).unwrap_err();
         assert!(matches!(err, OpsError::InvalidState { .. }));
     }
 
     #[test]
     fn retry_missing_task_is_not_found() {
         let store = store();
-        let err = retry_task(&store, TaskId::new(), false, now()).unwrap_err();
+        let err = retry_task(&store, TaskId::new(), false, None, now()).unwrap_err();
         assert!(matches!(err, OpsError::NotFound(_)));
     }
 }

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::Serialize;
-use task_core::{ArtifactRef, Event, RunRole, Task};
+use task_core::{ArtifactRef, Event, RunRole, Status, Task};
 
 /// `prior_review_from_events` の要素。`task_worker::PriorReview` と同じ形（フィールド名も同じ）。
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -175,6 +175,26 @@ pub fn latest_question(events: &[(u64, Event)]) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// ADR-0062 Phase 108: 直近の `Blocked` への遷移が `Trigger::Unroutable`（reason `"unroutable"`）に
+/// よるものか。B1（担当に `cluster:<id>` が無い）と ADR-0046 D5（担当の候補が無い）はどちらも同じ
+/// trigger を使うので区別しない。`PATCH /tasks/{id}` が `workspace`/`assignee` の変更で経路が通った
+/// `blocked` タスクを `ready` に戻せるかの判定に使う（worker が聞いた質問による `blocked` とは分ける。
+/// そちらは `Trigger::WorkerQuestion`、reason は `"worker_question"`）。
+pub fn latest_block_is_unroutable(events: &[(u64, Event)]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find_map(|(_, e)| match e {
+            Event::Transitioned {
+                to: Status::Blocked,
+                reason,
+                ..
+            } => Some(reason == "unroutable"),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

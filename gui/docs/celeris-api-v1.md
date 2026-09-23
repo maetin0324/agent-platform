@@ -1605,6 +1605,14 @@ Go か再設計」を**人の 3 つの答え**にしたもの（ADR-0038 D2）�
   受信箱の `failed` 項目、`GET /tasks/{id}` の `failed`/`cancelled` 表示、案件の仕事の木の失敗ノードは、
   みな `actions` にこれが立つのでボタンの表示に迷わない。
 
+**Phase 108 追記（2026-09-23、ADR-0062）**: 本番で、remote な作業場所のまま `failed` になった仕事
+（クラスタの準備失敗など）を retry しても `workspace` がそのまま複製され、担当に `cluster:<id>` が無ければ
+また `blocked` になる、という手詰まりが起きた。本文に **`workspace`（省略可）** を足した:
+`{"accept": false, "workspace": {"kind": "local", "path": "…"}}`。与えると複製先の `workspace` を
+差し替える（省略時は従来どおり元のタスクの `workspace` を複製する）。検証は §3.74 の `PATCH` の
+`workspace` と同じ規則（`Remote.cluster` が設定に無ければ 422 `validation`、`Local.path` が空でも 422、
+明示の `Remote` で元の担当が `cluster:<id>` を持たなければ 422）。検証に落ちれば複製は作られない。
+
 ### 3.64〜3.65 通知（Discord）（ADR-0037、Phase 39 / Phase 40）
 
 「人の判断が要るとき」だけ Discord の webhook に 1 通投げる仕組みの、設定の確認とテスト送信。
@@ -2002,6 +2010,27 @@ celeris の外の一時 scope に移り、旧デーモンの終了に巻き込�
   （継承〈親 → primary〉は作成時だけの規則なので、`[]` を書けば「リポジトリを使わない」になる）。
   知らない名前・リモートと他のリポジトリの混在・案件に属さないタスクの空でない `repos` は 422 `validation`。
   **走っている run には効かない**（次の run の worktree から。`PATCH` は run を止めない）。
+
+**Phase 108 追記（2026-09-23、ADR-0062）**: 本番で、案件から継承した remote な作業場所（担当に
+`cluster:<id>` が無い）で `blocked` になった調査タスクを、作業場所を直して進める手段が API に無い事故が
+あった。本文に **`workspace`（`WorkspaceSpec`。`{"kind":"local","path":"…"}` か
+`{"kind":"remote","cluster":"…","path":"…"}`）** を足した:
+
+- **この項目だけは、他の項目と違う状態のガードを持つ**: `draft` / `ready` / `blocked` / `failed` を
+  受け付け、`running` / `reviewing` / `done` / `cancelled` は 409 `invalid_transition`
+  （`failed` は他の項目の `PATCH` では 409 だが、`workspace` を書けば受け付ける）。
+- 検証は `POST /tasks` と同じ規則: `Remote.cluster` が設定に無ければ 422 `validation`
+  （`PATCH /projects/{id}` と同じ `validated_workspace` の層で見る。`~` はそこで `$HOME` に展開する）。
+  `Local.path` が空文字列なら 422。明示の `Remote` で、その時点の担当（同じ本文で `assignee` も
+  変えるならその新しい担当）が `cluster:<id>` を持たなければ 422（§4.6 の B3 と同じ規則。候補ノードを
+  列挙する）。`assignee` だけを変えて `workspace` を変えない場合も、既存の `workspace` が `Remote` なら
+  同じ検証を行う（`cluster:<id>` を持たない担当には付け替えられない）。
+- **`blocked`（ADR-0062 B1 の「担当に `cluster:<id>` が無い」による質問待ち）だったタスクは、この
+  `workspace` または `assignee` の変更で経路が通れば、検証を通過した時点でその場で `ready` に戻す**
+  （`gate::answer` と同じ `Trigger::Answer` に相乗りし、`Event::Answered{answer: "解決済み（作業場所/
+  担当の変更）"}` を記録、未決の `approvals` も同じ答えで決まる。GUI の受信箱からその質問は消える）。
+  worker が聞いた質問による `blocked` はここでは触らない（対象は B1 由来の `blocked` だけ）。
+- 応答の `fields` に `workspace` が加わる。
 
 #### 3.75 `GET /tasks/{id}/comments` → 200 `CommentList`
 

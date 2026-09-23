@@ -1548,10 +1548,14 @@ async fn retry(
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
-    let RetryBody { accept } = read_json(body, true).await?;
+    let RetryBody { accept, workspace } = read_json(body, true).await?;
+    // ADR-0062 Phase 108: `workspace` の検証は `PATCH /tasks/{id}` と同じ（先に 422 を返す）。
+    let workspace = workspace
+        .map(|spec| validated_workspace(&state, spec))
+        .transpose()?;
     let result = state
         .blocking(move |store| {
-            task_ops::retry::retry_task(store, id, accept, OffsetDateTime::now_utc())
+            task_ops::retry::retry_task(store, id, accept, workspace, OffsetDateTime::now_utc())
                 .map_err(|e| ops_problem(store, e, Some("retry")))
         })
         .await?;
@@ -1576,12 +1580,17 @@ async fn patch_task(
     no_query(&raw)?;
     require_admin(&state, &headers)?;
     let id = parse_task_id(&id)?;
-    let edit: task_ops::edit::TaskEdit = read_json(body, true).await?;
+    let mut edit: task_ops::edit::TaskEdit = read_json(body, true).await?;
     if edit.is_empty() {
         return Err(ApiProblem::validation(vec![ValidationError {
             field: None,
             message: "at least one field must be given".to_string(),
         }]));
+    }
+    // ADR-0062 Phase 108: `workspace` の検証（`Remote.cluster` が設定にあること、`~` の展開）は
+    // `PATCH /projects/{id}` と同じ `validated_workspace` を使う（422 はここで返す）。
+    if let Some(spec) = edit.workspace.take() {
+        edit.workspace = Some(validated_workspace(&state, spec)?);
     }
     let genres = state.inner.genres.clone();
     let result = state
