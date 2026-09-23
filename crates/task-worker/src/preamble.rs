@@ -867,7 +867,9 @@ fn actions_instructions() -> String {
      調査系（`literature` / `web-research`）の `create_task` を書くときは、受け入れ条件を対象ごとに \
      分けるか、レビュアー条件（`acceptance` のうち `check` が reviewer のもの）に「一次情報で確認できな \
      かった項目は『未確認』と明記されていれば不合格の理由にしない」という一文を含めてください \
-     （ADR-0063 D3）。1 件の欠落で全体を落とさないためです。\n\n"
+     （ADR-0063 D3）。1 件の欠落で全体を落とさないためです。成果物の存在確認（`check: \"artifact_exists\"`）\
+     は `report.md` を使ってください（`literature`/`web-research` のどちらのハーネスも `report.md` を \
+     書きます。ADR-0063 Phase 109b A3）。\n\n"
         .to_string()
 }
 

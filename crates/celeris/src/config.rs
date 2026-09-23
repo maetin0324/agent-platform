@@ -4074,10 +4074,13 @@ host = "h"
             ]
         );
         // Phase 38（ADR-0028 追記）: `名前: 説明` の形で書ける（設定は文字列のまま読み、名前は `:` の前）。
+        // ADR-0063 Phase 109b A3: `report.md` が標準（answer.md と同じ内容）。
         assert_eq!(
             literature.output_artifacts,
             vec![
-                "answer.md: 引用付きの答え（これが答え）".to_string(),
+                "report.md: 引用付きの答え（これが答え。answer.md と同じ内容。ADR-0063 Phase 109b A3）"
+                    .to_string(),
+                "answer.md: report.md と同じ内容（PaperQA 固有の名前）".to_string(),
                 "papers.json: 検索した論文の一覧（コーパス。答えではない）".to_string(),
                 "sources.json: 出典と引用の有無".to_string(),
                 "queries.json: 使った検索語".to_string()
@@ -4089,6 +4092,7 @@ host = "h"
                 .find(|g| g.id == "literature")
                 .map(|g| g.output_artifact_names()),
             Some(vec![
+                "report.md",
                 "answer.md",
                 "papers.json",
                 "sources.json",

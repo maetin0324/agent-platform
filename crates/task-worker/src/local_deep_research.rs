@@ -11,6 +11,7 @@
 //! ワーカープロトコル（`artifacts/result.json`）は PaperQA2 アダプタと同じく**アダプタが代わりに書く**
 //! （ADR-0006 D3 の規約は保つ）。委譲（`delegate.json`）は扱わない（ADR-0029 D1: 「委譲はしない」）。
 
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
@@ -81,6 +82,14 @@ pub struct EvidenceThresholds {
     /// 出典の異なるドメイン数の下限（`counts.unique_domains`）。
     #[serde(default = "default_min_domains")]
     pub min_domains: u32,
+    /// ADR-0063 Phase 109b B4（`task_worker::PaperQaEvidence::insufficient_is_error` と同じ考え方）:
+    /// 検索が 0 件（検索経路の問題）は、この設定に関わらず常に hard error。それ以外の閾値未達
+    /// （`min_sources`/`min_cited`/`min_domains`）を hard error にするか（既定 `false`）。`false`
+    /// （既定）なら証拠不足でも `Terminal::Done` にし、`report.md` の「## 証拠の質」節に内訳を書いて
+    /// reviewer / 受け入れ条件の判断に委ねる。`true` にすると Phase 109 までどおり
+    /// `Terminal::Error{retryable: true}`。
+    #[serde(default)]
+    pub insufficient_is_error: bool,
 }
 
 impl Default for EvidenceThresholds {
@@ -90,6 +99,7 @@ impl Default for EvidenceThresholds {
             min_sources: default_min_sources(),
             min_cited: default_min_cited(),
             min_domains: default_min_domains(),
+            insufficient_is_error: false,
         }
     }
 }
@@ -256,7 +266,12 @@ pub fn must_read_urls(
                 continue;
             }
             for url in &item.sources {
-                if seen.insert(url.clone()) {
+                // ADR-0063 Phase 109b B1: 知識ベースの `sources` は前置きの出典（人が
+                // `celerisctl knowledge record --source` で付けたもの）で、`human` のような
+                // URL でない値が混じることがある（本番の観測、2026-09-23）。`http(s)://` で
+                // 始まるものだけを拾う。
+                let is_url = url.starts_with("http://") || url.starts_with("https://");
+                if is_url && seen.insert(url.clone()) {
                     out.push(url.clone());
                 }
             }
@@ -646,16 +661,14 @@ async fn run_ldr(
             || ev.min_sources > 0
             || ev.min_cited > 0
             || ev.min_domains > 0;
-        let gate_message = if gate_enabled && search_results == 0 {
-            // 検索経路そのものの問題（鍵切れ・CAPTCHA・ネットワーク遮断）を、調べた結果情報が無かった
-            // ケースと区別できるように、別メッセージにする（ADR-0031 D2）。`min_search_results = 0` に
-            // していてもこの区別は要る（他の項目で落ちるので、運用者が原因を知りたいのは同じ）。
-            Some(
-                "web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)"
-                    .to_string(),
-            )
-        } else {
-            let mut problems = Vec::new();
+        // 検索経路そのものの問題（鍵切れ・CAPTCHA・ネットワーク遮断）を、調べた結果情報が無かった
+        // ケースと区別できるように、別メッセージにする（ADR-0031 D2）。`min_search_results = 0` に
+        // していてもこの区別は要る（他の項目で落ちるので、運用者が原因を知りたいのは同じ）。これは
+        // `insufficient_is_error` に関わらず常に hard error（ADR-0063 Phase 109b B4。PaperQA の
+        // 「取得 0 件」と同じ考え方）。
+        let zero_search_results = gate_enabled && search_results == 0;
+        let mut problems = Vec::new();
+        if !zero_search_results {
             if ev.min_search_results > 0 && search_results < ev.min_search_results {
                 problems.push(format!(
                     "search_results={search_results} (min {})",
@@ -671,17 +684,42 @@ async fn run_ldr(
             if ev.min_domains > 0 && unique_domains < ev.min_domains {
                 problems.push(format!("domains={unique_domains} (min {})", ev.min_domains));
             }
-            if problems.is_empty() {
-                None
-            } else {
-                Some(format!(
-                    "insufficient web evidence: {}",
-                    problems.join(", ")
-                ))
-            }
+        }
+        let insufficient = zero_search_results || !problems.is_empty();
+
+        // ADR-0063 Phase 109b B4: 閾値未達（`search_results == 0` を除く）は、`insufficient_is_error`
+        // （既定 false）が true のときだけ hard error。既定では `Terminal::Done` にし、`report.md` の
+        // 「## 証拠の質」節に内訳を書いて reviewer / 受け入れ条件の判断に委ねる。
+        let hard_error_message = if zero_search_results {
+            Some(
+                "web search returned nothing (possible search path failure: expired key, CAPTCHA, or network block)"
+                    .to_string(),
+            )
+        } else if !problems.is_empty() && ev.insufficient_is_error {
+            Some(format!(
+                "insufficient web evidence: {}",
+                problems.join(", ")
+            ))
+        } else {
+            None
         };
 
-        if let Some(message) = gate_message {
+        // ADR-0063 Phase 109b B4: ゲートを見た run では常に「## 証拠の質」節を足す（合否に関わらず。
+        // hard error でも report.md 自体は残るので、人が読めるようにしておく）。
+        if gate_enabled {
+            append_evidence_quality_section(
+                &report_path,
+                sources,
+                sources_cited,
+                unique_domains,
+                &problems,
+                insufficient,
+                run_id,
+            )
+            .await;
+        }
+
+        if let Some(message) = hard_error_message {
             // ADR-0031 D2: retryable な `Terminal::Error`。供給側の失敗（`AdapterError`）にはしない
             // （プロバイダを cooldown にする話ではない）ので `provider_failure` は `None` のまま。
             (
@@ -739,6 +777,83 @@ fn truncate_chars(s: &str, max: usize) -> String {
         return s.to_string();
     }
     s.chars().take(max).collect()
+}
+
+/// `sources.json`（`report_path` の隣。ランナーが書く）から `primary: true` の件数と、そのうち
+/// `cited: true` の件数を数える（ADR-0063 Phase 109b B1/B4: 必読の一次情報が実際に report に
+/// 反映されたか）。読めない・壊れていれば `(0, 0)`（この節は補足情報であって、失敗しても run は
+/// 止めない）。
+async fn read_primary_source_counts(report_path: &Path) -> (u32, u32) {
+    let Some(dir) = report_path.parent() else {
+        return (0, 0);
+    };
+    let Ok(text) = tokio::fs::read_to_string(dir.join("sources.json")).await else {
+        return (0, 0);
+    };
+    let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(&text)
+    else {
+        return (0, 0);
+    };
+    let mut total = 0u32;
+    let mut cited = 0u32;
+    for entry in &entries {
+        if entry.get("primary").and_then(serde_json::Value::as_bool) == Some(true) {
+            total += 1;
+            if entry.get("cited").and_then(serde_json::Value::as_bool) == Some(true) {
+                cited += 1;
+            }
+        }
+    }
+    (total, cited)
+}
+
+/// `report.md` の末尾に「## 証拠の質」節を足す（ADR-0063 Phase 109b B4。決定的の証拠ゲートを見た
+/// run では常に。PaperQA の `render_evidence_section` と同じ考え方）。出典/引用/ドメイン数と、
+/// 必読の一次情報のうち report に反映された件数、証拠不足ならその理由を書く。合否は reviewer に
+/// 委ねる（`insufficient` でも run 自体は Done になり得る）。読み書きに失敗しても run は止めない。
+#[allow(clippy::too_many_arguments)]
+async fn append_evidence_quality_section(
+    report_path: &Path,
+    sources: u32,
+    sources_cited: u32,
+    unique_domains: u32,
+    problems: &[String],
+    insufficient: bool,
+    run_id: &str,
+) {
+    let (primary_total, primary_cited) = read_primary_source_counts(report_path).await;
+    let mut section = String::from("\n\n## 証拠の質\n\n");
+    section.push_str(&format!(
+        "- 出典: {sources} 件（引用: {sources_cited} 件、異なるドメイン: {unique_domains} 件）\n"
+    ));
+    if primary_total > 0 {
+        section.push_str(&format!(
+            "- 必読の一次情報: {primary_total} 件中 {primary_cited} 件が report に反映（引用）された\n"
+        ));
+    }
+    if insufficient {
+        let reason = if problems.is_empty() {
+            "web search returned nothing".to_string()
+        } else {
+            problems.join(", ")
+        };
+        section.push_str(&format!(
+            "- 証拠不足（{reason}）。合否は reviewer の判断に委ねる。\n"
+        ));
+    }
+    match tokio::fs::read_to_string(report_path).await {
+        Ok(mut body) => {
+            body.push_str(&section);
+            if let Err(e) = tokio::fs::write(report_path, body).await {
+                warn!(
+                    "run {run_id}: could not append the evidence-quality section to report.md: {e}"
+                );
+            }
+        }
+        Err(e) => warn!(
+            "run {run_id}: could not read report.md to append the evidence-quality section: {e}"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1109,6 +1224,13 @@ while true; do sleep 0.1; done
         serde_json::from_str(&text).unwrap()
     }
 
+    fn python3_available() -> bool {
+        match std::process::Command::new("python3").arg("--version").output() {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
+    }
+
     /// 実機の回帰（2026-09-17）: 検索に渡す問いにタイトルの見出しや役割の指示文を入れると、検索が
     /// 何も返さなくなる。素の目的だけを渡す（人間の回答があれば短い補足として足す）。
     /// Phase 27（監査 M-2）: 役職・brief・記憶・直近のやり取りも載せない（ADR-0033 D6 に追記）。
@@ -1225,6 +1347,9 @@ while true; do sleep 0.1; done
                         "https://github.com/tsukuba-hpcs/finchfs".into(),
                         // 目的文の URL と重複するものは 1 回だけ。
                         "https://github.com/otatebe/chfs".into(),
+                        // ADR-0063 Phase 109b B1: URL でない前置きの出典（本番の観測、
+                        // 2026-09-23: `sources: ["human", ...]`）は捨てる。
+                        "human".into(),
                     ],
                     updated: None,
                     confidence: None,
@@ -1310,6 +1435,7 @@ while true; do sleep 0.1; done
             min_sources: 0,
             min_cited: 0,
             min_domains: 0,
+            insufficient_is_error: false,
         };
         let adapter = LdrAdapter::new(config);
         let mut req = sample_req(dir.path().to_path_buf());
@@ -1382,6 +1508,7 @@ while true; do sleep 0.1; done
             min_sources: 0,
             min_cited: 0,
             min_domains: 0,
+            insufficient_is_error: false,
         };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -1463,6 +1590,7 @@ while true; do sleep 0.1; done
             min_sources: 0,
             min_cited: 0,
             min_domains: 0,
+            insufficient_is_error: false,
         };
         let base = LdrAdapter::new(config);
         let with_env = base
@@ -1895,6 +2023,314 @@ print(json.dumps({"added": added, "sources": result["sources"]}))
         assert_eq!(sources[1]["title"], "T:https://github.com/otatebe/chfs", "{v}");
     }
 
+    /// ADR-0063 Phase 109b B1: `add_must_read_sources` は python 側でも `http(s)://` 以外
+    /// （`human` のような前置きの出典）を捨て、足した各エントリに `primary: true` を付ける。
+    #[test]
+    fn runner_add_must_read_sources_drops_non_urls_and_marks_primary() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r#"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+result = {"summary": "no citations", "sources": []}
+added = mod.add_must_read_sources(result, ["human", "https://github.com/otatebe/chfs"], lambda u: u)
+print(json.dumps({"added": added, "sources": result["sources"], "is_http_url": [mod.is_http_url("human"), mod.is_http_url("https://x")]}))
+"#;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["added"], 1, "human は URL でないので足さない: {v}");
+        let sources = v["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 1, "{v}");
+        assert_eq!(sources[0]["link"], "https://github.com/otatebe/chfs");
+        assert_eq!(sources[0]["primary"], true, "{v}");
+        assert_eq!(v["is_http_url"], serde_json::json!([false, true]));
+    }
+
+    /// ADR-0063 Phase 109b B1: 必読の一次情報の本文抜粋 — GitHub のリポジトリ URL は README の raw
+    /// テキストを、それ以外は HTML → テキストに変換して取る（`fetch` は注入するのでネットワークに
+    /// 出ない）。取得に失敗した URL は `fetch_error` を残して続行する。
+    #[test]
+    fn runner_builds_primary_source_excerpts_from_readme_and_html() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+def fetch(url, timeout):
+    if url == "https://raw.githubusercontent.com/otatebe/chfs/HEAD/README.md":
+        return b"# CHFS\n\nA persistent memory ad-hoc file system for HPC clusters."
+    if url == "https://example.org/paper":
+        return b"<html><head><title>A Paper</title></head><body><script>bad()</script><p>Hello &amp; world</p></body></html>"
+    if url == "https://broken.example/x":
+        raise OSError("boom")
+    raise AssertionError("unexpected url: " + url)
+
+urls = [
+    "https://github.com/otatebe/chfs",
+    "https://example.org/paper",
+    "https://broken.example/x",
+    "human",
+    "https://github.com/otatebe/chfs",
+]
+section, entries = mod.build_primary_source_entries(urls, fetch=fetch)
+print(json.dumps({
+    "section": section,
+    "entries": entries,
+    "readme_url": mod.github_readme_url("https://github.com/otatebe/chfs"),
+    "readme_url_subpath": mod.github_readme_url("https://github.com/otatebe/chfs/issues/1"),
+    "gitlab_readme_url": mod.github_readme_url("https://gitlab.com/foo/bar"),
+    "html_to_text": mod.html_to_text("<p>Hello <b>world</b></p><script>evil()</script>"),
+}))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        let entries = v["entries"].as_array().unwrap();
+        // `human` は捨てる。重複した chfs は 1 回だけ。
+        assert_eq!(entries.len(), 3, "{v}");
+        assert_eq!(entries[0]["link"], "https://github.com/otatebe/chfs");
+        assert!(
+            entries[0]["excerpt"]
+                .as_str()
+                .unwrap()
+                .contains("persistent memory"),
+            "{v}"
+        );
+        assert_eq!(entries[0]["primary"], true);
+        assert!(entries[0]["fetch_error"].is_null(), "{v}");
+        assert_eq!(entries[1]["link"], "https://example.org/paper");
+        assert_eq!(entries[1]["title"], "A Paper");
+        assert!(
+            entries[1]["excerpt"].as_str().unwrap().contains("Hello & world"),
+            "script は落ち、実体参照は戻る: {v}"
+        );
+        assert!(
+            !entries[1]["excerpt"].as_str().unwrap().contains("bad()"),
+            "{v}"
+        );
+        assert_eq!(entries[2]["link"], "https://broken.example/x");
+        assert!(entries[2]["fetch_error"].as_str().unwrap().contains("boom"), "{v}");
+        assert_eq!(entries[2]["excerpt"], "");
+
+        let section = v["section"].as_str().unwrap();
+        assert!(section.starts_with("## 必読の一次情報（本文抜粋）"), "{section}");
+        assert!(section.contains("CHFS"), "{section}");
+        assert!(section.contains("取得失敗: OSError: boom"), "{section}");
+
+        assert_eq!(
+            v["readme_url"],
+            "https://raw.githubusercontent.com/otatebe/chfs/HEAD/README.md"
+        );
+        assert!(v["readme_url_subpath"].is_null(), "サブパスは README にしない: {v}");
+        assert_eq!(
+            v["gitlab_readme_url"],
+            "https://gitlab.com/foo/bar/-/raw/HEAD/README.md"
+        );
+        assert_eq!(v["html_to_text"], "Hello world");
+    }
+
+    /// ADR-0063 Phase 109b B1: 必読の一次情報の抜粋が最終的な report の本文に現れれば `cited` になる
+    /// （URL でも一致する。`apply_primary_source_citations` が `sources_list`/`counts` を書き換える）。
+    #[test]
+    fn runner_excerpt_citation_marks_primary_sources_used_in_the_body() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r#"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+out = {}
+out["not_cited_when_absent"] = mod.excerpt_is_cited("https://x", "a line that is long enough to count as a real match", "totally unrelated body")
+out["cited_by_excerpt_line"] = mod.excerpt_is_cited("https://x", "CHFS uses node-local persistent memory for burst buffering", "The system, CHFS uses node-local persistent memory for burst buffering, is fast.")
+out["cited_by_url"] = mod.excerpt_is_cited("https://github.com/otatebe/chfs", "short", "see https://github.com/otatebe/chfs for the implementation")
+out["too_short_to_count"] = mod.excerpt_is_cited("https://x", "short line", "a body that happens to contain short line too")
+
+sources_list = [
+    {"url": "https://a.example.com/1", "title": "A", "engine": None, "cited": True},
+    {"url": "https://github.com/otatebe/chfs", "title": "CHFS", "engine": None, "cited": False, "primary": True},
+    {"url": "https://github.com/tsukuba-hpcs/finchfs", "title": "FinchFS", "engine": None, "cited": False, "primary": True},
+]
+research = {"queries": [], "iterations": 0, "counts": {"sources_cited": 1}}
+primary_excerpts = {
+    "https://github.com/otatebe/chfs": "CHFS is a persistent-memory ad-hoc file system for HPC.",
+    "https://github.com/tsukuba-hpcs/finchfs": "FinchFS is a different system entirely.",
+}
+body = "This report discusses: CHFS is a persistent-memory ad-hoc file system for HPC. That is all."
+mod.apply_primary_source_citations(sources_list, research, primary_excerpts, body)
+out["sources_list"] = sources_list
+out["sources_cited_count"] = research["counts"]["sources_cited"]
+print(json.dumps(out))
+"#;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["not_cited_when_absent"], false, "{v}");
+        assert_eq!(v["cited_by_excerpt_line"], true, "{v}");
+        assert_eq!(v["cited_by_url"], true, "{v}");
+        assert_eq!(v["too_short_to_count"], false, "{v}");
+
+        let sources = v["sources_list"].as_array().unwrap();
+        assert_eq!(sources[0]["cited"], true, "既に true のものはそのまま: {v}");
+        assert_eq!(sources[1]["cited"], true, "CHFS の抜粋が本文に現れる: {v}");
+        assert_eq!(
+            sources[2]["cited"], false,
+            "FinchFS の抜粋は本文に現れない: {v}"
+        );
+        assert_eq!(v["sources_cited_count"], 2, "{v}");
+    }
+
+    /// ADR-0063 Phase 109b B3: `detect_upstream_llm_error` はプロキシのエラー文面をそれと見抜き、
+    /// 普通の答えは通す。`run_with_retries`/`call_ldr_stage` は例外・偽装エラーのどちらも
+    /// バックオフ付きで再試行し、最終的に成功すれば返し、尽きれば最後のエラーを伝える。
+    #[test]
+    fn runner_upstream_llm_error_detection_and_retry_are_deterministic() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r#"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+out = {}
+out["real_answer_is_not_an_error"] = mod.detect_upstream_llm_error("CHFS uses persistent memory.") is None
+out["503_body_is_detected"] = mod.detect_upstream_llm_error(
+    "Error: Error code: 503 - {'error': {'message': 'no reachable llm source is configured for this model', 'type': 'no_source_available'}}"
+) is not None
+out["no_source_available_is_detected"] = mod.detect_upstream_llm_error("something something no_source_available") is not None
+
+# run_with_retries: 2 回失敗してから成功。
+calls = {"n": 0}
+sleeps = []
+def flaky():
+    calls["n"] += 1
+    if calls["n"] < 3:
+        raise mod.UpstreamLlmError("boom %d" % calls["n"])
+    return "ok"
+out["retry_result"] = mod.run_with_retries(flaky, sleep=sleeps.append)
+out["retry_attempts"] = calls["n"]
+out["retry_sleeps"] = sleeps
+
+# 尽きれば最後のエラーが伝播する。
+def always_fails():
+    raise mod.UpstreamLlmError("always boom")
+try:
+    mod.run_with_retries(always_fails, sleep=lambda s: None)
+    out["exhausted_raises"] = False
+except mod.UpstreamLlmError as exc:
+    out["exhausted_raises"] = True
+    out["exhausted_message"] = str(exc)
+
+# call_ldr_stage: 例外はそのまま UpstreamLlmError になる。
+try:
+    mod.call_ldr_stage(lambda: (_ for _ in ()).throw(RuntimeError("network down")), lambda r: "")
+    out["stage_exception_wrapped"] = False
+except mod.UpstreamLlmError as exc:
+    out["stage_exception_wrapped"] = "network down" in str(exc)
+
+# call_ldr_stage: 偽装エラー（成功したように見えて実は 503 の文面）は on_bad_result を呼んでから raise。
+cleanup_calls = []
+try:
+    mod.call_ldr_stage(
+        lambda: {"summary": "Error: Error code: 503 - boom"},
+        lambda r: r["summary"],
+        on_bad_result=lambda r: cleanup_calls.append(r),
+    )
+    out["disguised_error_raises"] = False
+except mod.UpstreamLlmError:
+    out["disguised_error_raises"] = True
+out["disguised_error_cleanup_called"] = len(cleanup_calls) == 1
+
+# call_ldr_stage: 普通の結果はそのまま返る。
+out["stage_passthrough"] = mod.call_ldr_stage(lambda: {"summary": "a real answer"}, lambda r: r["summary"])
+
+print(json.dumps(out))
+"#;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["real_answer_is_not_an_error"], true, "{v}");
+        assert_eq!(v["503_body_is_detected"], true, "{v}");
+        assert_eq!(v["no_source_available_is_detected"], true, "{v}");
+        assert_eq!(v["retry_result"], "ok");
+        assert_eq!(v["retry_attempts"], 3);
+        assert_eq!(v["retry_sleeps"], serde_json::json!([2.0, 4.0]));
+        assert_eq!(v["exhausted_raises"], true, "{v}");
+        assert_eq!(v["exhausted_message"], "always boom");
+        assert_eq!(v["stage_exception_wrapped"], true, "{v}");
+        assert_eq!(v["disguised_error_raises"], true, "{v}");
+        assert_eq!(v["disguised_error_cleanup_called"], true, "{v}");
+        assert_eq!(v["stage_passthrough"], serde_json::json!({"summary": "a real answer"}));
+    }
+
     // --- ADR-0031 D2: 決定的な証拠ゲート ---
 
     /// 検索が 1 件も返らなかった（`search_results == 0`）ときは別メッセージになり、`report.md` /
@@ -1913,6 +2349,7 @@ print(json.dumps({"added": added, "sources": result["sources"]}))
             min_sources: 3,
             min_cited: 2,
             min_domains: 2,
+            insufficient_is_error: false,
         };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -1957,12 +2394,15 @@ print(json.dumps({"added": added, "sources": result["sources"]}))
         assert_eq!(artifacts.len(), 3, "{artifacts:?}");
     }
 
-    /// 出典が閾値未満（他は満たす）→ 実数と閾値入りのメッセージで retryable。`report.md` は残る。
+    /// 出典が閾値未満（他は満たす）→ `insufficient_is_error = true` なら実数と閾値入りのメッセージで
+    /// retryable。`report.md` は残る（ADR-0063 Phase 109b B4: 既定は soft。この Phase 108 までの
+    /// 挙動は明示的に有効化して確かめる）。
     #[tokio::test]
     async fn gate_sources_below_minimum_is_retryable_with_actual_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let counts = r#"{"queries": 1, "search_results": 5, "sources": 1, "sources_cited": 2, "unique_domains": 2}"#;
-        let config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        let mut config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        config.evidence.insufficient_is_error = true;
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -1987,12 +2427,14 @@ print(json.dumps({"added": added, "sources": result["sources"]}))
         assert!(!dir.path().join("artifacts/result.json").exists());
     }
 
-    /// 引用数が閾値未満（他は満たす）→ 実数と閾値入りのメッセージで retryable。
+    /// 引用数が閾値未満（他は満たす）→ `insufficient_is_error = true` なら実数と閾値入りのメッセージで
+    /// retryable（ADR-0063 Phase 109b B4）。
     #[tokio::test]
     async fn gate_cited_below_minimum_is_retryable_with_actual_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let counts = r#"{"queries": 1, "search_results": 5, "sources": 3, "sources_cited": 1, "unique_domains": 2}"#;
-        let config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        let mut config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        config.evidence.insufficient_is_error = true;
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -2012,12 +2454,14 @@ print(json.dumps({"added": added, "sources": result["sources"]}))
         assert!(dir.path().join("artifacts/report.md").exists());
     }
 
-    /// 出典が同一ドメインのみ（他は満たす）→ 実数と閾値入りのメッセージで retryable。
+    /// 出典が同一ドメインのみ（他は満たす）→ `insufficient_is_error = true` なら実数と閾値入りの
+    /// メッセージで retryable（ADR-0063 Phase 109b B4）。
     #[tokio::test]
     async fn gate_single_domain_is_retryable_with_actual_numbers() {
         let dir = tempfile::tempdir().unwrap();
         let counts = r#"{"queries": 1, "search_results": 5, "sources": 3, "sources_cited": 2, "unique_domains": 1}"#;
-        let config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        let mut config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        config.evidence.insufficient_is_error = true;
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -2037,6 +2481,35 @@ print(json.dumps({"added": added, "sources": result["sources"]}))
         assert!(dir.path().join("artifacts/report.md").exists());
     }
 
+    /// ADR-0063 Phase 109b B4: `insufficient_is_error` の既定 `false` では、閾値未達でも
+    /// `Terminal::Done` になり、`report.md` の末尾に「## 証拠の質」節（出典/引用/ドメイン数、証拠
+    /// 不足の理由）が付く。合否は reviewer に委ねる。
+    #[tokio::test]
+    async fn gate_insufficient_evidence_defaults_to_done_with_an_evidence_quality_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let counts = r#"{"queries": 1, "search_results": 5, "sources": 1, "sources_cited": 1, "unique_domains": 1}"#;
+        let config = stub_ldr(dir.path(), &script_with_counts(Some(counts)));
+        let adapter = LdrAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-gate-soft", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
+        assert!(dir.path().join("artifacts/result.json").exists());
+        let report_md = std::fs::read_to_string(dir.path().join("artifacts/report.md")).unwrap();
+        assert!(report_md.contains("## 証拠の質"), "{report_md}");
+        assert!(report_md.contains("証拠不足"), "{report_md}");
+        assert!(report_md.contains("sources=1 (min 3)"), "{report_md}");
+        assert!(report_md.contains("cited=1 (min 2)"), "{report_md}");
+        assert!(report_md.contains("domains=1 (min 2)"), "{report_md}");
+    }
+
     /// 閾値を全部 0 にすると、`counts` が全 0 でも従来どおり `done`（受け入れ条件 3）。
     #[tokio::test]
     async fn gate_all_zero_thresholds_still_done_even_with_empty_counts() {
@@ -2048,6 +2521,7 @@ print(json.dumps({"added": added, "sources": result["sources"]}))
             min_sources: 0,
             min_cited: 0,
             min_domains: 0,
+            insufficient_is_error: false,
         };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -2096,6 +2570,7 @@ print(json.dumps({"added": added, "sources": result["sources"]}))
             min_sources: 0,
             min_cited: 0,
             min_domains: 0,
+            insufficient_is_error: false,
         };
         let adapter = LdrAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -2352,6 +2827,8 @@ print(json.dumps({
     "has_settings_snapshot_kwarg": "settings_snapshot" in kwargs,
     "has_settings_override_kwarg": "settings_override" in kwargs,
     "settings_snapshot_value": kwargs.get("settings_snapshot"),
+    "has_iterations_kwarg": "iterations" in kwargs,
+    "has_questions_per_iteration_kwarg": "questions_per_iteration" in kwargs,
 }))
 "#;
         let output = std::process::Command::new("python3")
@@ -2368,9 +2845,18 @@ print(json.dumps({
         let values: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
         assert_eq!(values["rc"], serde_json::json!(0));
+        // ADR-0063 Phase 109b B2: `fake_detailed_research(query, **kwargs)` declares neither
+        // `iterations` nor `questions_per_iteration` by name (exactly the real bug: they would be
+        // silently swallowed by `**kwargs`), so `iteration_setting_overrides` routes both into the
+        // settings snapshot instead of passing them as direct kwargs.
         assert_eq!(
             values["overrides_passed_to_snapshot"],
-            serde_json::json!({"llm.provider": "openai_endpoint", "llm.model": "qwen3.8-27b"})
+            serde_json::json!({
+                "llm.provider": "openai_endpoint",
+                "llm.model": "qwen3.8-27b",
+                "search.iterations": 1,
+                "search.questions_per_iteration": 1,
+            })
         );
         assert_eq!(
             values["has_settings_snapshot_kwarg"],
@@ -2380,9 +2866,311 @@ print(json.dumps({
             values["has_settings_override_kwarg"],
             serde_json::json!(false)
         );
+        assert_eq!(values["has_iterations_kwarg"], serde_json::json!(false));
+        assert_eq!(
+            values["has_questions_per_iteration_kwarg"],
+            serde_json::json!(false)
+        );
         assert_eq!(
             values["settings_snapshot_value"],
-            serde_json::json!({"snapshot": true, "from_overrides": {"llm.provider": "openai_endpoint", "llm.model": "qwen3.8-27b"}})
+            serde_json::json!({"snapshot": true, "from_overrides": {
+                "llm.provider": "openai_endpoint",
+                "llm.model": "qwen3.8-27b",
+                "search.iterations": 1,
+                "search.questions_per_iteration": 1,
+            }})
+        );
+    }
+
+    /// ADR-0063 Phase 109b B2: `detailed_research` が `iterations`/`questions_per_iteration` を
+    /// 実際に名前付き引数として宣言していれば、そちらへ直接渡る（設定へは回さない）。
+    #[test]
+    fn runner_iteration_kwargs_go_direct_when_the_function_actually_declares_them() {
+        let Ok(python) = std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        else {
+            eprintln!("skipping: python3 not available");
+            return;
+        };
+        if !python.status.success() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r#"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+def declares_both(query, iterations=None, questions_per_iteration=None, **kwargs):
+    return None
+
+def declares_neither(query, **kwargs):
+    return None
+
+overrides_a, direct_a = mod.iteration_setting_overrides(declares_both, 5, 2)
+overrides_b, direct_b = mod.iteration_setting_overrides(declares_neither, 5, 2)
+overrides_c, direct_c = mod.iteration_setting_overrides(declares_both, None, None)
+
+print(json.dumps({
+    "declares_both": {"overrides": overrides_a, "direct": dict(direct_a)},
+    "declares_neither": {"overrides": overrides_b, "direct": dict(direct_b)},
+    "both_none": {"overrides": overrides_c, "direct": dict(direct_c)},
+}))
+"#;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(
+            v["declares_both"],
+            serde_json::json!({
+                "overrides": {},
+                "direct": {"iterations": 5, "questions_per_iteration": 2},
+            }),
+            "{v}"
+        );
+        assert_eq!(
+            v["declares_neither"],
+            serde_json::json!({
+                "overrides": {"search.iterations": 5, "search.questions_per_iteration": 2},
+                "direct": {},
+            }),
+            "{v}"
+        );
+        assert_eq!(
+            v["both_none"],
+            serde_json::json!({"overrides": {}, "direct": {}}),
+            "None は両方とも渡さない: {v}"
+        );
+    }
+
+    /// エンドツーエンド（`main()` を偽の `local_deep_research` で実際に呼ぶ）: ADR-0063 Phase 109b
+    /// B1 + B3。1 回目の呼び出しは llm-proxy の 503 が答えに化けた結果（`detect_upstream_llm_error`
+    /// が見抜く）を返し、`run_with_retries`（`time.sleep` を注入して実時間は待たない）が 1 回だけ
+    /// 待って再試行、2 回目で本物の答えが返る。必読の一次情報（GitHub の README）は問いに追記され、
+    /// その抜粋が答えの本文に現れるので `sources.json` で `cited: true` になる。
+    #[test]
+    fn main_retries_a_disguised_upstream_error_and_marks_the_must_read_source_cited() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r###"
+import contextlib, importlib.util, io, json, os, sys, tempfile, types
+
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+# `run_with_retries`/`build_primary_source_entries` resolve their `sleep`/`fetch` at call time
+# (ADR-0063 Phase 109b), so `main()` -- which never passes either -- honors these fakes.
+sleep_calls = []
+mod.time.sleep = lambda s: sleep_calls.append(s)
+mod.default_primary_source_fetch = lambda url, timeout: b"# CHFS\n\nCHFS is a persistent-memory ad-hoc file system for HPC."
+
+calls = {"n": 0}
+captured_queries = []
+
+def fake_quick_summary(query, **kwargs):
+    calls["n"] += 1
+    captured_queries.append(query)
+    if calls["n"] == 1:
+        return {
+            "summary": "Error: Error code: 503 - {'error': {'message': "
+                       "'no reachable llm source is configured for this model', "
+                       "'type': 'no_source_available'}}",
+            "sources": [],
+        }
+    return {
+        "summary": "CHFS is a persistent-memory ad-hoc file system for HPC. [1]",
+        "sources": [{"link": "https://example.org/blog", "title": "Blog", "engine": "tavily"}],
+        "findings": [],
+        "iterations": 1,
+        "questions": {},
+    }
+
+fake_api = types.ModuleType("local_deep_research.api")
+fake_api.quick_summary = fake_quick_summary
+fake_api.detailed_research = lambda *a, **k: (_ for _ in ()).throw(AssertionError("not used"))
+fake_api.generate_report = lambda *a, **k: (_ for _ in ()).throw(AssertionError("not used"))
+fake_api.create_settings_snapshot = lambda **k: {}
+fake_pkg = types.ModuleType("local_deep_research")
+fake_pkg.api = fake_api
+sys.modules["local_deep_research"] = fake_pkg
+sys.modules["local_deep_research.api"] = fake_api
+
+with tempfile.TemporaryDirectory() as d:
+    report_path = os.path.join(d, "artifacts", "report.md")
+    input_path = os.path.join(d, "input.json")
+    payload = {
+        "query": "CHFS について調べる",
+        "mode": "quick",
+        "settings": {},
+        "report_path": report_path,
+        "must_read_urls": ["https://github.com/otatebe/chfs", "human"],
+    }
+    with open(input_path, "w") as f:
+        json.dump(payload, f)
+    sys.argv = ["local_deep_research_run.py", input_path]
+    with contextlib.redirect_stdout(io.StringIO()) as captured_stdout:
+        rc = mod.main()
+    stdout_text = captured_stdout.getvalue()
+    report_text = open(report_path, "r", encoding="utf-8").read()
+    sources_text = open(os.path.join(d, "artifacts", "sources.json"), "r", encoding="utf-8").read()
+
+print(json.dumps({
+    "rc": rc,
+    "attempts": calls["n"],
+    "sleeps": sleep_calls,
+    "first_query_has_excerpt_section": "## 必読の一次情報" in captured_queries[0],
+    "first_query_has_readme_text": "persistent-memory ad-hoc file system" in captured_queries[0],
+    "second_query_is_the_same_as_first": captured_queries[0] == captured_queries[1],
+    "celeris_result_line": "CELERIS_RESULT" in stdout_text,
+    "report_text": report_text,
+    "sources": json.loads(sources_text),
+}))
+"###;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["rc"], 0, "{v}");
+        assert_eq!(v["attempts"], 2, "2 回目で成功するはず: {v}");
+        assert_eq!(v["sleeps"], serde_json::json!([2.0]), "1 回だけ待つ: {v}");
+        assert_eq!(v["first_query_has_excerpt_section"], true, "{v}");
+        assert_eq!(v["first_query_has_readme_text"], true, "{v}");
+        assert_eq!(v["second_query_is_the_same_as_first"], true, "{v}");
+        assert_eq!(v["celeris_result_line"], true, "{v}");
+        let report_text = v["report_text"].as_str().unwrap();
+        assert!(
+            report_text.contains("CHFS is a persistent-memory"),
+            "{report_text}"
+        );
+        assert!(
+            !report_text.contains("no_source_available"),
+            "偽装エラーの本文は残らない: {report_text}"
+        );
+        let sources = v["sources"].as_array().unwrap();
+        let chfs = sources
+            .iter()
+            .find(|s| s["url"] == "https://github.com/otatebe/chfs")
+            .expect("必読の一次情報が sources.json に入っている");
+        assert_eq!(chfs["primary"], true, "{chfs}");
+        assert_eq!(
+            chfs["cited"], true,
+            "README の抜粋が答えの本文に現れるので cited になる: {chfs}"
+        );
+        // `human`（URL でない）は落ちて sources には現れない。
+        assert!(
+            !sources.iter().any(|s| s["url"] == "human"),
+            "{sources:?}"
+        );
+    }
+
+    /// エンドツーエンド: ADR-0063 Phase 109b B3 の再試行が尽きた場合、`report.md` を書かず（残さず）、
+    /// exit code 1 と `llm: ...` のメッセージで終わる（`run_ldr` はこれを retryable な
+    /// `Terminal::Error` にする）。バックオフは全て偽の `sleep` なので実時間は待たない。
+    #[test]
+    fn main_gives_up_without_writing_report_md_when_the_upstream_error_never_clears() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("local_deep_research_run.py");
+        std::fs::write(&script_path, RUNNER_SCRIPT).unwrap();
+        let checker = r#"
+import contextlib, importlib.util, io, json, os, sys, tempfile, types
+
+spec = importlib.util.spec_from_file_location("ldr_run", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+sleep_calls = []
+mod.time.sleep = lambda s: sleep_calls.append(s)
+
+calls = {"n": 0}
+
+def fake_quick_summary(query, **kwargs):
+    calls["n"] += 1
+    return {"summary": "Error: Error code: 503 - no_source_available forever", "sources": []}
+
+fake_api = types.ModuleType("local_deep_research.api")
+fake_api.quick_summary = fake_quick_summary
+fake_api.detailed_research = lambda *a, **k: (_ for _ in ()).throw(AssertionError("not used"))
+fake_api.generate_report = lambda *a, **k: (_ for _ in ()).throw(AssertionError("not used"))
+fake_api.create_settings_snapshot = lambda **k: {}
+fake_pkg = types.ModuleType("local_deep_research")
+fake_pkg.api = fake_api
+sys.modules["local_deep_research"] = fake_pkg
+sys.modules["local_deep_research.api"] = fake_api
+
+with tempfile.TemporaryDirectory() as d:
+    report_path = os.path.join(d, "artifacts", "report.md")
+    input_path = os.path.join(d, "input.json")
+    payload = {"query": "CHFS について調べる", "mode": "quick", "settings": {}, "report_path": report_path}
+    with open(input_path, "w") as f:
+        json.dump(payload, f)
+    sys.argv = ["local_deep_research_run.py", input_path]
+    stderr_capture = io.StringIO()
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr_capture):
+        rc = mod.main()
+    report_exists = os.path.exists(report_path)
+
+print(json.dumps({
+    "rc": rc,
+    "attempts": calls["n"],
+    "sleeps": sleep_calls,
+    "report_exists": report_exists,
+    "stderr": stderr_capture.getvalue(),
+}))
+"#;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        assert_eq!(v["rc"], 1, "{v}");
+        assert_eq!(v["attempts"], 4, "1 回 + 再試行 3 回 = 4 回: {v}");
+        assert_eq!(v["sleeps"], serde_json::json!([2.0, 4.0, 8.0]), "{v}");
+        assert_eq!(v["report_exists"], false, "{v}");
+        assert!(
+            v["stderr"].as_str().unwrap().starts_with("llm: "),
+            "{v}"
         );
     }
 }

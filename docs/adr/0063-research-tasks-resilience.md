@@ -111,3 +111,119 @@
    のみ差分（`NewTask.partial_ok` を追加したため）、`docs/api` には差分なし。
 5. 実機（親が行う）: BenchFS の文献調査を再実行して abstract 妥協で `done` になり、報告に証拠の質の
    内訳が出ること。Web 調査の再挑戦で CHFS の一次情報が `sources` に入ること。
+
+## Phase 109b 追記（2026-09-23）
+
+Phase 109 を本番で試したら（2026-09-23 11:04〜11:10 UTC、昇格直後の 2 タスクのやり直し）見つかった
+6 つの欠陥と、その直し。本文（上記 D1〜D4・受け入れ条件 1〜5）は書き換えない。
+
+### 観測
+
+1. **PaperQA — OpenAlex の 429 一斉障害**: Phase 109 で Unpaywall/Semantic Scholar の照会が増え、
+   OpenAlex への要求が短時間に集中し、全クエリが `HTTP Error 429` になった（`engines: {arxiv: 30,
+   openalex: 0}`）。
+2. **PaperQA — cited が本文の文字列一致に頼りすぎ**: abstract 妥協で `pdfs: 8, abstracts: 22` まで
+   取れたのに `cited=0`。`answer.md` には文書の内容を使った記述があるのに、プロキシ経由のモデルが
+   PaperQA 標準の引用マーカー（`(key pages x-y)`）を本文に残さなかった。
+3. **PaperQA — 成果物名が `answer.md` のみ**: 調査系の受け入れ条件が `artifact_exists report.md`
+   （LDR と同じ名前）だと決定的検査そのものが落ち、reviewer が評価されないまま 2 回で `failed`。
+4. **LDR — `must_read_urls` の本文が問いに載らない**: `add_must_read_sources` は答えが出た**後**に
+   URL とタイトルを `sources` 末尾に足すだけで、本文（README 等）を LDR に一切渡していなかった。
+   加えて、知識ベースの `sources: ["human", ...]` のような URL でない値まで拾っていた。
+5. **LDR — `detailed` の `iterations` が渡っていない**: `research.json` の `iterations` が 3 のまま
+   （`retry_iterations = 5` を設定していたのに）。原因は `detailed_research(query, settings_snapshot=
+   None, progress_callback=None, **kwargs)` が `iterations`/`questions_per_iteration` を名前付き引数
+   として宣言しておらず、`**kwargs` に落ちて黙って無視されていたこと（`settings_override` と同じ
+   構造の罠。ADR-0029 の既知の記録の類例）。
+6. **LDR — プロキシの一過性の 503 が「答え」として保存される**: 昇格直後の llm-proxy で候補が一瞬
+   全部無くなり `no_source_available` の 503 を返した瞬間、LDR 自身が LLM 呼び出しの例外を握りつぶし、
+   `str(exc)` をそのまま `summary` に書いて「合成できた」ことにしていた。`report.md` は 986 バイトの
+   エラー文面だけになり、`sources_cited=0` で `insufficient web evidence` の hard error になった。
+
+### 決定と実装
+
+- **A1（OpenAlex の礼儀）**: `paperqa_acquire.py` に `RateLimiter`（OpenAlex/Unpaywall/Semantic
+  Scholar 共通、1 req/sec）と `fetch_with_retry`（429 を `Retry-After` かフォールバックの 2/4/8 秒で
+  最大 3 回まで再試行）を追加。`openalex_url` は `mailto` を**常に**付ける（未設定なら
+  `DEFAULT_CONTACT_EMAIL`）。OA 探索（Unpaywall/Semantic Scholar）は元から PDF が無い候補だけに限って
+  いた（変更なし）。
+- **A2（cited の数え方）**: `pqa` の CLI に `--output json` 相当が無く、実際に使われた
+  `Answer.contexts` を確実に取り出す口を確認できなかったため、埋め込み Python への全面書き換え
+  （`pqa ask` を捨てて `paperqa` の Python API を呼ぶ）は採らなかった。代わりに、`pqa` の生の標準出力
+  にある `References`/`Sources` 見出し（PaperQA2 が `Answer.contexts` から機械的に組み立てる一覧で、
+  答えの本文にインライン引用マーカーが無くても出ることがある）を `extract_references_section` で
+  切り出し、`answer_cites(references, candidate)` を本文一致との**和**として `cited` に数える
+  （`paperqa.rs`）。`--output json` が実機で使えることを確認できたら、そちらを優先する再検討をする
+  （未解決事項）。
+- **A3（report.md）**: `answer.md` を書く箇所で同じ内容を `artifacts/report.md` にも書き、両方を
+  成果物として申告する（`paperqa.rs`）。`config/celeris.research.example.toml` の
+  `[[genres]] id = "literature"` の `output_artifacts` と `preamble.rs::actions_instructions`（CoS
+  への指示文）で `report.md` を標準として案内する。
+- **A4（LLM 呼び出しの再試行）**: PaperQA 自身の LLM 呼び出しの再試行は litellm の
+  `litellm_params.num_retries` が担う。`config/paperqa.qwen-local.example.json` の
+  `llm_config`/`summary_llm_config`/`agent.agent_llm_config` の `num_retries` を 1 → 3 に上げた
+  （celeris のコードは触らない。運用者が使う設定ファイルの変更）。
+- **B1（必読の一次情報の本文取り込み）**: `local_deep_research.rs::must_read_urls` の知識ベース側の
+  収集に `http(s)://` フィルタを追加（`human` のような値を落とす）。`local_deep_research_run.py` に
+  `build_primary_source_entries`（GitHub/GitLab のリポジトリ URL は `raw.githubusercontent.com/.../
+  HEAD/README.md`（GitLab は `/-/raw/HEAD/README.md`）、それ以外は HTML → `html_to_text` で最大 6 KB
+  に切ったテキスト）を追加し、「## 必読の一次情報（本文抜粋）」として research question の直後に
+  足してから LDR の各モード関数を呼ぶ。`add_must_read_sources` は `http(s)://` 以外を捨て、追加した
+  各エントリに `primary: true` を付ける。`build_evidence_manifest` はその `primary` フラグを
+  `sources.json` にも引き継ぐ。答えが出た後、`apply_primary_source_citations` が report の本文
+  （書き終えた `report.md` を読み直す）に抜粋の内容や URL 自身が現れるか調べ、現れれば該当ソースを
+  `cited: true` にする（`excerpt_is_cited`。URL 一致、または抜粋の 1 行〈24 字以上〉の verbatim
+  一致）。
+- **B2（`detailed` の `iterations`）**: `iteration_setting_overrides(func, iterations,
+  questions_per_iteration)` を追加。`inspect.signature(func)` で実際に宣言されている名前だけを直接
+  kwarg として渡し、宣言されていなければ `search.iterations`/`search.questions_per_iteration` として
+  settings（`settings_override`/`settings_snapshot` 経由）に回す。`detailed_research` は
+  `query`/`settings_snapshot`/`progress_callback` しか宣言しないので、両方とも settings 経由になる。
+  quick/report が実際に `iterations` を宣言していれば（未確認、`inspect.signature` が失敗した場合と
+  同じ扱い）直接 kwarg のまま。
+- **B3（例外を report にしない・再試行）**: `UpstreamLlmError` / `detect_upstream_llm_error`
+  （`error code: \d{3}` や `no_source_available` 等の文面を検出）/ `call_ldr_stage`（例外と偽装エラー
+  結果の両方をこの型に統一）/ `run_with_retries`（2/4/8 秒のバックオフで最大 3 回再試行、
+  `time.sleep` を呼び出し時に解決するので `main()` を実際に呼ぶテストでも注入できる）を追加。
+  最終的に失敗すれば `report.md` を書かない（`report` モードは `generate_report` 自身が既に書いた
+  ファイルを消してから再試行/終了する）。**celeris の既存の契約（非 0 の exit code + stderr の短い
+  メッセージ）はそのまま使う**: 新しい `result.json` ファイルは作らなかった（Rust 側
+  〈`run_ldr`〉に新しい契約を追加するのは本 Phase の変更範囲を超えると判断したため。既存の
+  「exit≠0 → `Terminal::Error{retryable:true}`、`report.md` は書かれていないので成果物にならない」
+  という経路で、指示の意図〈report.md を書かない・retryable なエラーとして扱う・再試行する〉は
+  満たしている）。
+- **B4（`insufficient_is_error` を LDR にも）**: `EvidenceThresholds.insufficient_is_error`
+  （既定 `false`）を追加。`search_results == 0`（検索経路の問題）は従来どおり常に hard error。
+  それ以外の閾値未達は既定では `Terminal::Done` にし、`append_evidence_quality_section` が
+  `report.md` の末尾に「## 証拠の質」節（出典/引用/ドメイン数、必読の一次情報のうち使われた件数、
+  証拠不足ならその理由）を足す（`local_deep_research.rs`）。B3 の例外（`UpstreamLlmError` 由来の
+  非 0 exit）はこの節の対象外で、そのまま `Terminal::Error` になる（証拠不足と呼び出し失敗は別物の
+  まま）。
+- **C1（プロキシの再走査）**: `chat_completions` は `attempts_for` が空を返しても即 503 にせず、
+  1 秒待って最大 2 回まで（合計 2 秒、要件の 3 秒以内）候補列を再計算する。それでも空なら
+  `Retry-After: 5` を付けて 503 を返す（`llm-proxy/src/server.rs`）。起動直後の probe 未完了の
+  source が「未知」として候補に含まれるか確認したところ、`ProxyState::reachable` は probe
+  キャッシュが無いとき（起動直後）実際に probe を実行してから結果を使っており、「未知だから除外」
+  という扱いにはなっていなかった（確認のみ、コード変更なし）。
+
+### ゲート
+
+- `cargo test --workspace --no-fail-fast`: exit 0、FAILED 0（下記「証拠」節に詳細）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0。
+- `docs/api`/`docs/protocol` に差分なし（`git status` で確認。型は変えていない）。
+
+### 未解決事項（Phase 109b）
+
+- A2: `pqa ask` に `--output json`（または同等の構造化出力）が実際にあるかどうかを実機で確認して
+  いない。あれば `Answer.contexts`/`used_contexts` を直接読む実装に置き換えるほうが、`References`
+  見出しの体裁に依存する現在の実装より確実（P-109b-1）。
+- B1: `excerpt_is_cited` は「抜粋の 1 行が本文に verbatim で現れるか」という粗い基準で、LLM が
+  抜粋を言い換えて使った場合は `cited` にならない（本文一致の限界。ADR-0035 の `answer_cites` と
+  同じ種類の妥協）。
+- B3: 「report.md を書かず、retryable な error にする」を celeris の既存の exit code / stderr
+  契約の中で実現した（新しい JSON ファイルは作っていない）。将来 LDR 以外のアダプタでも同種の
+  「成功した体裁の失敗」が見つかったら、`crates/task-worker/src/protocol.rs` 側に共通の型を
+  足すかどうか検討する（P-109b-2）。
+- C1: 「候補が一瞬全部消える」事象そのものの根本原因（claude-oauth の 429/cooldown から codex への
+  切替の一瞬）は直していない（再走査で覆うだけ）。頻発するようなら `record_failure` 側の cooldown
+  の付け方を見直す。

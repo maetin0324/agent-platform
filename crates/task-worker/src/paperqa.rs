@@ -1402,11 +1402,16 @@ async fn run_paperqa(
 
         // ADR-0035 D2 / D4: 取得した候補と答えを決定的に突き合わせ、`sources.json` の `cited` を決め、
         // `answer.md` の末尾に `## 出典` を足す。
+        // ADR-0063 Phase 109b A2: 本文（`answer`）の文字列一致に加え、`pqa` の生出力にある
+        // `References`/`Sources` 節（PaperQA2 が実際に使った証拠から機械的に組み立てる）も見る。
+        // `cited` は両方の和（本文一致は補助）。
+        let references_text = extract_references_section(&stdout_buf);
         let candidates = read_candidates(&artifacts_dir.join("papers.json")).await;
         let marked: Vec<(Candidate, bool)> = candidates
             .into_iter()
             .map(|c| {
-                let cited = answer_cites(&answer, &c);
+                let cited = answer_cites(&answer, &c)
+                    || (!references_text.is_empty() && answer_cites(&references_text, &c));
                 (c, cited)
             })
             .collect();
@@ -1452,15 +1457,28 @@ async fn run_paperqa(
         if let Err(e) = tokio::fs::write(artifacts_dir.join("answer.md"), &answer_md).await {
             warn!("run {run_id}: could not write artifacts/answer.md: {e}");
         }
+        // ADR-0063 Phase 109b A3: 調査系タスクの成果物名を LDR（`report.md`）と揃える。CoS が
+        // 受け入れ条件を `artifact_exists report.md` で書いても通るよう、`answer.md` と同じ内容を
+        // `report.md` にも書く（両方残す。`answer.md` が PaperQA 独自の詳しい名前として引き続き主）。
+        if let Err(e) = tokio::fs::write(artifacts_dir.join("report.md"), &answer_md).await {
+            warn!("run {run_id}: could not write artifacts/report.md: {e}");
+        }
         // 書いたものは celeris にも知らせる（run の成果物一覧と `Check::ArtifactExists` の解決に使われる）。
         // 他のアダプタではワーカー自身が `artifact` メッセージで申告するが、pqa は申告しないのでアダプタが行う。
         // ADR-0035 D3 / ADR-0063 D1: ゲートに落ちても成果物は残す（人が読めるように）ので、申告はゲートより前に行う。
         // ADR-0036 D4: 申告する `path` は workspace 相対のまま（`artifacts_dir` 基準で組む）。
-        let mut to_register: Vec<(&str, String, &str)> = vec![(
-            "answer.md",
-            format!("{artifacts_rel}/answer.md"),
-            "markdown",
-        )];
+        let mut to_register: Vec<(&str, String, &str)> = vec![
+            (
+                "answer.md",
+                format!("{artifacts_rel}/answer.md"),
+                "markdown",
+            ),
+            (
+                "report.md",
+                format!("{artifacts_rel}/report.md"),
+                "markdown",
+            ),
+        ];
         if acquiring {
             to_register.push((
                 "papers.json",
@@ -1714,6 +1732,30 @@ fn extract_answer(stdout: &str) -> String {
                 l.clone()
             }
         })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// ADR-0063 Phase 109b A2: `pqa ask` の生の標準出力から `References`/`Sources` 見出し以降を切り出す。
+/// PaperQA2 は `Answer.formatted_answer` の一部として、答えの本文にインライン引用マーカーが無くても
+/// **実際に使った証拠（`Answer.contexts`）から機械的に組み立てた参照一覧**を出す。本文の文字列一致
+/// （`answer_cites`）だけでは、モデルが日本語の答えでマーカーを落としたときに `cited` が実際より
+/// 少なく数えられる（本番 2026-09-23 の観測: `answer.md` に文書の内容を使った記述はあるのに
+/// `cited=0`）。見出しが見つからなければ空文字列（`answer_cites` は本文一致だけに頼る従来どおりの
+/// 動きに落ちる）。
+fn extract_references_section(stdout: &str) -> String {
+    let clean: Vec<String> = stdout.lines().map(strip_ansi).collect();
+    let marker = clean.iter().position(|l| {
+        let body = strip_log_prefix(l).trim();
+        let lower = body.trim_end_matches(':').trim().to_ascii_lowercase();
+        lower == "references" || lower == "sources"
+    });
+    let Some(idx) = marker else {
+        return String::new();
+    };
+    clean[idx..]
+        .iter()
+        .map(|l| strip_log_prefix(l))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1987,11 +2029,15 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
         );
 
         // 成果物として申告される（run の一覧と Check::ArtifactExists の解決に使われる）。
+        // ADR-0063 Phase 109b A3: `report.md` も `answer.md` と同じ内容で申告される。
         let artifacts = sink.artifacts.lock().unwrap();
-        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
-        assert_eq!(artifacts[0].name, "answer.md");
-        assert_eq!(artifacts[0].path, "artifacts/answer.md");
-        assert!(!artifacts[0].sha256.is_empty());
+        assert_eq!(artifacts.len(), 2, "{artifacts:?}");
+        let names: Vec<&str> = artifacts.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"answer.md"), "{names:?}");
+        assert!(names.contains(&"report.md"), "{names:?}");
+        for a in artifacts.iter() {
+            assert!(!a.sha256.is_empty(), "{a:?}");
+        }
         drop(artifacts);
 
         let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
@@ -2004,6 +2050,8 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
             !answer_md.contains("Gathering evidence"),
             "進捗のログは含めない: {answer_md}"
         );
+        let report_md = std::fs::read_to_string(dir.path().join("artifacts/report.md")).unwrap();
+        assert_eq!(report_md, answer_md, "report.md は answer.md と同じ内容");
 
         let result_json =
             std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
@@ -2055,10 +2103,18 @@ echo 'Answer: no prior work on X [Doe2020].'
             outcome.terminal
         );
         let artifacts = sink.artifacts.lock().unwrap();
-        assert_eq!(artifacts.len(), 1, "{artifacts:?}");
-        assert_eq!(artifacts[0].path, ".taskd/artifacts/T1/answer.md");
+        let mut paths: Vec<&str> = artifacts.iter().map(|a| a.path.as_str()).collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec![
+                ".taskd/artifacts/T1/answer.md",
+                ".taskd/artifacts/T1/report.md",
+            ]
+        );
         drop(artifacts);
         assert!(dir.path().join(".taskd/artifacts/T1/answer.md").is_file());
+        assert!(dir.path().join(".taskd/artifacts/T1/report.md").is_file());
         assert!(dir.path().join(".taskd/artifacts/T1/result.json").is_file());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap(),
@@ -2738,13 +2794,15 @@ while true; do sleep 0.1; done
         // 決定的な検索語だけで検索する。
         assert_eq!(input["query_llm"]["enabled"], false, "{input}");
 
-        // 3. 成果物 5 つの申告（ADR-0035 D5: `queries.json`、ADR-0063 D1: `research.json` も）
+        // 3. 成果物 6 つの申告（ADR-0035 D5: `queries.json`、ADR-0063 D1: `research.json`、
+        // ADR-0063 Phase 109b A3: `report.md` も）
         let artifacts = sink.artifacts.lock().unwrap();
         let names: Vec<&str> = artifacts.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(
             names,
             vec![
                 "answer.md",
+                "report.md",
                 "papers.json",
                 "sources.json",
                 "queries.json",
@@ -2819,6 +2877,47 @@ while true; do sleep 0.1; done
 
         assert!(dir.path().join("artifacts/result.json").is_file());
         assert!(dir.path().join("runs/run-a1/acquire.stdout.log").is_file());
+    }
+
+    /// ADR-0063 Phase 109b A2: `pqa` の生出力に、`Answer:` より前に出る `References` 節（PaperQA2 が
+    /// 途中の証拠収集で出す、実際に使ったコンテキストの一覧）があれば、答えの本文にインライン引用
+    /// マーカーが無い候補も `cited` に数える（本文一致との和）。本番の観測（2026-09-23）:
+    /// 日本語の答えでモデルが引用マーカーを落とし `cited=0` になった不具合の是正。
+    #[tokio::test]
+    async fn answer_cites_also_counts_a_references_section_that_precedes_the_answer_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_pqa_with_acquire(
+            dir.path(),
+            "cat >/dev/null\n\
+             printf 'References\\n1. (roe2021_arxiv-2101-00001v1.pdf pages 3-4): evidence\\n\\n'\n\
+             printf 'Answer: Ad hoc file systems aggregate node-local NVMe.\\n'\n",
+            &acquire_stub_script(6, 3),
+        );
+        let adapter = PaperQaAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-refs", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
+        let sources: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/sources.json")).unwrap(),
+        )
+        .unwrap();
+        let cited: Vec<bool> = sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["cited"].as_bool().unwrap())
+            .collect();
+        // 1 件目 (Brinkmann) は本文にも References 節にも出てこない、2 件目 (Roe) は References
+        // 節だけに出る（本文一致だけなら false のはず）、3 件目はどちらにも出ない。
+        assert_eq!(cited, vec![false, true, false], "{sources}");
     }
 
     /// ADR-0063 D1: 目的文中の起点 URL は種類ごとに扱いが分かれる — PDF / DOI / arXiv は取得ランナーへの
@@ -2896,12 +2995,14 @@ while true; do sleep 0.1; done
         }
         // 人が読めるように残る。
         assert!(dir.path().join("artifacts/answer.md").is_file());
+        assert!(dir.path().join("artifacts/report.md").is_file());
         assert!(dir.path().join("artifacts/papers.json").is_file());
         assert!(dir.path().join("artifacts/sources.json").is_file());
-        // 成果物の申告はゲートより前に行うので、落ちても 5 件（`queries.json` / `research.json` を含む）申告される。
+        // 成果物の申告はゲートより前に行うので、落ちても 6 件（`report.md`/`queries.json`/`research.json`
+        // を含む。ADR-0063 Phase 109b A3）申告される。
         assert!(dir.path().join("artifacts/queries.json").is_file());
         assert!(dir.path().join("artifacts/research.json").is_file());
-        assert_eq!(sink.artifacts.lock().unwrap().len(), 5);
+        assert_eq!(sink.artifacts.lock().unwrap().len(), 6);
         let research: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap(),
         )
@@ -3005,7 +3106,14 @@ while true; do sleep 0.1; done
         assert!(!dir.path().join("artifacts/papers.json").exists());
         let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
         assert!(!answer_md.contains("## 出典"), "{answer_md}");
-        assert_eq!(sink.artifacts.lock().unwrap().len(), 1, "answer.md だけ");
+        // ADR-0063 Phase 109b A3: `report.md` は取得の段を行わなくても常に書かれる。
+        assert_eq!(
+            sink.artifacts.lock().unwrap().len(),
+            2,
+            "answer.md と report.md だけ"
+        );
+        let report_md = std::fs::read_to_string(dir.path().join("artifacts/report.md")).unwrap();
+        assert_eq!(report_md, answer_md);
     }
 
     // ---------------------------------------------------- 取得ランナー（python3、ネットワーク無し）
@@ -3281,7 +3389,7 @@ out["arxiv_url"] = mod.arxiv_url("ad-hoc file system", 20)
 out["arxiv_url_cats"] = mod.arxiv_url("ad hoc file system for HPC", 20, ["cs.DC", "cs.OS", "bogus cat"])
 out["arxiv_url_or"] = mod.arxiv_url("ad hoc file system", 20, ["cs.DC"], "OR")
 out["openalex_url"] = mod.openalex_url("ad-hoc file system", 20, "who@example.org")
-out["openalex_url_no_mailto"] = mod.openalex_url("x", 5)
+out["openalex_url_default_mailto"] = mod.openalex_url("x", 5)
 out["openalex_url_filter"] = mod.openalex_url("x", 5, None, "is_oa:true")
 out["excluded"] = mod.candidate_excluded({"title": "A Mobile Ad Hoc Network Survey", "abstract": ""}, ["mobile ad hoc network"])
 out["not_excluded"] = mod.candidate_excluded({"title": "Ad Hoc File Systems", "abstract": "HPC burst buffers"}, ["mobile ad hoc network"])
@@ -3373,18 +3481,19 @@ print(json.dumps(out))
             openalex_url.contains("mailto=who%40example.org"),
             "{openalex_url}"
         );
+        // ADR-0063 Phase 109b A1: mailto は常に付く（polite pool。設定が無ければ既定値に落ちる）。
         assert!(
-            !v["openalex_url_no_mailto"]
+            v["openalex_url_default_mailto"]
                 .as_str()
                 .unwrap()
-                .contains("mailto"),
+                .contains("mailto=unknown%40example.org"),
             "{v}"
         );
         assert!(
             v["openalex_url_filter"]
                 .as_str()
                 .unwrap()
-                .ends_with("filter=is_oa%3Atrue"),
+                .contains("filter=is_oa%3Atrue"),
             "設定で filter を差し替えられる: {v}"
         );
         // 除外語は決定的に効く（タイトルでも要旨でも）。
@@ -3549,6 +3658,99 @@ print(json.dumps(out))
 
         assert_eq!(v["abstract_marks_not_full_text"], true, "{v}");
         assert_eq!(v["abstract_has_text"], true, "{v}");
+    }
+
+    /// ADR-0063 Phase 109b A1: OpenAlex/Unpaywall/Semantic Scholar 共通のレート制限器と 429 の
+    /// 再試行間隔が決定的に効くこと（`sleep`/`now` は注入するのでネットワークにも実時間にも出ない）。
+    #[test]
+    fn runner_rate_limiter_and_retry_delay_helpers_are_deterministic() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("paperqa_acquire.py");
+        std::fs::write(&script_path, ACQUIRE_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("acq", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+out = {}
+
+# レート制限器: 前回から min_interval 秒経っていなければその差分だけ眠り、経っていれば眠らない。
+clock = [0.0]
+sleeps = []
+limiter = mod.RateLimiter(1.0, now=lambda: clock[0], sleep=lambda s: (sleeps.append(s), clock.__setitem__(0, clock[0] + s)))
+limiter.wait()  # 初回は待たない
+clock[0] += 0.4
+limiter.wait()  # 0.6 秒待つはず
+clock[0] += 2.0
+limiter.wait()  # 1 秒以上経っているので待たない
+out["sleeps"] = sleeps
+
+# 429 の再試行間隔: Retry-After があればそれを使い（数値化できなければ既定へ）、無ければ 2/4/8 秒。
+out["delay_with_retry_after"] = mod.compute_retry_delay(1, "30")
+out["delay_with_bad_retry_after"] = mod.compute_retry_delay(2, "not-a-number")
+out["delay_schedule"] = [mod.compute_retry_delay(n) for n in (1, 2, 3, 4)]
+
+# fetch_with_retry: 429 を 2 回受けてから成功すれば、2 回だけ眠って値を返す。
+import urllib.error
+attempts = {"n": 0}
+sleeps2 = []
+def flaky():
+    attempts["n"] += 1
+    if attempts["n"] < 3:
+        raise urllib.error.HTTPError("http://x", 429, "too many", {}, None)
+    return b"ok"
+out["fetch_with_retry_result"] = mod.fetch_with_retry(flaky, sleep=sleeps2.append).decode()
+out["fetch_with_retry_attempts"] = attempts["n"]
+out["fetch_with_retry_sleeps"] = sleeps2
+
+# 429 が上限まで続けば最後の例外がそのまま伝播する。
+def always_429():
+    raise urllib.error.HTTPError("http://x", 429, "too many", {}, None)
+try:
+    mod.fetch_with_retry(always_429, sleep=lambda s: None)
+    out["exhausted_raises"] = False
+except urllib.error.HTTPError as exc:
+    out["exhausted_raises"] = exc.code == 429
+
+# 429 以外は即座に伝播する（再試行しない）。
+def not_found():
+    raise urllib.error.HTTPError("http://x", 404, "nope", {}, None)
+try:
+    mod.fetch_with_retry(not_found, sleep=lambda s: None)
+    out["non_429_raises_immediately"] = False
+except urllib.error.HTTPError as exc:
+    out["non_429_raises_immediately"] = exc.code == 404
+
+print(json.dumps(out))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+        let sleeps = v["sleeps"].as_array().unwrap();
+        assert_eq!(sleeps.len(), 1, "{v}");
+        assert!((sleeps[0].as_f64().unwrap() - 0.6).abs() < 1e-9, "{v}");
+        assert_eq!(v["delay_with_retry_after"], 30.0);
+        assert_eq!(v["delay_with_bad_retry_after"], 4.0);
+        assert_eq!(v["delay_schedule"], serde_json::json!([2.0, 4.0, 8.0, 8.0]));
+        assert_eq!(v["fetch_with_retry_result"], "ok");
+        assert_eq!(v["fetch_with_retry_attempts"], 3);
+        assert_eq!(v["fetch_with_retry_sleeps"], serde_json::json!([2.0, 4.0]));
+        assert_eq!(v["exhausted_raises"], true, "{v}");
+        assert_eq!(v["non_429_raises_immediately"], true, "{v}");
     }
 
     /// エンドツーエンド（`--fixture`）: 本文が取れない候補は abstract で妥協し（`_abstract.txt` を

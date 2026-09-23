@@ -130,6 +130,12 @@ min_sources = 3
 min_cited = 2
 # 出典の異なるドメイン数（同一ドメインのソースばかりでは通らない）。
 min_domains = 2
+# ADR-0063 Phase 109b B4（実機の失敗、2026-09-23: LLM プロキシの一過性の 503 で報告が空に近くなり、
+# 閾値未達を hard error にしていたら 2 回で failed になった）: `search_results == 0`（検索経路の問題）
+# 以外の閾値未達を hard error にするか。既定 false（証拠不足でも `Done` にし、`report.md` の
+# 「## 証拠の質」節に内訳と証拠不足の理由を書いて reviewer / 受け入れ条件の判断に委ねる）。
+# `true` にすると Phase 109 までどおり `Error{retryable}`。
+insufficient_is_error = false
 
 [[providers]]
 id = "ldr-qwen"

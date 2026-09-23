@@ -63,6 +63,16 @@ objective/inputs) are turned into extra candidates (`candidate_from_seed`) and
 merged in ahead of the search results, so they are never dropped by
 `max_candidates` and always attempted first.
 
+ADR-0063 Phase 109b A1 (production burst of `openalex search failed for
+'...': HTTP Error 429`): OpenAlex, Unpaywall and Semantic Scholar all go
+through one shared `RateLimiter` (at most 1 request/sec) and a 429 is
+retried up to 2 more times, honoring `Retry-After` when sent (else 2s / 4s /
+8s). Every OpenAlex request always carries `mailto` (falling back to
+`DEFAULT_CONTACT_EMAIL`), landing it in the polite pool even when no
+operator-configured address is set. Unpaywall/Semantic Scholar are only
+queried for candidates that still have no `pdf_url` (never repeated once one
+is found), which keeps the extra request volume down.
+
 OUTPUT FILES
   queries.json     {"generated_by": "llm"|"fallback", "model": ...,
                     "queries": [{text, engines[], arxiv_categories[]}],
@@ -93,6 +103,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -106,6 +117,18 @@ OPENALEX_ENDPOINT = "https://api.openalex.org/works"
 # DOI but no `pdf_url` yet (before giving up and falling back to the abstract).
 UNPAYWALL_ENDPOINT = "https://api.unpaywall.org/v2/"
 SEMANTIC_SCHOLAR_ENDPOINT = "https://api.semanticscholar.org/graph/v1/paper/DOI:"
+# ADR-0063 Phase 109b A1: OpenAlex's "polite pool" wants a contact email on
+# every request, not just when one happens to be configured; Unpaywall
+# already required one. Used as the fallback when `mailto` is unset.
+DEFAULT_CONTACT_EMAIL = "unknown@example.org"
+# Kinds that go through the shared rate limiter + 429 retry (arXiv is not
+# rate limited by the same rules and has its own tolerant error handling in
+# `search_all`).
+POLITE_KINDS = ("openalex", "unpaywall", "semanticscholar")
+# ADR-0063 Phase 109b A1: no more than one request per second to the polite
+# APIs, and up to 2 retries (3 attempts total) on a 429.
+POLITE_MIN_INTERVAL_SECS = 1.0
+MAX_POLITE_ATTEMPTS = 3
 
 ATOM_NS = "{http://www.w3.org/2005/Atom}"
 ARXIV_NS = "{http://arxiv.org/schemas/atom}"
@@ -129,6 +152,62 @@ ABSTRACT_MAX_CHARS = 600
 # ---------------------------------------------------------------- fetching
 
 
+class RateLimiter:
+    """Waits so calls are spaced at least `min_interval` seconds apart
+    (ADR-0063 Phase 109b A1: OpenAlex's polite pool asks for at most one
+    request per second; Unpaywall / Semantic Scholar are routed through the
+    same limiter). `now`/`sleep` are injected so tests never really wait."""
+
+    def __init__(self, min_interval, now=time.monotonic, sleep=time.sleep):
+        self.min_interval = min_interval
+        self._now = now
+        self._sleep = sleep
+        self._last = None
+
+    def wait(self):
+        now = self._now()
+        if self._last is not None:
+            remaining = self.min_interval - (now - self._last)
+            if remaining > 0:
+                self._sleep(remaining)
+                now = self._now()
+        self._last = now
+
+
+def compute_retry_delay(attempt, retry_after=None):
+    """How long to sleep before retrying a 429 (ADR-0063 Phase 109b A1).
+    `attempt` is 1 for the delay before the *first* retry (i.e. after the
+    first failure). Honors a `Retry-After` value when one was sent (falls
+    back to the exponential schedule if it is not a usable non-negative
+    number); otherwise 2 -> 4 -> 8 seconds for attempt 1 -> 2 -> 3."""
+    if retry_after is not None:
+        try:
+            value = float(retry_after)
+        except (TypeError, ValueError):
+            value = None
+        if value is not None and value >= 0:
+            return value
+    schedule = {1: 2.0, 2: 4.0, 3: 8.0}
+    return schedule.get(attempt, 8.0)
+
+
+def fetch_with_retry(fetch_once, max_attempts=MAX_POLITE_ATTEMPTS, sleep=time.sleep):
+    """Call `fetch_once()` up to `max_attempts` times (ADR-0063 Phase 109b
+    A1). Retries only a `urllib.error.HTTPError` whose `.code == 429`,
+    honoring `Retry-After` when the upstream sent one; any other exception,
+    or the last attempt's 429, propagates. `sleep` is injected so tests
+    never really wait."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fetch_once()
+        except urllib.error.HTTPError as exc:
+            if exc.code != 429 or attempt == max_attempts:
+                raise
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            sleep(compute_retry_delay(attempt, retry_after))
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 class Fetcher:
     """`url -> bytes`. With `fixture_dir` set, no HTTP request is made at
     all: canned bodies are read from the directory (tests; ADR-0035 §4.1).
@@ -150,10 +229,14 @@ class Fetcher:
                  <dir>/semanticscholar-<i>.json / <dir>/semanticscholar.json / {"results": []}
     """
 
-    def __init__(self, timeout, fixture_dir=None):
+    def __init__(self, timeout, fixture_dir=None, sleep=time.sleep):
         self.timeout = timeout
         self.fixture_dir = fixture_dir
         self.calls = {"arxiv": 0, "openalex": 0, "pdf": 0, "llm": 0}
+        self._sleep = sleep
+        # ADR-0063 Phase 109b A1: one shared limiter for OpenAlex / Unpaywall /
+        # Semantic Scholar (not arXiv, which has no such requirement).
+        self._rate_limiter = RateLimiter(POLITE_MIN_INTERVAL_SECS, sleep=sleep)
 
     def _fixture(self, kind, url):
         self.calls[kind] = self.calls.get(kind, 0) + 1
@@ -179,13 +262,22 @@ class Fetcher:
             return b'{"choices": [{"message": {"content": ""}}]}'
         return b'{"results": []}'
 
+    def _raw_get(self, url):
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            return response.read()
+
     def get(self, kind, url):
         if self.fixture_dir:
             return self._fixture(kind, url)
         self.calls[kind] = self.calls.get(kind, 0) + 1
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
-            return response.read()
+        if kind in POLITE_KINDS:
+            # ADR-0063 Phase 109b A1: at most 1 request/sec, and up to 2
+            # retries on a 429 (honoring Retry-After when the upstream sent
+            # one, else the 2/4/8s schedule).
+            self._rate_limiter.wait()
+            return fetch_with_retry(lambda: self._raw_get(url), sleep=self._sleep)
+        return self._raw_get(url)
 
     def post(self, kind, url, payload, timeout=None, headers=None):
         """JSON POST. Fixtures answer without any HTTP request (tests)."""
@@ -549,14 +641,18 @@ def arxiv_url(query, per_query, categories=None, join="AND"):
 
 def openalex_url(query, per_query, mailto=None, filter_expr=None):
     """OpenAlex `/works` URL. The filter is open access **and** the field
-    (Computer Science by default; ADR-0035 D5)."""
+    (Computer Science by default; ADR-0035 D5).
+
+    ADR-0063 Phase 109b A1: `mailto` is **always** sent (falling back to
+    `DEFAULT_CONTACT_EMAIL`) so every request lands in OpenAlex's polite
+    pool, not just the ones where an operator happened to configure one --
+    production saw plain (non-polite) requests get `429`'d in a burst."""
     params = {
         "search": str(query or "").strip(),
         "per_page": str(per_query),
         "filter": str(filter_expr or DEFAULT_OPENALEX_FILTER),
+        "mailto": str(mailto or DEFAULT_CONTACT_EMAIL),
     }
-    if mailto:
-        params["mailto"] = mailto
     return OPENALEX_ENDPOINT + "?" + urllib.parse.urlencode(params)
 
 
@@ -885,7 +981,7 @@ def seed_candidates(seed_urls, progress):
 
 def unpaywall_url(doi, mailto):
     return UNPAYWALL_ENDPOINT + urllib.parse.quote(str(doi or ""), safe="") + "?" + urllib.parse.urlencode(
-        {"email": mailto or "unknown@example.org"}
+        {"email": mailto or DEFAULT_CONTACT_EMAIL}
     )
 
 

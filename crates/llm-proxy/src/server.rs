@@ -35,6 +35,11 @@ use crate::sources::{SendOutcome, SourceError, claude, codex, relay};
 const X_SOURCE: &str = "x-celeris-source";
 const X_ACCOUNT: &str = "x-celeris-account";
 
+/// ADR-0063 Phase 109b C1: 候補が一時的に全部無くなったときの再走査の回数と待ち（合計
+/// `NO_SOURCE_MAX_RESCANS * NO_SOURCE_RESCAN_DELAY` = 2 秒。3 秒以内の要件を満たす）。
+const NO_SOURCE_MAX_RESCANS: u32 = 2;
+const NO_SOURCE_RESCAN_DELAY: Duration = Duration::from_secs(1);
+
 /// プロキシが動くのに要るもの一式。`Arc` で共有する。
 pub struct ProxyState {
     pub config: LlmProxyConfig,
@@ -685,7 +690,18 @@ async fn chat_completions(State(state): State<Arc<ProxyState>>, Json(req): Json<
         }
     };
 
-    let attempts = state.attempts_for(&parsed, now).await;
+    let mut attempts = state.attempts_for(&parsed, now).await;
+    // ADR-0063 Phase 109b C1: 起動直後・アカウントのローテーションの一瞬など、候補が一時的に全部
+    // 無くなる瞬間がある（実機の観測、2026-09-23: claude-oauth が 429/cooldown で codex に倒れる
+    // 過程で一瞬すべての候補が無くなり `no_source_available` を返した）。即 503 を返す前に短い待ち
+    // を挟んで候補列をもう 1 周する（最大 2 周、合計 3 秒以内）。
+    let mut rescans = 0u32;
+    while attempts.is_empty() && rescans < NO_SOURCE_MAX_RESCANS {
+        tokio::time::sleep(NO_SOURCE_RESCAN_DELAY).await;
+        rescans += 1;
+        let rescan_now = time::OffsetDateTime::now_utc().unix_timestamp();
+        attempts = state.attempts_for(&parsed, rescan_now).await;
+    }
     if attempts.is_empty() {
         LogHandle {
             id: request_id,
@@ -699,7 +715,11 @@ async fn chat_completions(State(state): State<Arc<ProxyState>>, Json(req): Json<
             busy_timeout: state.busy_timeout,
         }
         .write("unavailable", (None, None), Some("no_source_available".to_string()));
-        return problem(StatusCode::SERVICE_UNAVAILABLE, "no_source_available", "no reachable llm source is configured for this model");
+        let mut resp = problem(StatusCode::SERVICE_UNAVAILABLE, "no_source_available", "no reachable llm source is configured for this model");
+        if let Ok(v) = HeaderValue::from_str("5") {
+            resp.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        return resp;
     }
 
     let mut last_error = None;
