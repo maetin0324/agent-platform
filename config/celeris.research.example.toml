@@ -28,7 +28,12 @@
 #     仕様。`paperqa_ask.py` がこのパスを `PQA_SETTINGS_DIR`（親ディレクトリ）とファイル名に分ける）。
 #   - 論文（`paper_directory`）と索引（`index_directory`）の下に、**案件ごと**（タスクの `project_id`、
 #     案件が無ければ `_shared`）のサブディレクトリを celeris 側が作る（ADR-0035 D1 / D2。同じ案件の別タスク・
-#     リトライで corpus と索引を使い回すため）。
+#     リトライで corpus と索引を使い回すため）。**著者版 PDF を人が直接置きたいときは、この
+#     `<paper_directory>/<project_id>/` に置けば、次の run から PaperQA の索引（`agent.index` はこの
+#     ディレクトリ全体を見る）に入り、`pqa ask` / `ask()` が使える**（ADR-0063 Phase 109g B）。
+#   - ADR-0063 Phase 109g B: 知識ベース（`[knowledge]`）に `primary-sources` タグを付けたページの
+#     `sources`（`celerisctl knowledge record --source` で人が付けた DOI/arXiv/PDF の URL）も、
+#     目的文中の URL と同じく毎 run 必ず acquire の seed 候補に入る（既知の論文を種にする）。
 #   - ADR-0035: run は 2 段（取得 → 回答）。1 段目は arXiv / OpenAlex（**鍵なし**）で候補論文を探し、
 #     open access の PDF を案件の corpus に落とす（`[adapters.paperqa.acquire]`）。2 段目は ADR-0063
 #     Phase 109d C1: 埋め込みの python ランナー（`paperqa_ask.py`）が `paperqa` の Python API を呼ぶ

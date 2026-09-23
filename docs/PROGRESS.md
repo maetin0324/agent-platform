@@ -16151,3 +16151,127 @@ io_uring」が「(必要ならDAOS/Lustre)」の括弧に阻まれて落ちて�
 - reviewer 不合格の理由（2 回とも）: 全対象で「BenchFS との比較分類」が『未確認』。PaperQA は文献の範囲で答えるため「文献に BenchFS の言及がない」としたが、この分類は BenchFS の設計条件（知識ベース `projects/benchfs/architecture-overview.md`）と対象の設計を照らす判断であり、文献検索の問いとして立てていたのが誤り。
 - 副次: 多くの観点が『未確認』。corpus が周辺論文中心で、対象の主要論文（CHFS DOI 10.1145/3492805.3492807、GekkoFS DOI 10.1109/CLUSTER.2018.00049 など）が毎 run 入るとは限らない（クエリ生成の揺れ）。
 - Phase 109g（Sonnet）: 総括の問いを「比較先の設計条件（知識ベースから 3 KB）+ 対象別の答えを材料に、必ず二択で分類し確度と理由を書く」に変更、表の分類列に反映。`primary-sources` ページの DOI / arXiv / PDF を acquire の種に。人が著者版 PDF を `~/.local/celeris/tools/paperqa/papers/<project_id>/` に置けば索引されることを文書化。CoS の指示に「分類の欠落は不合格」を追記。
+### 2026-09-23 15:12〜15:27 UTC: 文献調査の 7 回目（Phase 109f）は抽出・PaperQA 経路とも正常、比較分類が全対象『未確認』で不合格 → Phase 109g
+
+- タスク 01M37D6TMRZSBQDC1SKBV22JAW: `targets = [CHFS, FINCHFS, GekkoFS, UnifyFS, BeeOND,
+  Mochi-Margo-Mercury, UCX, io_uring]`、`aspects = [目的, file semantics, deployment model,
+  server/core 利用, data path, BenchFS との比較分類]`（Phase 109f の期待どおり）。`report.md` は
+  「# 対象別の整理」の表 + 8 対象の節 + 「## 引用された文献（contexts）」。
+  `evidence = {cited: 3（本文 3、contexts 由来 2）, insufficient: false}`。
+- reviewer 不合格の理由（2 回とも同じ）: **全 8 対象で「BenchFS との比較分類」列が『未確認』**
+  （「公平比較可能」「背景比較のみ」の語が全文で 0 件）。原因は、この分類が文献検索ではなく BenchFS の
+  設計条件（知識ベース `projects/benchfs/architecture-overview.md`）と対象の設計を照らす判断なのに、
+  総括の問いは PaperQA に「BenchFS と比較して分類せよ」とだけ投げていたこと（PaperQA は文献の範囲でしか
+  答えないため「文献に BenchFS への言及がない」と答えていた）。
+- Phase 109g（Sonnet）: 総括の問いを「設計条件の提示 → 必ず二択で分類 → 確度も添える」という判断の形に
+  作り直し、既知の論文（知識ベースの `primary-sources` タグの `sources`）を acquire の種にする。詳細は
+  下の Phase 109g 節。
+
+## Phase 109g（完了日 2026-09-23）: BenchFS との比較分類を設計条件の照合による判断にし、既知の論文を種にする
+
+Phase 109f の本番反映後、7 回目のやり直し（上記 2026-09-23 15:12〜15:27 UTC 節）で見つかった「比較分類が
+全対象『未確認』」の直し。本文（ADR-0063 D1〜D4・受け入れ条件 1〜5、Phase 109b〜109f 追記）は書き換えない。
+
+### 条件ごとの実施
+
+1. **総括の問いは設計条件の提示と必ず二択の判断を要求する（設計条件があるとき）、無ければ従来どおり
+   （未確認を許す）**
+   - 実行したコマンド:
+     `cargo test -p task-worker --lib paperqa::tests::comparison_judgement_pure_functions_extract_build_and_parse`
+   - 出力の要点: exit 0、1 passed。`build_comparison_question("BenchFS", [...], {}, None)` は旧来の
+     1 行の問い（`old_style_question`、未確認を許す）のまま。`comparison_context` ありは「以下は BenchFS
+     の設計条件である」「必ず『公平比較可能』か『背景比較のみ』のどちらかに分類」「文献に BenchFS への
+     言及が無いことは理由にならない」「判断の確度（高/中/低）も添えよ」を含み、対象ごとの答え
+     （`### CHFS の対象別の答え` 等）を材料として埋め込む。CHFS の答え（200 回繰り返しで 4800 文字）は
+     1.5 KB（+ 省略記号）に切り詰められる。
+2. **比較先の設計条件は知識ベースのページ本文（最大 3 KB）→ 目的文の周辺 1 文 → 無し、の順**
+   - 実行したコマンド: 同上（同じテストの `page_path_found`/`stripped`/`design_from_page`/
+     `design_from_fallback`/`design_from_fallback_empty_page`/`design_none`/`design_truncated_len`
+     系のアサーション）
+   - 出力の要点: `find_comparison_page_path` は title/path/tags のいずれかに比較先の名前を含む最初の
+     ページの `path` を返す（無ければ `None`）。`strip_front_matter_block` は `---…---` の front matter
+     を落とす（閉じていなければ本文の水平線とみなしそのまま）。`comparison_design_context` はページ本文
+     があればそれを、無ければ `fallback_paragraph` を、どちらも空文字列なら `None` を返し、3000 文字
+     （`COMPARISON_CONTEXT_MAX_CHARS`）を超えると省略記号付きで切り詰める（4000 文字の入力 →
+     3001 文字）。`research_targets::comparison_target_paragraph`（Rust、新規）が目的文中の比較の言い回し
+     を含む 1 文を決定的に返す（`cargo test -p task-worker --lib
+     research_targets::tests::comparison_target_paragraph_returns_the_sentence_around_the_compare_phrase
+     research_targets::tests::comparison_target_paragraph_is_none_without_a_compare_phrase` → exit 0、
+     2 passed）。
+3. **表の比較分類列は総括の答えから、それ以外の列は対象ごとの答えから**
+   - 実行したコマンド: 同 1 のテスト（`table_with_comparison` アサーション）
+   - 出力の要点: `build_target_aspect_table(["CHFS","FINCHFS"], ["cache","BenchFS との比較分類"],
+     answers, "BenchFS")` で、CHFS 行は `cache` 列が対象ごとの答えから（`node-local NVMe`）、
+     `BenchFS との比較分類` 列は総括の答えから（`公平比較可能（高）`）。FINCHFS は対象ごとの答えが無い
+     ので `cache` 列は「未確認」、比較分類列だけ総括から（`背景比較のみ（中）`）。
+     `extract_comparison_classification` は「公平比較可能（高）」「背景比較のみ（中）」の両表記、確度の
+     表記が無ければラベルだけ、対象名が総括に無ければ「未確認」を返す。
+4. **総括の節の見出しは比較先が分かっていれば「## <比較先> との比較分類」**
+   - 実行したコマンド:
+     `cargo test -p task-worker --lib paperqa::tests::render_target_sections_headings_the_summary_with_the_comparison_target_when_known`
+   - 出力の要点: exit 0、1 passed。`comparison_target = Some("BenchFS")` なら
+     「## BenchFS との比較分類」、`None` なら従来どおり「## 総括」。
+5. **既知の論文を種にする（知識ベースの `primary-sources` タグのページの `sources` から DOI/arXiv/PDF）**
+   - 実行したコマンド:
+     `cargo test -p task-worker --lib paperqa::tests::kb_primary_source_seed_urls_reads_only_tagged_pages_and_http_sources paperqa::tests::kb_primary_source_urls_are_merged_into_the_seed_urls`
+   - 出力の要点: exit 0、2 passed。`kb_primary_source_seed_urls` は `primary-sources`/`一次情報` タグの
+     ページの `sources` のうち `http(s)://` のものだけを拾い（タグ無しページ・`human` は無視）、
+     `classify_seed_url` で種類分けする。`acquire_input.json.seed_urls` には目的文由来と合わせて
+     DOI/arXiv/PDF が（重複除く）入り、GitHub は `answer.md` の「## 一次情報（実装）」に回る（目的文
+     由来の GitHub 同様）。人が著者版 PDF を `paper_directory/<project_id>/` に直接置く運用は
+     `config/celeris.research.example.toml` に一文追記（コード変更は不要。PaperQA の索引がディレクトリ
+     全体を見るため）。
+6. **`ask_input.json` に `comparison_context`（材料）が入る。型変更なし**
+   - 実行したコマンド:
+     `cargo test -p task-worker --lib paperqa::tests::ask_input_carries_comparison_context_ingredients`
+   - 出力の要点: exit 0、1 passed。`comparison_target = "BenchFS"`、
+     `comparison_context.knowledge_root` に `[knowledge] root`、`comparison_context.knowledge_index`
+     に知識ベースの索引（`path`/`title`/`tags`）、`comparison_context.fallback_paragraph` に目的文の
+     周辺 1 文が入る。`RunRequest`/`RunContext`/`KnowledgeContext` の型は変更していない
+     （`PaperQaConfig.knowledge_root` は docs/protocol の対象外の Rust 内部設定。下の「API/protocol」
+     ゲートで確認）。
+7. **CoS への受け入れの文に 1 行追記**
+   - 実行したコマンド: `cargo test -p task-worker --lib preamble::tests::cos_conversations_show_active_projects_and_the_actions_instructions`
+   - 出力の要点: exit 0、1 passed（既存テスト。`actions_instructions` の追記後も `.contains()` 系
+     アサーションは変わらず通る）。`preamble.rs::actions_instructions` に「観点に比較先との比較分類を
+     含める場合、それは文献検索ではなく比較先の設計条件との照合による判断で、必ず『公平比較可能』か
+     『背景比較のみ』のどちらかを確度付きで出させる。分類の欠落は不合格の理由になる」を追記。
+
+### ゲート
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（passed 合計 **1977**。Phase 109f の 1970 から +7: `research_targets` +2〈`comparison_target_paragraph`〉、`paperqa`（Rust）+5〈`kb_primary_source_seed_urls` 単体・合流・`ask_input.comparison_context`・`render_target_sections` の見出し・`comparison_judgement_pure_functions`〉） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| API/protocol | `git status --porcelain -- docs/api docs/protocol` | 出力なし（型を変えていない） |
+
+### 変更ファイル
+
+- `crates/task-worker/src/paperqa_ask.py`（`find_comparison_page_path`/`strip_front_matter_block`/
+  `truncate_text`/`comparison_design_context`/`load_comparison_design_context`/
+  `build_comparison_question`/`extract_comparison_classification`/`_is_comparison_aspect` を追加。
+  `build_target_aspect_table` に `comparison_target` 引数、`main()` に総括の問いの置き換えを追加）
+- `crates/task-worker/src/paperqa.rs`（`PaperQaConfig.knowledge_root`、`kb_primary_source_seed_urls`、
+  `ask_input.json` への `comparison_context` の組み立て、`render_target_sections` の見出し分岐、seed URL
+  の合流。新規テスト 5 件）
+- `crates/task-worker/src/research_targets.rs`（`comparison_target_paragraph` を追加、テスト 2 件）
+- `crates/task-worker/src/preamble.rs`（`actions_instructions` に一文追記）
+- `crates/celeris/src/lib.rs`（`PaperQaConfig` の構築に `knowledge_root: Some(config.knowledge.root.clone())` を配線）
+- `config/celeris.research.example.toml`（著者版 PDF の置き場と KB `primary-sources` タグの運用を追記）
+- `docs/adr/0063-research-tasks-resilience.md`（「## Phase 109g 追記」を追加。本文・既存の Phase 追記は
+  書き換えていない）
+
+### 未解決事項
+
+- P-109g-1: `extract_comparison_classification` は「対象名を含む行」を探す行ベースの素朴な規則で、
+  対象名が別の対象名の部分文字列になっている場合（例 `"FINCHFS"` は `"CHFS"` を部分文字列として含む）に
+  誤って手前の行を拾う可能性が理論上ある。総括の問いで「対象ごとに 1 行」の形式を明示指示しているため
+  実害は限定的（表は補助で、総括の節の本文には答え全文が残る）。
+- P-109g-2: `find_comparison_page_path` は知識ベースの索引全体を線形走査する素朴な一致（タイトル/パス/
+  タグの部分文字列）。比較先の名前が別の無関係なページに偶然含まれる場合に誤ったページを拾う可能性が
+  ある（実運用では比較先は固有のプロジェクト名なので実害は小さいと見ているが未確認）。
+- 実機未確認（ADR-0009 P-34）。本番での確認（親エージェントが行う）: BenchFS の文献調査を（比較先の
+  取れる目的文で）やり直し、(1) `ask_input.json.comparison_context` に KB の
+  `architecture-overview.md` が拾われること、(2) `answer.md` の「## BenchFS との比較分類」節に対象
+  ごとの『公平比較可能』/『背景比較のみ』と確度が出ること、(3) reviewer が「BenchFS との比較分類」観点を
+  合格と判定すること。

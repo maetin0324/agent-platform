@@ -278,6 +278,9 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     evidence: base.evidence,
                     // ADR-0063 Phase 109d C3: `max_asks` も行ごとの上書きが無い。
                     max_asks: base.max_asks,
+                    // ADR-0063 Phase 109g A: コンテナと同じ `[knowledge] root`（`ContainerPlan.knowledge_root`
+                    // と同じ絶対パス）。`paperqa_ask.py` が比較先のページ本文をここから直接読む。
+                    knowledge_root: Some(config.knowledge.root.clone()),
                 }))
             }
             LdrAdapter::ID => {
