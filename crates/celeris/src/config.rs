@@ -29,8 +29,11 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    #[serde(default = "default_db")]
-    pub db: PathBuf,
+    /// ADR-0064 D1: 従来どおり `db = "<path>"`（文字列）で書けるほか、`[db]` テーブルで
+    /// `path` と一緒に `busy_timeout_ms` 等を書ける（`DbConfig` のカスタム `Deserialize` が両方を
+    /// 受け付ける）。
+    #[serde(default)]
+    pub db: DbConfig,
     #[serde(default = "default_workspace_root")]
     pub workspace_root: PathBuf,
     #[serde(default = "default_tick_ms")]
@@ -1552,6 +1555,111 @@ pub struct ProviderConfig {
 fn default_db() -> PathBuf {
     PathBuf::from("~/.local/celeris/celeris.sqlite3")
 }
+
+/// ADR-0064 D1: `db` キー。**文字列**（`db = "<path>"`。従来どおり、互換）か、**テーブル**
+/// （`[db]` に `path` と `busy_timeout_ms` / `checkpoint_interval_secs` / `backup_dir` /
+/// `backup_interval_secs` / `backup_keep` を書く）のどちらでも受け付ける。状態ディレクトリ
+/// （`~/.local/celeris`）は `/home` のままで、DB ファイルだけローカルディスクに置けるようにする
+/// のが狙い（本番で観測した I/O 遅延。`docs/adr/0065-db-local-disk-and-store-resilience.md`）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DbConfig {
+    pub path: PathBuf,
+    /// `PRAGMA busy_timeout`（既定 5000 ms。本番では 15000 ms を勧める）。
+    pub busy_timeout_ms: u64,
+    /// 背景チェックポイント（`PRAGMA wal_checkpoint(PASSIVE)`）の間隔（既定 30 秒）。
+    pub checkpoint_interval_secs: u64,
+    /// 定期バックアップの置き場所。`None`（既定）ならバックアップしない。相対パスは設定ファイル基準
+    /// （`Config::load` が絶対化する）。
+    pub backup_dir: Option<PathBuf>,
+    /// 定期バックアップの間隔（既定 3600 秒）。
+    pub backup_interval_secs: u64,
+    /// 残す世代数（既定 48）。
+    pub backup_keep: usize,
+}
+
+impl DbConfig {
+    pub fn busy_timeout(&self) -> Duration {
+        Duration::from_millis(self.busy_timeout_ms)
+    }
+
+    pub fn checkpoint_interval(&self) -> Duration {
+        Duration::from_secs(self.checkpoint_interval_secs)
+    }
+
+    pub fn backup_interval(&self) -> Duration {
+        Duration::from_secs(self.backup_interval_secs)
+    }
+}
+
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self {
+            path: default_db(),
+            busy_timeout_ms: default_db_busy_timeout_ms(),
+            checkpoint_interval_secs: default_db_checkpoint_interval_secs(),
+            backup_dir: None,
+            backup_interval_secs: default_db_backup_interval_secs(),
+            backup_keep: default_db_backup_keep(),
+        }
+    }
+}
+
+fn default_db_busy_timeout_ms() -> u64 {
+    5000
+}
+fn default_db_checkpoint_interval_secs() -> u64 {
+    30
+}
+fn default_db_backup_interval_secs() -> u64 {
+    3600
+}
+fn default_db_backup_keep() -> usize {
+    48
+}
+
+impl<'de> Deserialize<'de> for DbConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Path(PathBuf),
+            Table(Table),
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Table {
+            #[serde(default = "default_db")]
+            path: PathBuf,
+            #[serde(default = "default_db_busy_timeout_ms")]
+            busy_timeout_ms: u64,
+            #[serde(default = "default_db_checkpoint_interval_secs")]
+            checkpoint_interval_secs: u64,
+            #[serde(default)]
+            backup_dir: Option<PathBuf>,
+            #[serde(default = "default_db_backup_interval_secs")]
+            backup_interval_secs: u64,
+            #[serde(default = "default_db_backup_keep")]
+            backup_keep: usize,
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Path(path) => DbConfig {
+                path,
+                ..DbConfig::default()
+            },
+            Repr::Table(t) => DbConfig {
+                path: t.path,
+                busy_timeout_ms: t.busy_timeout_ms,
+                checkpoint_interval_secs: t.checkpoint_interval_secs,
+                backup_dir: t.backup_dir,
+                backup_interval_secs: t.backup_interval_secs,
+                backup_keep: t.backup_keep,
+            },
+        })
+    }
+}
 /// ADR-0042 D3: タスクの足回り（worktree・成果物・run のログ）の既定の置き場。
 /// Phase 51 までは設定ファイル基準の `workspaces` だった。明示してあればそのまま使う。
 fn default_workspace_root() -> PathBuf {
@@ -1645,11 +1753,20 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("."));
         let base = base.canonicalize().unwrap_or(base);
         cfg.source_path = Some(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
-        // ADR-0045 D2: `db` の既定は `~/.local/celeris/celeris.sqlite3`。`~` を展開してから、
-        // それでも相対なら従来どおり設定ファイルのディレクトリ基準にする。
-        cfg.db = task_core::expand_home(&cfg.db, task_core::home_dir().as_deref());
-        if cfg.db.is_relative() {
-            cfg.db = base.join(&cfg.db);
+        // ADR-0045 D2 / ADR-0064 D1: `db` の既定は `~/.local/celeris/celeris.sqlite3`。`~` を展開して
+        // から、それでも相対なら従来どおり設定ファイルのディレクトリ基準にする。`[db] backup_dir` も
+        // 同じ規則（省略時は触らない）。
+        cfg.db.path = task_core::expand_home(&cfg.db.path, task_core::home_dir().as_deref());
+        if cfg.db.path.is_relative() {
+            cfg.db.path = base.join(&cfg.db.path);
+        }
+        if let Some(backup_dir) = &cfg.db.backup_dir {
+            let expanded = task_core::expand_home(backup_dir, task_core::home_dir().as_deref());
+            cfg.db.backup_dir = Some(if expanded.is_relative() {
+                base.join(&expanded)
+            } else {
+                expanded
+            });
         }
         // ADR-0042 D3: `workspace_root` の既定は `~/.local/celeris/workspaces`。`~` を展開してから、
         // それでも相対なら他のパス設定と同じく設定ファイルのディレクトリ基準にする
@@ -2422,7 +2539,7 @@ impl Config {
             }
         };
         if let Some(db) = &overrides.db {
-            self.db = resolve(db);
+            self.db.path = resolve(db);
         }
         if let Some(listen) = overrides.listen {
             self.api.listen = Some(listen);
@@ -3267,7 +3384,7 @@ genre = "conversation"
             "/../../config/celeris.example.toml"
         ));
         let cfg = Config::load(path).unwrap();
-        assert!(cfg.db.is_absolute());
+        assert!(cfg.db.path.is_absolute());
         assert!(cfg.workspace_root.is_absolute());
         assert_eq!(cfg.max_concurrency, 2);
         assert_eq!(cfg.providers[0].adapter, "fake");
@@ -3304,6 +3421,76 @@ genre = "conversation"
         let dispatch = cfg.dispatch_config();
         assert_eq!(dispatch.knowledge.fallback_tier, Some(Tier::Cheap));
         assert_eq!(dispatch.knowledge.langmem_base_url, None, "例は無効のまま");
+    }
+
+    /// ADR-0064 D1: `db` は従来どおり文字列（`db = "<path>"`）でも、`[db]` テーブル
+    /// （`path` / `busy_timeout_ms` / `checkpoint_interval_secs` / `backup_dir` /
+    /// `backup_interval_secs` / `backup_keep`）でも書ける。両方とも既定値は同じ。
+    #[test]
+    fn db_accepts_both_the_bare_path_string_and_the_table_form() {
+        // 何も書かなければ既定（`~/.local/celeris/celeris.sqlite3`、busy_timeout 5000ms、
+        // checkpoint 30s、backup_dir 無し、backup_interval 3600s、backup_keep 48）。
+        let raw: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert_eq!(raw.db, DbConfig::default());
+        assert_eq!(raw.db.busy_timeout_ms, 5000);
+        assert_eq!(raw.db.checkpoint_interval_secs, 30);
+        assert_eq!(raw.db.backup_dir, None);
+        assert_eq!(raw.db.backup_interval_secs, 3600);
+        assert_eq!(raw.db.backup_keep, 48);
+
+        // 文字列（従来どおり）。
+        let raw: Config = toml::from_str(
+            "db = \"local.sqlite3\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        assert_eq!(raw.db.path, PathBuf::from("local.sqlite3"));
+        assert_eq!(raw.db.busy_timeout_ms, 5000, "still the default");
+
+        // テーブル（新規、任意）: 一部だけ書けば残りは既定。
+        let raw: Config = toml::from_str(
+            "[db]\npath = \"/var/lib/celeris/celeris.sqlite3\"\nbusy_timeout_ms = 15000\n\
+             checkpoint_interval_secs = 10\nbackup_dir = \"/var/backups/celeris\"\n\
+             backup_interval_secs = 900\nbackup_keep = 12\n\
+             [[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            raw.db.path,
+            PathBuf::from("/var/lib/celeris/celeris.sqlite3")
+        );
+        assert_eq!(raw.db.busy_timeout(), Duration::from_millis(15000));
+        assert_eq!(raw.db.checkpoint_interval(), Duration::from_secs(10));
+        assert_eq!(
+            raw.db.backup_dir,
+            Some(PathBuf::from("/var/backups/celeris"))
+        );
+        assert_eq!(raw.db.backup_interval(), Duration::from_secs(900));
+        assert_eq!(raw.db.backup_keep, 12);
+
+        // 綴り間違いは `[db]` テーブルの中でも設定エラー（`deny_unknown_fields`。`Repr` が
+        // untagged のため、メッセージは「どちらの形にも合わない」という一般的な文言になる）。
+        assert!(
+            toml::from_str::<Config>(
+                "[db]\npath = \"x.sqlite3\"\nbusy_timeout_msx = 1\n\
+                 [[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+            )
+            .is_err()
+        );
+
+        // `Config::load` は `[db].backup_dir` の相対パス・`~` も他のパス設定と同じ規則で解決する。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[db]\npath = \"d.sqlite3\"\nbackup_dir = \"backups\"\n\
+             [[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        assert_eq!(cfg.db.path, base.join("d.sqlite3"));
+        assert_eq!(cfg.db.backup_dir, Some(base.join("backups")));
     }
 
     /// ADR-0052 D2（Phase 64）: `[[harnesses]] id = "knowledge"` の `fallback` は
@@ -5402,7 +5589,7 @@ adapter = "fake"
             "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n[memory]\n[secrets]\n[accounts]\n",
         )
         .unwrap();
-        assert_eq!(raw.db, PathBuf::from("~/.local/celeris/celeris.sqlite3"));
+        assert_eq!(raw.db.path, PathBuf::from("~/.local/celeris/celeris.sqlite3"));
         assert_eq!(
             raw.workspace_root,
             PathBuf::from("~/.local/celeris/workspaces")
@@ -5437,7 +5624,7 @@ adapter = "fake"
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         for p in [
-            &cfg.db,
+            &cfg.db.path,
             &cfg.workspace_root,
             &cfg.selfdeploy.releases_dir,
             &cfg.containers.build_dir,
@@ -5447,9 +5634,9 @@ adapter = "fake"
             assert!(p.is_absolute(), "{p:?}");
         }
         assert!(
-            cfg.db.ends_with(".local/celeris/celeris.sqlite3"),
+            cfg.db.path.ends_with(".local/celeris/celeris.sqlite3"),
             "{:?}",
-            cfg.db
+            cfg.db.path
         );
         assert!(
             cfg.selfdeploy
@@ -5483,7 +5670,7 @@ adapter = "fake"
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         let base = dir.path().canonicalize().unwrap();
-        assert_eq!(cfg.db, base.join("d.sqlite3"));
+        assert_eq!(cfg.db.path, base.join("d.sqlite3"));
         assert_eq!(cfg.workspace_root, base.join("ws"));
         assert_eq!(cfg.selfdeploy.releases_dir, base.join("rel"));
         assert_eq!(cfg.memory.as_ref().expect("[memory]").dir, base.join("mem"));

@@ -652,7 +652,7 @@ fn starting_the_same_release_twice_exits_three() {
 fn the_cli_overrides_replace_the_config_values() {
     let env = Env::new();
     let mut config = env.config();
-    assert_eq!(config.db, env.root.join("celeris.sqlite3"));
+    assert_eq!(config.db.path, env.root.join("celeris.sqlite3"));
     assert_eq!(config.api.listen, None);
     std::fs::write(env.root.join("api.token"), "s3cret").unwrap_or_else(|e| panic!("token: {e}"));
     config.apply_overrides(&celeris::Overrides {
@@ -661,7 +661,7 @@ fn the_cli_overrides_replace_the_config_values() {
         workspace_root: Some(PathBuf::from("staging-ws")),
         token_file: Some(PathBuf::from("api.token")),
     });
-    assert_eq!(config.db, env.root.join("staging.sqlite3"));
+    assert_eq!(config.db.path, env.root.join("staging.sqlite3"));
     assert_eq!(config.workspace_root, env.root.join("staging-ws"));
     assert_eq!(
         config.api.listen.map(|a| a.to_string()).as_deref(),
@@ -682,7 +682,7 @@ fn the_cli_overrides_replace_the_config_values() {
         db: Some(elsewhere.to_path_buf()),
         ..Default::default()
     });
-    assert_eq!(config.db, elsewhere);
+    assert_eq!(config.db.path, elsewhere);
     // 既定は `[handoff] drain_timeout_secs = 3600`（この設定では 60 に上書きしてある）。
     assert_eq!(config.drain_timeout(), Duration::from_secs(60));
     assert_eq!(

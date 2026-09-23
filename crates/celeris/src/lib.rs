@@ -4,6 +4,8 @@
 mod accounts_admin;
 mod cluster_admin;
 pub mod config;
+/// ADR-0064 D3 / D5（Phase 110a）: 背景チェックポイントと定期バックアップ。
+pub mod db_maintenance;
 pub mod delivery;
 /// ADR-0040 D4（Phase 47）: インスタンスの役割（active / standby / draining / verify）とライブ引き継ぎ。
 pub mod instance;
@@ -572,7 +574,16 @@ pub fn build_dispatcher(
     config.ensure_accounts_dir()?;
     config.ensure_secrets_dir()?;
     config.ensure_memory_dir()?;
-    let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open(&config.db)?);
+    // ADR-0064 D1/D5: `[db]` の `busy_timeout_ms` を使い、デーモンの書き込み接続は
+    // `background_checkpoint` を立てる（別の背景 tick が `PRAGMA wal_checkpoint(PASSIVE)` を打つ）。
+    let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_with(
+        &config.db.path,
+        StoreOptions {
+            busy_timeout: config.db.busy_timeout(),
+            background_checkpoint: true,
+            ..StoreOptions::default()
+        },
+    )?);
     seed_org_if_empty(store.as_ref(), config)?;
     let policy = StaticPolicy::new(
         config.provider_specs(),
@@ -952,7 +963,7 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
             .as_ref()
             .map(|p| p.display().to_string())
             .unwrap_or_default(),
-        db: config.db.display().to_string(),
+        db: config.db.path.display().to_string(),
         workspace_root: config.workspace_root.display().to_string(),
         tick_ms: config.tick_ms,
         max_concurrency: config.max_concurrency,
@@ -1128,8 +1139,10 @@ pub fn api_settings(
         listen,
         token,
         allowed_hosts: config.api.allowed_hosts.clone(),
-        db_path: config.db.clone(),
-        busy_timeout: StoreOptions::default().busy_timeout,
+        db_path: config.db.path.clone(),
+        busy_timeout: config.db.busy_timeout(),
+        // ADR-0064 D5: API もデーモン内の接続なので背景チェックポイント側に回す。
+        background_checkpoint: true,
         view: ViewContext {
             workspace_root: config.workspace_root.clone(),
             retry_backoff_base: Duration::from_secs(config.retry_backoff_base_secs),
@@ -1248,13 +1261,15 @@ fn build_mcp_state(config: &Config) -> Result<Option<Arc<celeris_mcp::McpState>>
         return Ok(None);
     }
     let state = celeris_mcp::McpState::open(
-        &config.db,
-        StoreOptions::default().busy_timeout,
+        &config.db.path,
+        config.db.busy_timeout(),
         config.mcp.rate_limit_per_min,
         config.role_specs(),
         config.genre_specs(),
         config.conversation_genre_id().to_string(),
         Some(config.knowledge.root.clone()),
+        // ADR-0064 D5: MCP もデーモン内の接続なので背景チェックポイント側に回す。
+        true,
     )
     .map_err(|e| ApiError::Startup(format!("mcp: could not open the store: {e}")))?;
     Ok(Some(state))
@@ -1310,8 +1325,8 @@ fn build_llm_proxy_state(
         codex_book,
         token,
         role,
-        Some(config.db.clone()),
-        StoreOptions::default().busy_timeout,
+        Some(config.db.path.clone()),
+        config.db.busy_timeout(),
     )))
 }
 
@@ -1445,7 +1460,7 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
     if verify {
         config.apply_verify_smoke();
     }
-    warn_if_db_on_network_filesystem(&config.db);
+    warn_if_db_on_network_filesystem(&config.db.path);
     // ADR-0047 D3 / D4（P-61-i、Phase 62）: 起動時に索引が無ければ作る（`_inbox` の変化を tick ごとに
     // 見る仕組みは無いが、知識整理 run が `apply_candidates` の後に必ず `reindex` するので、起動後は
     // それで追随する）。`--mode verify` では KB に触れない。
@@ -1506,6 +1521,28 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
                 && task.worker_hint.adapter.as_deref() == Some(FakeAdapter::ID)
         }));
     }
+    // ADR-0064 D3/D5（Phase 110a）: 背景チェックポイントと定期バックアップ。`verify` はデータのコピーに
+    // 対する検証専用で背景ジョブを持たないので、そこでは起こさない（ADR-0040 D3）。
+    let db_checkpoint = (!verify).then(|| {
+        db_maintenance::spawn_checkpoint_task(
+            config.db.path.clone(),
+            config.db.checkpoint_interval(),
+            config.db.busy_timeout(),
+        )
+    });
+    let db_backup = if verify {
+        None
+    } else {
+        config.db.backup_dir.clone().map(|backup_dir| {
+            db_maintenance::spawn_backup_task(
+                config.db.path.clone(),
+                backup_dir,
+                config.db.backup_interval(),
+                config.db.backup_keep,
+                config.db.busy_timeout(),
+            )
+        })
+    };
     // ADR-0053 D1/D4（Phase 65）: 主 API（`GET /llm/sources`）とプロキシ自身が同じ `Arc` を使う。
     let llm_proxy_state = build_llm_proxy_state(&config, &dispatcher, role.clone())?;
     let (api, admin_rx) = match config.api.listen {
@@ -1562,6 +1599,15 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
     if let Some(mcp) = roles.mcp.take() {
         mcp.stop().await;
     }
+    // ADR-0064 D3/D5: 背景チェックポイント・定期バックアップは draining でも動き続けてよい
+    // （DB への書き込みではなく、既存の WAL をさばく／バックアップするだけ）ので、プロセスが本当に
+    // 終わるここで初めて止める。
+    if let Some(t) = db_checkpoint {
+        t.stop().await;
+    }
+    if let Some(t) = db_backup {
+        t.stop().await;
+    }
     // ADR-0040 D4: 普通に止まったときは自分の行を消す。drain で終わったときは `drained_at` を残したまま
     // にし、新しい active が掃除する（`status.sh` が引き継ぎの結果を見られるように）。
     if let Some(supervisor) = &roles.supervisor
@@ -1614,7 +1660,7 @@ async fn tick_loop(
     let mut ticks: u64 = 0;
     // ADR-0040 D4: 手元の run とレビューの数（drain の判定に使う。最後の tick の値）。
     let mut in_flight: usize = 0;
-    tracing::info!(db = %config.db.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, role = %roles.role.get(), "celeris started");
+    tracing::info!(db = %config.db.path.display(), workspace_root = %config.workspace_root.display(), max_concurrency = config.max_concurrency, tick_ms = config.tick_ms, role = %roles.role.get(), "celeris started");
 
     let mut sigterm =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
@@ -2499,7 +2545,7 @@ genre = "conversation"
         )
         .unwrap();
         let config = Config::load(&path).unwrap();
-        let store = SqliteStore::open(&config.db).unwrap();
+        let store = SqliteStore::open(&config.db.path).unwrap();
 
         assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 13);
         let nodes = store.org_list().unwrap();
@@ -2567,7 +2613,7 @@ parent_id = "research-survey"
         )
         .unwrap();
         let config = Config::load(&path).unwrap();
-        let store = SqliteStore::open(&config.db).unwrap();
+        let store = SqliteStore::open(&config.db.path).unwrap();
 
         let err = seed_org_if_empty(&store, &config).unwrap_err();
         assert!(err.to_string().contains("placed under"), "{err}");
@@ -2587,7 +2633,7 @@ parent_id = "research-survey"
             db.display()
         ))
         .unwrap();
-        let store = SqliteStore::open(&config.db).unwrap();
+        let store = SqliteStore::open(&config.db.path).unwrap();
         assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 0);
         assert!(store.org_list().unwrap().is_empty());
     }
@@ -3495,7 +3541,7 @@ auth = "publickey"
         )
         .unwrap_or_else(|e| panic!("config: {e}"));
         let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
-        let store = SqliteStore::open(&config.db).unwrap_or_else(|e| panic!("open store: {e}"));
+        let store = SqliteStore::open(&config.db.path).unwrap_or_else(|e| panic!("open store: {e}"));
         let now = OffsetDateTime::now_utc();
         let task = task_core::Task {
             repos: Vec::new(),

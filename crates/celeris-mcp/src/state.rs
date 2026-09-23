@@ -38,8 +38,18 @@ impl McpState {
         genres: Vec<task_core::GenreSpec>,
         conversation_genre: String,
         knowledge_root: Option<PathBuf>,
+        // ADR-0064 D5: `true` なら `wal_autocheckpoint=0`（celeris の背景チェックポイント tick が
+        // 別に打つ前提。デーモンの本番経路だけ `true`）。
+        background_checkpoint: bool,
     ) -> Result<Arc<Self>, McpStateError> {
-        let store = SqliteStore::open_with(db_path, StoreOptions { busy_timeout })?;
+        let store = SqliteStore::open_with(
+            db_path,
+            StoreOptions {
+                busy_timeout,
+                background_checkpoint,
+                ..StoreOptions::default()
+            },
+        )?;
         Ok(Arc::new(Self {
             store: Arc::new(store),
             rate_limit_per_min,

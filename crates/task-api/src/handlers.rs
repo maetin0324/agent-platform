@@ -911,6 +911,8 @@ async fn health(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiRe
             db: DbInfo {
                 journal_mode: inner.journal_mode.clone(),
                 busy_timeout_ms: inner.busy_timeout_ms,
+                filesystem: inner.db_mount.as_ref().map(|m| m.fstype.clone()),
+                device: inner.db_mount.as_ref().map(|m| m.source.clone()),
             },
             // ADR-0040 D3 / D4: 検証（`verify.sh`）と昇格（`promote.sh`）が「どの版がどの役割で動いて
             // いるか」をここだけで判定できるようにする。
@@ -3036,6 +3038,7 @@ mod tests {
             allowed_hosts: vec![],
             db_path: dir.join("celeris.db"),
             busy_timeout: Duration::from_millis(5000),
+            background_checkpoint: false,
             view: ViewContext {
                 workspace_root: dir.join("ws"),
                 retry_backoff_base: Duration::from_secs(0),

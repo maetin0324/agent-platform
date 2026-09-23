@@ -983,7 +983,7 @@ read -r account
 echo '{"id":2,"result":{"account":{"type":"apiKey"}}}'"#,
         );
         let mut config = config_with_codex_accounts(acct, command);
-        config.db = tmp.path().join("db");
+        config.db.path = tmp.path().join("db");
         config.workspace_root = tmp.path().join("ws");
         let mut dispatcher = crate::build_dispatcher(&config, Default::default()).unwrap();
         let mut checks = UsageChecks::default();
@@ -1021,7 +1021,7 @@ echo '{"id":2,"result":{"account":{"type":"apiKey"}}}'"#,
 
     fn config_for_dispatcher(tmp: &std::path::Path, claude_dir: PathBuf) -> Config {
         let mut config = config_with_accounts(claude_dir, "claude".into());
-        config.db = tmp.join("celeris.db");
+        config.db.path = tmp.join("celeris.db");
         config.workspace_root = tmp.join("ws");
         config
     }
@@ -1137,7 +1137,7 @@ sleep 30
         std::fs::create_dir_all(codex_dir.join("a")).unwrap();
         std::fs::write(codex_dir.join("a").join("auth.json"), "{}").unwrap();
         let mut config = config_with_codex_accounts(codex_dir.clone(), "codex".into());
-        config.db = tmp.path().join("celeris.db");
+        config.db.path = tmp.path().join("celeris.db");
         config.workspace_root = tmp.path().join("ws");
         let mut dispatcher = crate::build_dispatcher(&config, Default::default()).unwrap();
         let sessions = new_sessions();

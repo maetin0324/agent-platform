@@ -151,6 +151,9 @@ pub struct ApiSettings {
     /// API 専用の `SqliteStore` を `open_with` で開く DB のパス。
     pub db_path: PathBuf,
     pub busy_timeout: Duration,
+    /// ADR-0064 D5: `true` なら `wal_autocheckpoint=0` にする（デーモンの背景チェックポイント tick が
+    /// 別に `PRAGMA wal_checkpoint(PASSIVE)` を打つ前提。celeris の本番経路だけ `true` を渡す）。
+    pub background_checkpoint: bool,
     pub view: task_ops::view::ViewContext,
     pub config_view: ConfigView,
     /// ADR-0016 D1 / M3: `[[roles]]`。`POST /tasks` で省略された `tier` / `adapter` / 予算の既定に使う。
@@ -245,6 +248,7 @@ impl std::fmt::Debug for ApiSettings {
             .field("allowed_hosts", &self.allowed_hosts)
             .field("db_path", &self.db_path)
             .field("busy_timeout", &self.busy_timeout)
+            .field("background_checkpoint", &self.background_checkpoint)
             .field("view", &self.view)
             .field("config_view", &self.config_view)
             .field("roles", &self.roles)
