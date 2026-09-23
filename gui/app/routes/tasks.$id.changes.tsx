@@ -15,6 +15,7 @@ import { RouteRecovery } from "~/components/RouteRecovery";
 import { TaskChanges } from "~/components/task-changes";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, PageHeader } from "~/components/ui/misc";
+import { isTransientStatus } from "~/lib/recovery";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/tasks.$id.changes";
 
@@ -96,6 +97,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={problem.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -106,6 +108,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
         </h1>
         {/* celeris の文言をそのまま出す（404 `file_not_found` / `task_not_found`）。 */}
         <Alert tone="danger">{problem.detail}</Alert>
+        {isTransientStatus(problem.status) && <RouteRecovery />}
       </main>
     );
   }

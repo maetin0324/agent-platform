@@ -57,3 +57,8 @@ export function shouldReloadForChunkError(storage: Pick<Storage, "getItem" | "se
   }
   return true;
 }
+
+/** 待てば直りうる HTTP ステータスか（5xx・408・429）。404 / 401 / 4xx は再試行しても直らない。 */
+export function isTransientStatus(status: number | undefined): boolean {
+  return status === undefined || status === 408 || status === 429 || status >= 500;
+}

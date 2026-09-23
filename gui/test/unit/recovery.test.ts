@@ -3,6 +3,7 @@ import {
   AUTO_RETRY_DELAYS_MS,
   CHUNK_RELOAD_KEY,
   createResumeGate,
+  isTransientStatus,
   isChunkLoadError,
   nextRetryDelay,
   shouldReloadForChunkError,
@@ -60,5 +61,12 @@ describe("shouldReloadForChunkError", () => {
       setItem: () => {},
     };
     expect(shouldReloadForChunkError(broken)).toBe(false);
+  });
+});
+
+describe("isTransientStatus", () => {
+  it("5xx / 408 / 429 / 不明は再試行対象、404 / 401 / 400 は対象外", () => {
+    for (const s of [500, 503, 504, 408, 429, undefined]) expect(isTransientStatus(s)).toBe(true);
+    for (const s of [400, 401, 403, 404, 409]) expect(isTransientStatus(s)).toBe(false);
   });
 });

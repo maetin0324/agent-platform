@@ -34,6 +34,7 @@ import {
   DOCS_TRUNCATED_LABEL,
   docsErrorHint,
 } from "~/lib/labels";
+import { isTransientStatus } from "~/lib/recovery";
 import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/projects.$id.docs";
@@ -554,6 +555,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={problem.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -563,6 +565,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           {problem.status === 404 ? "案件がありません" : `エラー ${problem.status}`}
         </h1>
         <Alert tone="danger">{problem.detail}</Alert>
+        {isTransientStatus(problem.status) && <RouteRecovery />}
       </main>
     );
   }

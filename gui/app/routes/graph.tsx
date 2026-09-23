@@ -1,5 +1,6 @@
 import { Background, Controls, ReactFlow } from "@xyflow/react";
 import { RouteRecovery } from "~/components/RouteRecovery";
+import { isTransientStatus } from "~/lib/recovery";
 import "@xyflow/react/dist/style.css";
 import { useEffect, useMemo, useState } from "react";
 import { Form, isRouteErrorResponse, useSearchParams } from "react-router";
@@ -147,6 +148,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -156,6 +158,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           {data.status === 404 ? "タスクが見つかりません" : `エラー ${data.status}`}
         </h1>
         <p className="mt-2 text-sm text-fg-muted">{data.detail}</p>
+        {isTransientStatus(data.status) && <RouteRecovery />}
       </main>
     );
   }

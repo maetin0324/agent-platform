@@ -17,6 +17,7 @@ import { hintClass, inputClass, labelClass, textareaClass, touchLinkClass } from
 import { Icon } from "~/components/ui/Icon";
 import { Alert, EmptyState, Mono, PageHeader } from "~/components/ui/misc";
 import { shortId } from "~/lib/format";
+import { isTransientStatus } from "~/lib/recovery";
 import {
   skillBodyProblem,
   skillFilePathProblem,
@@ -574,6 +575,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={problem.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -581,6 +583,8 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       <main className="mx-auto max-w-2xl space-y-3 p-6">
         <h1 className="text-xl font-semibold text-fg">エラー {problem.status}</h1>
         <Alert tone="danger">{problem.detail}</Alert>
+        {isTransientStatus(problem.status) && <RouteRecovery />}
+        {isTransientStatus(problem.status) && <RouteRecovery />}
       </main>
     );
   }

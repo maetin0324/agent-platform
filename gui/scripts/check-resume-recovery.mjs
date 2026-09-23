@@ -96,6 +96,41 @@ for (const [label, ctxOpts] of [
   await ctx.close();
 }
 
+// C. celeris が一時的に 503（problem+json）を返す: 構造化エラー画面（RouteRecovery 付き）から、復旧後に自動で復帰するか
+for (const [label, ctxOpts] of [
+  ["mobile 393x851", { ...MOBILE_DEVICE, viewport: { width: 393, height: 851 } }],
+  ["desktop 1280x800", { viewport: { width: 1280, height: 800 } }],
+]) {
+  const ctx = await browser.newContext(ctxOpts);
+  const page = await ctx.newPage();
+  await page.goto(`${base}/tasks`);
+  await page.waitForLoadState("networkidle");
+  await page.evaluate(() => {
+    window.__noReload = true;
+  });
+  mock.failWith503(`/api/v1/tasks/${TASK_ID}`);
+  await page.evaluate((id) => {
+    const link = document.querySelector(`a[href="/tasks/${id}"], a[href^="/tasks/${id}?"]`);
+    if (!link) throw new Error("no task link");
+    link.click();
+  }, TASK_ID);
+  await page.waitForTimeout(1500);
+  const errShown = (await page.locator("text=/エラー 503|接続できません/").count()) > 0;
+  const hasRetry = (await page.getByTestId("route-recovery").count()) > 0;
+  mock.failWith503(null);
+  let recoveredC = false;
+  try {
+    await page.waitForFunction(() => !document.body.innerText.match(/エラー 503|自動で再試行/), null, {
+      timeout: 15_000,
+    });
+    recoveredC = true;
+  } catch {}
+  const noReloadC = await page.evaluate(() => window.__noReload === true);
+  record(`[${label}] C 一時 503 でエラー画面＋再試行導線が出る（前提）`, errShown && hasRetry);
+  record(`[${label}] C 503 が直るとリロード無しで復帰`, recoveredC && noReloadC);
+  await ctx.close();
+}
+
 // D. チャンク 404（デプロイ後の旧タブ）: preloadError を発火させ、1 回だけ再読み込みされること
 {
   const ctx = await browser.newContext();

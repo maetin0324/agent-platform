@@ -170,8 +170,18 @@ function createFakeCeleris() {
   const routes = new Map();
   /** @type {(method: string, routePath: string, handler: RouteHandler) => void} */
   const on = (method, routePath, handler) => routes.set(`${method} ${routePath}`, handler);
+  /** 検査用: 指定パス接頭辞の API を 503（problem+json）にする。null で解除。 */
+  /** @type {string | null} */
+  let failPrefix = null;
   const server = http.createServer((req, res) => {
     const pathname = new URL(req.url ?? "/", "http://fake-celeris.invalid").pathname;
+    if (failPrefix && pathname.startsWith(failPrefix)) {
+      res.writeHead(503, { "content-type": "application/problem+json" });
+      res.end(
+        JSON.stringify({ code: "unavailable", title: "Service Unavailable", status: 503, detail: "temporarily down" }),
+      );
+      return;
+    }
     const handler = routes.get(`${req.method ?? "GET"} ${pathname}`);
     if (!handler) {
       sendJson(res, 404, { code: "not_found", detail: `no route for ${req.method} ${pathname}` });
@@ -181,6 +191,10 @@ function createFakeCeleris() {
   });
   return {
     on,
+    /** @param {string | null} prefix */
+    failWith503: (prefix) => {
+      failPrefix = prefix;
+    },
     /** @returns {Promise<string>} */
     listen: () =>
       new Promise((resolve, reject) => {
@@ -202,7 +216,7 @@ function createFakeCeleris() {
 export async function setupMockCeleris() {
   const fake = createFakeCeleris();
   const baseUrl = await fake.listen();
-  const mock = { on: fake.on, baseUrl, close: fake.close };
+  const mock = { on: fake.on, failWith503: fake.failWith503, baseUrl, close: fake.close };
 
   mock.on("GET", "/api/v1/health", (_req, res) => sendJson(res, 200, fx.defaultHealth));
   mock.on("GET", "/api/v1/projects", (_req, res) => sendJson(res, 200, { items: [fx.project({ id: PROJECT_ID })] }));

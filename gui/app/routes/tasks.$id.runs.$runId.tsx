@@ -10,6 +10,7 @@ import { buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { Icon } from "~/components/ui/Icon";
 import { Alert } from "~/components/ui/misc";
+import { isTransientStatus } from "~/lib/recovery";
 import { classifyStreamJsonLine, type FormattedLine } from "~/lib/stream-json";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/tasks.$id.runs.$runId";
@@ -314,6 +315,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -323,6 +325,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           {data.status === 404 ? "run が見つかりません" : `エラー ${data.status}`}
         </h1>
         <Alert tone="danger">{data.detail}</Alert>
+        {isTransientStatus(data.status) && <RouteRecovery />}
       </main>
     );
   }

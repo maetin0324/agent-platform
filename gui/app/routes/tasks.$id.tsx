@@ -114,6 +114,7 @@ import {
 } from "~/lib/labels";
 import { isLiveStatusScreen } from "~/lib/live-status";
 import { milestoneTitle } from "~/lib/project-index";
+import { isTransientStatus } from "~/lib/recovery";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import {
   groupTimelineWorkerProgress,
@@ -2428,6 +2429,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -2437,6 +2439,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           {data.status === 404 ? "タスクが見つかりません" : `エラー ${data.status}`}
         </h1>
         <Alert tone="danger">{data.detail}</Alert>
+        {isTransientStatus(data.status) && <RouteRecovery />}
       </main>
     );
   }
