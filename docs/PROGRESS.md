@@ -15796,3 +15796,100 @@ Phase 109 の本番反映直後（2026-09-23 11:04〜11:10 UTC）にやり直し
 - reviewer（claude-code）: 合格。「5 システムすべてに deployment model / tuning の節がある。CHFS の記述（`chfsctl -h/-p`、`-c devdax`、`chfuse -o direct_io`、`chfs_sync`、zpoline）は取得した README の逐語と一致。FINCHFS と BeeOND は一次情報が 404 か詳細不足の項目を正直に『未確認』と明記しており、受け入れ条件の例外条項に合致。UnifyFS（Commit/Lamination、`unifyfs.conf`）は公式 docs と整合」。
 - ここまでの経緯: 1〜3 回目は (1) LDR が検索結果だけで一次情報を読まない → 109b で必読 URL の本文を fetch、(2) 再挑戦で目的が置き換わり報告が 1 対象に縮む → 109c で目的文を保つ、(3) 抜粋を貼るだけで観点の整理が無い → 109c の構造化合成、(4) 受け入れ条件が 1 対象の欠落で全体を落とす → 部分達成（『未確認』）を許す文に。
 - 残り: 文献調査（PaperQA）は Phase 109d（Python API、contexts 由来の cited、対象ごとの質問）の昇格後にやり直す。framing タスクは文献調査の完了待ち。
+## Phase 109d（完了日 2026-09-23）: PaperQA を Python API に切り替え、contexts から cited を数え、対象ごとに問う（ADR-0063 追記）
+
+Phase 109c で見送った P-109c-1（PaperQA の Python API 切り替え・対象ごとの複数 `ask`）に、親が本番の
+venv で `paperqa==2026.8.12` を実際に `inspect` して確認した API 面（`paperqa.ask`/`Settings`/
+`PQASession`/`Context`/`Text`/`Doc`）を前提に取り組んだ。決定は
+`docs/adr/0063-research-tasks-resilience.md` の「## Phase 109d 追記」に記録。
+
+### 条件ごとの実施
+
+1. **C1（`pqa ask` CLI → PaperQA の Python API、新規 `paperqa_ask.py`）**
+   - 条件: `crates/task-worker/src/paperqa_ask.py`（新設、`paperqa_acquire.py` と同じ埋め込みランナー
+     の流儀）が `import paperqa` を `try/except ImportError` で守り、無ければ exit 3。
+     `Settings.from_name(settings_name)`（`PQA_SETTINGS_DIR=settings_dir`）→
+     `settings.agent.index.*` を上書き → 各問いを `ask(question, settings=settings)`（2/4/8 秒
+     バックオフで再試行、503/429/502/接続断のみ）→ `output_path` に
+     `{"answers": [...], "target_aspect_table": "..."}`。
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa::`
+   - 出力の要点: exit 0、**48 passed**（0 failed）。新規:
+     `paperqa_not_importable_is_a_clear_non_retryable_error`（exit 3 → `retryable: false`）、
+     `empty_output_is_retryable_error`（`output_path` を書かない → 「produced no answer」）を更新。
+2. **C1'（`paperqa_ask.py` の純関数）**
+   - 条件: `build_questions_for_targets`/`flatten_contexts`/`build_target_aspect_table` が
+     `paperqa` 無しで `python3 -c` から呼べる。
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa::ask_script_pure_functions_build_questions_flatten_contexts_and_the_table`
+   - 出力の要点: exit 0、1 passed。対象 5 件 + 比較先あり・`max_asks` 既定 8 → 6 問
+     （`t1`〜`t5`＋`summary`）、`max_asks=4` → 4 問（`t1`〜`t4`、総括は入らない）、比較先が無ければ
+     総括なしの 2 問、対象なしなら単一のフォールバック問い（`q1`）。contexts の平坦化・表の組み立て
+     （観点が答えに無ければ「未確認」）・`is_transient_error`（503/429/502/接続断のみ true）も同じ
+     テストで確認。
+3. **C2（Rust 側、`paperqa.rs` の 2 段目書き換え）**
+   - 条件: `run_paperqa` の 2 段目が `pqa ask` の `Command` ではなく `paperqa_ask.py` を起動する。
+     `[adapters.paperqa] command` の既定を `"pqa"` → `"python"` に。旧 `pqa` 指定は同じディレクトリの
+     `python` に自動で置き換えて警告 1 回（`resolve_ask_command`）。`config.settings`
+     （設定ファイルへのフルパス）を `settings_dir`/`settings_name` に分ける（`split_settings_path`）。
+     `pqa` の rich 出力をパースしていた `extract_answer`/`extract_references_section`/
+     `strip_log_prefix`/`strip_ansi` を削除。
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa::` / `cargo test -p celeris --lib config::`
+   - 出力の要点: task-worker 48 passed（上記に含む。`ask_input_carries_settings_and_index_paths`/
+     `ask_input_defaults_when_settings_and_index_config_are_absent`/
+     `ask_input_carries_model_only_when_set`/`resolve_ask_command_replaces_the_old_pqa_cli_...`/
+     `split_settings_path_separates_the_directory_and_the_name` が新規）、celeris config
+     **71 passed**（`accepts_paperqa_adapter_with_default_config` の `command`/`max_asks` 期待値、
+     `loads_research_example_config` の `command` 期待値を更新）。
+4. **C2'（`cited` を contexts から数える）**
+   - 条件: `research.json.evidence.cited` が全 `ask()` の `contexts`（`docname`/`dockey`）の和集合
+     （本文一致は補助として OR）、`cited_from_contexts: n` を追加、`sources.json` の `cited` も同じ
+     定義。
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa::cited_counts_the_union_of_context_docnames_and_text_matches`
+   - 出力の要点: exit 0、1 passed。文脈にしか出ない候補（Roe）が `cited: true` になり
+     `cited_from_contexts: 1`、本文にしか出ない候補（Brinkmann）も `cited: true`（`cited: 2` 合計）、
+     どちらにも出ない候補は `false`。`answer.md` に「## 引用された文献（contexts）」が出ることも確認。
+5. **C3（対象ごとの質問、`max_asks`）**
+   - 条件: 対象ごとに 1 問 + 比較先があれば総括 1 問、上限 `[adapters.paperqa] max_asks`（既定 8）。
+     対象が無ければ従来の単一の問い。
+   - 実行したコマンド: 上記 C1' のテストに含む（`build_questions_for_targets`）。
+   - 出力の要点: 上記の通り。`comparison_target(objective)`
+     （`crates/task-worker/src/research_targets.rs` 新規）が「<識別子>と比較」「<識別子>との比較」を
+     決定的に抜く。`cargo test -p task-worker --lib research_targets::` → exit 0、**13 passed**
+     （新規 2 件: `comparison_target_finds_an_ascii_identifier_before_and_compare`/
+     `comparison_target_is_none_without_a_compare_phrase`）。
+6. **C4（`answer.md`/`report.md` の組み立て）**
+   - 条件: 対象が取れていれば「# 対象別の整理」（表 + 対象ごとの節 + 総括）→「## 引用された文献
+     （contexts）」→ 既存の「## 出典」/「## 証拠の質」/「## 一次情報（実装）」。
+   - 実行したコマンド: `cargo test -p task-worker --lib paperqa::answer_md_gets_target_sections_and_table_when_targets_are_found`
+   - 出力の要点: exit 0、1 passed。`answer.md` が「# 対象別の整理」で始まり、対象×観点の表・
+     `### CHFS`/`### FINCHFS` の節・「## 引用された文献（contexts）」が全て出ることを確認。
+
+### ゲート（証拠コマンドと出力の要点）
+
+| 条件 | コマンド | 出力の要点 |
+| --- | --- | --- |
+| test | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（79 テストバイナリすべて `test result: ok`、passed 合計 **1960**。Phase 109c の 1955 から +5） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| API/protocol | `git status --porcelain \| grep -E "docs/api\|docs/protocol"` | 出力なし（型を変えていないので差分ゼロ） |
+
+### 変更ファイル
+
+- 新規: `crates/task-worker/src/paperqa_ask.py`
+- `crates/task-worker/src/paperqa.rs`（C1・C2・C2'・C3・C4）
+- `crates/task-worker/src/research_targets.rs`（`comparison_target`）
+- `crates/celeris/src/config.rs`（`PaperQaAdapterConfig.max_asks`、`command` の既定を `python` に）
+- `crates/celeris/src/lib.rs`（`max_asks` の配線）
+- `config/celeris.research.example.toml`（`command` の例、`max_asks` の例とコメント）
+- `docs/adr/0063-research-tasks-resilience.md`（「## Phase 109d 追記」を追加。本文・Phase 109/109b/109c 追記は書き換えていない）
+
+### 未解決事項
+
+- P-109d-1: `contexts` の突き合わせ（`candidate_in_contexts`）はファイル名（`docname`）基準の
+  正規化一致で、`parsing.use_doc_details = true` 等 `docname` がファイル名以外から作られる設定では
+  機能しない可能性がある（本番の設定 `parsing.use_doc_details = false` を前提にしている）。
+- P-109d-2: `build_target_aspect_table` のセル抽出（`_extract_aspect_line`）は「`- <観点>: <内容>`」
+  形式の行を優先する素朴な規則で、モデルがその形式を守らないと実際には書いてある事実でも「未確認」に
+  なりうる（対象ごとの節には答え全文が残るので実害は限定的）。
+- 実機未確認（ADR-0009 P-34）。本番での確認は親エージェントが行う: `[adapters.paperqa] command` を
+  venv の `python`（`paperqa` パッケージ入り）に向け、対象の取れる目的文（BenchFS の文献調査）で
+  再実行し、`research.json.evidence.cited_from_contexts > 0`、`answer.md` の「# 対象別の整理」（表）、
+  「## 引用された文献（contexts）」が出ることを確認する。

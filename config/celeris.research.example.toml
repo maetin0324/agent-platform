@@ -2,7 +2,12 @@
 # ファイルのあるディレクトリ基準。コピーして書き換えて使うこと（`celerisctl ... --config <このファイルのコピー>`）。
 #
 # 前提:
-#   - `uv` の隔離環境などに paper-qa（`pqa` CLI）を入れておく（例 `~/.local/celeris/paperqa/.venv/bin/pqa`）。
+#   - `uv` の隔離環境などに paper-qa（`paperqa` パッケージ）を入れておく（例
+#     `~/.local/celeris/paperqa/.venv`）。ADR-0063 Phase 109d C1/C2: このアダプタはもう `pqa` CLI を
+#     呼ばない。埋め込みの python ランナー（`paperqa_ask.py`）が `paperqa` の Python API
+#     （`from paperqa import Settings, ask`）を直接呼ぶので、下の `command` は **venv の `python`**
+#     （例 `~/.local/celeris/paperqa/.venv/bin/python`）を指す。旧 `pqa` を指していても自動で同じ
+#     ディレクトリの `python` に置き換えて 1 回警告するが、設定は直しておくこと。
 #   - PaperQA の設定ファイル（下の `settings` が指す `.json`、ここでは
 #     config/paperqa.qwen-local.example.json をコピーして書き換えたもの）に **必ず**:
 #       - `agent.agent_type = "fake"`（既定の ToolSelector はこの版の組み合わせで落ちる。ADR-0027 の実機確認）
@@ -19,17 +24,20 @@
 #         config/paperqa.qwen-local.example.json は既にこの値）
 #     を設定しておくこと。
 #   - PDF を索引するには venv に `pillow` も必要（`uv pip install pillow`。pypdf の画像抽出が要求する）。
-#   - `settings` にはファイルパスから **`.json` を付けずに** 渡す（`pqa` 自身が拡張子を足す実機の仕様）。
+#   - `settings` にはファイルパスから **`.json` を付けずに** 渡す（`Settings.from_name` と同じ実機の
+#     仕様。`paperqa_ask.py` がこのパスを `PQA_SETTINGS_DIR`（親ディレクトリ）とファイル名に分ける）。
 #   - 論文（`paper_directory`）と索引（`index_directory`）の下に、**案件ごと**（タスクの `project_id`、
 #     案件が無ければ `_shared`）のサブディレクトリを celeris 側が作る（ADR-0035 D1 / D2。同じ案件の別タスク・
 #     リトライで corpus と索引を使い回すため）。
 #   - ADR-0035: run は 2 段（取得 → 回答）。1 段目は arXiv / OpenAlex（**鍵なし**）で候補論文を探し、
-#     open access の PDF を案件の corpus に落とす（`[adapters.paperqa.acquire]`）。2 段目が `pqa ask`。
+#     open access の PDF を案件の corpus に落とす（`[adapters.paperqa.acquire]`）。2 段目は ADR-0063
+#     Phase 109d C1: 埋め込みの python ランナー（`paperqa_ask.py`）が `paperqa` の Python API を呼ぶ
+#     （目的文から対象が取れていれば対象ごと + 総括の複数回、上限 `max_asks`。取れなければ単一の問い）。
 #     取得と引用の件数は決定的な証拠ゲート（`[adapters.paperqa.evidence]`）が見る。
-#     成果物は `artifacts/answer.md`（末尾に `## 出典`）と、同じ内容の `artifacts/report.md`
-#     （ADR-0063 Phase 109b A3: 調査系タスクの受け入れ条件 `artifact_exists report.md` を LDR と
-#     揃えるため。CoS の指示文では `report.md` を標準として使う）/ `papers.json` / `sources.json` /
-#     `queries.json`。
+#     成果物は `artifacts/answer.md`（対象が取れていれば対象別の表 + 節、末尾に「引用された文献
+#     （contexts）」と `## 出典`）と、同じ内容の `artifacts/report.md`（ADR-0063 Phase 109b A3: 調査系
+#     タスクの受け入れ条件 `artifact_exists report.md` を LDR と揃えるため。CoS の指示文では
+#     `report.md` を標準として使う）/ `papers.json` / `sources.json` / `queries.json` / `research.json`。
 #   - ADR-0035 D5（Phase 36）: その 1 段目の**検索語は LLM が立てる**（`acquire.query_llm`、既定 true）。
 #     PaperQA2 と同じ LLM 先に `chat/completions` を 1 回叩くだけなので、`env` の `OPENAI_BASE_URL` が
 #     生きていることが前提。壊れた答えなら決定的な抽出に落ちるので、止まりはしない。
@@ -50,11 +58,14 @@ auto_accept = false
 # `[adapters.paperqa]` は共通設定（ADR-0027 D3）。`settings`/`env`/`model` は `[[providers]] adapter =
 # "paperqa"` の行ごとに上書きできる（`acp`/`command`/`args` と同じ作り。ADR-0026 D2）。
 [adapters.paperqa]
-command = "/home/u/celeris/paperqa/.venv/bin/pqa"
+# ADR-0063 Phase 109d C2: `pqa` CLI ではなく venv の python（`paperqa_ask.py` を起動する）。
+command = "/home/u/celeris/paperqa/.venv/bin/python"
 # `.json` を付けない（実機の仕様）。config/paperqa.qwen-local.example.json をコピーして書き換えたものを指す。
 settings = "/home/u/celeris/paperqa/settings/qwen-local"
 paper_directory = "/home/u/celeris/paperqa/papers"
 index_directory = "/home/u/celeris/paperqa/index"
+# ADR-0063 Phase 109d C3: 対象ごとの問い + 総括の問いの上限（既定 8。目的文の対象が多ければ先頭から）。
+# max_asks = 8
 # LiteLLM 経由で OpenAI 互換の口に向ける。ADR-0053 D2（Phase 65）: celeris の LLM source プロキシ
 # （`[llm_proxy]`。既定 `127.0.0.1:18100`）に向ける。Qwen が落ちていれば celeris/standard は自動で
 # Claude/GPT のアカウントプールに倒れる（下の `model` も参照）。`OPENAI_API_KEY` は**プロキシの Bearer**

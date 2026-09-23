@@ -1323,10 +1323,14 @@ fn default_acp_startup_timeout_secs() -> u64 {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaperQaAdapterConfig {
-    /// 起動するコマンド名／パス。既定 `"pqa"`。
+    /// ADR-0063 Phase 109d C2: 起動するコマンド。**`pqa` CLI ではなく python インタプリタ**
+    /// （`paperqa` パッケージが入った venv の `bin/python`）。既定 `"python"`。旧 `pqa` を指していると
+    /// 自動で同じディレクトリの `python` に置き換えて 1 回警告する。
     #[serde(default = "default_paperqa_command")]
     pub command: String,
-    /// `-s <name>`（拡張子は付けない。実機の仕様。ADR-0027 D3）。
+    /// `Settings.from_name(name)` に渡すファイルパス（拡張子は付けない。実機の仕様。ADR-0027 D3）。
+    /// `PQA_SETTINGS_DIR`（親ディレクトリ）と名前（ファイル名）に分けて `paperqa_ask.py` に渡す
+    /// （ADR-0063 Phase 109d C1）。
     #[serde(default)]
     pub settings: Option<String>,
     /// `--agent.index.paper_directory`。相対パスは設定ファイルのディレクトリ基準で絶対化する。
@@ -1356,6 +1360,10 @@ pub struct PaperQaAdapterConfig {
     /// 意味は `task_worker::PaperQaEvidence` と同じ。
     #[serde(default)]
     pub evidence: task_worker::PaperQaEvidence,
+    /// ADR-0063 Phase 109d C3: 対象ごとの問い + 総括の問いの上限（`ask()` を呼ぶ回数の上限）。
+    /// 対象が多ければ先頭から。既定 8。
+    #[serde(default = "default_paperqa_max_asks")]
+    pub max_asks: u32,
 }
 
 impl Default for PaperQaAdapterConfig {
@@ -1371,12 +1379,17 @@ impl Default for PaperQaAdapterConfig {
             env_from_secrets: HashMap::new(),
             acquire: task_worker::AcquireConfig::default(),
             evidence: task_worker::PaperQaEvidence::default(),
+            max_asks: default_paperqa_max_asks(),
         }
     }
 }
 
 fn default_paperqa_command() -> String {
-    "pqa".to_string()
+    "python".to_string()
+}
+
+fn default_paperqa_max_asks() -> u32 {
+    8
 }
 
 /// `local-deep-research` アダプタの設定（ADR-0029 D1）。フィールドの意味は
@@ -3698,13 +3711,15 @@ host = "h"
         );
     }
 
-    /// ADR-0027 D3: `[adapters.paperqa]` の既定値（`pqa` を素の状態で使う）。
+    /// ADR-0063 Phase 109d C2: `[adapters.paperqa]` の既定値（python インタプリタを素の状態で使う。
+    /// `pqa` CLI ではない）。
     #[test]
     fn accepts_paperqa_adapter_with_default_config() {
         let cfg: Config =
             toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"paperqa\"\n").unwrap();
         assert!(cfg.validate().is_ok());
-        assert_eq!(cfg.adapters.paperqa.command, "pqa");
+        assert_eq!(cfg.adapters.paperqa.command, "python");
+        assert_eq!(cfg.adapters.paperqa.max_asks, 8);
         assert!(cfg.adapters.paperqa.settings.is_none());
         assert!(cfg.adapters.paperqa.paper_directory.is_none());
         assert!(cfg.adapters.paperqa.index_directory.is_none());
@@ -4019,9 +4034,10 @@ host = "h"
         ));
         let cfg = Config::load(path).unwrap();
         assert!(cfg.validate().is_ok());
+        // ADR-0063 Phase 109d C2: `pqa` CLI ではなく venv の python（`paperqa_ask.py` を起動する）。
         assert_eq!(
             cfg.adapters.paperqa.command,
-            "/home/u/celeris/paperqa/.venv/bin/pqa"
+            "/home/u/celeris/paperqa/.venv/bin/python"
         );
         // `.json` を付けずに渡す（実機の仕様）。
         assert_eq!(

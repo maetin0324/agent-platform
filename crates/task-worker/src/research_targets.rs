@@ -130,6 +130,44 @@ pub fn research_aspects(objective: &str) -> Vec<String> {
     DEFAULT_ASPECTS.iter().map(|s| s.to_string()).collect()
 }
 
+/// 目的文から比較先（「<対象>と比較」「<対象>との比較」）を決定的に取り出す（ADR-0063 Phase 109d C3。
+/// LLM は使わない）。PaperQA の対象ごとの問いに「対象ごとに <比較先> と『公平比較可能』か『背景比較のみ』
+/// かを分類せよ」という総括の問いを 1 本足すかどうかを決めるのに使う。見つからなければ `None`。
+pub fn comparison_target(objective: &str) -> Option<String> {
+    fn is_ident_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '-' || c == '_'
+    }
+    let chars: Vec<char> = objective.chars().collect();
+    for needle in ["との比較", "と比較"] {
+        let needle_chars: Vec<char> = needle.chars().collect();
+        if let Some(pos) = find_subsequence(&chars, &needle_chars) {
+            // 「BenchFS と比較」のように識別子と「と」の間に空白が挟まることがある。
+            let mut end = pos;
+            while end > 0 && chars[end - 1].is_whitespace() {
+                end -= 1;
+            }
+            let mut start = end;
+            while start > 0 && is_ident_char(chars[start - 1]) {
+                start -= 1;
+            }
+            if start < end {
+                let ident: String = chars[start..end].iter().collect();
+                if ident.chars().count() >= 2 {
+                    return Some(ident);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_subsequence(haystack: &[char], needle: &[char]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&i| haystack[i..i + needle.len()] == *needle)
+}
+
 /// 半角/全角の丸括弧の中身を `、`/`,`/`，` で割った列挙（2 件以上あるものだけ）。最初に見つかったものを返す。
 fn extract_parenthesized_list(text: &str) -> Option<Vec<String>> {
     let chars: Vec<char> = text.chars().collect();
@@ -238,6 +276,24 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn comparison_target_finds_an_ascii_identifier_before_and_compare() {
+        assert_eq!(
+            comparison_target("CHFS/FINCHFS を BenchFS と比較する"),
+            Some("BenchFS".to_string())
+        );
+        assert_eq!(
+            comparison_target("CHFS/FINCHFS を BenchFS との比較で調べる"),
+            Some("BenchFS".to_string())
+        );
+    }
+
+    #[test]
+    fn comparison_target_is_none_without_a_compare_phrase() {
+        assert!(comparison_target("CHFS/FINCHFS を調べる").is_none());
+        assert!(comparison_target("").is_none());
     }
 
     #[test]

@@ -1,8 +1,9 @@
-//! `paperqa` アダプタ（DESIGN §5.4, ADR-0027 D3、ADR-0035 で「取得」の段を追加）。
+//! `paperqa` アダプタ（DESIGN §5.4, ADR-0027 D3、ADR-0035 で「取得」の段を追加、
+//! ADR-0063 Phase 109d C1/C2 で `pqa ask` CLI を PaperQA の Python API に置き換え）。
 //!
-//! PaperQA2（`pqa` CLI）は celeris のワーカープロトコルもストリーム型の進捗形式も話さない、
-//! ただの調査エンジンである。**アダプタ自身が** ADR-0006 D3 の結果ファイル規約（`artifacts/result.json`）を
-//! 代わりに書き、`Terminal::Done`/`Terminal::Error` を合成する。委譲（`delegate.json`）は扱わない
+//! PaperQA2 は celeris のワーカープロトコルもストリーム型の進捗形式も話さない、ただの調査エンジンで
+//! ある。**アダプタ自身が** ADR-0006 D3 の結果ファイル規約（`artifacts/result.json`）を代わりに書き、
+//! `Terminal::Done`/`Terminal::Error` を合成する。委譲（`delegate.json`）は扱わない
 //! （ADR-0027 D3: 「委譲はしない」）。生存監視（wall-clock・無出力タイムアウト・SIGTERM→SIGKILL）は
 //! `subprocess.rs` の低レベル部分を再利用する。
 //!
@@ -13,13 +14,17 @@
 //!    （`paper_directory/<project_id>/`）に落とす。**検索語はランナーの最初の段で LLM が立てる**
 //!    （ADR-0035 D5 / Phase 36。PaperQA2 と同じ LLM 先に `chat/completions` を 1 回。答えが壊れて
 //!    いれば、このアダプタが `objective` から決定的に抜いた語（`build_search_queries`）に落ちる）。
-//! 2. **索引と回答** — 従来どおり `pqa ask`。`paper_directory` / `index_directory` / 索引名は案件ごと。
+//! 2. **索引と回答** — ADR-0063 Phase 109d C1: `pqa ask` CLI ではなく、もう 1 つの埋め込み Python
+//!    ランナー（`paperqa_ask.py`）が `paperqa.ask`/`Settings.from_name` を呼ぶ。対象（目的文から
+//!    決定的に抜いた `research_targets`）が取れていれば対象ごと + 総括の複数回の `ask()`、取れなければ
+//!    従来の単一の問い。`paper_directory` / `index_directory` / 索引名は案件ごと。
 //!
-//! 回答の後に、答えが実際に引用した出典（`cited`）を決定的に突き合わせ（`answer_cites`）、
-//! `artifacts/sources.json` を書き直し、`artifacts/answer.md` の末尾に `## 出典` を足し、
-//! 証拠ゲート（ADR-0035 D3）で候補数・PDF 数・引用数を機械的に判定する。
+//! 回答の後に、`ask()` が実際に使った証拠（`PQASession.contexts` の `docname`/`dockey`）と答えの本文
+//! （文字列一致、補助）の和で `cited` を決定的に突き合わせ、`artifacts/sources.json` を書き直し、
+//! `artifacts/answer.md`（対象が取れていれば対象別の表 + 節、引用された文献の一覧）の末尾に
+//! `## 出典` を足し、証拠ゲート（ADR-0035 D3）で候補数・PDF 数・引用数を機械的に判定する。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -47,6 +52,11 @@ const ACQUIRE_SCRIPT: &str = include_str!("paperqa_acquire.py");
 const ACQUIRE_RESULT_PREFIX: &str = "CELERIS_ACQUIRE ";
 /// 取得ランナーの進捗行の目印。
 const PROGRESS_PREFIX: &str = "progress:";
+/// run ごとに `runs/<run_id>/paperqa_ask.py` として書き出す、PaperQA の Python API を呼ぶランナー
+/// （ADR-0063 Phase 109d C1。`pqa ask` CLI の置き換え）。
+const ASK_SCRIPT: &str = include_str!("paperqa_ask.py");
+/// `paperqa_ask.py` が `paperqa` を import できなかったときの exit code（ADR-0063 Phase 109d C1）。
+const ASK_EXIT_PAPERQA_NOT_IMPORTABLE: i32 = 3;
 /// `artifacts/result.json` の `summary` の上限（ADR-0027 D3）。
 const SUMMARY_MAX_CHARS: usize = 1500;
 /// `progress` に転送する 1 行あたりの上限（他アダプタと同じ規則。ADR-0026 の `truncate` を踏襲）。
@@ -203,7 +213,11 @@ fn default_min_cited() -> u32 {
 /// `settings` / `env` / `model` を上書きできる（ADR-0026 D2 と同じ作り）。
 #[derive(Debug, Clone)]
 pub struct PaperQaConfig {
-    /// 起動するコマンド名／パス。既定 `"pqa"`。
+    /// ADR-0063 Phase 109d C2: 起動するコマンド。**`pqa` CLI ではなく python インタプリタ**
+    /// （`paperqa_ask.py` を `<command> <script> <input.json>` として起動する。既定 `"python"`、
+    /// 通常は `paperqa` パッケージが入った venv の `bin/python`）。旧 `pqa`（Phase 108 までの既定、
+    /// または運用者が明示的に指している場合）が来たら、同じディレクトリの `python` に自動で
+    /// 置き換えて 1 回警告する（`resolve_ask_command`）。
     pub command: String,
     /// `-s <name>`（拡張子は付けない。`pqa` 自身が `.json` を足す。ADR-0027 の実機の仕様）。未指定なら渡さない。
     pub settings: Option<String>,
@@ -216,22 +230,28 @@ pub struct PaperQaConfig {
     pub index_directory: Option<PathBuf>,
     /// `--agent.index.name`。未指定なら案件の鍵（`project_id`、無ければ `_shared`）を使う。
     pub index_name: Option<String>,
-    /// `--llm`。設定されているときだけ渡す（PaperQA の設定ファイルの値より優先。ADR-0027 D3）。
+    /// `settings.llm` の上書き。設定されているときだけ渡す（PaperQA の設定ファイルの値より優先。
+    /// ADR-0027 D3。ADR-0063 Phase 109d C1/C2: CLI の `--llm` から `paperqa_ask.py` への
+    /// `input.json` の `model` フィールドに変わった。意味は同じ）。
     pub model: Option<String>,
     /// 追加の環境変数（例: `OPENAI_API_KEY` / `OPENAI_BASE_URL`。LiteLLM 経由の OpenAI 互換エンドポイント向け）。
     pub env: Vec<(String, String)>,
-    /// 末尾に追加する引数（`ask` の前に挿入する）。
+    /// Phase 108 までの `pqa ask` CLI 用の追加引数。ADR-0063 Phase 109d C1/C2 で CLI 呼び出しを
+    /// 廃止したため、いまは何もしない（設定ファイルの互換性のためフィールドだけ残す）。
     pub extra_args: Vec<String>,
     /// ADR-0035 D1: 文献の取得。
     pub acquire: AcquireConfig,
     /// ADR-0035 D3: 決定的な証拠ゲートの閾値。
     pub evidence: PaperQaEvidence,
+    /// ADR-0063 Phase 109d C3: `ask()` を呼ぶ回数の上限（対象ごとの問い + 総括の問い）。
+    /// 対象が多ければ先頭から。既定 8。
+    pub max_asks: u32,
 }
 
 impl Default for PaperQaConfig {
     fn default() -> Self {
         Self {
-            command: "pqa".to_string(),
+            command: "python".to_string(),
             settings: None,
             paper_directory: None,
             index_directory: None,
@@ -241,8 +261,13 @@ impl Default for PaperQaConfig {
             extra_args: Vec::new(),
             acquire: AcquireConfig::default(),
             evidence: PaperQaEvidence::default(),
+            max_asks: default_max_asks(),
         }
     }
+}
+
+fn default_max_asks() -> u32 {
+    8
 }
 
 #[derive(Debug, Clone)]
@@ -659,8 +684,9 @@ fn query_request_block(req: &RunRequest) -> serde_json::Value {
     })
 }
 
-/// 取得ランナーを動かす python（ADR-0035 D1）。設定が無ければ `command`（`pqa`）と同じ
-/// ディレクトリの `python3`（venv の中を指しているのが普通）、ディレクトリが無ければ `python3`。
+/// 取得ランナーを動かす python（ADR-0035 D1）。設定が無ければ `command`（既定は python インタプリタ
+/// 自身。ADR-0063 Phase 109d C2）と同じディレクトリの `python3`（venv の中を指しているのが普通）、
+/// ディレクトリが無ければ `python3`。
 fn acquire_python(config: &PaperQaConfig) -> String {
     if let Some(command) = &config.acquire.command {
         return command.clone();
@@ -671,6 +697,84 @@ fn acquire_python(config: &PaperQaConfig) -> String {
         }
         _ => "python3".to_string(),
     }
+}
+
+/// ADR-0063 Phase 109d C2: `[adapters.paperqa] command` を実際に起動するコマンドに解決する。
+/// 既定・現行の値は python インタプリタそのもの（`paperqa_ask.py` を `<command> <script> <input.json>`
+/// として起動する）。旧 `pqa`（Phase 108 までの既定、または運用者がまだ CLI 実行ファイルを指している
+/// 場合）が来たら、同じディレクトリの `python` に自動で置き換えて 1 回警告する。
+fn resolve_ask_command(config: &PaperQaConfig, run_id: &str) -> String {
+    let path = Path::new(&config.command);
+    let is_old_pqa_cli = path.file_name().and_then(|n| n.to_str()) == Some("pqa");
+    if !is_old_pqa_cli {
+        return config.command.clone();
+    }
+    let replacement = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            parent.join("python").to_string_lossy().into_owned()
+        }
+        _ => "python".to_string(),
+    };
+    warn!(
+        "run {run_id}: [adapters.paperqa] command={:?} looks like the old `pqa` CLI (ADR-0063 \
+         Phase 109d C2 replaced it with the paperqa Python API); using the sibling python \
+         interpreter {replacement:?} instead. Update the config to point at python directly.",
+        config.command
+    );
+    replacement
+}
+
+/// ADR-0063 Phase 109d C1: `config.settings` はこのコードベースでは設定ファイルへの**フルパス**
+/// （拡張子無し。`settings_llm` と同じ前提）として扱われてきた。`paperqa_ask.py` に渡す
+/// `settings_dir`（`PQA_SETTINGS_DIR`）/`settings_name`（`Settings.from_name` の引数）に分解する。
+fn split_settings_path(settings: &str) -> (Option<String>, Option<String>) {
+    let path = Path::new(settings);
+    let name = path
+        .file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty());
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().into_owned());
+    (dir, name)
+}
+
+/// ADR-0063 Phase 109d C2: 答え（全問い）の `contexts` に現れた `docname`/`dockey` の集合
+/// （英数字だけに正規化）。
+fn context_identifiers(answers: &[AskAnswer]) -> BTreeSet<String> {
+    let mut set = BTreeSet::new();
+    for answer in answers {
+        for ctx in &answer.contexts {
+            if !ctx.docname.is_empty() {
+                set.insert(normalize_alnum(&ctx.docname));
+            }
+            if !ctx.dockey.is_empty() {
+                set.insert(normalize_alnum(&ctx.dockey));
+            }
+        }
+    }
+    set
+}
+
+/// この候補が `context_ids`（`context_identifiers` の戻り値）のどれかと一致するか（ADR-0063 Phase
+/// 109d C2）。`parsing.use_doc_details = false`（ADR-0027 の設定）だと PaperQA2 は corpus の
+/// **ファイル名**から `docname` を作るので、`answer_cites` と同じくファイル名の語幹で突き合わせる。
+fn candidate_in_contexts(context_ids: &BTreeSet<String>, candidate: &Candidate) -> bool {
+    if candidate.file.is_empty() {
+        return false;
+    }
+    let stem = candidate
+        .file
+        .trim_end_matches(".pdf")
+        .trim_end_matches(".txt");
+    let normalized_stem = normalize_alnum(stem);
+    if normalized_stem.is_empty() {
+        return false;
+    }
+    context_ids
+        .iter()
+        .any(|id| id.contains(&normalized_stem) || normalized_stem.contains(id.as_str()))
 }
 
 /// `artifacts/papers.json` の 1 件（ADR-0035 D1 手順 4。Phase 38 で `candidates.json` から改名）。ランナー（Python）が書き、
@@ -707,6 +811,59 @@ pub struct Candidate {
     /// テキストファイル）。`pdf_downloaded` と排他（両方 true にはならない）。
     #[serde(default)]
     pub abstract_only: bool,
+}
+
+/// `paperqa_ask.py` が `output_path` に書く 1 件の証拠（`PQASession.contexts` の 1 件。
+/// ADR-0063 Phase 109d C1/C4）。`ask()` に渡した Python の型ではなく、その `docname`/`dockey`/
+/// `citation`/`score` だけを写した JSON 表現。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AskContext {
+    #[serde(default)]
+    pub docname: String,
+    #[serde(default)]
+    pub dockey: String,
+    #[serde(default)]
+    pub citation: String,
+    #[serde(default)]
+    pub score: Option<f64>,
+    /// この証拠を使った問いの `id`（`AskAnswer::id`）。
+    #[serde(default)]
+    pub question: String,
+}
+
+/// `paperqa_ask.py` が `output_path` に書く 1 問分の答え（ADR-0063 Phase 109d C1）。
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AskAnswer {
+    #[serde(default)]
+    pub id: String,
+    /// 対象ごとの問いなら対象名、総括や（対象が取れないときの）単一の問いなら `None`。
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub question: String,
+    #[serde(default)]
+    pub answer: String,
+    #[serde(default)]
+    pub has_successful_answer: bool,
+    #[serde(default)]
+    pub contexts: Vec<AskContext>,
+    #[serde(default)]
+    pub references: String,
+    /// 再試行しても失敗した場合のメッセージ（成功すれば `None`）。
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// `paperqa_ask.py` の `output_path` 全体（ADR-0063 Phase 109d C1）。`error` が `Some` なら
+/// `paperqa` そのものが import できなかった（exit 3。`answers` は空）。
+#[derive(Debug, Clone, Default, Deserialize)]
+struct AskOutput {
+    #[serde(default)]
+    answers: Vec<AskAnswer>,
+    #[serde(default)]
+    target_aspect_table: String,
+    #[serde(default)]
+    error: Option<String>,
 }
 
 /// 取得の段の結果（`CELERIS_ACQUIRE` の中身）。
@@ -1171,6 +1328,88 @@ fn render_sources_section(candidates: &[(Candidate, bool)]) -> String {
     out
 }
 
+/// ADR-0063 Phase 109d C4: `answer.md`/`report.md` の先頭に置く「# 対象別の整理」
+/// （対象×観点の表 + 対象ごとの節 + 総括）。対象が 1 件も取れていなければ空文字列
+/// （呼び出し側はフォールバックの単一の答えをそのまま先頭に置く）。
+fn render_target_sections(answers: &[AskAnswer], table: &str) -> String {
+    if !answers.iter().any(|a| a.target.is_some()) {
+        return String::new();
+    }
+    let mut out = String::from("# 対象別の整理\n\n");
+    if !table.trim().is_empty() {
+        out.push_str(table.trim_end());
+        out.push_str("\n\n");
+    }
+    for answer in answers.iter().filter(|a| a.target.is_some()) {
+        out.push_str(&format!(
+            "### {}\n\n",
+            answer.target.as_deref().unwrap_or_default()
+        ));
+        if answer.answer.trim().is_empty() {
+            out.push_str("(回答なし");
+            if let Some(err) = &answer.error {
+                out.push_str(&format!(": {err}"));
+            }
+            out.push_str(")\n\n");
+        } else {
+            out.push_str(answer.answer.trim());
+            out.push_str("\n\n");
+        }
+    }
+    if let Some(summary) = answers.iter().find(|a| a.id == "summary") {
+        out.push_str("## 総括\n\n");
+        if summary.answer.trim().is_empty() {
+            out.push_str("(回答なし");
+            if let Some(err) = &summary.error {
+                out.push_str(&format!(": {err}"));
+            }
+            out.push_str(")\n\n");
+        } else {
+            out.push_str(summary.answer.trim());
+            out.push_str("\n\n");
+        }
+    }
+    out
+}
+
+/// ADR-0063 Phase 109d C4: 「## 引用された文献（contexts）」節。`docname`（無ければ `dockey`）で
+/// 重複排除し、その文献がどの問い（`AskAnswer::id`）で使われたかを列挙する。
+fn render_contexts_section(answers: &[AskAnswer]) -> String {
+    let mut by_key: BTreeMap<String, (String, String, Vec<String>)> = BTreeMap::new();
+    for answer in answers {
+        for ctx in &answer.contexts {
+            let key = if !ctx.docname.is_empty() {
+                ctx.docname.clone()
+            } else {
+                ctx.dockey.clone()
+            };
+            if key.is_empty() {
+                continue;
+            }
+            let entry = by_key
+                .entry(key)
+                .or_insert_with(|| (ctx.docname.clone(), ctx.citation.clone(), Vec::new()));
+            if !entry.2.contains(&answer.id) {
+                entry.2.push(answer.id.clone());
+            }
+        }
+    }
+    if by_key.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\n## 引用された文献（contexts）\n\n");
+    for (key, (docname, citation, ids)) in &by_key {
+        let name = if !docname.is_empty() { docname } else { key };
+        let label = if !citation.trim().is_empty() {
+            citation.trim()
+        } else {
+            name.as_str()
+        };
+        out.push_str(&format!("- {name}: {label}（{}）\n", ids.join(", ")));
+    }
+    out
+}
+
 /// `answer.md` に足す「一次情報（実装）」節（ADR-0063 D1）。目的文中の GitHub / GitLab の URL は
 /// PaperQA の corpus には入れず（論文ではないため）、参照節に載せるだけ。
 fn render_primary_sources_section(urls: &[String]) -> String {
@@ -1191,6 +1430,9 @@ struct EvidenceSummary {
     cited: u32,
     cited_fulltext: u32,
     cited_abstract_only: u32,
+    /// ADR-0063 Phase 109d C2: `cited` のうち、`ask()` が実際に使った証拠（`PQASession.contexts` の
+    /// `docname`/`dockey`）と突き合わせられた件数（本文一致だけで数えたものは含まない）。
+    cited_from_contexts: u32,
     min_cited: u32,
     insufficient: bool,
 }
@@ -1227,8 +1469,9 @@ async fn write_research_json(
 fn render_evidence_section(summary: &EvidenceSummary) -> String {
     let mut out = String::from("\n\n## 証拠の質\n\n");
     out.push_str(&format!(
-        "- 引用された出典: {} 件（本文からの引用: {} 件、アブストラクトのみ: {} 件）\n",
-        summary.cited, summary.cited_fulltext, summary.cited_abstract_only
+        "- 引用された出典: {} 件（本文からの引用: {} 件、アブストラクトのみ: {} 件、\
+         うち PaperQA の証拠〈contexts〉との突き合わせ: {} 件）\n",
+        summary.cited, summary.cited_fulltext, summary.cited_abstract_only, summary.cited_from_contexts
     ));
     if summary.insufficient {
         out.push_str(&format!(
@@ -1344,26 +1587,44 @@ async fn run_paperqa(
     };
 
     // ---------------------------------------------------------------- 2 段目: 索引と回答
+    // ADR-0063 Phase 109d C1/C2: `pqa ask` CLI ではなく、埋め込みの python ランナー
+    // （`paperqa_ask.py`）が PaperQA の Python API（`paperqa.ask`/`Settings`）を呼ぶ。
     let stdout_log_path = run_dir.join("stdout.log");
     let stderr_log_path = run_dir.join("stderr.log");
 
-    let mut command = Command::new(&config.command);
-    if let Some(settings) = &config.settings {
-        command.arg("-s").arg(settings);
-    }
+    let ask_script_path = run_dir.join("paperqa_ask.py");
+    let ask_input_path = run_dir.join("ask_input.json");
+    let ask_output_path = run_dir.join("ask_output.json");
+    let (settings_dir, settings_name) = config
+        .settings
+        .as_deref()
+        .map(split_settings_path)
+        .unwrap_or((None, None));
+    // ADR-0063 Phase 109d C3: 対象が複数（比較先込み）でも `max_asks` を超えない。
+    let comparison_target = crate::research_targets::comparison_target(&req.task.objective);
+    let ask_input = serde_json::json!({
+        "settings_name": settings_name,
+        "settings_dir": settings_dir,
+        "paper_directory": paper_directory.to_string_lossy(),
+        "index_directory": index_directory.to_string_lossy(),
+        "index_name": index_name,
+        "model": config.model,
+        "targets": research_targets,
+        "aspects": research_aspects,
+        "comparison_target": comparison_target,
+        "max_asks": config.max_asks,
+        "fallback_question": question,
+        "output_path": ask_output_path.to_string_lossy(),
+    });
+    tokio::fs::write(&ask_script_path, ASK_SCRIPT).await?;
+    let ask_input_text = serde_json::to_string_pretty(&ask_input)?;
+    tokio::fs::write(&ask_input_path, format!("{ask_input_text}\n")).await?;
+
+    let ask_command = resolve_ask_command(config, run_id);
+    let mut command = Command::new(&ask_command);
     command
-        .arg("--agent.index.paper_directory")
-        .arg(&paper_directory)
-        .arg("--agent.index.index_directory")
-        .arg(&index_directory)
-        .arg("--agent.index.name")
-        .arg(&index_name);
-    if let Some(model) = &config.model {
-        command.arg("--llm").arg(model);
-    }
-    command.args(&config.extra_args);
-    command.arg("ask").arg(&question);
-    command
+        .arg(&ask_script_path)
+        .arg(&ask_input_path)
         .envs(config.env.iter().cloned())
         .current_dir(req.cwd())
         .stdin(Stdio::null())
@@ -1386,7 +1647,7 @@ async fn run_paperqa(
         run_id,
         sink,
         |line| {
-            // PaperQA2 は検索・要約の進捗を出す（ADR-0027 D3 手順 3）。行単位でそのまま progress に写す。
+            // `paperqa_ask.py` は `progress: <text>` を出す（ADR-0035 D5 の acquire ランナーと同じ流儀）。
             progress::emit_status(sink, &truncate_chars(line, PROGRESS_LINE_MAX_CHARS));
         },
     )
@@ -1404,50 +1665,69 @@ async fn run_paperqa(
     let exit_status = streamed.exit;
     let stdout_buf = streamed.stdout;
     let stderr_tail = streamed.stderr_tail;
-    let answer = extract_answer(&stdout_buf);
+    let classify_text = format!("{stdout_buf}\n{stderr_tail}");
+    let ask_output: Option<AskOutput> = match tokio::fs::read_to_string(&ask_output_path).await {
+        Ok(text) => serde_json::from_str::<AskOutput>(&text).ok(),
+        Err(_) => None,
+    };
+    // 成功と見なせる出力（`error` なし・答えが 1 件でも非空）だけを次に渡す。
+    let usable_ask_output = ask_output.filter(|o| {
+        o.error.is_none() && o.answers.iter().any(|a| !a.answer.trim().is_empty())
+    });
 
-    let (terminal, provider_failure) = if !exit_status.success() {
+    let (terminal, provider_failure) = if exit_status.code() == Some(ASK_EXIT_PAPERQA_NOT_IMPORTABLE)
+    {
+        // ADR-0063 Phase 109d C1: `paperqa` が import できない (テスト環境や未整備の venv)。再試行しても
+        // 直らないので `retryable: false` の分かりやすいエラーにする（一般の非 0 終了とは区別する）。
+        (
+            Terminal::Error {
+                message: "paperqa (the Python package) is not importable in the environment \
+                          used by [adapters.paperqa] command; install `paperqa` there \
+                          (ADR-0063 Phase 109d C1)"
+                    .to_string(),
+                retryable: false,
+            },
+            None,
+        )
+    } else if !exit_status.success() {
         let exit_repr = match exit_status.code() {
             Some(code) => code.to_string(),
             None => "signal".to_string(),
         };
-        let classify_text = format!("{stdout_buf}\n{stderr_tail}");
         let pf = classify_provider_failure(&classify_text);
         (
             Terminal::Error {
-                message: format!("pqa exited with a non-zero status (exit={exit_repr})"),
+                message: format!("paperqa_ask.py exited with a non-zero status (exit={exit_repr})"),
                 retryable: true,
             },
             pf,
         )
-    } else if answer.trim().is_empty() {
-        let classify_text = format!("{stdout_buf}\n{stderr_tail}");
-        let pf = classify_provider_failure(&classify_text);
-        (
-            Terminal::Error {
-                message: "pqa produced no answer".to_string(),
-                retryable: true,
-            },
-            pf,
-        )
-    } else {
+    } else if let Some(ask_output) = usable_ask_output {
         // ADR-0027 D3 手順 4: アダプタが `artifacts/answer.md` と `artifacts/result.json` を書く。
         if let Err(e) = tokio::fs::create_dir_all(&artifacts_dir).await {
             warn!("run {run_id}: could not create artifacts/ directory: {e}");
         }
 
-        // ADR-0035 D2 / D4: 取得した候補と答えを決定的に突き合わせ、`sources.json` の `cited` を決め、
-        // `answer.md` の末尾に `## 出典` を足す。
-        // ADR-0063 Phase 109b A2: 本文（`answer`）の文字列一致に加え、`pqa` の生出力にある
-        // `References`/`Sources` 節（PaperQA2 が実際に使った証拠から機械的に組み立てる）も見る。
-        // `cited` は両方の和（本文一致は補助）。
-        let references_text = extract_references_section(&stdout_buf);
+        // ADR-0063 Phase 109d C2: `cited` は全 `ask()` 呼び出しの `contexts`（実際に使った証拠）の
+        // `docname`/`dockey` の和集合が主。本文一致（`answer_cites`、答え全体を連結したもの）は補助として
+        // OR する（Phase 109b A2 までの仕組みの名残 -- モデルが引用マーカーを本文に残さない場合の保険）。
+        let context_ids = context_identifiers(&ask_output.answers);
+        let combined_answer_text: String = ask_output
+            .answers
+            .iter()
+            .map(|a| a.answer.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let candidates = read_candidates(&artifacts_dir.join("papers.json")).await;
+        let mut cited_from_contexts: u32 = 0;
         let marked: Vec<(Candidate, bool)> = candidates
             .into_iter()
             .map(|c| {
-                let cited = answer_cites(&answer, &c)
-                    || (!references_text.is_empty() && answer_cites(&references_text, &c));
+                let via_contexts = candidate_in_contexts(&context_ids, &c);
+                if via_contexts {
+                    cited_from_contexts += 1;
+                }
+                let cited = via_contexts || answer_cites(&combined_answer_text, &c);
                 (c, cited)
             })
             .collect();
@@ -1472,6 +1752,7 @@ async fn run_paperqa(
                 acquired,
                 cited_fulltext,
                 cited_abstract_only,
+                cited_from_contexts,
             ))
         } else {
             None
@@ -1487,15 +1768,32 @@ async fn run_paperqa(
             .await;
         }
 
+        // ADR-0063 Phase 109d C4: 対象が取れていれば「# 対象別の整理」（表 + 対象ごとの節 + 総括）、
+        // 取れていなければフォールバックの単一の答えをそのまま使う。
+        let target_section = render_target_sections(&ask_output.answers, &ask_output.target_aspect_table);
+        let body_text = if target_section.is_empty() {
+            ask_output
+                .answers
+                .first()
+                .map(|a| a.answer.clone())
+                .unwrap_or_default()
+        } else {
+            target_section
+        };
+        let contexts_section = render_contexts_section(&ask_output.answers);
+
         let answer_md = if acquiring {
-            let mut body = format!("{answer}{}", render_sources_section(&marked));
+            let mut body = format!(
+                "{body_text}{contexts_section}{}",
+                render_sources_section(&marked)
+            );
             if let Some(ev) = &evidence {
                 body.push_str(&render_evidence_section(&ev.summary));
             }
             body.push_str(&render_primary_sources_section(&github_urls));
             body
         } else {
-            answer.clone()
+            format!("{body_text}{contexts_section}")
         };
         if let Err(e) = tokio::fs::write(artifacts_dir.join("answer.md"), &answer_md).await {
             warn!("run {run_id}: could not write artifacts/answer.md: {e}");
@@ -1568,7 +1866,15 @@ async fn run_paperqa(
                 None,
             )
         } else {
-            let summary = single_line_summary(&answer, SUMMARY_MAX_CHARS);
+            // 総括の問い（対象が取れているとき）があればそれを、無ければ最初の答えを要約の元にする。
+            let summary_source = ask_output
+                .answers
+                .iter()
+                .find(|a| a.id == "summary")
+                .or_else(|| ask_output.answers.first())
+                .map(|a| a.answer.as_str())
+                .unwrap_or("");
+            let summary = single_line_summary(summary_source, SUMMARY_MAX_CHARS);
             let result_file = serde_json::json!({ "summary": summary, "evidence": [] });
             match serde_json::to_string_pretty(&result_file) {
                 Ok(text) => {
@@ -1590,6 +1896,15 @@ async fn run_paperqa(
                 None,
             )
         }
+    } else {
+        let pf = classify_provider_failure(&classify_text);
+        (
+            Terminal::Error {
+                message: "paperqa_ask.py produced no answer".to_string(),
+                retryable: true,
+            },
+            pf,
+        )
     };
 
     write_result_json(&run_dir, &terminal, provider_failure).await?;
@@ -1617,6 +1932,7 @@ fn evidence_gate(
     acquired: AcquireCounts,
     cited_fulltext: u32,
     cited_abstract_only: u32,
+    cited_from_contexts: u32,
 ) -> EvidenceGateResult {
     let cited = cited_fulltext + cited_abstract_only;
     let enabled =
@@ -1628,6 +1944,7 @@ fn evidence_gate(
                 cited,
                 cited_fulltext,
                 cited_abstract_only,
+                cited_from_contexts,
                 min_cited: thresholds.min_cited,
                 insufficient: false,
             },
@@ -1645,6 +1962,7 @@ fn evidence_gate(
                 cited,
                 cited_fulltext,
                 cited_abstract_only,
+                cited_from_contexts,
                 min_cited: thresholds.min_cited,
                 insufficient: true,
             },
@@ -1681,6 +1999,7 @@ fn evidence_gate(
             cited,
             cited_fulltext,
             cited_abstract_only,
+            cited_from_contexts,
             min_cited: thresholds.min_cited,
             insufficient,
         },
@@ -1723,142 +2042,6 @@ async fn write_sources_json(path: &Path, marked: &[(Candidate, bool)], run_id: &
         }
         Err(e) => warn!("run {run_id}: could not serialize artifacts/sources.json: {e}"),
     }
-}
-
-/// `pqa ask` の標準出力から回答部分を切り出す。`Answer:` で始まる行が見つかればそこから末尾まで、
-/// 見つからなければ標準出力全体を返す（ADR-0027 D3: 「回答本文と引用」、見つからない場合は全体）。
-fn extract_answer(stdout: &str) -> String {
-    // 実機（pqa 2026.8.12）の出力は rich で整形されていて、各行が `[04:38:30] ` のような時刻と
-    // 折り返し用の左詰めと色コードを含む。回答の始まりは `Answer:` の行。
-    let clean: Vec<String> = stdout.lines().map(strip_ansi).collect();
-    let marker = clean.iter().position(|l| {
-        strip_log_prefix(l)
-            .trim_start()
-            .to_ascii_lowercase()
-            .starts_with("answer:")
-    });
-    let Some(idx) = marker else {
-        return stdout.trim_end_matches('\n').to_string();
-    };
-    let mut out: Vec<String> = Vec::new();
-    for (i, line) in clean[idx..].iter().enumerate() {
-        let body = strip_log_prefix(line);
-        let body = if i == 0 {
-            // 先頭行は `Answer:` を落として本文だけにする。
-            match body.trim_start().split_once(':') {
-                Some((_, rest)) => rest,
-                None => body,
-            }
-        } else {
-            body
-        };
-        out.push(body.trim_end().to_string());
-    }
-    while out.last().is_some_and(|l| l.trim().is_empty()) {
-        out.pop();
-    }
-    while out.first().is_some_and(|l| l.trim().is_empty()) {
-        out.remove(0);
-    }
-    // 折り返しの左詰め（行頭の共通の空白）を落とす。
-    let indent = out
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
-        .min()
-        .unwrap_or(0);
-    out.iter()
-        .map(|l| {
-            if l.len() >= indent {
-                l[indent..].to_string()
-            } else {
-                l.clone()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// ADR-0063 Phase 109b A2: `pqa ask` の生の標準出力から `References`/`Sources` 見出し以降を切り出す。
-/// PaperQA2 は `Answer.formatted_answer` の一部として、答えの本文にインライン引用マーカーが無くても
-/// **実際に使った証拠（`Answer.contexts`）から機械的に組み立てた参照一覧**を出す。本文の文字列一致
-/// （`answer_cites`）だけでは、モデルが日本語の答えでマーカーを落としたときに `cited` が実際より
-/// 少なく数えられる（本番 2026-09-23 の観測: `answer.md` に文書の内容を使った記述はあるのに
-/// `cited=0`）。見出しが見つからなければ空文字列（`answer_cites` は本文一致だけに頼る従来どおりの
-/// 動きに落ちる）。
-fn extract_references_section(stdout: &str) -> String {
-    let clean: Vec<String> = stdout.lines().map(strip_ansi).collect();
-    let marker = clean.iter().position(|l| {
-        let body = strip_log_prefix(l).trim();
-        let lower = body.trim_end_matches(':').trim().to_ascii_lowercase();
-        lower == "references" || lower == "sources"
-    });
-    let Some(idx) = marker else {
-        return String::new();
-    };
-    clean[idx..]
-        .iter()
-        .map(|l| strip_log_prefix(l))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// `[04:38:30] ` のような時刻の前置きを落とす（無ければそのまま）。
-fn strip_log_prefix(line: &str) -> &str {
-    let trimmed = line.trim_start();
-    if !trimmed.starts_with('[') {
-        return line;
-    }
-    let Some(close) = trimmed.find(']') else {
-        return line;
-    };
-    let inside = &trimmed[1..close];
-    let looks_like_time = inside.len() == 8
-        && inside.as_bytes().iter().enumerate().all(|(i, b)| {
-            if i == 2 || i == 5 {
-                *b == b':'
-            } else {
-                b.is_ascii_digit()
-            }
-        });
-    if looks_like_time {
-        let rest = &trimmed[close + 1..];
-        // 時刻の分だけ左詰めを保つ（折り返し行と桁を揃えるため、先頭 1 つの空白だけ落とす）。
-        rest.strip_prefix(' ').unwrap_or(rest)
-    } else {
-        line
-    }
-}
-
-/// ANSI のエスケープ（色・カーソル制御）を落とす。
-fn strip_ansi(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        if c != '\u{1b}' {
-            out.push(c);
-            continue;
-        }
-        // CSI / OSC を読み飛ばす。
-        match chars.next() {
-            Some('[') => {
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                for next in chars.by_ref() {
-                    if next == '\u{7}' || next == '\u{1b}' {
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    out
 }
 
 /// `artifacts/result.json` の `summary`: 改行・連続空白を単一の空白にたたみ（single-line-safe）、
@@ -1999,6 +2182,97 @@ echo 'CELERIS_ACQUIRE {{"candidates": {candidates}, "pdfs": {pdfs}, "engines": {
 (brinkmann2020_10-1007-s11390-020-9801-1.pdf), and asynchronous IO runtimes \
 reduce server overhead (Roe 2021).";
 
+    /// ADR-0063 Phase 109d C1/C2: `paperqa_ask.py`（実物、`config.command` に渡すのは `$1` にその
+    /// パスを受け取るスタブ）の代わりに使うスタブ本体。**実物の `paperqa_ask.py` をそのまま
+    /// `python3` で動かし**、`paperqa` パッケージだけ `sys.modules` に偽物を差し込む（LDR の
+    /// `sys.modules["local_deep_research"]` 注入と同じ考え方）。これにより `build_questions_for_targets`
+    /// / `ask_with_retries` / `flatten_contexts` / `build_target_aspect_table` など、このアダプタが
+    /// 書き出す**本物の**問いの組み立て・表の組み立てをテストが経由する（シェルで作った別物の答えを
+    /// 返すのではない）。`answer_text` は全ての問いに同じ答えとして、`contexts_json` は全ての問いに
+    /// 同じ `contexts` として返す（`[]` なら空）。
+    fn ask_stub_script(answer_text: &str, contexts_json: &str) -> String {
+        let answer_literal = serde_json::to_string(answer_text).expect("valid json string");
+        let contexts_literal = if contexts_json.trim().is_empty() {
+            "[]".to_string()
+        } else {
+            contexts_json.to_string()
+        };
+        format!(
+            r#"python3 - "$1" "$2" <<'PY'
+import importlib.util, sys, types
+
+script_path, input_path = sys.argv[1], sys.argv[2]
+
+
+class FakeIndex:
+    def __init__(self):
+        self.paper_directory = None
+        self.index_directory = None
+        self.name = None
+
+
+class FakeAgent:
+    def __init__(self):
+        self.index = FakeIndex()
+
+
+class FakeSettings:
+    def __init__(self):
+        self.agent = FakeAgent()
+        self.llm = None
+
+    @classmethod
+    def from_name(cls, name):
+        return cls()
+
+
+ANSWER_TEXT = {answer_literal}
+CONTEXTS = {contexts_literal}
+
+
+class FakeSession:
+    def __init__(self):
+        self.formatted_answer = ANSWER_TEXT
+        self.answer = ANSWER_TEXT
+        self.has_successful_answer = True
+        self.contexts = CONTEXTS
+        self.references = ""
+        self.cost = None
+        self.token_counts = None
+
+
+class FakeResponse:
+    def __init__(self):
+        self.session = FakeSession()
+
+
+def fake_ask(question_text, settings=None):
+    return FakeResponse()
+
+
+fake_pkg = types.ModuleType("paperqa")
+fake_pkg.Settings = FakeSettings
+fake_pkg.ask = fake_ask
+sys.modules["paperqa"] = fake_pkg
+
+spec = importlib.util.spec_from_file_location("paperqa_ask_stub", script_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+sys.argv = [script_path, input_path]
+sys.exit(mod.main())
+PY
+"#
+        )
+    }
+
+    /// `runs/<run_id>/ask_input.json`（ADR-0063 Phase 109d C1）を読む。
+    fn read_ask_input(dir: &Path, run_id: &str) -> serde_json::Value {
+        let text =
+            std::fs::read_to_string(dir.join("runs").join(run_id).join("ask_input.json")).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
     fn sample_req(workspace: std::path::PathBuf) -> RunRequest {
         RunRequest {
             protocol: PROTOCOL_VERSION,
@@ -2023,11 +2297,7 @@ reduce server overhead (Roe 2021).";
         let dir = tempfile::tempdir().unwrap();
         let config = stub_pqa(
             dir.path(),
-            r#"cat >/dev/null
-echo 'Searching for relevant papers...'
-echo 'Gathering evidence from 3 sources...'
-echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
-"#,
+            &ask_stub_script("PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].", ""),
         );
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -2049,13 +2319,10 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
             other => panic!("expected done, got {other:?}"),
         }
         let progress = sink.progress.lock().unwrap();
-        assert!(
-            progress
-                .iter()
-                .any(|m| m.contains("Searching for relevant papers"))
-        );
-        assert!(progress.iter().any(|m| m.contains("Gathering evidence")));
-        assert!(*sink.heartbeat_count.lock().unwrap() >= 3);
+        // 対象が取れない目的文なので単一のフォールバック問い（`id = "q1"`）になる
+        // （`paperqa_ask.py::build_questions_for_targets`）。
+        assert!(progress.iter().any(|m| m.contains("asking:")), "{progress:?}");
+        assert!(*sink.heartbeat_count.lock().unwrap() >= 1);
         // ADR-0048 D2（Phase 60a）: このアダプタが出せる進行は節目（`status`）だけで、
         // すべての行が構造化されている（`msg` は従来どおり）。
         let structured = sink.structured.lock().unwrap().clone();
@@ -2084,13 +2351,12 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
         drop(artifacts);
 
         let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
-        // `Answer:` の見出しは落とし、本文だけを残す（実機の出力は時刻と左詰めが付くため）。
         assert!(
             answer_md.starts_with("PaperQA2 finds no evidence"),
             "{answer_md}"
         );
         assert!(
-            !answer_md.contains("Gathering evidence"),
+            !answer_md.contains("asking:"),
             "進捗のログは含めない: {answer_md}"
         );
         let report_md = std::fs::read_to_string(dir.path().join("artifacts/report.md")).unwrap();
@@ -2124,12 +2390,7 @@ echo 'Answer: PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].'
     #[tokio::test]
     async fn a_shared_workspace_task_writes_under_its_own_artifacts_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let config = stub_pqa(
-            dir.path(),
-            r#"cat >/dev/null
-echo 'Answer: no prior work on X [Doe2020].'
-"#,
-        );
+        let config = stub_pqa(dir.path(), &ask_stub_script("no prior work on X [Doe2020].", ""));
         std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
         std::fs::write(dir.path().join("artifacts/answer.md"), "sibling").unwrap();
         let adapter = PaperQaAdapter::new(config);
@@ -2168,7 +2429,7 @@ echo 'Answer: no prior work on X [Doe2020].'
     #[tokio::test]
     async fn non_zero_exit_is_retryable_error() {
         let dir = tempfile::tempdir().unwrap();
-        let config = stub_pqa(dir.path(), "cat >/dev/null; echo 'boom' 1>&2; exit 7");
+        let config = stub_pqa(dir.path(), "echo 'boom' 1>&2; exit 7");
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -2186,10 +2447,41 @@ echo 'Answer: no prior work on X [Doe2020].'
         assert!(!dir.path().join("artifacts/result.json").exists());
     }
 
+    /// ADR-0063 Phase 109d C1: `paperqa` が import できない (テスト環境や未整備の venv) ときの exit 3 は
+    /// 一般の非 0 終了とは別扱いで、`retryable: false` の分かりやすいメッセージになる（再試行しても
+    /// 直らないため）。
+    #[tokio::test]
+    async fn paperqa_not_importable_is_a_clear_non_retryable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_pqa(dir.path(), "echo 'paperqa not importable: no module' 1>&2; exit 3");
+        let adapter = PaperQaAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-not-importable", default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Error { retryable, message } => {
+                assert!(!retryable, "installing paperqa fixes this, retrying alone does not");
+                assert!(message.contains("paperqa"), "{message}");
+                assert!(
+                    message.to_ascii_lowercase().contains("not importable")
+                        || message.to_ascii_lowercase().contains("install"),
+                    "message should say what is wrong, not just that it failed: {message}"
+                );
+            }
+            other => panic!("expected error, got {other:?}"),
+        }
+        assert!(!dir.path().join("artifacts/result.json").exists());
+    }
+
     #[tokio::test]
     async fn empty_output_is_retryable_error() {
         let dir = tempfile::tempdir().unwrap();
-        let config = stub_pqa(dir.path(), "cat >/dev/null");
+        // `output_path` を一切書かない（`paperqa` は import できたが、何らかの理由で結果が出なかった
+        // 場合の保険。ADR-0063 Phase 109d C1）。
+        let config = stub_pqa(dir.path(), "exit 0");
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -2215,8 +2507,7 @@ echo 'Answer: no prior work on X [Doe2020].'
         let config = stub_pqa(
             dir.path(),
             &format!(
-                r#"cat >/dev/null
-echo $$ > {pid}
+                r#"echo $$ > {pid}
 while true; do sleep 0.1; done
 "#,
                 pid = pid_file.display()
@@ -2252,27 +2543,13 @@ while true; do sleep 0.1; done
         );
     }
 
-    fn read_argv(path: &Path) -> Vec<String> {
-        let bytes = std::fs::read(path).unwrap();
-        bytes
-            .split(|b| *b == 0)
-            .filter(|chunk| !chunk.is_empty())
-            .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
-            .collect()
-    }
-
-    /// settings / paper_directory / index_directory / index_name の組み立てを argv でそのまま確認する
-    /// （ADR-0027 D3。ADR-0035 D1 / D2 で corpus と索引が**案件ごと**になったので、案件が無い
-    /// タスクでは `_shared` が足される）。
+    /// settings / paper_directory / index_directory / index_name の組み立てを `ask_input.json`
+    /// でそのまま確認する（ADR-0063 Phase 109d C1: CLI の argv ではなく JSON になった。ADR-0035
+    /// D1 / D2 で corpus と索引が**案件ごと**になったので、案件が無いタスクでは `_shared` が足される）。
     #[tokio::test]
-    async fn settings_and_index_args_are_composed_exactly() {
+    async fn ask_input_carries_settings_and_index_paths() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = stub_pqa(
-            dir.path(),
-            "for a in \"$@\"; do printf '%s\\0' \"$a\" >> \"$(dirname \"$0\")/args.log\"; done\n\
-             cat >/dev/null\n\
-             echo 'Answer: ok'\n",
-        );
+        let mut config = stub_pqa(dir.path(), &ask_stub_script("ok", ""));
         config.settings = Some("/settings/qwen-local".to_string());
         config.paper_directory = Some(PathBuf::from("/papers"));
         config.index_directory = Some(PathBuf::from("/index"));
@@ -2285,35 +2562,34 @@ while true; do sleep 0.1; done
             .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
 
-        let argv = read_argv(&dir.path().join("args.log"));
+        let input = read_ask_input(dir.path(), "run-5");
+        assert_eq!(input["settings_dir"], "/settings", "{input}");
+        assert_eq!(input["settings_name"], "qwen-local", "{input}");
         assert_eq!(
-            argv,
-            vec![
-                "-s".to_string(),
-                "/settings/qwen-local".to_string(),
-                "--agent.index.paper_directory".to_string(),
-                format!("/papers/{SHARED_PROJECT_KEY}"),
-                "--agent.index.index_directory".to_string(),
-                format!("/index/{SHARED_PROJECT_KEY}"),
-                "--agent.index.name".to_string(),
-                SHARED_PROJECT_KEY.to_string(),
-                "ask".to_string(),
-                build_question(&req.task, &req.context, "artifacts"),
-            ]
+            input["paper_directory"],
+            format!("/papers/{SHARED_PROJECT_KEY}"),
+            "{input}"
+        );
+        assert_eq!(
+            input["index_directory"],
+            format!("/index/{SHARED_PROJECT_KEY}"),
+            "{input}"
+        );
+        assert_eq!(input["index_name"], SHARED_PROJECT_KEY, "{input}");
+        assert_eq!(
+            input["fallback_question"],
+            build_question(&req.task, &req.context, "artifacts"),
+            "{input}"
         );
     }
 
-    /// 設定を省略したときの既定値: `-s` は付かず、`paper_directory`/`index_directory`/`index_name` は
-    /// ワークスペース相対・案件ごと（案件が無ければ `_shared`）の既定値になる。
+    /// 設定を省略したときの既定値: `settings_name`/`settings_dir` は `null`、`paper_directory`/
+    /// `index_directory`/`index_name` はワークスペース相対・案件ごと（案件が無ければ `_shared`）の
+    /// 既定値になる。
     #[tokio::test]
-    async fn defaults_are_used_when_settings_and_index_config_are_absent() {
+    async fn ask_input_defaults_when_settings_and_index_config_are_absent() {
         let dir = tempfile::tempdir().unwrap();
-        let config = stub_pqa(
-            dir.path(),
-            "for a in \"$@\"; do printf '%s\\0' \"$a\" >> \"$(dirname \"$0\")/args.log\"; done\n\
-             cat >/dev/null\n\
-             echo 'Answer: ok'\n",
-        );
+        let config = stub_pqa(dir.path(), &ask_stub_script("ok", ""));
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -2323,29 +2599,28 @@ while true; do sleep 0.1; done
             .unwrap();
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
 
-        let argv = read_argv(&dir.path().join("args.log"));
-        assert!(!argv.contains(&"-s".to_string()));
-        assert_eq!(argv[0], "--agent.index.paper_directory");
-        assert_eq!(argv[1], format!("papers/{SHARED_PROJECT_KEY}"));
-        assert_eq!(argv[2], "--agent.index.index_directory");
-        assert_eq!(argv[3], format!("index/{SHARED_PROJECT_KEY}"));
-        assert_eq!(argv[4], "--agent.index.name");
-        assert_eq!(argv[5], SHARED_PROJECT_KEY.to_string());
-        assert_eq!(argv[6], "ask");
+        let input = read_ask_input(dir.path(), "run-6");
+        assert!(input["settings_name"].is_null(), "{input}");
+        assert!(input["settings_dir"].is_null(), "{input}");
+        assert_eq!(
+            input["paper_directory"],
+            format!("papers/{SHARED_PROJECT_KEY}"),
+            "{input}"
+        );
+        assert_eq!(
+            input["index_directory"],
+            format!("index/{SHARED_PROJECT_KEY}"),
+            "{input}"
+        );
+        assert_eq!(input["index_name"], SHARED_PROJECT_KEY, "{input}");
     }
 
-    /// `--llm` はモデルが設定されているときだけ渡す。
+    /// `model` は設定されているときだけ `ask_input.json` に載る（`Settings.llm` の上書き。
+    /// ADR-0063 Phase 109d C1/C2）。
     #[tokio::test]
-    async fn llm_flag_is_passed_only_when_model_is_set() {
+    async fn ask_input_carries_model_only_when_set() {
         let dir = tempfile::tempdir().unwrap();
-
-        // model なし
-        let config_without = stub_pqa(
-            dir.path(),
-            "for a in \"$@\"; do printf '%s\\0' \"$a\" >> \"$(dirname \"$0\")/args-without.log\"; done\n\
-             cat >/dev/null\n\
-             echo 'Answer: ok'\n",
-        );
+        let config_without = stub_pqa(dir.path(), &ask_stub_script("ok", ""));
         let adapter = PaperQaAdapter::new(config_without);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -2353,17 +2628,13 @@ while true; do sleep 0.1; done
             .run(req, "run-7a", default_limits(), &sink)
             .await
             .unwrap();
-        let argv_without = read_argv(&dir.path().join("args-without.log"));
-        assert!(!argv_without.contains(&"--llm".to_string()));
-
-        // model あり
-        let dir2 = tempfile::tempdir().unwrap();
-        let mut config_with = stub_pqa(
-            dir2.path(),
-            "for a in \"$@\"; do printf '%s\\0' \"$a\" >> \"$(dirname \"$0\")/args-with.log\"; done\n\
-             cat >/dev/null\n\
-             echo 'Answer: ok'\n",
+        assert!(
+            read_ask_input(dir.path(), "run-7a")["model"].is_null(),
+            "model なしなら null"
         );
+
+        let dir2 = tempfile::tempdir().unwrap();
+        let mut config_with = stub_pqa(dir2.path(), &ask_stub_script("ok", ""));
         config_with.model = Some("qwen3.8-27b".to_string());
         let adapter2 = PaperQaAdapter::new(config_with);
         let req2 = sample_req(dir2.path().to_path_buf());
@@ -2372,12 +2643,10 @@ while true; do sleep 0.1; done
             .run(req2, "run-7b", default_limits(), &sink2)
             .await
             .unwrap();
-        let argv_with = read_argv(&dir2.path().join("args-with.log"));
-        let llm_idx = argv_with
-            .iter()
-            .position(|a| a == "--llm")
-            .expect("--llm should be present");
-        assert_eq!(argv_with[llm_idx + 1], "qwen3.8-27b");
+        assert_eq!(
+            read_ask_input(dir2.path(), "run-7b")["model"],
+            "qwen3.8-27b"
+        );
     }
 
     /// `with_env` の追加分は既存の同名キーより後に環境を組み立てるので勝つ（claude_code/codex と同じ規則）。
@@ -2388,8 +2657,9 @@ while true; do sleep 0.1; done
         let mut config = stub_pqa(
             dir.path(),
             &format!(
-                "cat >/dev/null\nprintf '%s' \"$OPENAI_BASE_URL\" > {out}\necho 'Answer: ok'\n",
-                out = out_file.display()
+                "printf '%s' \"$OPENAI_BASE_URL\" > {out}\n{ask}",
+                out = out_file.display(),
+                ask = ask_stub_script("ok", "")
             ),
         );
         config
@@ -2417,8 +2687,7 @@ while true; do sleep 0.1; done
         let dir = tempfile::tempdir().unwrap();
         let config = stub_pqa(
             dir.path(),
-            "cat >/dev/null\n\
-             echo 'litellm.AuthenticationError: Invalid API key provided' 1>&2\n\
+            "echo 'litellm.AuthenticationError: Invalid API key provided' 1>&2\n\
              exit 1\n",
         );
         let adapter = PaperQaAdapter::new(config);
@@ -2445,42 +2714,6 @@ while true; do sleep 0.1; done
         assert_eq!(collapsed, "Answer: line one line two line three");
     }
 
-    /// 実機（pqa 2026.8.12）の出力そのままの形: 時刻の前置き・色コード・折り返しの左詰めがある。
-    #[test]
-    fn extract_answer_handles_timestamped_ansi_wrapped_output() {
-        let stdout = concat!(
-            "[04:33:21] New file to index: unifyfs.txt...\n",
-            "\u{1b}[1;31mProvider List: https://docs.litellm.ai/docs/providers\u{1b}[0m\n",
-            "[04:38:30] Answer:                                        \n",
-            "                                                          \n",
-            "           UnifyFS and GekkoFS aggregate node-local NVMe   \n",
-            "           into a job-scoped file system (Unify2020).      \n",
-            "\n",
-        );
-        let answer = extract_answer(stdout);
-        assert_eq!(
-            answer,
-            "UnifyFS and GekkoFS aggregate node-local NVMe\ninto a job-scoped file system (Unify2020)."
-        );
-        assert!(
-            !answer.contains("New file to index"),
-            "索引のログは含めない: {answer}"
-        );
-        assert!(!answer.contains('\u{1b}'), "色コードは落とす: {answer:?}");
-    }
-
-    #[test]
-    fn extract_answer_finds_answer_line_or_falls_back_to_full_output() {
-        let stdout = "searching...\nsummarizing...\nAnswer: X causes Y [Doe2020].\n";
-        // `Answer:` の見出しは落として本文だけを返す。
-        assert_eq!(extract_answer(stdout), "X causes Y [Doe2020].");
-
-        let no_answer_marker = "just some raw output\nwithout the marker\n";
-        assert_eq!(
-            extract_answer(no_answer_marker),
-            no_answer_marker.trim_end_matches('\n')
-        );
-    }
     // ------------------------------------------------------------ ADR-0035（Phase 34）
 
     /// 依頼文が日本語でも、その中の英数字の名詞句が検索語になる（ADR-0035 D1 手順 1。決定的、LLM 無し）。
@@ -2661,6 +2894,58 @@ while true; do sleep 0.1; done
         assert_eq!(acquire_python(&config), "/usr/bin/python3.12");
     }
 
+    /// ADR-0063 Phase 109d C2: `command` が python インタプリタならそのまま、旧 `pqa` CLI を指して
+    /// いれば同じディレクトリの `python` に置き換える（ディレクトリが無ければ `"python"`）。
+    #[test]
+    fn resolve_ask_command_replaces_the_old_pqa_cli_with_the_sibling_python() {
+        let config = PaperQaConfig {
+            command: "python".to_string(),
+            ..PaperQaConfig::default()
+        };
+        assert_eq!(resolve_ask_command(&config, "run-x"), "python");
+
+        let config = PaperQaConfig {
+            command: "/home/u/celeris/paperqa/.venv/bin/pqa".to_string(),
+            ..PaperQaConfig::default()
+        };
+        assert_eq!(
+            resolve_ask_command(&config, "run-x"),
+            "/home/u/celeris/paperqa/.venv/bin/python"
+        );
+
+        let config = PaperQaConfig {
+            command: "pqa".to_string(),
+            ..PaperQaConfig::default()
+        };
+        assert_eq!(resolve_ask_command(&config, "run-x"), "python");
+    }
+
+    /// ADR-0063 Phase 109d C1: `settings`（設定ファイルへのフルパス、拡張子無し）を
+    /// `settings_dir`（`PQA_SETTINGS_DIR`）/`settings_name`（`Settings.from_name` の引数）に分ける。
+    #[test]
+    fn split_settings_path_separates_the_directory_and_the_name() {
+        assert_eq!(
+            split_settings_path("/home/u/celeris/paperqa/settings/celeris-proxy"),
+            (
+                Some("/home/u/celeris/paperqa/settings".to_string()),
+                Some("celeris-proxy".to_string())
+            )
+        );
+        // `.json` が付いていても同じ（`settings_llm` と同じ前提）。
+        assert_eq!(
+            split_settings_path("/settings/celeris-proxy.json"),
+            (
+                Some("/settings".to_string()),
+                Some("celeris-proxy".to_string())
+            )
+        );
+        // ディレクトリの無い名前だけなら `settings_dir` は `None`。
+        assert_eq!(
+            split_settings_path("celeris-proxy"),
+            (None, Some("celeris-proxy".to_string()))
+        );
+    }
+
     /// `cited` の判定（ADR-0035 D2。決定的。合わなければ false）。
     #[test]
     fn answer_cites_matches_the_file_name_doi_arxiv_id_or_author_year() {
@@ -2729,10 +3014,13 @@ while true; do sleep 0.1; done
             },
             2,
             0,
+            1,
         );
         assert!(ok.error.is_none());
         assert!(!ok.summary.insufficient);
         assert_eq!(ok.summary.cited, 2);
+        // ADR-0063 Phase 109d C2: contexts との突き合わせの内訳も別枠で残る。
+        assert_eq!(ok.summary.cited_from_contexts, 1);
 
         // 既定（insufficient_is_error = false）: 閾値未達でも hard error にはしない。
         let soft = evidence_gate(
@@ -2744,12 +3032,14 @@ while true; do sleep 0.1; done
             },
             0,
             1,
+            0,
         );
         assert!(soft.error.is_none(), "{:?}", soft.error);
         assert!(soft.summary.insufficient);
         assert_eq!(soft.summary.cited, 1);
         assert_eq!(soft.summary.cited_fulltext, 0);
         assert_eq!(soft.summary.cited_abstract_only, 1);
+        assert_eq!(soft.summary.cited_from_contexts, 0);
         assert_eq!(soft.summary.min_cited, 2);
 
         // `insufficient_is_error = true`（Phase 108 までの挙動）: 実数と閾値入りのメッセージで hard error。
@@ -2766,6 +3056,7 @@ while true; do sleep 0.1; done
             },
             1,
             0,
+            0,
         );
         let message = hard.error.unwrap();
         assert!(message.contains("candidates=4 (min 5)"), "{message}");
@@ -2773,7 +3064,7 @@ while true; do sleep 0.1; done
         assert!(message.contains("cited=1 (min 2)"), "{message}");
 
         // 0 件は別メッセージ（検索経路の問題と区別する）。`insufficient_is_error` に関わらず常に hard error。
-        let zero = evidence_gate(&thresholds, AcquireCounts::default(), 0, 0)
+        let zero = evidence_gate(&thresholds, AcquireCounts::default(), 0, 0, 0)
             .error
             .unwrap();
         assert!(
@@ -2787,7 +3078,7 @@ while true; do sleep 0.1; done
             min_cited: 0,
             insufficient_is_error: true,
         };
-        let disabled = evidence_gate(&off, AcquireCounts::default(), 0, 0);
+        let disabled = evidence_gate(&off, AcquireCounts::default(), 0, 0, 0);
         assert!(disabled.error.is_none());
         assert!(!disabled.summary.insufficient);
     }
@@ -2801,9 +3092,9 @@ while true; do sleep 0.1; done
         let config = stub_pqa_with_acquire(
             dir.path(),
             &format!(
-                "echo pqa >> {order}\ncat >/dev/null\nprintf 'Answer: {answer}\\n'\n",
+                "echo pqa >> {order}\n{ask}",
                 order = order_log.display(),
-                answer = STUB_ANSWER
+                ask = ask_stub_script(STUB_ANSWER, "")
             ),
             &format!(
                 "echo acquire >> {order}\n{script}",
@@ -2946,18 +3237,20 @@ while true; do sleep 0.1; done
         assert!(dir.path().join("runs/run-a1/acquire.stdout.log").is_file());
     }
 
-    /// ADR-0063 Phase 109b A2: `pqa` の生出力に、`Answer:` より前に出る `References` 節（PaperQA2 が
-    /// 途中の証拠収集で出す、実際に使ったコンテキストの一覧）があれば、答えの本文にインライン引用
-    /// マーカーが無い候補も `cited` に数える（本文一致との和）。本番の観測（2026-09-23）:
-    /// 日本語の答えでモデルが引用マーカーを落とし `cited=0` になった不具合の是正。
+    /// ADR-0063 Phase 109d C2: `cited` は `ask()` が実際に使った証拠（`PQASession.contexts` の
+    /// `docname`/`dockey`）との突き合わせと、答えの本文一致（`answer_cites`、補助）の**和**。
+    /// 1 件目 (Brinkmann) は本文にだけ出てくる、2 件目 (Roe) は本文には出てこず `contexts` にだけ
+    /// 出てくる（本文一致だけなら false のはず）、3 件目はどちらにも出ない。
     #[tokio::test]
-    async fn answer_cites_also_counts_a_references_section_that_precedes_the_answer_marker() {
+    async fn cited_counts_the_union_of_context_docnames_and_text_matches() {
         let dir = tempfile::tempdir().unwrap();
+        // Roe への言及を含まない答え（本文一致では拾えない）。
+        let answer_text =
+            "Ad hoc file systems aggregate node-local NVMe (brinkmann2020_10-1007-s11390-020-9801-1.pdf).";
+        let contexts_json = r#"[{"text": {"doc": {"docname": "roe2021_arxiv-2101-00001v1", "dockey": "k1", "citation": "Roe (2021)"}}, "score": 5}]"#;
         let config = stub_pqa_with_acquire(
             dir.path(),
-            "cat >/dev/null\n\
-             printf 'References\\n1. (roe2021_arxiv-2101-00001v1.pdf pages 3-4): evidence\\n\\n'\n\
-             printf 'Answer: Ad hoc file systems aggregate node-local NVMe.\\n'\n",
+            &ask_stub_script(answer_text, contexts_json),
             &acquire_stub_script(6, 3),
         );
         let adapter = PaperQaAdapter::new(config);
@@ -2982,9 +3275,20 @@ while true; do sleep 0.1; done
             .iter()
             .map(|s| s["cited"].as_bool().unwrap())
             .collect();
-        // 1 件目 (Brinkmann) は本文にも References 節にも出てこない、2 件目 (Roe) は References
-        // 節だけに出る（本文一致だけなら false のはず）、3 件目はどちらにも出ない。
-        assert_eq!(cited, vec![false, true, false], "{sources}");
+        assert_eq!(cited, vec![true, true, false], "{sources}");
+
+        let research: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(research["evidence"]["cited"], 2, "{research}");
+        // Roe だけが contexts 経由（Brinkmann は本文一致だけ）。
+        assert_eq!(research["evidence"]["cited_from_contexts"], 1, "{research}");
+
+        let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
+        assert!(answer_md.contains("## 引用された文献（contexts）"), "{answer_md}");
+        assert!(answer_md.contains("roe2021_arxiv-2101-00001v1"), "{answer_md}");
+        assert!(answer_md.contains("Roe (2021)"), "{answer_md}");
     }
 
     /// ADR-0063 D1: 目的文中の起点 URL は種類ごとに扱いが分かれる — PDF / DOI / arXiv は取得ランナーへの
@@ -2994,7 +3298,7 @@ while true; do sleep 0.1; done
         let dir = tempfile::tempdir().unwrap();
         let config = stub_pqa_with_acquire(
             dir.path(),
-            &format!("cat >/dev/null\nprintf 'Answer: {STUB_ANSWER}\\n'\n"),
+            &ask_stub_script(STUB_ANSWER, ""),
             &acquire_stub_script(6, 3),
         );
         let adapter = PaperQaAdapter::new(config);
@@ -3033,7 +3337,7 @@ while true; do sleep 0.1; done
         let dir = tempfile::tempdir().unwrap();
         let mut config = stub_pqa_with_acquire(
             dir.path(),
-            &format!("cat >/dev/null\nprintf 'Answer: {STUB_ANSWER}\\n'\n"),
+            &ask_stub_script(STUB_ANSWER, ""),
             &acquire_stub_script(3, 1),
         );
         // ADR-0063 D1: 既定（`insufficient_is_error = false`）では hard error にならないので、
@@ -3090,7 +3394,7 @@ while true; do sleep 0.1; done
         let dir = tempfile::tempdir().unwrap();
         let config = stub_pqa_with_acquire(
             dir.path(),
-            &format!("cat >/dev/null\nprintf 'Answer: {STUB_ANSWER}\\n'\n"),
+            &ask_stub_script(STUB_ANSWER, ""),
             &acquire_stub_script(5, 3),
         );
         let adapter = PaperQaAdapter::new(config);
@@ -3121,7 +3425,7 @@ while true; do sleep 0.1; done
         let dir = tempfile::tempdir().unwrap();
         let config = stub_pqa_with_acquire(
             dir.path(),
-            "cat >/dev/null\necho 'Answer: I could not find any relevant work.'\n",
+            &ask_stub_script("I could not find any relevant work.", ""),
             "echo 'progress: arxiv: 0 result(s)'\necho 'CELERIS_ACQUIRE {\"candidates\": 0, \"pdfs\": 0, \"engines\": {}}'\n",
         );
         let adapter = PaperQaAdapter::new(config);
@@ -3153,7 +3457,7 @@ while true; do sleep 0.1; done
         let dir = tempfile::tempdir().unwrap();
         let mut config = stub_pqa_with_acquire(
             dir.path(),
-            "cat >/dev/null\necho 'Answer: answered from the existing corpus.'\n",
+            &ask_stub_script("answered from the existing corpus.", ""),
             "echo 'boom' 1>&2\nexit 3\n",
         );
         // ゲートを切っておけば（既存 corpus だけで答える運用）取得の失敗でも done になる。
@@ -3189,10 +3493,7 @@ while true; do sleep 0.1; done
     async fn acquire_and_the_gate_are_skipped_when_max_candidates_is_zero() {
         let dir = tempfile::tempdir().unwrap();
         // `stub_pqa` は `max_candidates = 0`。
-        let config = stub_pqa(
-            dir.path(),
-            "cat >/dev/null\necho 'Answer: from the local corpus only.'\n",
-        );
+        let config = stub_pqa(dir.path(), &ask_stub_script("from the local corpus only.", ""));
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -4008,7 +4309,7 @@ print(json.dumps(out))
         .unwrap();
         let mut config = stub_pqa_with_acquire(
             dir.path(),
-            &format!("cat >/dev/null\nprintf 'Answer: {STUB_ANSWER}\\n'\n"),
+            &ask_stub_script(STUB_ANSWER, ""),
             &acquire_stub_script(6, 3),
         );
         config.settings = Some(dir.path().join("qwen-local").to_string_lossy().into_owned());
@@ -4072,7 +4373,7 @@ print(json.dumps(out))
         // `acquire.query_llm = false` にすると LLM の段は動かさない（従来の決定的な抽出だけ）。
         let mut off = stub_pqa_with_acquire(
             dir.path(),
-            &format!("cat >/dev/null\nprintf 'Answer: {STUB_ANSWER}\\n'\n"),
+            &ask_stub_script(STUB_ANSWER, ""),
             &acquire_stub_script(6, 3),
         );
         off.settings = Some(dir.path().join("qwen-local").to_string_lossy().into_owned());
@@ -4498,5 +4799,185 @@ print(json.dumps(out, ensure_ascii=False))
         assert_eq!(v["prompt_has_objective"], true);
         assert_eq!(v["prompt_has_context"], true);
         assert_eq!(v["prompt_has_rules"], true);
+    }
+
+    // ---------------------------------------------- paperqa_ask.py（python3、ネットワーク無し）
+
+    /// ADR-0063 Phase 109d: `paperqa_ask.py` の純関数（質問の生成・contexts の平坦化・表の組み立て）を
+    /// `python3 -c` から直接呼ぶ（`paperqa` パッケージ無しで動く）。
+    #[test]
+    fn ask_script_pure_functions_build_questions_flatten_contexts_and_the_table() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("paperqa_ask.py");
+        std::fs::write(&script_path, ASK_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ask", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+out = {}
+
+# (b) 対象 5 件 + 総括（比較先あり）で 6 問、max_asks=4 なら 4 問。
+qs_default = mod.build_questions_for_targets(
+    ["A", "B", "C", "D", "E"], ["x", "y"], "BenchFS", 8, "fallback")
+out["default_count"] = len(qs_default)
+out["default_ids"] = [q["id"] for q in qs_default]
+out["default_last_target"] = qs_default[-1]["target"]
+qs_capped = mod.build_questions_for_targets(
+    ["A", "B", "C", "D", "E"], ["x", "y"], "BenchFS", 4, "fallback")
+out["capped_count"] = len(qs_capped)
+out["capped_ids"] = [q["id"] for q in qs_capped]
+
+# 比較先が無ければ総括の問いは無い（対象は全部入るのに max_asks 未満で終わる）。
+qs_no_comparison = mod.build_questions_for_targets(["A", "B"], ["x"], None, 8, "fallback")
+out["no_comparison_count"] = len(qs_no_comparison)
+out["no_comparison_ids"] = [q["id"] for q in qs_no_comparison]
+
+# (c) 対象が無ければフォールバックの単一の問い。
+qs_none = mod.build_questions_for_targets([], ["x", "y"], "BenchFS", 8, "the fallback question")
+out["none_count"] = len(qs_none)
+out["none_question"] = qs_none[0]["question"]
+out["none_target"] = qs_none[0]["target"]
+
+# contexts の平坦化（dict 形の偽の Context/Text/Doc、paperqa 無しで動く）。
+contexts = [
+    {"text": {"doc": {"docname": "roe2021", "dockey": "k1", "citation": "Roe 2021"}}, "score": 5},
+    {"text": {"doc": {"docname": "", "dockey": "k2", "citation": ""}}, "score": None},
+]
+out["flat"] = mod.flatten_contexts(contexts, "t1")
+
+# (d) 表の組み立て: 観点が答えに無ければ「未確認」。
+answers = [
+    {"target": "A", "answer": "- x: fact about A (cite1)\n- y: something else entirely"},
+    {"target": "B", "answer": "no useful information here"},
+]
+out["table"] = mod.build_target_aspect_table(["A", "B"], ["x", "y"], answers)
+out["table_empty_without_targets"] = mod.build_target_aspect_table([], ["x"], answers)
+out["table_empty_without_aspects"] = mod.build_target_aspect_table(["A"], [], answers)
+
+# 再試行の判定（is_transient_error）: 503/429/502/接続断は再試行対象、それ以外は対象外。
+out["transient"] = [
+    mod.is_transient_error(Exception("HTTP Error 503: Service Unavailable")),
+    mod.is_transient_error(Exception("429 Too Many Requests")),
+    mod.is_transient_error(Exception("connection reset by peer")),
+    mod.is_transient_error(Exception("KeyError: 'missing'")),
+]
+
+print(json.dumps(out, ensure_ascii=False))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+
+        assert_eq!(v["default_count"], 6, "{v}");
+        assert_eq!(
+            v["default_ids"],
+            serde_json::json!(["t1", "t2", "t3", "t4", "t5", "summary"]),
+            "{v}"
+        );
+        assert_eq!(v["default_last_target"], serde_json::Value::Null, "{v}");
+        assert_eq!(v["capped_count"], 4, "max_asks=4 のとき対象だけで埋まり総括は入らない: {v}");
+        assert_eq!(
+            v["capped_ids"],
+            serde_json::json!(["t1", "t2", "t3", "t4"]),
+            "{v}"
+        );
+        assert_eq!(v["no_comparison_count"], 2, "比較先が無ければ総括は無い: {v}");
+        assert_eq!(v["no_comparison_ids"], serde_json::json!(["t1", "t2"]), "{v}");
+
+        assert_eq!(v["none_count"], 1, "{v}");
+        assert_eq!(v["none_question"], "the fallback question", "{v}");
+        assert_eq!(v["none_target"], serde_json::Value::Null, "{v}");
+
+        assert_eq!(
+            v["flat"],
+            serde_json::json!([
+                {"docname": "roe2021", "dockey": "k1", "citation": "Roe 2021", "score": 5, "question": "t1"},
+                {"docname": "", "dockey": "k2", "citation": "", "score": serde_json::Value::Null, "question": "t1"},
+            ]),
+            "{v}"
+        );
+
+        let table = v["table"].as_str().unwrap();
+        assert!(table.contains("| 対象 | x | y |"), "{table}");
+        assert!(table.contains("| A | fact about A (cite1) | something else entirely |"), "{table}");
+        assert!(
+            table.contains("| B | 未確認 | 未確認 |"),
+            "B の答えにはどちらの観点も無いので未確認: {table}"
+        );
+        assert_eq!(v["table_empty_without_targets"], "");
+        assert_eq!(v["table_empty_without_aspects"], "");
+
+        assert_eq!(
+            v["transient"],
+            serde_json::json!([true, true, true, false]),
+            "{v}"
+        );
+    }
+
+    /// ADR-0063 Phase 109d C4: 対象が取れているとき、`answer.md`/`report.md` に「# 対象別の整理」
+    /// （表 + 対象ごとの節）と「## 引用された文献（contexts）」が出る。
+    #[tokio::test]
+    async fn answer_md_gets_target_sections_and_table_when_targets_are_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let contexts_json = r#"[{"text": {"doc": {"docname": "brinkmann2020_10-1007-s11390-020-9801-1", "dockey": "k1", "citation": "Brinkmann et al. (2020)"}}, "score": 8}]"#;
+        let answer_text = "- cache 方式: node-local NVMe cache (brinkmann2020_10-1007-s11390-020-9801-1.pdf)\n- file semantics: 未確認\n";
+        let config = stub_pqa_with_acquire(
+            dir.path(),
+            &ask_stub_script(answer_text, contexts_json),
+            &acquire_stub_script(6, 3),
+        );
+        let adapter = PaperQaAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.task.objective = "CHFS/FINCHFS の性能比較調査（cache 方式、file semantics）".to_string();
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-targets-answer", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
+
+        let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
+        assert!(answer_md.starts_with("# 対象別の整理"), "{answer_md}");
+        assert!(answer_md.contains("| 対象 | cache 方式 | file semantics |"), "{answer_md}");
+        assert!(answer_md.contains("### CHFS"), "{answer_md}");
+        assert!(answer_md.contains("### FINCHFS"), "{answer_md}");
+        assert!(
+            answer_md.contains("## 引用された文献（contexts）"),
+            "{answer_md}"
+        );
+        assert!(
+            answer_md.contains("brinkmann2020_10-1007-s11390-020-9801-1"),
+            "{answer_md}"
+        );
+
+        let research: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            research["targets"],
+            serde_json::json!(["CHFS", "FINCHFS"]),
+            "{research}"
+        );
     }
 }

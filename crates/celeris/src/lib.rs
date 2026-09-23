@@ -276,6 +276,8 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     // ADR-0035 D1 / D3: 取得と証拠ゲートは行ごとの上書きが無い（他の paperqa 設定と同じ扱い）。
                     acquire: base.acquire.clone(),
                     evidence: base.evidence,
+                    // ADR-0063 Phase 109d C3: `max_asks` も行ごとの上書きが無い。
+                    max_asks: base.max_asks,
                 }))
             }
             LdrAdapter::ID => {
