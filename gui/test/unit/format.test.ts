@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shortId, truncateLabel } from "~/lib/format";
+import { shortId, splitOutcome, truncateLabel } from "~/lib/format";
 
 describe("shortId", () => {
   it("returns the id unchanged when it already fits within tailLength + 1", () => {
@@ -33,5 +33,19 @@ describe("truncateLabel", () => {
 
   it("respects a custom maxLength", () => {
     expect(truncateLabel("Pluvio の新テーマ", 5)).toBe("Pluv…");
+  });
+});
+
+describe("splitOutcome", () => {
+  it("接頭辞（ステータス名）と長文の本文に分ける", () => {
+    expect(splitOutcome("done: 全部やりました: 詳細は report.md")).toEqual({
+      status: "done",
+      text: "全部やりました: 詳細は report.md",
+    });
+  });
+
+  it("接頭辞だけ・本文なしはステータス名だけ", () => {
+    expect(splitOutcome("done")).toEqual({ status: "done", text: null });
+    expect(splitOutcome("error: ")).toEqual({ status: "error", text: null });
   });
 });

@@ -142,6 +142,8 @@ describe("loadTaskDetail", () => {
       files: null,
       // マージ（Phase 54）: 「変更」タブを見ていないので引かない（`?tab=changes` のときだけ）。
       changes: null,
+      // running のタスクは人のレビュー待ちではないので `GET /inbox` を引かない。
+      humanReview: [],
       place: {
         projectId: null,
         projectTitle: null,
@@ -150,6 +152,7 @@ describe("loadTaskDetail", () => {
         assigneeName: null,
       },
     });
+    expect(mock.requests.some((r) => r.url.startsWith("/api/v1/inbox"))).toBe(false);
     for (const path of ["", "/events", "/artifacts", "/timeline", "/comments"]) {
       expect(
         mock.requests.some((r) => r.method === "GET" && r.url.startsWith(`/api/v1/tasks/T1${path}`)),
@@ -158,6 +161,52 @@ describe("loadTaskDetail", () => {
     }
     // 「ファイル」タブを見ていないので `GET /tasks/{id}/tree` は叩かない。
     expect(mock.requests.some((r) => r.url.startsWith("/api/v1/tasks/T1/tree"))).toBe(false);
+  });
+
+  it("reviewing / 承認タスクは GET /inbox の未決の承認のうち自分か子のものだけ humanReview に載せる", async () => {
+    const reviewing: TaskDetail = { ...taskDetail, task: { ...taskDetail.task, status: "reviewing" } };
+    mock.on("GET", "/api/v1/tasks/T1", (_req, res) => sendJson(res, 200, reviewing));
+    mock.on("GET", "/api/v1/tasks/T1/events", (_req, res) => sendJson(res, 200, eventsPage));
+    mock.on("GET", "/api/v1/tasks/T1/artifacts", (_req, res) => sendJson(res, 200, artifactList));
+    mock.on("GET", "/api/v1/tasks/T1/timeline", (_req, res) => sendJson(res, 200, timeline));
+    mock.on("GET", "/api/v1/tasks/T1/comments", (_req, res) => sendJson(res, 200, comments));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] }));
+    const item = (id: string, parent: string) => ({
+      approval: { id, title: "Approval", kind: "approval", status: "ready", actions: ["approve", "reject"] },
+      parent: { id: parent, title: "P", kind: "execute", status: "reviewing", actions: [] },
+      criterion_text: "someone signs off",
+      criterion_idx: 0,
+      requested_at: "2026-09-15T00:00:00Z",
+      evidence: [],
+      other_verdicts: [],
+      artifacts: [],
+      previous_decisions: [],
+    });
+    mock.on("GET", "/api/v1/inbox", (_req, res) =>
+      sendJson(res, 200, {
+        approvals: [item("A1", "T1"), item("A2", "OTHER")],
+        questions: [],
+        drafts: [],
+        attention: [],
+        counts: { approvals: 2, attention: 0, by_status: {}, drafts: 0, questions: 0 },
+      }),
+    );
+
+    const result = await loadTaskDetail(client, "T1", new Request("http://gui.invalid/tasks/T1"));
+    expect(result.humanReview.map((a) => a.approval.id)).toEqual(["A1"]);
+  });
+
+  it("GET /inbox が落ちても画面は出す（humanReview は空）", async () => {
+    const reviewing: TaskDetail = { ...taskDetail, task: { ...taskDetail.task, status: "reviewing" } };
+    mock.on("GET", "/api/v1/tasks/T1", (_req, res) => sendJson(res, 200, reviewing));
+    mock.on("GET", "/api/v1/tasks/T1/events", (_req, res) => sendJson(res, 200, eventsPage));
+    mock.on("GET", "/api/v1/tasks/T1/artifacts", (_req, res) => sendJson(res, 200, artifactList));
+    mock.on("GET", "/api/v1/tasks/T1/timeline", (_req, res) => sendJson(res, 200, timeline));
+    mock.on("GET", "/api/v1/tasks/T1/comments", (_req, res) => sendJson(res, 200, comments));
+    mock.on("GET", "/api/v1/org", (_req, res) => sendJson(res, 200, { items: [] }));
+    mock.on("GET", "/api/v1/inbox", (_req, res) => sendProblem(res, { status: 500, code: "internal", detail: "boom" }));
+    const result = await loadTaskDetail(client, "T1", new Request("http://gui.invalid/tasks/T1"));
+    expect(result.humanReview).toEqual([]);
   });
 
   /**

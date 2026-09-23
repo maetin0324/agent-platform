@@ -16,3 +16,15 @@ export function truncateLabel(text: string, maxLength = 40): string {
   if (maxLength <= 1) return "…";
   return `${text.slice(0, maxLength - 1)}…`;
 }
+
+/**
+ * `WorkerFinished.outcome`（`done: <要約>` / `error: <理由>` のように接頭辞 + 長文）を、
+ * ステータス名（短い語）と本文に分ける。ステータス欄にはステータス名だけを出し、本文は別の領域に出す。
+ * 接頭辞が無ければ全体がステータス名。
+ */
+export function splitOutcome(outcome: string): { status: string; text: string | null } {
+  const i = outcome.indexOf(": ");
+  if (i <= 0) return { status: outcome, text: null };
+  const text = outcome.slice(i + 2);
+  return { status: outcome.slice(0, i), text: text === "" ? null : text };
+}

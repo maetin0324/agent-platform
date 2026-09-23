@@ -7394,3 +7394,12 @@ fixture（`test/mock-celeris/fixtures.ts::orgList`）には既に depth 5 のノ
 - ダークモードの面の区別をさらに強めるなら、`--surface-2`/`--surface-3`/`--border` も含めた段階を
   引き直す（今回は `--surface` のみの最小変更）。
 - P-G46-2・P-G46-5 は上記「未解決事項」のとおり次のラウンド・celeris Phase 97 待ち。
+
+## タスク詳細: outcome 欄の分離と人のレビュー情報（2026-09-23）
+
+- 原因(1): run 一覧の outcome バッジに `outcome_text`（`done: <長い要約>` の本文）を連結していた。タイムラインの `worker_finished` も生の文字列を出していた。
+- 対応(1): バッジはステータス名のみ（本文は `title` と「詳細」折り畳み）。タイムラインは `splitOutcome`（`app/lib/format.ts`）で分けて折り畳み。
+- 原因(2): 人の承認の判断材料（要約・証拠・成果物）は `/inbox` にしか無く、reviewing の親にも承認タスクにも出ていなかった。
+- 対応(2): loader が reviewing / approval のタスクのときだけ `GET /inbox` を引き（失敗しても画面は出す）、概要タブ先頭に `HumanReviewPanel`（条件・直近 run の要約・条件別判定・reviewer 指摘・証拠・成果物と「変更」タブへのリンク・承認/却下）を出す。API 変更なし。
+- 検証: `pnpm lint/typecheck/test(1065)/build`、`node scripts/check-human-review.mjs`（デスクトップ 1440・スマホ 393 で全チェック true、`docs/gui/human-review/*.png`）。
+- 未確認: 実 celeris での実機確認、`pnpm e2e`、Console 画面の `run 終了:` 表示（未変更）。

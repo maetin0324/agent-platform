@@ -29,12 +29,14 @@ import { loadTaskFiles, readTaskFilesQuery, type TaskFilesData } from "~/celeris
 import { buildTaskEdit, commentOnTask, editTask, reopenTask } from "~/celeris/tasks-admin.server";
 import type {
   Action,
+  ApprovalItem,
   ArtifactList,
   ArtifactView,
   CommentList,
   ConfigView,
   Event,
   EventsPage,
+  Inbox,
   MilestoneView,
   OrgList,
   OrgNode,
@@ -57,6 +59,7 @@ import {
   TransitionFlash,
 } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { HumanReviewPanel } from "~/components/HumanReviewPanel";
 import { ImageViewer } from "~/components/ImageViewer";
 import { LocalTime } from "~/components/LocalTime";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
@@ -86,7 +89,7 @@ import type { Tone } from "~/components/ui/tone";
 import { artifactStatusMessage, isJson, pickViewer } from "~/lib/artifact-view";
 import { isValidLabel, MAX_LABELS, PRIORITY_LABELS } from "~/lib/board";
 import { defaultPromotePath, docsHref, isMarkdownName } from "~/lib/docs";
-import { shortId } from "~/lib/format";
+import { shortId, splitOutcome } from "~/lib/format";
 import { isKnowledgeFallback } from "~/lib/knowledge";
 import {
   ASSIGNED_WHY_LABEL,
@@ -249,6 +252,11 @@ export interface TaskDetailData {
    * リポジトリを使わないタスクでは `error` に celeris の文言が入り、タブはその文言だけを出す。
    */
   changes: { data: TaskChangesData; error: null } | { data: null; error: ActionError } | null;
+  /**
+   * 人のレビュー待ち（`reviewing` のタスク、または `kind = approval` のタスク）の判断材料。
+   * `GET /inbox` の未決の承認のうち、このタスクが承認タスク自身か、その親のもの。落ちても画面は出す（空）。
+   */
+  humanReview: ApprovalItem[];
   /** どの案件・どの途中目標・誰の仕事か（監査 M2「裏方から戻れる」）。分からなければ null。 */
   place: {
     projectId: string | null;
@@ -327,6 +335,12 @@ export async function loadTaskDetail(client: CelerisClient, taskId: string, requ
       changes = { data: null, error: toActionError(e) };
     }
   }
+  // 人のレビュー待ちの判断材料（`GET /inbox` の承認）。reviewing の親か承認タスク自身のときだけ引く。
+  let humanReview: ApprovalItem[] = [];
+  if (detail.task.status === "reviewing" || detail.task.kind === "approval") {
+    const inbox = await client.get<Inbox>("/inbox", { signal: request.signal }).catch(() => null);
+    humanReview = (inbox?.approvals ?? []).filter((a) => a.approval.id === taskId || a.parent?.id === taskId);
+  }
   return {
     detail,
     events,
@@ -342,6 +356,7 @@ export async function loadTaskDetail(client: CelerisClient, taskId: string, requ
       : null,
     files,
     changes,
+    humanReview,
     place: {
       projectId,
       projectTitle: project?.project.title ?? null,
@@ -413,6 +428,7 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
     assignedEvent,
     files,
     changes,
+    humanReview,
     place,
   } = loaderData;
   const { task } = detail;
@@ -613,6 +629,7 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
               retryFetcher={retryFetcher}
               retrying={retrying}
               fetchedAt={fetchedAt}
+              humanReview={humanReview}
             />
           )}
 
@@ -791,7 +808,9 @@ function OverviewTab({
   retryFetcher,
   retrying,
   fetchedAt,
+  humanReview,
 }: {
+  humanReview: ApprovalItem[];
   detail: TaskDetail;
   artifactCount: number;
   org: OrgNode[];
@@ -806,6 +825,15 @@ function OverviewTab({
   const { task } = detail;
   return (
     <>
+      {humanReview.length > 0 && (
+        <HumanReviewPanel
+          items={humanReview}
+          criteria={detail.criteria}
+          priorReview={detail.prior_review}
+          reviewTaskId={task.id}
+        />
+      )}
+
       <section aria-labelledby="info-heading" data-testid="info-section">
         <Card>
           <CardHeader
@@ -1016,12 +1044,20 @@ function OverviewTab({
                         </td>
                         <td className={tdClass}>
                           {run.outcome ? (
-                            <Badge tone={OUTCOME_TONE[run.outcome] ?? "neutral"}>
+                            <Badge tone={OUTCOME_TONE[run.outcome] ?? "neutral"} title={run.outcome_text ?? undefined}>
                               {run.outcome}
-                              {run.outcome_text ? ` (${run.outcome_text})` : ""}
                             </Badge>
                           ) : (
                             <span className="text-fg-subtle">-</span>
+                          )}
+                          {/* 長い理由・要約はステータス欄に混ぜず、折り畳みの中に分ける。 */}
+                          {run.outcome_text && (
+                            <details data-testid="run-outcome-detail" className="mt-1 max-w-xs text-xs text-fg-muted">
+                              <summary className="cursor-pointer select-none">詳細</summary>
+                              <p className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+                                {run.outcome_text}
+                              </p>
+                            </details>
                           )}
                         </td>
                         <td className={cn(tdClass, "tabular-nums")}>
@@ -2138,12 +2174,23 @@ function TimelineEventBody({ event }: { event: Event }) {
           run {event.run_id} 開始（{event.adapter} / {event.model}）
         </p>
       );
-    case "worker_finished":
+    case "worker_finished": {
+      // `done: <長い要約>` はステータス名だけ本文に出し、要約は折り畳みに分ける。
+      const { status, text } = splitOutcome(event.outcome);
       return (
-        <p className="mt-1.5 text-fg-muted">
-          run {event.run_id} 終了: {event.outcome}
-        </p>
+        <div className="mt-1.5 text-fg-muted">
+          <p>
+            run {event.run_id} 終了: {status}
+          </p>
+          {text && (
+            <details data-testid="timeline-outcome-detail" className="mt-1 text-sm lg:text-xs">
+              <summary className="cursor-pointer select-none">詳細</summary>
+              <p className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words">{text}</p>
+            </details>
+          )}
+        </div>
       );
+    }
     case "worker_progress":
       return <p className="mt-1.5 text-fg-muted">{event.msg}</p>;
     case "artifact_produced":
