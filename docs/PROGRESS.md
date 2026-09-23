@@ -16020,3 +16020,8 @@ Phase 109d C1 の「`PQA_SETTINGS_DIR=settings_dir` にしてから `from_name(s
 - タスク 01M37A3JMMFXVY30SWD4EZ01JN: Python API 経路が動いた。settings 読込 OK、対象ごとの ask（targets = CHFS / FINCHFS / GekkoFS / UnifyFS / BeeOND / BeeGFS-on-demand）、`evidence = {cited: 4（本文 2 / アブスト 2、contexts 由来 2）, insufficient: false}`、`report.md` に「# 対象別の整理」の表と対象ごとの節、「## 引用された文献（contexts）」。
 - reviewer 不合格の理由: 表の列（観点）が「人の指定」「2026-09-23」。目的文の末尾に人（親）が足した見出し「## 方針（人の指定、2026-09-23）」の括弧を `research_aspects` が観点と解釈し、本体の「目的・semantics・deployment model・server/core利用・data path」を拾わなかった。targets も同じ文の「Mochi-Margo-Mercury、UCX、io_uring」を落としていた。
 - 対処 2 本: (1) 6 回目のやり直し 01M37AZ129EMB93N50MZ132S8K は目的文を「対象: … / …（観点: 目的、file semantics、deployment model、server/core 利用、data path、BenchFS との比較分類）」の明示形に書き直して approve（現行リリースで通るかを見る）。(2) Phase 109f（Sonnet）: 抽出を目的文の最初の段落に限る、日付や「人の指定」を捨てる妥当性チェック、`、` 区切りで続く固有名詞も対象に、「(必要なら…)」は除外、明示の「対象:」「観点:」を最優先。
+
+### 2026-09-23 14:43 UTC: 文献調査の 6 回目（明示の「対象: … / …（観点: …）」行）も抽出で不合格
+
+- タスク 01M37AZ129EMB93N50MZ132S8K: `targets = ["model", "server", "core"]`（スペース付き `A / B / C` を列挙と認識せず、括弧内の観点「deployment model」「server/core 利用」から識別子を拾った）、`aspects` に「観点: 目的」とラベルが残る、表のセルに質問文のエコー（「Question: model について…」）が貼られる。reviewer は「指定 8 対象ではなく model / server / core」で不合格。PaperQA 経路自体（settings、ask、contexts 由来の cited=2、insufficient=false）は正常。
+- Phase 109f に追加指示: 明示の「対象:」行は括弧を除いてから `/`・` / `・`、`・`,` のどれでも同じに読む、「観点:」ラベルを剥がす、表のセル抽出は質問のエコーを除く、この目的文そのものをテストに。以降のやり直しは 109f の昇格後に行う（1 回 10 分・codex の reviewer 2 回を消費するため、抽出が直るまで止める）。
