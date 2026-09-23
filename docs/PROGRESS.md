@@ -15088,3 +15088,8 @@ Phase 104（本番、2026-09-22）の delivery は merge 後 push を行わず�
 - 副次的に見つけた不整合: (1) CoS の計画が BenchFS の子タスク 6 件を `remote(sirius)` で作り、担当 software-engineering ×2（tools: gh, cluster:pegasus）と web-research（tavily, exa）は D8 で sirius を使えず「no such cluster in the config; task left ready」（文言が誤解を招く）→ ready のまま放置され、D8 の warn が 2 秒ごとに出続ける（2 時間で 1,500 行超）。人には知らされない。tools 空の systems-performance / literature-research は「従来どおり許す」で実行し、死んだ master に当たって失敗・requeue。(2) Phase 103 で Drop の kill を外した結果、`cluster_login` のテストが起こす偽 ssh master（`/tmp/.tmpXXXX/ssh -M -N cluster-host`）がテスト後も残り、本番ホストに 35 プロセス（ppid 1、親の tmux scope 内）溜まっていた → 親が kill（0 に）。
 - 対応: Phase 107（ADR-0062）を Sonnet で起動。A. master に `ServerAliveInterval` 等を付け、`ssh <host> true` の実通信 probe を足し、master 終了を `ClusterMasterExited`（stderr 付き）で可視化。B. 担当に `cluster:<id>` が無い remote タスクは blocked + 人への質問（1 回）、`create_task`/plan の検証で落とす、matching は道具を持つノードだけ。C. テストの偽 ssh の後片付け。
 - 人の判断待ち: BenchFS 案件を進めるには software-engineering（と systems-performance）の tools に `cluster:sirius` を足すか、担当を cluster-hpc に寄せる必要がある。
+
+### 2026-09-23 04:05 UTC: 組織の道具を追加（人の指示）と Phase 107 の追加指示
+
+- `PATCH /org/software-engineering` で tools を `["gh","cluster:pegasus"]` → `["gh","cluster:pegasus","cluster:sirius"]`、`PATCH /org/systems-performance` で tools 無し → `["cluster:pegasus","cluster:sirius"]`（profile は丸ごと差し替えなので他の項目は保ったまま）。`GET /org` の `effective_profiles` で反映を確認。BenchFS 案件の子タスクのうち担当がこの 2 ノードのものは、次の tick から sirius へ配線される。
+- 人の指示「web-research などが不必要に remote で作業しないように」: 原因は ADR-0039 D3 の作業場所の継承（案件が remote(sirius) なので子が担当を問わず remote を継いだ）。Phase 107 に追加指示: remote を使えるのは実効 profile に `cluster:<id>` を持つ担当だけ（tools 空の例外を廃止）、継承は担当に道具が無ければ Local に落とす（plan / create_task / delegate / retry の 4 経路で共通）、明示 remote で道具無しは検証で落とす、matching は道具を持つノードだけを候補に、CoS の指示文にも明記。
