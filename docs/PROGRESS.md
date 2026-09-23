@@ -15202,3 +15202,12 @@ CoS の対話指示（`crates/task-worker/src/preamble.rs::conversation_instruct
 
 - P-107-1: GUI の「クラスタ」画面に `ClusterMasterExited` の直近の発生（exit code・stderr の末尾）を出す（現状は `GET /tasks/{id}/events` からしか見えない）。
 - P-107-2: `keepalive_secs`/`liveness_probe_secs` を `PUT /clusters/{id}/settings` で上書きできるようにする（現状は設定ファイルのみ）。
+
+### Phase 107 の本番反映（2026-09-23 05:01 UTC、ライブ切替）と直後の観測
+
+- merge: `worktree-agent-ac3c98a6ba391f323` → main `b5ee547`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1900 / failed 0）、テスト後の偽 ssh（`ssh -M -N cluster-host`）残り 0、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、`pnpm gen:types` 差分ゼロ（`cluster_master_exited` を含む types.ts は Phase 107 が更新済み）、`pnpm typecheck` exit 0、`pnpm test` 68 files / 1061 passed。push 済み。
+- `release.sh main` → exit 0、`sha12=b5ee54757131 schema_version=25`、`changes.json: base=a6e12d813f3b commits=5 files=25 sensitive=1`（`config/celeris.clusters.example.toml` の `keepalive_secs` / `liveness_probe_secs` の例のみ）。ゲート 10 段すべて exit 0（cargo-test 161.8s）。`verify.sh b5ee54757131` → exit 0、check 1〜4, 4b, 5（N-1 = a6e12d813f3b）, 6（smoke 6.03s）すべて true、`ok=true live_ok=true`。
+- `promote.sh b5ee54757131` → mode=live、DB バックアップ 19M、新 celeris が 2 秒で active、GUI 切替 1 秒。`GET /health` release=b5ee54757131 role=active schema_version=25。pegasus の master（旧バイナリが起こしたもの、keepalive 無し）は生存・接続維持。sirius は昇格前から未接続（03:43 の再接続後に再び切れていた。keepalive 付きの master は次の接続から）。
+- 昇格直後の効果: 担当 web-research の remote タスク 01M35X86XTCSVMAMVM82QRM06S が 05:01:30 に `ready → blocked（unroutable）` + 質問「担当 `web-research` には道具 `cluster:sirius` が無いため…」（ADR-0062 B1）。D8 の warn は 1 行（INFO「assignee lacks the cluster tool; blocked and asked a human」）だけになり、2 秒ごとの spam は止まった。
+- BenchFS の子 6 件の状態: done 1（software-engineering、棚卸し）、blocked 3（software-engineering: codex run が `remote-exec` で `Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf` (exit 255) に当たって人に質問。systems-performance: 作業を進めた上での正当な質問〈scheduler/accounting のデータ〉。web-research: 上記 B1）、failed 1（literature-research、remote 準備の失敗 ×2）、cancelled 1（依存の失敗）。
+- 見つかった穴 2 つ → Phase 108 を起動: (1) `PATCH /tasks/{id}` と retry が `workspace` を受けず、B1 の質問文が示す「作業場所を変える」手段が無い。(2) codex のサンドボックス内では ssh がシステムの `/etc/ssh/ssh_config.d` の Include 先を「Bad owner or permissions」で拒否する（人のシェルでは問題なし）→ `.celeris/remote-exec` は `ssh -F ~/.ssh/config` でユーザー設定だけを読む。
