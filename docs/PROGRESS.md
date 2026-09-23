@@ -15789,3 +15789,10 @@ Phase 109 の本番反映直後（2026-09-23 11:04〜11:10 UTC）にやり直し
 - `release.sh main` → exit 0、`sha12=3e0991661ee0 schema_version=25`、`changes.json: base=5b496f5b5720 commits=4 files=11 sensitive=1`（`config/celeris.web-research.example.toml` の例のみ）。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = 5b496f5b5720）, 6 すべて true、`ok=true live_ok=true`。`promote.sh 3e0991661ee0` → mode=live、新 celeris 2 秒で active、GUI 切替 3 秒。
 - 知識ベース `projects/benchfs/primary-sources.md` の `sources` に BeeOND の章 `https://doc.beegfs.io/latest/advanced_topics/beeond.html` と FINCHFS の docs `https://finchfs.readthedocs.io` を追加（3 回目の不合格理由の 2 つ）。
 - Web 調査の 4 回目のやり直しを起動（構造化合成・docs 深追い・目的文を保つ再挑戦）。結果は次節に追記。PaperQA の Python API 化（Phase 109d）は並行して実装中。
+
+### 2026-09-23 13:14 UTC: Web 調査が合格（4 回目、Phase 109c で初めて reviewer を通過）
+
+- タスク 01M3768090QQQMQEFK2JK6SCNB（web-research、local、attempts 0 = quick）: LDR が 1 分 53 秒で報告（1,650 行）。構成は「対象ごとの節（CHFS / FINCHFS / GekkoFS / UnifyFS / BeeOND）× デプロイメントモデル・推奨構成・チューニング・File Semantics」。「証拠の質」: 出典 15 件（引用 13）、必読の一次情報 6 件中 6 件を反映。
+- reviewer（claude-code）: 合格。「5 システムすべてに deployment model / tuning の節がある。CHFS の記述（`chfsctl -h/-p`、`-c devdax`、`chfuse -o direct_io`、`chfs_sync`、zpoline）は取得した README の逐語と一致。FINCHFS と BeeOND は一次情報が 404 か詳細不足の項目を正直に『未確認』と明記しており、受け入れ条件の例外条項に合致。UnifyFS（Commit/Lamination、`unifyfs.conf`）は公式 docs と整合」。
+- ここまでの経緯: 1〜3 回目は (1) LDR が検索結果だけで一次情報を読まない → 109b で必読 URL の本文を fetch、(2) 再挑戦で目的が置き換わり報告が 1 対象に縮む → 109c で目的文を保つ、(3) 抜粋を貼るだけで観点の整理が無い → 109c の構造化合成、(4) 受け入れ条件が 1 対象の欠落で全体を落とす → 部分達成（『未確認』）を許す文に。
+- 残り: 文献調査（PaperQA）は Phase 109d（Python API、contexts 由来の cited、対象ごとの質問）の昇格後にやり直す。framing タスクは文献調査の完了待ち。
