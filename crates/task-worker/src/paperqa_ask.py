@@ -59,6 +59,11 @@ INPUT (all paths absolute):
    "targets": ["CHFS", "FINCHFS", ...],          # ADR-0063 Phase 109c A
    "aspects": ["server/client 配置", ...],
    "comparison_target": "BenchFS" | null,
+   "comparison_context": {                       # ADR-0063 Phase 109g A: material for the
+       "knowledge_root": "<abs path>" | null,     # comparison-classification judgement
+       "knowledge_index": [{"path": ..., "title": ..., "tags": [...]}, ...],
+       "fallback_paragraph": "<the objective's own sentence around the compare phrase>" | null,
+   } | null,
    "max_asks": 8,
    "fallback_question": "<the full single-question text used when targets is empty>",
    "output_path": "<run_dir>/ask_output.json"}
@@ -95,6 +100,19 @@ so `build_questions_for_targets`/`build_target_aspect_table`/
 `flatten_contexts` (and the retry helpers) can be exercised with
 `python3 -c` against plain dicts, without the `paperqa` package installed
 (ADR-0063 Phase 109d test requirement).
+
+ADR-0063 Phase 109g A: the comparison-classification summary question (the last one in
+`build_questions_for_targets`'s output when `comparison_target` is given) is a *placeholder*
+at that point -- `main()` resolves the compare target's design conditions
+(`load_comparison_design_context`, from a matching knowledge-base page or, failing that, the
+objective's own surrounding sentence) and, once the per-target answers are in, rebuilds it as
+a forced judgement question (`build_comparison_question`) that must classify each target
+`公平比較可能`/`背景比較のみ` against those design conditions -- a lack of literature
+mentioning the compare target is explicitly not an acceptable reason to answer 未確認. Only
+when no design-conditions text can be found at all does the old, permissive question stay in
+place (未確認 remains acceptable then). `build_target_aspect_table`'s comparison column is
+then read back out of that summary answer (`extract_comparison_classification`), not out of
+each target's own per-target answer.
 """
 
 import json
@@ -205,25 +223,78 @@ def _extract_aspect_line(answer_text, aspect, question_text=None):
     return "未確認"
 
 
-def build_target_aspect_table(targets, aspects, answers):
+def _is_comparison_aspect(aspect, comparison_target):
+    """Whether `aspect` (a column header, e.g. `"BenchFS との比較分類"`) is the comparison
+    classification column (ADR-0063 Phase 109g A): it names `comparison_target` and talks
+    about comparison (`比較`). Without a `comparison_target` there is no such column."""
+    comparison_target = str(comparison_target or "").strip()
+    if not comparison_target:
+        return False
+    aspect = str(aspect or "")
+    return "比較" in aspect and comparison_target in aspect
+
+
+_COMPARISON_LABELS = ("公平比較可能", "背景比較のみ")
+_CONFIDENCE_LEVELS = ("高", "中", "低")
+_CONFIDENCE_PAREN_RE = re.compile(r"[（(]\s*(高|中|低)\s*[）)]")
+_CONFIDENCE_LABEL_RE = re.compile(r"確度\s*[:：]\s*(高|中|低)")
+
+
+def extract_comparison_classification(summary_answer_text, target):
+    """ADR-0063 Phase 109g A: the `"<比較先> との比較分類"` table cell for one target, pulled
+    from the **comparison summary answer** (not the target's own per-target answer -- the
+    per-target question never asked for this classification, only the summary question
+    does). Looks line by line for a line that names `target` and one of `_COMPARISON_LABELS`
+    (`公平比較可能`/`背景比較のみ`), then a confidence level near it -- either
+    `(高)`/`（高）` right after the label, or a separate `確度: 高` elsewhere on the same
+    line. Returns e.g. `"公平比較可能（高）"`, or just the label without a confidence level
+    if none was found, or `"未確認"` if no line matches at all (never guessed)."""
+    text = summary_answer_text or ""
+    target = str(target or "").strip()
+    if not target:
+        return "未確認"
+    for raw_line in text.splitlines():
+        if target not in raw_line:
+            continue
+        label = next((l for l in _COMPARISON_LABELS if l in raw_line), None)
+        if not label:
+            continue
+        after_label = raw_line.split(label, 1)[1]
+        match = _CONFIDENCE_PAREN_RE.search(after_label) or _CONFIDENCE_LABEL_RE.search(
+            raw_line
+        )
+        if match:
+            return "%s（%s）" % (label, match.group(1))
+        return label
+    return "未確認"
+
+
+def build_target_aspect_table(targets, aspects, answers, comparison_target=None):
     """The target x aspect Markdown table for `answer.md`/`report.md`
     (ADR-0063 Phase 109d C4). Empty (`""`) if there are no targets or no
     aspects -- the caller falls back to the per-target sections alone. A
     cell whose aspect does not show up in that target's answer is
     `"未確認"` (never guessed). Phase 109f: also strips a leading echo of
     the question (`answer.question`, when the answer dict/object has one)
-    out of the answer text before looking for aspect lines."""
+    out of the answer text before looking for aspect lines. ADR-0063 Phase
+    109g A: the comparison-classification column (see `_is_comparison_aspect`)
+    is filled from the **summary** answer (`extract_comparison_classification`)
+    instead of the target's own per-target answer -- that question was never
+    asked to classify anything, the summary question was."""
     targets = [str(t).strip() for t in (targets or []) if str(t or "").strip()]
     aspects = [str(a).strip() for a in (aspects or []) if str(a or "").strip()]
     if not targets or not aspects:
         return ""
     by_target = {}
     question_by_target = {}
+    summary_answer_text = None
     for answer in answers or []:
         target = _get(answer, "target")
         if target:
             by_target[str(target)] = _get(answer, "answer") or ""
             question_by_target[str(target)] = _get(answer, "question") or ""
+        elif _get(answer, "id") == "summary":
+            summary_answer_text = _get(answer, "answer") or ""
     lines = [
         "| 対象 | " + " | ".join(aspects) + " |",
         "| --- | " + " | ".join("---" for _ in aspects) + " |",
@@ -231,10 +302,12 @@ def build_target_aspect_table(targets, aspects, answers):
     for target in targets:
         answer_text = by_target.get(target, "")
         question_text = question_by_target.get(target, "")
-        cells = [
-            _extract_aspect_line(answer_text, aspect, question_text)
-            for aspect in aspects
-        ]
+        cells = []
+        for aspect in aspects:
+            if _is_comparison_aspect(aspect, comparison_target) and summary_answer_text is not None:
+                cells.append(extract_comparison_classification(summary_answer_text, target))
+            else:
+                cells.append(_extract_aspect_line(answer_text, aspect, question_text))
         lines.append("| " + target + " | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
@@ -271,12 +344,157 @@ def build_questions_for_targets(
     remaining = max_asks - len(questions)
     comparison_target = str(comparison_target).strip() if comparison_target else ""
     if remaining > 0 and comparison_target:
+        # ADR-0063 Phase 109g A: this is the *placeholder* question text (allows 未確認,
+        # asks nothing about design conditions) -- `main()` replaces it with the grounded
+        # judgement question (`build_comparison_question`) once the per-target answers are
+        # known and a comparison design-conditions text could be resolved. Kept as the
+        # fallback for when no design-conditions text is available at all (neither a
+        # knowledge-base page nor a sentence in the objective -- ADR-0063 Phase 109g
+        # decision: only then does 未確認 stay an acceptable answer for this question).
         summary_text = (
             "対象ごとに %s と『公平比較可能』か『背景比較のみ』かを分類し理由を1行で述べよ。\n"
             "対象: %s" % (comparison_target, "、".join(limited))
         )
         questions.append({"id": "summary", "target": None, "question": summary_text})
     return questions
+
+
+# ------------------------------------------------ pure: comparison judgement (Phase 109g)
+
+
+COMPARISON_CONTEXT_MAX_CHARS = 3000
+COMPARISON_TARGET_ANSWER_MAX_CHARS = 1500
+
+
+def find_comparison_page_path(knowledge_index, comparison_target):
+    """ADR-0063 Phase 109g A: the `path` of the first knowledge-base index item (in index
+    order) whose `title`/`path`/`tags` contains `comparison_target` as a case-insensitive
+    substring (e.g. `projects/benchfs/architecture-overview.md` for `comparison_target =
+    "BenchFS"`). `None` if there is no `comparison_target`, no index, or no match --
+    `comparison_design_context` then falls back to the objective's own surrounding
+    sentence."""
+    needle = str(comparison_target or "").strip().lower()
+    if not needle:
+        return None
+    for item in knowledge_index or []:
+        title = str(_get(item, "title") or "").lower()
+        path = str(_get(item, "path") or "").lower()
+        tags = " ".join(str(t) for t in (_get(item, "tags") or [])).lower()
+        if needle in title or needle in path or needle in tags:
+            return _get(item, "path")
+    return None
+
+
+def strip_front_matter_block(raw):
+    """Drops a leading `---\\n ... ---\\n` (or `...`) front-matter block, the same shape
+    `task_core::knowledge::front_matter` (Rust, crates/task-core/src/knowledge.rs) reads for
+    knowledge-base pages. Not a full re-parse of the fields (none are needed here, only the
+    body) -- just enough so the design-conditions excerpt does not quote the front matter
+    back at the model. An unclosed `---` is not front matter (a body horizontal rule, same
+    as the Rust reader) and is left alone."""
+    text = (raw or "").lstrip("﻿")
+    if not (text.startswith("---\n") or text.startswith("---\r\n")):
+        return text
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if index == 0:
+            continue
+        if line.rstrip("\r\n").strip() in ("---", "..."):
+            return "".join(lines[index + 1 :])
+    return text
+
+
+def truncate_text(text, max_chars):
+    """`text` cut to at most `max_chars` characters, with a trailing `…` when it was cut
+    (ADR-0063 Phase 109g A/B: 3 KB for the design-conditions excerpt, 1.5 KB per per-target
+    answer embedded in the judgement question)."""
+    text = text or ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "…"
+
+
+def comparison_design_context(
+    page_raw_text, fallback_paragraph, max_chars=COMPARISON_CONTEXT_MAX_CHARS
+):
+    """ADR-0063 Phase 109g A: the (<= `max_chars`) design-conditions text to embed in the
+    comparison judgement question. `page_raw_text` is the already-read content of the
+    knowledge-base page `find_comparison_page_path` matched (reading the file is `main()`'s
+    job -- this function stays pure), or `None`/empty if there was no match or the file
+    could not be read. Falls back to `fallback_paragraph` (the objective's own sentence
+    around the compare phrase -- Rust-side `research_targets::comparison_target_paragraph`)
+    when there is no usable page text. `None` when neither is available (the caller then
+    keeps the old, permissive single-line comparison question -- ADR-0063 Phase 109g
+    decision: 未確認 stays acceptable only in that case)."""
+    body = strip_front_matter_block(page_raw_text or "").strip()
+    if body:
+        return truncate_text(body, max_chars)
+    fallback = str(fallback_paragraph or "").strip()
+    if fallback:
+        return truncate_text(fallback, max_chars)
+    return None
+
+
+def load_comparison_design_context(payload):
+    """The impure half of `comparison_design_context`: resolves `page_path` via
+    `find_comparison_page_path`, reads it from `knowledge_root` if both are given (a missing
+    file, unset `knowledge_root`, or any `OSError` just means no page text -- not a hard
+    failure of the run), and hands the result to the pure function above."""
+    comparison_target = payload.get("comparison_target")
+    comparison_context = payload.get("comparison_context") or {}
+    knowledge_root = comparison_context.get("knowledge_root")
+    knowledge_index = comparison_context.get("knowledge_index")
+    fallback_paragraph = comparison_context.get("fallback_paragraph")
+    page_raw_text = None
+    page_path = find_comparison_page_path(knowledge_index, comparison_target)
+    if page_path and knowledge_root:
+        try:
+            with open(os.path.join(knowledge_root, page_path), "r", encoding="utf-8") as handle:
+                page_raw_text = handle.read()
+        except OSError:
+            page_raw_text = None
+    return comparison_design_context(page_raw_text, fallback_paragraph)
+
+
+def build_comparison_question(comparison_target, targets, target_answers, comparison_context=None):
+    """ADR-0063 Phase 109g A: the comparison-classification summary question, built *after*
+    the per-target answers are known so it can carry them as material (`target_answers`,
+    each truncated to `COMPARISON_TARGET_ANSWER_MAX_CHARS`). With `comparison_context` (the
+    compare target's design conditions, already <= `COMPARISON_CONTEXT_MAX_CHARS`) this is a
+    forced binary judgement grounded in those design conditions -- never 未確認, a lack of
+    literature mentioning `comparison_target` is explicitly *not* a valid reason -- with a
+    stated confidence level. Without `comparison_context` this falls back to the old
+    (ADR-0063 Phase 109d C3) single-line classification question, which does allow 未確認."""
+    targets = [str(t).strip() for t in (targets or []) if str(t or "").strip()]
+    comparison_target = str(comparison_target or "").strip()
+    comparison_context = str(comparison_context or "").strip()
+    if not comparison_context:
+        return {
+            "id": "summary",
+            "target": None,
+            "question": (
+                "対象ごとに %s と『公平比較可能』か『背景比較のみ』かを分類し理由を1行で述べよ。\n"
+                "対象: %s" % (comparison_target, "、".join(targets))
+            ),
+        }
+    parts = [
+        "以下は %s の設計条件である:\n%s" % (comparison_target, comparison_context),
+        (
+            "各対象について、提示された文献（と下の対象別の答え）から分かる設計と、この設計条件を照らし、"
+            "必ず『公平比較可能』か『背景比較のみ』のどちらかに分類し、理由を1〜2行で書け。文献に%s"
+            "への言及が無いことは理由にならない（設計条件同士の比較で判断する）。判断の確度（高/中/低）"
+            "も添えよ。各対象は次の形で書け: `- <対象>: <公平比較可能|背景比較のみ>（<高|中|低>） — <理由>`"
+            % comparison_target
+        ),
+        "対象: %s" % "、".join(targets),
+    ]
+    for target in targets:
+        answer_text = truncate_text(
+            (target_answers or {}).get(target, "") or "", COMPARISON_TARGET_ANSWER_MAX_CHARS
+        ).strip()
+        if answer_text:
+            parts.append("### %s の対象別の答え\n%s" % (target, answer_text))
+    return {"id": "summary", "target": None, "question": "\n\n".join(parts)}
 
 
 # ------------------------------------------------------------------ retries
@@ -503,16 +721,33 @@ def main():
     if model:
         settings.llm = model
 
+    # ADR-0063 Phase 109g A: resolve the comparison design-conditions text once, before the
+    # loop -- if a comparison summary question is in play (last question, id "summary") and a
+    # design-conditions text can be found, its (permissive, old-style) question text gets
+    # replaced by the grounded judgement question right before it is asked, once the
+    # per-target answers it needs as material are available.
+    comparison_target = payload.get("comparison_target")
+    has_summary_question = any(q.get("id") == "summary" for q in questions)
+    comparison_context = load_comparison_design_context(payload) if has_summary_question else None
+    limited_targets = [q["target"] for q in questions if q.get("target")]
+
     progress = make_progress_printer()
     answers = []
     for question in questions:
+        if question.get("id") == "summary" and comparison_context:
+            target_answers = {a.get("target"): a.get("answer") for a in answers if a.get("target")}
+            question = build_comparison_question(
+                comparison_target, limited_targets, target_answers, comparison_context
+            )
         progress("asking: %s" % (question.get("target") or question.get("id")))
         answer = ask_one(ask, settings, question)
         if answer.get("error"):
             progress("ask failed for %s: %s" % (question.get("id"), answer["error"]))
         answers.append(answer)
 
-    table = build_target_aspect_table(payload.get("targets"), payload.get("aspects"), answers)
+    table = build_target_aspect_table(
+        payload.get("targets"), payload.get("aspects"), answers, comparison_target
+    )
     write_json(output_path, {"answers": answers, "target_aspect_table": table})
     return 0
 

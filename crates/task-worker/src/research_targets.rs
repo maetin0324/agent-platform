@@ -463,6 +463,36 @@ pub fn comparison_target(objective: &str) -> Option<String> {
     None
 }
 
+/// ADR-0063 Phase 109g A: `comparison_target` が見つかった文（前の「。」の直後から次の「。」まで）を、
+/// 知識ベースに比較先の設計条件を書いたページが無いときの、総括の問い（比較分類の判断）の最後の拠り所
+/// として返す。目的文全体を見る（`comparison_target` と同じく最初の段落に制限しない）。決定的、LLM は
+/// 使わない。比較の言い回しが無ければ `None`。
+pub fn comparison_target_paragraph(objective: &str) -> Option<String> {
+    let chars: Vec<char> = objective.chars().collect();
+    for needle in ["との比較", "と比較"] {
+        let needle_chars: Vec<char> = needle.chars().collect();
+        if let Some(pos) = find_subsequence(&chars, &needle_chars) {
+            let end_needle = pos + needle_chars.len();
+            let start = chars[..pos]
+                .iter()
+                .rposition(|&c| c == '。')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            let end = chars[end_needle..]
+                .iter()
+                .position(|&c| c == '。')
+                .map(|i| end_needle + i + 1)
+                .unwrap_or(chars.len());
+            let sentence: String = chars[start..end].iter().collect();
+            let trimmed = sentence.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn find_subsequence(haystack: &[char], needle: &[char]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
@@ -596,6 +626,27 @@ mod tests {
     fn comparison_target_is_none_without_a_compare_phrase() {
         assert!(comparison_target("CHFS/FINCHFS を調べる").is_none());
         assert!(comparison_target("").is_none());
+    }
+
+    /// ADR-0063 Phase 109g A: 知識ベースに比較先のページが無いときの最後の拠り所（目的文中の比較の
+    /// 言い回しを含む 1 文）。
+    #[test]
+    fn comparison_target_paragraph_returns_the_sentence_around_the_compare_phrase() {
+        let objective =
+            "CHFS/FINCHFS の学術文献を調査する。BenchFSとの比較が『公平比較可能』か『背景比較のみ』かを\
+分類すること。既存knowledgeの設計と対比できるよう根拠付きで書くこと。";
+        assert_eq!(
+            comparison_target_paragraph(objective),
+            Some(
+                "BenchFSとの比較が『公平比較可能』か『背景比較のみ』かを分類すること。".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn comparison_target_paragraph_is_none_without_a_compare_phrase() {
+        assert!(comparison_target_paragraph("CHFS/FINCHFS を調べる。").is_none());
+        assert!(comparison_target_paragraph("").is_none());
     }
 
     #[test]

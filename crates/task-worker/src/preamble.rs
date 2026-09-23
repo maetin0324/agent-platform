@@ -875,7 +875,9 @@ fn actions_instructions() -> String {
      不合格の理由にしない」という一文を含めてください（ADR-0063 D3、Phase 109c D で具体化）。1 件の欠落 \
      で全体を落とさないためです。成果物の存在確認（`check: \"artifact_exists\"`）は `report.md` を \
      使ってください（`literature`/`web-research` のどちらのハーネスも `report.md` を書きます。\
-     ADR-0063 Phase 109b A3）。\n\n"
+     ADR-0063 Phase 109b A3）。観点に比較先との比較分類（例: 「BenchFS との比較分類」）を含める場合、\
+     それは文献検索ではなく比較先の設計条件との照合による判断で、必ず『公平比較可能』か『背景比較のみ』\
+     のどちらかを確度付きで出させてください。分類の欠落は不合格の理由になります（ADR-0063 Phase 109g）。\n\n"
         .to_string()
 }
 

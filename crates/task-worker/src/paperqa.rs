@@ -250,6 +250,12 @@ pub struct PaperQaConfig {
     /// ADR-0063 Phase 109d C3: `ask()` を呼ぶ回数の上限（対象ごとの問い + 総括の問い）。
     /// 対象が多ければ先頭から。既定 8。
     pub max_asks: u32,
+    /// ADR-0063 Phase 109g A: `[knowledge] root`（絶対パス）。設定されていれば `paperqa_ask.py` が
+    /// 比較先の設計条件（知識ベースのページ本文）をここから直接読む（`ask_input.json` の
+    /// `comparison_context.knowledge_root`）。`None` ならページ本文は使わず、目的文の周辺 1 文に
+    /// 落ちる（`research_targets::comparison_target_paragraph`）。コンテナで走る run では
+    /// `container.knowledge_root` と同じ絶対パスがマウントされているので、そのまま読める。
+    pub knowledge_root: Option<PathBuf>,
 }
 
 impl Default for PaperQaConfig {
@@ -266,6 +272,7 @@ impl Default for PaperQaConfig {
             acquire: AcquireConfig::default(),
             evidence: PaperQaEvidence::default(),
             max_asks: default_max_asks(),
+            knowledge_root: None,
         }
     }
 }
@@ -461,6 +468,43 @@ pub fn extract_seed_urls(objective: &str, inputs: &[task_core::ArtifactRef]) -> 
         if seen.insert(url.clone()) {
             let kind = classify_seed_url(&url);
             out.push(SeedUrl { url, kind });
+        }
+    }
+    out
+}
+
+/// ADR-0063 Phase 109g B: 知識ベースの索引（`context.knowledge.index`）のうち `primary-sources` /
+/// `一次情報` タグを持つページの `sources` から拾う seed URL。`local_deep_research::must_read_urls`
+/// と同じタグ判定（大小文字を無視して `primary-source`/`一次情報` を含む）。DOI / arXiv / PDF は
+/// `extract_seed_urls` と同じ扱いで取得ランナーの種に、GitHub / GitLab は「一次情報（実装）」に載る
+/// （`classify_seed_url` に委ねる。それ以外の URL は捨てる）。重複は落とし、出現順を保つ（決定的、
+/// LLM は使わない）。
+pub fn kb_primary_source_seed_urls(
+    knowledge: Option<&crate::protocol::KnowledgeContext>,
+) -> Vec<SeedUrl> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    let Some(k) = knowledge else {
+        return out;
+    };
+    for item in &k.index {
+        let is_primary = item.tags.iter().any(|t| {
+            let t = t.to_ascii_lowercase();
+            t.contains("primary-source") || t.contains("一次情報")
+        });
+        if !is_primary {
+            continue;
+        }
+        for url in &item.sources {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                continue;
+            }
+            if seen.insert(url.clone()) {
+                out.push(SeedUrl {
+                    url: url.clone(),
+                    kind: classify_seed_url(url),
+                });
+            }
         }
     }
     out
@@ -1354,7 +1398,14 @@ fn render_sources_section(candidates: &[(Candidate, bool)]) -> String {
 /// ADR-0063 Phase 109d C4: `answer.md`/`report.md` の先頭に置く「# 対象別の整理」
 /// （対象×観点の表 + 対象ごとの節 + 総括）。対象が 1 件も取れていなければ空文字列
 /// （呼び出し側はフォールバックの単一の答えをそのまま先頭に置く）。
-fn render_target_sections(answers: &[AskAnswer], table: &str) -> String {
+///
+/// ADR-0063 Phase 109g A: 総括の節の見出しは、比較先（`comparison_target`）が分かっていれば
+/// 「## <比較先> との比較分類」、無ければ従来どおり「## 総括」。
+fn render_target_sections(
+    answers: &[AskAnswer],
+    table: &str,
+    comparison_target: Option<&str>,
+) -> String {
     if !answers.iter().any(|a| a.target.is_some()) {
         return String::new();
     }
@@ -1380,7 +1431,12 @@ fn render_target_sections(answers: &[AskAnswer], table: &str) -> String {
         }
     }
     if let Some(summary) = answers.iter().find(|a| a.id == "summary") {
-        out.push_str("## 総括\n\n");
+        match comparison_target {
+            Some(target) if !target.trim().is_empty() => {
+                out.push_str(&format!("## {target} との比較分類\n\n"));
+            }
+            _ => out.push_str("## 総括\n\n"),
+        }
         if summary.answer.trim().is_empty() {
             out.push_str("(回答なし");
             if let Some(err) = &summary.error {
@@ -1545,7 +1601,16 @@ async fn run_paperqa(
 
     // ADR-0063 D1: 起点の資料（目的文 + `inputs` の URL）。PDF / DOI / arXiv は取得ランナーへの seed に、
     // GitHub / GitLab は「一次情報（実装）」として答えの参照節に載せる（corpus には入れない）。
-    let seed_urls = extract_seed_urls(&req.task.objective, &req.task.inputs);
+    // ADR-0063 Phase 109g B: 知識ベースの `primary-sources` タグのページの `sources` にある URL も
+    // 同じ種に足す（既知の論文を種にする。目的文由来の URL が優先、重複は落とす）。
+    let mut seed_urls = extract_seed_urls(&req.task.objective, &req.task.inputs);
+    let mut seen_seed_urls: std::collections::BTreeSet<String> =
+        seed_urls.iter().map(|s| s.url.clone()).collect();
+    for kb_seed in kb_primary_source_seed_urls(req.context.knowledge.as_ref()) {
+        if seen_seed_urls.insert(kb_seed.url.clone()) {
+            seed_urls.push(kb_seed);
+        }
+    }
     let fetchable_seeds: Vec<SeedUrl> = seed_urls
         .iter()
         .filter(|s| matches!(s.kind, SeedUrlKind::Pdf | SeedUrlKind::Doi | SeedUrlKind::Arxiv))
@@ -1625,6 +1690,28 @@ async fn run_paperqa(
         .unwrap_or((None, None, None));
     // ADR-0063 Phase 109d C3: 対象が複数（比較先込み）でも `max_asks` を超えない。
     let comparison_target = crate::research_targets::comparison_target(&req.task.objective);
+    // ADR-0063 Phase 109g A: 総括の問い（比較分類の判断）の材料。マッチングと本文の切り詰めは
+    // `paperqa_ask.py` の純関数に任せ、ここでは材料（KB の root と索引、目的文の周辺 1 文）を渡すだけ
+    // （知識ベースの本文はハーネス〈task-worker〉自身では読まない。ADR-0047 D2「索引だけ」の境界を守る）。
+    let comparison_fallback_paragraph =
+        crate::research_targets::comparison_target_paragraph(&req.task.objective);
+    let knowledge_index_for_comparison: Vec<serde_json::Value> = req
+        .context
+        .knowledge
+        .as_ref()
+        .map(|k| {
+            k.index
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "path": item.path,
+                        "title": item.title,
+                        "tags": item.tags,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let ask_input = serde_json::json!({
         "settings_name": settings_name,
         "settings_dir": settings_dir,
@@ -1638,6 +1725,13 @@ async fn run_paperqa(
         "targets": research_targets,
         "aspects": research_aspects,
         "comparison_target": comparison_target,
+        // ADR-0063 Phase 109g A: `paperqa_ask.py::find_comparison_page_path` /
+        // `comparison_design_context` が読む材料。
+        "comparison_context": {
+            "knowledge_root": config.knowledge_root.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            "knowledge_index": knowledge_index_for_comparison,
+            "fallback_paragraph": comparison_fallback_paragraph,
+        },
         "max_asks": config.max_asks,
         "fallback_question": question,
         "output_path": ask_output_path.to_string_lossy(),
@@ -1819,7 +1913,11 @@ async fn run_paperqa(
 
         // ADR-0063 Phase 109d C4: 対象が取れていれば「# 対象別の整理」（表 + 対象ごとの節 + 総括）、
         // 取れていなければフォールバックの単一の答えをそのまま使う。
-        let target_section = render_target_sections(&ask_output.answers, &ask_output.target_aspect_table);
+        let target_section = render_target_sections(
+            &ask_output.answers,
+            &ask_output.target_aspect_table,
+            comparison_target.as_deref(),
+        );
         let body_text = if target_section.is_empty() {
             ask_output
                 .answers
@@ -2874,6 +2972,57 @@ while true; do sleep 0.1; done
         );
     }
 
+    /// ADR-0063 Phase 109g B: `primary-sources`（`一次情報` 表記も）タグを持つページの `sources` だけを
+    /// 拾う。タグの無いページ・`http` でない値（`human`）は無視する。**取得ランナーに渡る種**（後段で
+    /// `Pdf`/`Doi`/`Arxiv` に絞る）は DOI/arXiv だけで、GitHub は分類だけされ「一次情報（実装）」に回る
+    /// （`kb_primary_source_urls_are_merged_into_the_seed_urls` が実際の分岐先を確認する）。
+    #[test]
+    fn kb_primary_source_seed_urls_reads_only_tagged_pages_and_http_sources() {
+        let knowledge = crate::protocol::KnowledgeContext {
+            mounts: Vec::new(),
+            index: vec![
+                task_core::KnowledgeItem {
+                    path: "projects/benchfs/primary-sources.md".into(),
+                    title: "一次情報".into(),
+                    tags: vec!["primary-sources".into()],
+                    sources: vec![
+                        "https://doi.org/10.1145/3492805.3492807".into(),
+                        "https://github.com/otatebe/chfs".into(),
+                        "human".into(),
+                    ],
+                    ..Default::default()
+                },
+                task_core::KnowledgeItem {
+                    path: "projects/benchfs/note.md".into(),
+                    title: "一次情報（別表記）".into(),
+                    tags: vec!["一次情報".into()],
+                    sources: vec!["https://arxiv.org/abs/2101.00002".into()],
+                    ..Default::default()
+                },
+                task_core::KnowledgeItem {
+                    path: "projects/benchfs/other.md".into(),
+                    title: "その他".into(),
+                    tags: vec!["misc".into()],
+                    sources: vec!["https://arxiv.org/abs/9999.00001".into()],
+                    ..Default::default()
+                },
+            ],
+        };
+        let seeds = kb_primary_source_seed_urls(Some(&knowledge));
+        let urls: Vec<(&str, SeedUrlKind)> =
+            seeds.iter().map(|s| (s.url.as_str(), s.kind)).collect();
+        assert_eq!(
+            urls,
+            vec![
+                ("https://doi.org/10.1145/3492805.3492807", SeedUrlKind::Doi),
+                ("https://github.com/otatebe/chfs", SeedUrlKind::Github),
+                ("https://arxiv.org/abs/2101.00002", SeedUrlKind::Arxiv),
+            ],
+            "タグ無しページ（other.md）と 'human' は拾わない"
+        );
+        assert!(kb_primary_source_seed_urls(None).is_empty());
+    }
+
     /// ADR-0063 D1: 目的文中の URL をトークナイズして拾う（日本語の括弧・句読点は落とす）。
     #[test]
     fn extract_urls_pulls_http_tokens_out_of_japanese_text() {
@@ -3388,6 +3537,114 @@ while true; do sleep 0.1; done
         assert!(
             answer_md.contains("https://github.com/otatebe/chfs"),
             "{answer_md}"
+        );
+    }
+
+    /// ADR-0063 Phase 109g B: 知識ベースの `primary-sources` タグのページの `sources` にある DOI/GitHub
+    /// の URL も、目的文由来の seed と同じ扱いで `acquire_input.json.seed_urls` / 「一次情報（実装）」に
+    /// 入る（重複は落とす）。
+    #[tokio::test]
+    async fn kb_primary_source_urls_are_merged_into_the_seed_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_pqa_with_acquire(
+            dir.path(),
+            &ask_stub_script(STUB_ANSWER, ""),
+            &acquire_stub_script(6, 3),
+        );
+        let adapter = PaperQaAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.task.objective =
+            "CHFS の関連研究として https://arxiv.org/abs/2101.00001 を調べる".to_string();
+        req.context.knowledge = Some(crate::protocol::KnowledgeContext {
+            mounts: Vec::new(),
+            index: vec![task_core::KnowledgeItem {
+                path: "projects/benchfs/primary-sources.md".into(),
+                title: "一次情報".into(),
+                tags: vec!["primary-sources".into()],
+                sources: vec![
+                    "https://doi.org/10.1145/3492805.3492807".into(),
+                    "https://github.com/otatebe/chfs".into(),
+                    "human".into(),
+                    // 目的文とも重複する URL は 1 回だけ数える。
+                    "https://arxiv.org/abs/2101.00001".into(),
+                ],
+                ..Default::default()
+            }],
+        });
+        let sink = RecordingSink::default();
+        adapter
+            .run(req, "run-kb-seed", default_limits(), &sink)
+            .await
+            .unwrap();
+
+        let input: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("runs/run-kb-seed/acquire_input.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let seed_urls = input["seed_urls"].as_array().unwrap();
+        let urls: Vec<&str> = seed_urls.iter().map(|s| s["url"].as_str().unwrap()).collect();
+        assert_eq!(
+            urls,
+            vec![
+                "https://arxiv.org/abs/2101.00001",
+                "https://doi.org/10.1145/3492805.3492807",
+            ],
+            "重複した arxiv URL は 1 回だけ、GitHub と 'human' は seed_urls に入らない: {input}"
+        );
+
+        let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
+        assert!(
+            answer_md.contains("https://github.com/otatebe/chfs"),
+            "知識ベース由来の GitHub URL も「一次情報（実装）」に載る: {answer_md}"
+        );
+    }
+
+    /// ADR-0063 Phase 109g A: `ask_input.json` の `comparison_context` に、比較先のページ探索に使う
+    /// 材料（`knowledge_root`・`knowledge_index`・目的文の周辺 1 文）が入る。
+    #[tokio::test]
+    async fn ask_input_carries_comparison_context_ingredients() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_pqa(dir.path(), &ask_stub_script(STUB_ANSWER, ""));
+        let kb_root = dir.path().join("kb");
+        config.knowledge_root = Some(kb_root.clone());
+        let adapter = PaperQaAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.task.objective =
+            "CHFS/FINCHFS の学術文献を調査する。BenchFSとの比較が『公平比較可能』か『背景比較のみ』かを\
+分類すること。".to_string();
+        req.context.knowledge = Some(crate::protocol::KnowledgeContext {
+            mounts: Vec::new(),
+            index: vec![task_core::KnowledgeItem {
+                path: "projects/benchfs/architecture-overview.md".into(),
+                title: "BenchFS architecture overview".into(),
+                tags: vec!["project:benchfs".into()],
+                ..Default::default()
+            }],
+        });
+        let sink = RecordingSink::default();
+        adapter
+            .run(req, "run-cc1", default_limits(), &sink)
+            .await
+            .unwrap();
+
+        let input = read_ask_input(dir.path(), "run-cc1");
+        assert_eq!(input["comparison_target"], "BenchFS", "{input}");
+        let cc = &input["comparison_context"];
+        assert_eq!(
+            cc["knowledge_root"],
+            kb_root.to_string_lossy().into_owned(),
+            "{input}"
+        );
+        assert_eq!(
+            cc["knowledge_index"][0]["path"],
+            "projects/benchfs/architecture-overview.md",
+            "{input}"
+        );
+        assert_eq!(
+            cc["fallback_paragraph"],
+            "BenchFSとの比較が『公平比較可能』か『背景比較のみ』かを分類すること。",
+            "{input}"
         );
     }
 
@@ -5042,6 +5299,198 @@ print(json.dumps(out, ensure_ascii=False))
         assert_eq!(v["settings_path_no_name"], serde_json::Value::Null, "{v}");
     }
 
+    /// ADR-0063 Phase 109g A: `paperqa_ask.py` の比較分類（judgement）純関数を `python3 -c` から直接
+    /// 呼ぶ（`paperqa` パッケージ無しで動く）— 設計条件の抽出（knowledge index + 本文から）、総括の問いの
+    /// 組み立て（設計条件・対象別の答えが入る、3 KB / 1.5 KB の切り詰め）、総括の答えから分類語と確度を
+    /// 抜く。
+    #[test]
+    fn comparison_judgement_pure_functions_extract_build_and_parse() {
+        if !python3_available() {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let script_path = dir.path().join("paperqa_ask.py");
+        std::fs::write(&script_path, ASK_SCRIPT).unwrap();
+        let checker = r##"
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("ask", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+out = {}
+
+# find_comparison_page_path: title/tags/path のいずれかに比較先の名前があれば最初の 1 件。
+index = [
+    {"path": "projects/other/note.md", "title": "別件", "tags": ["misc"]},
+    {"path": "projects/benchfs/architecture-overview.md", "title": "BenchFS architecture", "tags": ["project:benchfs"]},
+]
+out["page_path_found"] = mod.find_comparison_page_path(index, "BenchFS")
+out["page_path_no_target"] = mod.find_comparison_page_path(index, None)
+out["page_path_no_match"] = mod.find_comparison_page_path(index, "SomethingElse")
+
+# strip_front_matter_block: front matter を落として本文だけ残す。閉じていない '---' はそのまま。
+paged = "---\ntitle: BenchFS\ntags: [project:benchfs]\n---\nBenchFS aggregates node-local NVMe.\n"
+out["stripped"] = mod.strip_front_matter_block(paged)
+out["stripped_unclosed"] = mod.strip_front_matter_block("---\nnot closed")
+
+# comparison_design_context: ページ本文があればそれを、無ければ objective の周辺文、どちらも無ければ None。
+out["design_from_page"] = mod.comparison_design_context(paged, "fallback sentence.")
+out["design_from_fallback"] = mod.comparison_design_context(None, "fallback sentence.")
+out["design_from_fallback_empty_page"] = mod.comparison_design_context("---\ntitle: x\n---\n   \n", "fallback sentence.")
+out["design_none"] = mod.comparison_design_context(None, None)
+# 3 KB の切り詰め。
+long_body = "x" * 4000
+out["design_truncated_len"] = len(mod.comparison_design_context(long_body, None))
+out["design_truncated_ends_with_ellipsis"] = mod.comparison_design_context(long_body, None).endswith("…")
+
+# build_comparison_question: comparison_context 無しは旧来の 1 行の問い（未確認を許す）。
+q_old = mod.build_comparison_question("BenchFS", ["CHFS", "FINCHFS"], {}, None)
+out["old_style_question"] = q_old["question"]
+out["old_style_id"] = q_old["id"]
+out["old_style_target"] = q_old["target"]
+
+# comparison_context ありは設計条件と対象別の答え（切り詰め）を材料にした判断の問い。
+target_answers = {"CHFS": "node-local NVMe cache. " * 200, "FINCHFS": "short answer"}
+q_new = mod.build_comparison_question("BenchFS", ["CHFS", "FINCHFS"], target_answers, "BenchFS aggregates node-local NVMe.")
+out["new_question"] = q_new["question"]
+out["new_question_id"] = q_new["id"]
+
+# extract_comparison_classification: 両方の表記、無ければ未確認。
+summary = (
+    "- CHFS: 公平比較可能（高） — 両方とも node-local aggregation。\n"
+    "- FINCHFS: 背景比較のみ（中） — 直接の設計対応が無い。\n"
+    "- UnifyFS: 公平比較可能 — 確度の表記なし。\n"
+)
+out["cls_chfs"] = mod.extract_comparison_classification(summary, "CHFS")
+out["cls_finchfs"] = mod.extract_comparison_classification(summary, "FINCHFS")
+out["cls_no_confidence"] = mod.extract_comparison_classification(summary, "UnifyFS")
+out["cls_missing"] = mod.extract_comparison_classification(summary, "GekkoFS")
+out["cls_no_summary"] = mod.extract_comparison_classification("", "CHFS")
+
+# build_target_aspect_table: 比較分類の列は総括の答えから、それ以外の列は対象ごとの答えから。
+answers = [
+    {"target": "CHFS", "answer": "- cache: node-local NVMe"},
+    {"target": None, "id": "summary", "answer": summary},
+]
+out["table_with_comparison"] = mod.build_target_aspect_table(
+    ["CHFS", "FINCHFS"], ["cache", "BenchFS との比較分類"], answers, "BenchFS"
+)
+
+print(json.dumps(out, ensure_ascii=False))
+"##;
+        let output = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(checker)
+            .arg(&script_path)
+            .output()
+            .expect("failed to run python3");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
+
+        assert_eq!(
+            v["page_path_found"],
+            "projects/benchfs/architecture-overview.md",
+            "{v}"
+        );
+        assert_eq!(v["page_path_no_target"], serde_json::Value::Null, "{v}");
+        assert_eq!(v["page_path_no_match"], serde_json::Value::Null, "{v}");
+
+        assert_eq!(
+            v["stripped"],
+            "BenchFS aggregates node-local NVMe.\n",
+            "{v}"
+        );
+        assert_eq!(v["stripped_unclosed"], "---\nnot closed", "{v}");
+
+        assert_eq!(
+            v["design_from_page"],
+            "BenchFS aggregates node-local NVMe.",
+            "{v}"
+        );
+        assert_eq!(v["design_from_fallback"], "fallback sentence.", "{v}");
+        assert_eq!(
+            v["design_from_fallback_empty_page"], "fallback sentence.",
+            "本文が front matter しか無ければ空とみなし fallback に落ちる: {v}"
+        );
+        assert_eq!(v["design_none"], serde_json::Value::Null, "{v}");
+        assert_eq!(v["design_truncated_len"], 3001, "3000 文字 + 省略記号: {v}");
+        assert_eq!(v["design_truncated_ends_with_ellipsis"], true, "{v}");
+
+        assert_eq!(
+            v["old_style_question"],
+            "対象ごとに BenchFS と『公平比較可能』か『背景比較のみ』かを分類し理由を1行で述べよ。\n\
+             対象: CHFS、FINCHFS",
+            "{v}"
+        );
+        assert_eq!(v["old_style_id"], "summary", "{v}");
+        assert_eq!(v["old_style_target"], serde_json::Value::Null, "{v}");
+
+        let new_question = v["new_question"].as_str().unwrap();
+        assert!(
+            new_question.contains("以下は BenchFS の設計条件である"),
+            "{new_question}"
+        );
+        assert!(
+            new_question.contains("BenchFS aggregates node-local NVMe."),
+            "{new_question}"
+        );
+        assert!(
+            new_question.contains("必ず『公平比較可能』か『背景比較のみ』のどちらかに分類"),
+            "{new_question}"
+        );
+        assert!(
+            new_question.contains("文献にBenchFSへの言及が無いことは理由にならない"),
+            "{new_question}"
+        );
+        assert!(
+            new_question.contains("判断の確度（高/中/低）も添えよ"),
+            "{new_question}"
+        );
+        assert!(new_question.contains("### CHFS の対象別の答え"), "{new_question}");
+        assert!(new_question.contains("### FINCHFS の対象別の答え"), "{new_question}");
+        assert!(new_question.contains("short answer"), "{new_question}");
+        // CHFS の答えは 1.5 KB に切り詰められる（4600 文字近い繰り返し文字列 -> 1500 + 省略記号）。
+        let chfs_material_len = new_question
+            .split("### CHFS の対象別の答え\n")
+            .nth(1)
+            .unwrap()
+            .split("\n\n### FINCHFS")
+            .next()
+            .unwrap()
+            .chars()
+            .count();
+        assert!(
+            chfs_material_len <= 1501,
+            "CHFS の対象別の答えは 1.5 KB に切り詰められるはず: {chfs_material_len}"
+        );
+        assert_eq!(v["new_question_id"], "summary", "{v}");
+
+        assert_eq!(v["cls_chfs"], "公平比較可能（高）", "{v}");
+        assert_eq!(v["cls_finchfs"], "背景比較のみ（中）", "{v}");
+        assert_eq!(
+            v["cls_no_confidence"], "公平比較可能",
+            "確度の表記が無ければラベルだけ: {v}"
+        );
+        assert_eq!(v["cls_missing"], "未確認", "{v}");
+        assert_eq!(v["cls_no_summary"], "未確認", "{v}");
+
+        let table = v["table_with_comparison"].as_str().unwrap();
+        assert!(
+            table.contains("| CHFS | node-local NVMe | 公平比較可能（高） |"),
+            "比較分類の列は総括の答えから: {table}"
+        );
+        assert!(
+            table.contains("| FINCHFS | 未確認 | 背景比較のみ（中） |"),
+            "FINCHFS 自身の対象別の答えは無いので cache 列は未確認、比較分類だけ総括から: {table}"
+        );
+    }
+
     /// ADR-0063 Phase 109e: `settings_path` が指す設定ファイルが**実在すれば**、`paperqa_ask.py::main`
     /// は `Settings.from_name` を経由せずそれを直接読んで（`Settings.model_validate_json` →
     /// `model_dump()` → `Settings(**...)`）`ask()` に渡し、`output_path` に答えを書く
@@ -5384,5 +5833,35 @@ exit 2
             serde_json::json!(["CHFS", "FINCHFS"]),
             "{research}"
         );
+    }
+
+    /// ADR-0063 Phase 109g A: 総括の節の見出しは、比較先が分かっていれば「## <比較先> との比較分類」、
+    /// 無ければ従来どおり「## 総括」。
+    #[test]
+    fn render_target_sections_headings_the_summary_with_the_comparison_target_when_known() {
+        let answers = vec![
+            AskAnswer {
+                id: "t1".into(),
+                target: Some("CHFS".into()),
+                answer: "- cache: node-local NVMe".into(),
+                ..Default::default()
+            },
+            AskAnswer {
+                id: "summary".into(),
+                target: None,
+                answer: "- CHFS: 公平比較可能（高）".into(),
+                ..Default::default()
+            },
+        ];
+        let with_target = render_target_sections(&answers, "", Some("BenchFS"));
+        assert!(
+            with_target.contains("## BenchFS との比較分類\n\n- CHFS: 公平比較可能（高）"),
+            "{with_target}"
+        );
+        assert!(!with_target.contains("## 総括"), "{with_target}");
+
+        let without_target = render_target_sections(&answers, "", None);
+        assert!(without_target.contains("## 総括\n\n"), "{without_target}");
+        assert!(!without_target.contains("との比較分類"), "{without_target}");
     }
 }
