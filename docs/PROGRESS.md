@@ -16008,3 +16008,9 @@ Phase 109d C1 の「`PQA_SETTINGS_DIR=settings_dir` にしてから `from_name(s
   run（`01M378JWR702TADBQCQRCEAB5V` またはその再試行）をやり直し、(1) exit=1 の
   `FileNotFoundError` が再発しないこと、(2) `ask_output.json`/`answer.md` に実際の答えが書かれること
   を確認する。
+
+### Phase 109e の本番反映（2026-09-23 14:17 UTC、ライブ切替）
+
+- merge: `worktree-agent-a4f0512808c3dea6b` → main `62cc398`（`docs/PROGRESS.md` の append 衝突を両方残して解決）。main 上のゲート: `cargo test --workspace --no-fail-fast` exit 0（passed 1963 / failed 0）、`cargo clippy` exit 0。push 済み。
+- `release.sh main` → exit 0、`sha12=62cc3985c29a schema_version=25`、`changes.json: base=bbd5f21188b0 commits=4 files=5 sensitive=0`。`verify.sh` → exit 0、check 1〜4, 4b, 5（N-1 = bbd5f21188b0）, 6 すべて true、`ok=true live_ok=true`。`promote.sh 62cc3985c29a` → mode=live、新 celeris 2 秒で active、GUI 切替 1 秒。
+- 文献調査の 5 回目のやり直しを起動（settings をファイルパスから直接読む）。結果は次節に追記。
