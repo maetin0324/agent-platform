@@ -229,6 +229,13 @@ pub struct SelfdeployConfig {
     /// `~` は celeris の `$HOME` で展開する。無くても構わない（その場合 `on_main` は `null`）。
     #[serde(default = "default_selfdeploy_repo")]
     pub repo: PathBuf,
+    /// ADR-0051 Phase 106追記: `merge_reviewed` が成功した直後、release.sh を起こす前に
+    /// `origin` へ push する。push の失敗は release 準備を止めない（本番反映の妨げにしない）。
+    #[serde(default = "default_selfdeploy_push")]
+    pub push: bool,
+    /// ADR-0051 Phase 106追記: push先のリモート名。
+    #[serde(default = "default_selfdeploy_push_remote")]
+    pub push_remote: String,
 }
 
 impl Default for SelfdeployConfig {
@@ -237,8 +244,18 @@ impl Default for SelfdeployConfig {
             releases_dir: default_releases_dir(),
             delivery_projects: Vec::new(),
             repo: default_selfdeploy_repo(),
+            push: default_selfdeploy_push(),
+            push_remote: default_selfdeploy_push_remote(),
         }
     }
+}
+
+fn default_selfdeploy_push() -> bool {
+    true
+}
+
+fn default_selfdeploy_push_remote() -> String {
+    "origin".to_string()
 }
 
 /// ADR-0045 D2: `~/.local/celeris/releases`。
@@ -1752,6 +1769,12 @@ impl Config {
                     != Some("releases"))
         {
             return Err(ConfigError::Invalid("delivery_projects requires project IDs and the standard <state>/releases directory".into()));
+        }
+        // ADR-0051 Phase 106追記: 空のリモート名でpushしようとして分かりにくいgitエラーになるのを防ぐ。
+        if self.selfdeploy.push_remote.trim().is_empty() {
+            return Err(ConfigError::Invalid(
+                "[selfdeploy] push_remote must not be blank".into(),
+            ));
         }
 
         if self.max_concurrency == 0 {
@@ -3340,6 +3363,24 @@ client = "chatgpt"
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("bogus-adapter"));
         assert!(toml::from_str::<Config>("bogus = 1\n").is_err());
+    }
+
+    /// ADR-0051 Phase 106追記: `[selfdeploy] push` / `push_remote` の既定と検査。
+    #[test]
+    fn selfdeploy_push_defaults_to_true_and_origin_and_rejects_blank_remote() {
+        let cfg: Config =
+            toml::from_str("[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
+        assert!(cfg.selfdeploy.push);
+        assert_eq!(cfg.selfdeploy.push_remote, "origin");
+        cfg.validate().unwrap();
+
+        let cfg: Config = toml::from_str(
+            "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n[selfdeploy]\npush = false\npush_remote = \"\"\n",
+        )
+        .unwrap();
+        assert!(!cfg.selfdeploy.push);
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("push_remote"));
     }
 
     /// ADR-0019: `sync = "worktree"` が読めて、worktree の設定が `ClusterSpec` と `ViewContext` に写ること。

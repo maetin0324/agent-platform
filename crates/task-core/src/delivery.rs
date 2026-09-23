@@ -3,6 +3,7 @@ use crate::{MessageId, ProjectId, RepoId, SqliteStore, StoreError, TaskId};
 use rusqlite::OptionalExtension;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -35,6 +36,16 @@ pub struct Delivery {
     pub release: Option<String>,
     pub prepare_pid: Option<u32>,
     pub notification: Option<MessageId>,
+    /// ADR-0051 Phase 106追記: merge直後にoriginへpushした時刻（成功または「既に同じかそれより先」で
+    /// 省略したとき）。push機能を使わない（`[selfdeploy] push = false`）ときは常に`None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crate::node_session::opt_rfc3339")]
+    #[schemars(with = "Option<String>")]
+    pub pushed_at: Option<OffsetDateTime>,
+    /// push失敗の理由（stderr末尾500バイト）。1度だけ再試行し、再試行後もなお失敗したものには
+    /// `[retried] ` を前置して以後は触らない目印にする（通知文には前置詞を外して出す）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_error: Option<String>,
 }
 
 pub trait DeliveryStore: Send + Sync {

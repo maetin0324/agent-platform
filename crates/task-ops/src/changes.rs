@@ -117,6 +117,17 @@ fn read_all(pipe: Option<impl std::io::Read>) -> String {
 
 /// `git -C <dir> <args...>`（人の設定と対話的な認証に引きずられない）。
 pub fn git(dir: &Path, args: &[&str], timeout: Duration) -> Option<CmdOutput> {
+    git_with_env(dir, args, &[], timeout)
+}
+
+/// [`git`] に加えて追加の環境変数を渡す版。ADR-0051 Phase 106: `push` の `GIT_SSH_COMMAND`
+/// （`-o BatchMode=yes` を足して対話的な鍵入力を止める）など、呼び出しごとに違う環境が要るとき用。
+pub fn git_with_env(
+    dir: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+    timeout: Duration,
+) -> Option<CmdOutput> {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(dir)
@@ -127,6 +138,9 @@ pub fn git(dir: &Path, args: &[&str], timeout: Duration) -> Option<CmdOutput> {
         .env("GIT_PAGER", "cat")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(args);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
     run(cmd, timeout)
 }
 
