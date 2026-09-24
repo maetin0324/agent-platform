@@ -44,7 +44,12 @@ const STATUS_ROWS: { status: string; meaning: string; canDo: string }[] = [
     canDo: "取り消しのみ（待つ）",
   },
   { status: "done", meaning: "受け入れ条件を全て満たして完了。", canDo: "（終端。操作なし）" },
-  { status: "failed", meaning: "リトライ上限に達した、または致命的なエラー。", canDo: "（終端。操作なし）" },
+  {
+    status: "failed",
+    meaning: "リトライ上限に達した、または致命的なエラー。受信箱に通知が出る（ADR-0070）。",
+    canDo:
+      "やり直す（retry）／再レビュー（rereview、条件付き）／取り下げ（コメント）。「失敗したタスクの直し方」を参照",
+  },
   {
     status: "cancelled",
     meaning: "取り消された（自分で取り消した、または依存先が失敗して連鎖）。",
@@ -167,6 +172,7 @@ const TOC = [
   { id: "screens", heading: "画面ごとの説明", icon: "layers" },
   { id: "acceptance", heading: "受け入れ条件", icon: "checkCircle" },
   { id: "status", heading: "状態", icon: "activity" },
+  { id: "failure", heading: "失敗したタスクの直し方", icon: "alert" },
   { id: "mcp", heading: "MCP で外から使う", icon: "network" },
   { id: "settings", heading: "表示設定", icon: "clock" },
   { id: "glossary", heading: "用語集", icon: "book" },
@@ -449,6 +455,58 @@ export default function HelpPage() {
             </tbody>
           </table>
         </div>
+      </Section>
+
+      <Section id="failure" icon="alert" tone="danger" heading="失敗したタスクの直し方" testId="help-failure-section">
+        <p className="text-sm text-fg-muted">
+          タスクが <Mono>failed</Mono> になると、受信箱（
+          <Link to="/inbox" className={touchLinkClass}>
+            /inbox
+          </Link>
+          ）の「注意」区画とタスク詳細の赤いバナーに、原因の分類（
+          <strong className="font-semibold text-fg">インフラ</strong>
+          =lease 失効・切替による中断・result.json 不在・セッション再開拒否・レート制限・DB busy・ディスク不足など
+          celeris やプロバイダの都合、<strong className="font-semibold text-fg">作業内容</strong>
+          =レビュー不合格・max_turns 超過・ワーカー自身の明示的な error）と理由 1 行が出ます（ADR-0070）。
+          成果が既に配送済み（release に昇格済み）だったタスクの失敗には「成果は配送済み（release
+          &lt;sha12&gt;）だがレビューで不合格」と明記されます。操作は次の 3 つで、意味は決まっています:
+        </p>
+        <dl className="divide-y divide-border text-sm">
+          <div className="py-3 first:pt-0">
+            <dt className="font-semibold text-fg">やり直す（retry）</dt>
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
+              元のタスクを複製して<strong className="font-semibold text-fg">新しいタスク</strong>
+              を作り、attempts は 0 から始まります。<Mono>failed</Mono> でも <Mono>cancelled</Mono>{" "}
+              でも常に使えます。既定は<strong className="font-semibold text-fg">受け入れ済み（ready）</strong>
+              で始まります（下書きのまま始めたいときだけ「下書き（draft）のまま始める」にチェックする）。
+            </dd>
+          </div>
+          <div className="py-3">
+            <dt className="font-semibold text-fg">再レビュー（rereview）</dt>
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
+              <strong className="font-semibold text-fg">実装 run はやり直さず</strong>
+              、判定だけをやり直します。直前の実装 run が <Mono>done</Mono> で、レビューの判定（reviewer・command・human
+              のどれか）だけが不合格だったときだけボタンが出ます（それ以外の理由で
+              <Mono>failed</Mono> になったタスクには出ません。そちらは「やり直す」を使う）。人が既に承認済みの
+              <Mono>Human</Mono> 条件があれば、その承認は保持され、二度承認を求められません。
+            </dd>
+          </div>
+          <div className="py-3 last:pb-0">
+            <dt className="font-semibold text-fg">取り下げ</dt>
+            <dd className="mt-0.5 leading-relaxed text-fg-muted">
+              <strong className="font-semibold text-fg">状態は変えません</strong>（<Mono>failed</Mono>{" "}
+              のまま）。「対応不要と判断しました」という定型コメントを残すだけの軽い操作です。原因を確認済みで、やり直しも再レビューも不要と判断したときに使う。
+            </dd>
+          </div>
+        </dl>
+        <p className="text-sm text-fg-muted">
+          <Mono>celerisctl</Mono> でも同じ 3 つが使えます: <code>celerisctl retry &lt;task_id&gt; [--draft]</code>（既定
+          ready、下書きのまま始めるときだけ <code>--draft</code>）、<code>celerisctl rereview &lt;task_id&gt;</code>、
+          <code>celerisctl cancel &lt;task_id&gt;</code>（終端でないタスクの取り消し。<Mono>failed</Mono>{" "}
+          の「取り下げ」はコメントなので GUI から行うか、コメントの API を直接叩く）。<Mono>draft</Mono> を{" "}
+          <Mono>ready</Mono> にするだけの道具として <code>celerisctl accept &lt;task_id&gt;</code>（
+          <code>POST /tasks/&#123;id&#125;/accept</code>）もあります。
+        </p>
       </Section>
 
       <Section id="mcp" icon="network" tone="teal" heading="MCP で外から使う" testId="help-mcp-section">

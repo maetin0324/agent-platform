@@ -471,6 +471,11 @@
           "const": "reopen",
           "description": "ADR-0044 D2（Phase 53）: 終端のタスクを同じ worktree のまま再開する（`POST /tasks/{id}/reopen`。\n`done` / `failed` だけ。`cancelled` は worktree を消してあるので `Retry` を使う）。",
           "type": "string"
+        },
+        {
+          "const": "rereview",
+          "description": "ADR-0070 D2（Phase 116）: 既存成果の再判定（`POST /tasks/{id}/rereview`。ADR-0051 /\nADR-0054 Phase 113 D3）。`done`、または直前の遷移が `review_fail` だった `failed` だけ\n（`task_ops::comment::can_rereview` と同じ規則。events を要るので `actions(task)` 単体では\n判定できず、`task_detail` / 受信箱の `build_attention` が events を渡して個別に足す）。",
+          "type": "string"
         }
       ]
     },
@@ -1011,6 +1016,17 @@
             "at": {
               "type": "string"
             },
+            "class": {
+              "$ref": "#/$defs/FailureClass",
+              "description": "ADR-0070 D1（Phase 116）: `infra`（lease失効・切替中断・result.json不在・セッション再開\n拒否・レート制限・DB busy）か `work`（レビュー不合格・max_turns・ワーカーの明示的な\nerror）かの分類（`task_ops::derive::classify_task_failure`）。"
+            },
+            "delivered_release": {
+              "description": "配送済み（`deliveries` に `release` が付いた記録がある）なら sha12。",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "reason": {
               "type": "string"
             },
@@ -1026,7 +1042,8 @@
             "type",
             "task",
             "reason",
-            "at"
+            "at",
+            "class"
           ],
           "type": "object"
         },
@@ -4622,6 +4639,38 @@
       ],
       "type": "object"
     },
+    "FailureClass": {
+      "description": "ADR-0070 D1（Phase 116）: `failed` の分類。`infra` はレース・切替・供給側都合、`work` はレビュー\n不合格やワーカー自身の明示的な失敗（人が中身を見て判断すべきもの）。",
+      "enum": [
+        "infra",
+        "work"
+      ],
+      "type": "string"
+    },
+    "FailureSummary": {
+      "description": "ADR-0070 D1（Phase 116）: `TaskDetail.failure` / 受信箱 `AttentionItem::Failed` が共有する形。",
+      "properties": {
+        "class": {
+          "$ref": "#/$defs/FailureClass"
+        },
+        "delivered_release": {
+          "description": "配送済み（`deliveries` に `release` が付いた記録がある）なら sha12。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reason": {
+          "description": "人が読む理由 1 行（`derive::classify_task_failure` が作る）。",
+          "type": "string"
+        }
+      },
+      "required": [
+        "class",
+        "reason"
+      ],
+      "type": "object"
+    },
     "GenreConfigView": {
       "description": "`[[genres]]` 1 行の要約（ADR-0027 D1, ADR-0028 D1）。",
       "properties": {
@@ -6882,6 +6931,11 @@
         {
           "const": "cluster_login_needed",
           "description": "ADR-0053 D3（Phase 66）: クラスタの ssh master が落ち、鍵認証も失敗した（人の TOTP が要る）。\n`key` = クラスタ id（Dispatcher が outage ごとに 1 回だけ報告を作るので、同じ key の再送は\n起きない。復旧して再び落ちれば `celeris::reports::record_cluster_login_needed_report` が\n新しい報告 id を作り、`scan_cluster_login_needed` の `key`（報告 id）もそのぶん変わる）。",
+          "type": "string"
+        },
+        {
+          "const": "task_failed",
+          "description": "ADR-0070 D1（Phase 116）: タスクが `failed` に遷移した。`key` = `task_id:updated_at`\n（同じタスクが後で再び failed になったときにも新しい key になるよう、遷移の時刻を含める）。",
           "type": "string"
         }
       ]
@@ -9381,7 +9435,8 @@
       "description": "`POST /tasks/{id}/retry`（Phase 31）の本文。`accept: true` なら新しいタスクは `draft` を経ず `ready` で始まる。\nADR-0062 Phase 108 追記: `workspace`（省略可）を与えると、複製先の作業場所をそれに差し替える\n（検証は `PATCH /tasks/{id}` の `workspace` と同じ）。省略時は従来どおり元のタスクの `workspace` を複製する。",
       "properties": {
         "accept": {
-          "default": false,
+          "default": true,
+          "description": "ADR-0070 D2 追記（Phase 116。本番で確認: `accept` を省略すると `draft` のまま止まり、\n「やり直したのに動かない」状態になった）。既定 `true`（`ready` で始める）。\n`draft` のまま始めたいときだけ明示で `false` を送る。",
           "type": "boolean"
         },
         "workspace": {
@@ -10412,6 +10467,17 @@
             "$ref": "#/$defs/TaskRef"
           },
           "type": "array"
+        },
+        "failure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FailureSummary"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0070 D1（Phase 116）: `task.status == Failed` のときだけ `Some`（分類・理由・配送済みの release）。\nGUI のタスク詳細の赤いバナーの材料。"
         },
         "genre": {
           "description": "ADR-0027 D1: `Task.genre`（`role` と同じ理由で最上位にも出す）。",

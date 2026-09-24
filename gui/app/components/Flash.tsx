@@ -15,6 +15,7 @@ import type {
   TaskCommentOutcome,
   TaskEditOutcome,
   TaskReopenOutcome,
+  TaskRereviewOutcome,
   TransitionOutcome,
 } from "~/celeris/action-types";
 import { Alert } from "~/components/ui/misc";
@@ -172,6 +173,21 @@ export function TaskReopenFlash({ outcome }: { outcome: TaskReopenOutcome | unde
     <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
       <p data-testid="flash-task-reopen">
         再開しました: <span data-testid="flash-from">{result.from}</span> →{" "}
+        <span data-testid="flash-to">{result.to}</span>（reason: {result.reason}）
+      </p>
+    </Alert>
+  );
+}
+
+/** 既存成果の再判定の結果（ADR-0070 D2、Phase 116）。 */
+export function TaskRereviewFlash({ outcome }: { outcome: TaskRereviewOutcome | undefined | null }) {
+  if (!outcome) return null;
+  if (!outcome.ok) return <ErrorFlash error={outcome.error} />;
+  const { result } = outcome;
+  return (
+    <Alert role="status" data-testid="flash" data-flash-kind="ok" tone="success" className="my-2">
+      <p data-testid="flash-task-rereview">
+        再レビューを始めました: <span data-testid="flash-from">{result.from}</span> →{" "}
         <span data-testid="flash-to">{result.to}</span>（reason: {result.reason}）
       </p>
     </Alert>

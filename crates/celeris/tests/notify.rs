@@ -16,6 +16,7 @@ use celeris::notify::{self, NotifyConfig, SendResult};
 use task_core::approval::{Approval, ApprovalId, ApprovalStore, Decision};
 use task_core::message::{Message, MessageId, MessageRole};
 use task_core::notify::{MAX_NOTIFY_ATTEMPTS, NotificationKind, NotificationStore};
+use task_core::DeliveryStore;
 use task_core::org::{OrgKind, OrgNode};
 use task_core::report::{Report, ReportId, ReportKind, ReportStore};
 use task_core::{
@@ -687,6 +688,136 @@ fn secretary_reply_fires_once_when_a_proposed_project_gets_a_node_message() {
         .project_set_status(project, ProjectStatus::Active)
         .unwrap_or_else(|e| panic!("status: {e}"));
     assert!(env.scanned(NotificationKind::SecretaryReply).is_empty());
+}
+
+// ---- 6. task_failed（ADR-0070 D1, Phase 116）----
+
+/// infra 分類（`infra failure ×N` の接頭辞）は `失敗（infra）` として鳴り、work 分類（`error(...)`）は
+/// `失敗（work）` として鳴る。同じ (kind, key) は 2 回目の tick で増えない。
+#[test]
+fn task_failed_fires_once_and_is_classified_infra_or_work() {
+    let env = Env::new();
+
+    let infra = task(Status::Failed);
+    env.store
+        .insert(&infra)
+        .unwrap_or_else(|e| panic!("insert infra: {e}"));
+    env.store
+        .append_event(
+            infra.id,
+            &task_core::Event::WorkerFinished {
+                run_id: "run-1".into(),
+                outcome: "infra failure ×5: adapter: session resume rejected".into(),
+                usage: None,
+                role: None,
+                metrics: None,
+            },
+        )
+        .unwrap_or_else(|e| panic!("event: {e}"));
+
+    let work = task(Status::Failed);
+    env.store
+        .insert(&work)
+        .unwrap_or_else(|e| panic!("insert work: {e}"));
+    env.store
+        .append_event(
+            work.id,
+            &task_core::Event::WorkerFinished {
+                run_id: "run-1".into(),
+                outcome: "error(retryable=false): cargo test failed".into(),
+                usage: None,
+                role: None,
+                metrics: None,
+            },
+        )
+        .unwrap_or_else(|e| panic!("event: {e}"));
+
+    assert_eq!(env.schedule(NotificationKind::TaskFailed), 2);
+    assert_eq!(
+        env.schedule(NotificationKind::TaskFailed),
+        0,
+        "同じ (kind, key) は 2 回目で増えない"
+    );
+
+    let rows = env
+        .store
+        .notification_recent(10)
+        .unwrap_or_else(|e| panic!("recent: {e}"));
+    let infra_row = rows
+        .iter()
+        .find(|n| n.kind == NotificationKind::TaskFailed && n.body.starts_with("失敗（infra）"))
+        .unwrap_or_else(|| panic!("no infra task_failed row: {rows:?}"));
+    assert!(infra_row.body.contains("session resume rejected"), "{}", infra_row.body);
+    let work_row = rows
+        .iter()
+        .find(|n| n.kind == NotificationKind::TaskFailed && n.body.starts_with("失敗（work）"))
+        .unwrap_or_else(|| panic!("no work task_failed row: {rows:?}"));
+    assert!(work_row.body.contains("cargo test failed"), "{}", work_row.body);
+}
+
+/// 配送済み（`deliveries` に `release` が付いた記録がある）のに `failed` になったタスクは、
+/// 「成果は配送済み（release <sha12>）だがレビューで不合格」と文面に明記する。
+#[test]
+fn task_failed_notes_when_the_task_was_already_delivered() {
+    let env = Env::new();
+    let delivered = task(Status::Failed);
+    env.store
+        .insert(&delivered)
+        .unwrap_or_else(|e| panic!("insert: {e}"));
+    env.store
+        .append_event(
+            delivered.id,
+            &task_core::Event::WorkerFinished {
+                run_id: "run-1".into(),
+                outcome: "error(retryable=false): cargo test failed".into(),
+                usage: None,
+                role: None,
+                metrics: None,
+            },
+        )
+        .unwrap_or_else(|e| panic!("event: {e}"));
+    env.store
+        .delivery_save(
+            None,
+            &task_core::Delivery {
+                task_id: delivered.id,
+                project_id: task_core::ProjectId::new(),
+                repo_id: task_core::RepoId::new(),
+                repo: "agent-platform".into(),
+                branch: "celeris/x".into(),
+                base: "main".into(),
+                head: "abc123".into(),
+                default_branch: "main".into(),
+                department: "engineering".into(),
+                review_run: "rev-1".into(),
+                worker_run: "run-1".into(),
+                criterion_idx: 0,
+                decision: None,
+                state: task_core::DeliveryState::Ready,
+                detail: String::new(),
+                release: Some("51d24a61c2ba".into()),
+                prepare_pid: None,
+                notification: None,
+                pushed_at: None,
+                push_error: None,
+            },
+        )
+        .unwrap_or_else(|e| panic!("delivery: {e}"));
+
+    assert_eq!(env.schedule(NotificationKind::TaskFailed), 1);
+    let rows = env
+        .store
+        .notification_recent(10)
+        .unwrap_or_else(|e| panic!("recent: {e}"));
+    let row = rows
+        .iter()
+        .find(|n| n.kind == NotificationKind::TaskFailed)
+        .unwrap_or_else(|| panic!("no task_failed row"));
+    assert!(
+        row.body.contains("成果は配送済み（release 51d24a61c2ba）だがレビューで不合格"),
+        "{}",
+        row.body
+    );
 }
 
 // ---- 文面のリンク ----

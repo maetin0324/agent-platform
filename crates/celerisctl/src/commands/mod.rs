@@ -1,3 +1,5 @@
+/// ADR-0070 D2 追記（Phase 116）: `celerisctl accept <task_id>`。`draft` を `ready` にする専用の道具。
+pub mod accept;
 pub mod add;
 pub mod cancel;
 /// ADR-0046 D3（Phase 59）: `celerisctl config to-harnesses`。
@@ -22,6 +24,9 @@ pub mod replay;
 /// ADR-0051 / ADR-0054 Phase 113 D3: `celerisctl rereview <task_id>`。既存成果を再判定する
 /// （新しい実装 run は起こさない）。
 pub mod rereview;
+/// ADR-0070 D2（Phase 116）: `celerisctl retry <task_id>`。`failed`/`cancelled` を複製してやり直す
+/// （attempts は常に 0 から。`POST /tasks/{id}/retry` と同じ `task_ops::retry::retry_task`）。
+pub mod retry;
 pub mod worker;
 /// ADR-0066 D2（Phase 110b）: `celerisctl workspace prune`。
 pub mod workspace;

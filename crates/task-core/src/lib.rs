@@ -133,6 +133,7 @@ pub use repos::{
 pub use store::{
     ClusterSettings, EventRow, ListFilter, ListOrder, Page, SCHEMA_VERSION, SqliteStore,
     StoreError, StoreOptions, TaskStore, backup_database, event_row_schema_value, integrity_check,
+    is_busy_error,
 };
 pub use transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
 

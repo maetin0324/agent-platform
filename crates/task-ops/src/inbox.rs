@@ -106,6 +106,13 @@ pub enum AttentionItem {
         task: TaskRef,
         reason: String,
         at: String,
+        /// ADR-0070 D1（Phase 116）: `infra`（lease失効・切替中断・result.json不在・セッション再開
+        /// 拒否・レート制限・DB busy）か `work`（レビュー不合格・max_turns・ワーカーの明示的な
+        /// error）かの分類（`task_ops::derive::classify_task_failure`）。
+        class: derive::FailureClass,
+        /// 配送済み（`deliveries` に `release` が付いた記録がある）なら sha12。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delivered_release: Option<String>,
     },
     RequeueLimitNear {
         task: TaskRef,
@@ -450,10 +457,20 @@ fn build_attention(
             }
         }
 
+        // ADR-0070 D1（Phase 116）: 分類・配送済みの release・「再レビュー」操作を足す。
+        let (class, _) = derive::classify_task_failure(&events);
+        let delivered_release = store
+            .delivery_get(t.id)?
+            .and_then(|d| d.release.clone());
+        let mut task_ref = view::task_ref(t);
+        task_ref.actions = view::actions_with_events(t, &events);
+
         items.push(AttentionItem::Failed {
-            task: view::task_ref(t),
+            task: task_ref,
             reason: reasons.join("; "),
             at: view::to_rfc3339(t.updated_at),
+            class,
+            delivered_release,
         });
     }
 
@@ -604,7 +621,9 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::time::Duration as StdDuration;
-    use task_core::{Budget, Check, Criterion, SqliteStore, Task, TaskId, Tier, WorkspaceSpec};
+    use task_core::{
+        Budget, Check, Criterion, DeliveryStore, SqliteStore, Task, TaskId, Tier, WorkspaceSpec,
+    };
 
     fn view_ctx() -> ViewContext {
         ViewContext {
@@ -997,6 +1016,135 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, AttentionItem::Unroutable { .. }))
         );
+    }
+
+    /// ADR-0070 D1（Phase 116。D6(a)）: `AttentionItem::Failed` の `class` が
+    /// infra / work を見分け、配送済みタスクは `delivered_release` を持ち、`review_fail` だけが
+    /// 原因のタスクだけ `rereview` 操作が付く。
+    #[test]
+    fn inbox_attention_failed_items_are_classified_and_carry_operations() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+
+        // infra: `infra failure ×N` の接頭辞。
+        let infra = sample_task(TaskKind::Execute, Status::Failed);
+        store.insert(&infra).expect("insert infra");
+        store
+            .append_event(
+                infra.id,
+                &Event::WorkerFinished {
+                    run_id: "run-1".into(),
+                    outcome: "infra failure ×5: adapter: session resume rejected".into(),
+                    usage: None,
+                    role: None,
+                    metrics: None,
+                },
+            )
+            .expect("finished");
+
+        // work: reviewer 条件を持ち、review_fail だけが原因（rereview が使えるはず）。
+        let mut work = sample_task(TaskKind::Execute, Status::Failed);
+        work.acceptance = vec![task_core::Criterion {
+            text: "reviewer checks it".into(),
+            check: Check::Reviewer,
+        }];
+        store.insert(&work).expect("insert work");
+        store
+            .append_event(
+                work.id,
+                &Event::ReviewVerdict {
+                    run_id: "rev-1".into(),
+                    criterion_idx: 0,
+                    pass: false,
+                    reason: "テストが落ちている".into(),
+                },
+            )
+            .expect("verdict");
+        store
+            .append_event(
+                work.id,
+                &Event::Transitioned {
+                    from: Status::Reviewing,
+                    to: Status::Failed,
+                    reason: "review_fail".into(),
+                },
+            )
+            .expect("transitioned");
+
+        // delivered: 配送済みなのに failed。
+        let delivered = sample_task(TaskKind::Execute, Status::Failed);
+        store.insert(&delivered).expect("insert delivered");
+        store
+            .append_event(
+                delivered.id,
+                &Event::WorkerFinished {
+                    run_id: "run-1".into(),
+                    outcome: "error(retryable=false): cargo test failed".into(),
+                    usage: None,
+                    role: None,
+                    metrics: None,
+                },
+            )
+            .expect("finished");
+        store
+            .delivery_save(
+                None,
+                &task_core::Delivery {
+                    task_id: delivered.id,
+                    project_id: task_core::ProjectId::new(),
+                    repo_id: task_core::RepoId::new(),
+                    repo: "agent-platform".into(),
+                    branch: "celeris/x".into(),
+                    base: "main".into(),
+                    head: "abc123".into(),
+                    default_branch: "main".into(),
+                    department: "engineering".into(),
+                    review_run: "rev-1".into(),
+                    worker_run: "run-1".into(),
+                    criterion_idx: 0,
+                    decision: None,
+                    state: task_core::DeliveryState::Ready,
+                    detail: String::new(),
+                    release: Some("51d24a61c2ba".into()),
+                    prepare_pid: None,
+                    notification: None,
+                    pushed_at: None,
+                    push_error: None,
+                },
+            )
+            .expect("delivery save");
+
+        let ctx = view_ctx();
+        let result =
+            inbox(&store, None, &ctx, OffsetDateTime::now_utc(), &no_evidence).expect("inbox");
+
+        let find = |id: TaskId| {
+            result
+                .attention
+                .iter()
+                .find_map(|a| match a {
+                    AttentionItem::Failed {
+                        task,
+                        class,
+                        delivered_release,
+                        ..
+                    } if task.id == id => Some((task.clone(), *class, delivered_release.clone())),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no failed attention item for {id}"))
+        };
+
+        let (infra_task, infra_class, infra_release) = find(infra.id);
+        assert_eq!(infra_class, derive::FailureClass::Infra);
+        assert!(infra_release.is_none());
+        assert!(infra_task.actions.contains(&view::Action::Retry));
+        assert!(!infra_task.actions.contains(&view::Action::Rereview));
+
+        let (work_task, work_class, _) = find(work.id);
+        assert_eq!(work_class, derive::FailureClass::Work);
+        assert!(work_task.actions.contains(&view::Action::Rereview));
+
+        let (_, _, delivered_release) = find(delivered.id);
+        assert_eq!(delivered_release.as_deref(), Some("51d24a61c2ba"));
     }
 
     #[test]

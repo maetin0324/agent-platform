@@ -82,6 +82,9 @@ pub enum NotificationKind {
     /// 起きない。復旧して再び落ちれば `celeris::reports::record_cluster_login_needed_report` が
     /// 新しい報告 id を作り、`scan_cluster_login_needed` の `key`（報告 id）もそのぶん変わる）。
     ClusterLoginNeeded,
+    /// ADR-0070 D1（Phase 116）: タスクが `failed` に遷移した。`key` = `task_id:updated_at`
+    /// （同じタスクが後で再び failed になったときにも新しい key になるよう、遷移の時刻を含める）。
+    TaskFailed,
 }
 
 impl NotificationKind {
@@ -94,6 +97,7 @@ impl NotificationKind {
             NotificationKind::SecretaryReply => "secretary_reply",
             NotificationKind::TaskReady => "task_ready",
             NotificationKind::ClusterLoginNeeded => "cluster_login_needed",
+            NotificationKind::TaskFailed => "task_failed",
         }
     }
 
@@ -106,12 +110,13 @@ impl NotificationKind {
             "secretary_reply" => Some(NotificationKind::SecretaryReply),
             "task_ready" => Some(NotificationKind::TaskReady),
             "cluster_login_needed" => Some(NotificationKind::ClusterLoginNeeded),
+            "task_failed" => Some(NotificationKind::TaskFailed),
             _ => None,
         }
     }
 
     /// 判定の順（GUI と再送の順を決定的にするため）。
-    pub const ALL: [NotificationKind; 7] = [
+    pub const ALL: [NotificationKind; 8] = [
         NotificationKind::MilestoneReady,
         NotificationKind::ApprovalPending,
         NotificationKind::QuestionBlocked,
@@ -119,6 +124,7 @@ impl NotificationKind {
         NotificationKind::SecretaryReply,
         NotificationKind::TaskReady,
         NotificationKind::ClusterLoginNeeded,
+        NotificationKind::TaskFailed,
     ];
 }
 

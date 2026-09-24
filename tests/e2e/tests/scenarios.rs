@@ -404,6 +404,11 @@ echo '{"type":"done","summary":"attempt '"$N"'","evidence":[{"criterion":0,"comm
 }
 
 /// シナリオ 3: 期限切れリースを持つ running タスクが回収され、再実行されて done。
+///
+/// ADR-0070 D3/D5（Phase 116）: このインスタンスが起こした run ではない（`self.running` に無い）
+/// lease 失効は、以前は `Trigger::LeaseExpired`（無条件に attempts を消費）で reclaim していたが、
+/// 今は D3 のインフラ分類経路（`Trigger::InfraRequeue`。attempts を消費せず、
+/// `[dispatch] max_infra_retries` まではバックオフして再試行する）に統合された。
 #[test]
 fn expired_lease_is_reclaimed_and_task_completes() {
     let env = Env::new();
@@ -473,26 +478,28 @@ fn expired_lease_is_reclaimed_and_task_completes() {
         )
         .unwrap();
 
-    let log = env.run_celeris(&config, Duration::from_secs(60));
+    // ADR-0070 D3: インフラ再試行は 30 秒のバックオフを挟んでから redispatch するので、
+    // 通常の 60 秒より長めに待つ。
+    let log = env.run_celeris(&config, Duration::from_secs(90));
 
     let t = env.task(task.id);
     assert_eq!(t.status, Status::Done, "{log}");
     assert_eq!(
-        t.attempts, 1,
-        "lease expiry counts as a failed attempt (ADR-0002 D3)"
+        t.attempts, 0,
+        "ADR-0070 D3: インフラ都合の lease 失効は attempts を消費しない"
     );
     assert!(t.lease.is_none());
     assert_eq!(
         env.transitions(task.id),
         vec![
-            "Running->Ready:lease_expired",
+            "Running->Ready:infra_requeue",
             "Ready->Running:dispatch",
             "Running->Reviewing:worker_done",
             "Reviewing->Done:review_pass",
         ]
     );
     let events = env.store.events_for(task.id).unwrap();
-    assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerFinished { run_id, outcome, .. } if run_id == "stale-run" && outcome == "lease_expired")));
+    assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerFinished { run_id, outcome, .. } if run_id == "stale-run" && outcome == "infra_requeue: lease expired (run_id=stale-run)")));
     assert!(log.contains("lease expired; reclaimed"), "{log}");
     env.replay_is_consistent();
 }

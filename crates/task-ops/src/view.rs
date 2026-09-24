@@ -145,6 +145,20 @@ pub struct TaskDetail {
     pub worker_run_hint: Option<String>,
     /// ADR-0019 D2: `sync = "worktree"` のクラスタで動くタスクの worktree。人はここを見て diff / commit する。
     pub worktree: Option<WorktreeView>,
+    /// ADR-0070 D1（Phase 116）: `task.status == Failed` のときだけ `Some`（分類・理由・配送済みの release）。
+    /// GUI のタスク詳細の赤いバナーの材料。
+    pub failure: Option<FailureSummary>,
+}
+
+/// ADR-0070 D1（Phase 116）: `TaskDetail.failure` / 受信箱 `AttentionItem::Failed` が共有する形。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct FailureSummary {
+    pub class: derive::FailureClass,
+    /// 人が読む理由 1 行（`derive::classify_task_failure` が作る）。
+    pub reason: String,
+    /// 配送済み（`deliveries` に `release` が付いた記録がある）なら sha12。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_release: Option<String>,
 }
 
 /// ADR-0019 D2: クラスタ側の worktree（celeris はここだけを触り、commit はしない）。
@@ -276,6 +290,11 @@ pub enum Action {
     /// ADR-0044 D2（Phase 53）: 終端のタスクを同じ worktree のまま再開する（`POST /tasks/{id}/reopen`。
     /// `done` / `failed` だけ。`cancelled` は worktree を消してあるので `Retry` を使う）。
     Reopen,
+    /// ADR-0070 D2（Phase 116）: 既存成果の再判定（`POST /tasks/{id}/rereview`。ADR-0051 /
+    /// ADR-0054 Phase 113 D3）。`done`、または直前の遷移が `review_fail` だった `failed` だけ
+    /// （`task_ops::comment::can_rereview` と同じ規則。events を要るので `actions(task)` 単体では
+    /// 判定できず、`task_detail` / 受信箱の `build_attention` が events を渡して個別に足す）。
+    Rereview,
 }
 
 pub fn task_ref(task: &Task) -> TaskRef {
@@ -314,6 +333,17 @@ pub fn actions(task: &Task) -> Vec<Action> {
     }
     if matches!(task.status, Status::Done | Status::Failed) {
         out.push(Action::Reopen);
+    }
+    out
+}
+
+/// ADR-0070 D2（Phase 116）: [`actions`] に `Action::Rereview` を足したもの（events が要るので
+/// 別関数にした。`task_detail` と受信箱の `build_attention` が、それぞれ既に読んでいる events を
+/// 渡して使う）。
+pub fn actions_with_events(task: &Task, events: &[(u64, Event)]) -> Vec<Action> {
+    let mut out = actions(task);
+    if crate::comment::can_rereview(task, events) {
+        out.push(Action::Rereview);
     }
     out
 }
@@ -759,7 +789,8 @@ pub fn task_detail(
         }
     };
 
-    let task_actions = actions(&task);
+    let task_actions = actions_with_events(&task, &events);
+    let failure = task_failure(&task, &events, store)?;
     let worker_run_hint = if task.status.is_terminal() {
         None
     } else {
@@ -807,7 +838,30 @@ pub fn task_detail(
         actions: task_actions,
         worker_run_hint,
         worktree,
+        failure,
     })
+}
+
+/// ADR-0070 D1（Phase 116）: `task.status == Failed` のときだけ `Some`。分類・理由 1 行・
+/// 配送済みなら release の sha12 を持つ。`deliveries` の読み取りは `TaskDetail` の他のフィールドと
+/// 同じくストアから 1 回読むだけ（LLM は使わない）。
+fn task_failure(
+    task: &Task,
+    events: &[(u64, Event)],
+    store: &dyn TaskStore,
+) -> Result<Option<FailureSummary>, OpsError> {
+    if task.status != Status::Failed {
+        return Ok(None);
+    }
+    let (class, reason) = derive::classify_task_failure(events);
+    let delivered_release = store
+        .delivery_get(task.id)?
+        .and_then(|d| d.release.clone());
+    Ok(Some(FailureSummary {
+        class,
+        reason,
+        delivered_release,
+    }))
 }
 
 /// `Approval needed: <title> — criterion <idx> (attempt <n>)`（`derive::human_approval_title` の書式）を解析して
@@ -1758,6 +1812,80 @@ mod tests {
         assert!(detail.worker_run_hint.is_none());
         // ADR-0044 D2（Phase 53）: `done` は編集できないが「再開」はできる。
         assert_eq!(detail.actions, vec![Action::Reopen]);
+        assert!(detail.failure.is_none(), "done is not a failure");
+    }
+
+    /// ADR-0070 D1/D2（Phase 116。D6(a)）: `failed` のタスク詳細は `failure`（分類・理由・配送済みの
+    /// release）を持ち、`review_fail` だけが原因のときだけ `Action::Rereview` が付く。
+    #[test]
+    fn task_detail_failed_task_reports_failure_and_rereview_when_review_fail_is_the_only_reason() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let mut task = sample_task(TaskKind::Execute, Status::Failed);
+        task.acceptance = vec![Criterion {
+            text: "reviewer checks it".into(),
+            check: Check::Reviewer,
+        }];
+        store.insert(&task).expect("insert task");
+        store
+            .append_event(
+                task.id,
+                &Event::ReviewVerdict {
+                    run_id: "rev-1".into(),
+                    criterion_idx: 0,
+                    pass: false,
+                    reason: "テストが落ちている".into(),
+                },
+            )
+            .expect("verdict");
+        store
+            .append_event(
+                task.id,
+                &Event::Transitioned {
+                    from: Status::Reviewing,
+                    to: Status::Failed,
+                    reason: "review_fail".into(),
+                },
+            )
+            .expect("transitioned");
+
+        let ctx = view_ctx();
+        let detail =
+            task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
+        let failure = detail.failure.expect("failure summary");
+        assert_eq!(failure.class, derive::FailureClass::Work);
+        assert_eq!(failure.reason, "テストが落ちている");
+        assert!(failure.delivered_release.is_none());
+        assert!(detail.actions.contains(&Action::Retry));
+        assert!(detail.actions.contains(&Action::Rereview));
+    }
+
+    /// インフラ分類（`infra failure ×N`）は `Action::Rereview` を出さない
+    /// （`review_fail` が原因ではないので `can_rereview` が偽になる）。
+    #[test]
+    fn task_detail_infra_failed_task_reports_infra_class_without_rereview() {
+        let store = SqliteStore::open_in_memory().expect("open store");
+        let task = sample_task(TaskKind::Execute, Status::Failed);
+        store.insert(&task).expect("insert task");
+        store
+            .append_event(
+                task.id,
+                &Event::WorkerFinished {
+                    run_id: "run-1".into(),
+                    outcome: "infra failure ×5: adapter: session resume rejected".into(),
+                    usage: None,
+                    role: None,
+                    metrics: None,
+                },
+            )
+            .expect("finished");
+
+        let ctx = view_ctx();
+        let detail =
+            task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("task_detail");
+        let failure = detail.failure.expect("failure summary");
+        assert_eq!(failure.class, derive::FailureClass::Infra);
+        assert!(detail.actions.contains(&Action::Retry));
+        assert!(!detail.actions.contains(&Action::Rereview));
     }
 
     #[test]

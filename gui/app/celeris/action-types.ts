@@ -103,6 +103,15 @@ export type TaskReopenOutcome =
   | { ok: true; op: "reopen"; taskId: string; result: TransitionResult }
   | { ok: false; op: "reopen"; taskId: string; error: ActionError };
 
+/**
+ * 既存成果の再判定（ADR-0051 / ADR-0054 Phase 113 D3、ADR-0070 D2、Phase 116。
+ * `POST /tasks/{id}/rereview`。**管理系**）: `done`、または直前の遷移が `review_fail` だった
+ * `failed` からだけ（celeris 側の判断）。新しい実装 run は起こさない。
+ */
+export type TaskRereviewOutcome =
+  | { ok: true; op: "rereview"; taskId: string; result: TransitionResult }
+  | { ok: false; op: "rereview"; taskId: string; error: ActionError };
+
 /** 作成（`POST /tasks` / `POST /plans`）の失敗。成功は詳細へ redirect するので data にならない。 */
 export interface CreateFailure {
   ok: false;

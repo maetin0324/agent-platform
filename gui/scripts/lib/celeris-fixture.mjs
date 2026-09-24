@@ -444,7 +444,14 @@ export async function setupMockCeleris() {
 
   mock.on(`GET`, `/api/v1/tasks/${TASK_ID}`, (_req, res) =>
     sendJson(res, 200, {
-      actions: [],
+      // ADR-0070 D1/D2（Phase 116）: `failure`（失敗バナー）と「やり直す」「再レビュー」を
+      // 機械検査対象にする（`FailureBanner` は `task.status` ではなく `failure`/`actions` だけを見る）。
+      actions: ["retry", "rereview"],
+      failure: {
+        class: "infra",
+        reason: "infra failure ×5: adapter: session resume rejected",
+        delivered_release: null,
+      },
       answers: [],
       approvals: [],
       children: [],
@@ -662,12 +669,15 @@ export async function setupMockCeleris() {
       ],
       // Phase 88（P-G39-1）: `attention-item`（`AttentionRow`。`cluster_unavailable` 以外の分岐）を
       // 機械検査対象にする。
+      // ADR-0070 D1（Phase 116）: `class`/`delivered_release`/`rereview` も機械検査対象にする。
       attention: [
         {
           at: "2026-09-20T22:00:00Z",
           reason: "run failed: exit 1",
+          class: "work",
+          delivered_release: "51d24a61c2ba",
           task: {
-            actions: ["retry", "cancel"],
+            actions: ["retry", "rereview", "cancel"],
             id: "01INBOXATTENTIONTASK00001",
             kind: "execute",
             status: "failed",

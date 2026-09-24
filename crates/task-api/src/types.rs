@@ -210,10 +210,17 @@ pub struct CancelBody {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RetryBody {
-    #[serde(default)]
+    /// ADR-0070 D2 追記（Phase 116。本番で確認: `accept` を省略すると `draft` のまま止まり、
+    /// 「やり直したのに動かない」状態になった）。既定 `true`（`ready` で始める）。
+    /// `draft` のまま始めたいときだけ明示で `false` を送る。
+    #[serde(default = "default_retry_accept")]
     pub accept: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<task_core::WorkspaceSpec>,
+}
+
+fn default_retry_accept() -> bool {
+    true
 }
 
 /// `GET /tasks/{id}/events`、`GET /events`。

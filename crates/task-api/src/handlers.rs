@@ -92,6 +92,9 @@ pub(crate) fn router(state: ApiState) -> Router {
         .route("/api/v1/tasks/{id}/artifacts", get(artifact_list))
         .route("/api/v1/tasks/{id}/artifacts/{idx}", get(artifact_body))
         .route("/api/v1/tasks/{id}/approve", post(approve))
+        // ADR-0070 D2 追記（Phase 116）: `draft` だけを `ready` にする専用の道具（`approve` は
+        // `Approval` タスクの承認とも兼用でわかりにくかった）。
+        .route("/api/v1/tasks/{id}/accept", post(accept))
         .route("/api/v1/tasks/{id}/reject", post(reject))
         .route("/api/v1/tasks/{id}/answer", post(answer))
         .route("/api/v1/tasks/{id}/cancel", post(cancel))
@@ -1461,6 +1464,29 @@ async fn approve(
         .blocking(move |store| {
             task_ops::gate::approve(store, id, note, expected_status)
                 .map_err(|e| ops_problem(store, e, Some("approve")))
+        })
+        .await?;
+    Ok(json_response(StatusCode::OK, &result))
+}
+
+/// ADR-0070 D2 追記（Phase 116。本番で確認: `retry` の `accept` を明示しないと `draft` のまま止まり、
+/// `draft` を `ready` にする専用の道具が `approve` しか無くわかりにくかった）: `status == Draft` だけを
+/// 許す `task_ops::gate::accept` の薄いラッパー。
+async fn accept(
+    State(state): State<ApiState>,
+    Params(id): Params<String>,
+    headers: HeaderMap,
+    RawQuery(raw): RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let id = parse_task_id(&id)?;
+    let ReopenBody { expected_status } = read_json(body, true).await?;
+    let result = state
+        .blocking(move |store| {
+            task_ops::gate::accept(store, id, expected_status)
+                .map_err(|e| ops_problem(store, e, Some("accept")))
         })
         .await?;
     Ok(json_response(StatusCode::OK, &result))

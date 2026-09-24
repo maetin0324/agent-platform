@@ -33,10 +33,11 @@ use task_ops::daemon::{
 };
 use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
-    AnswerNote, REVIEWER_INFRA_FAILURE_PREFIX, REVIEWER_REQUEUED_PREFIX, ReviewNote,
-    answers_from_events, approval_decision_note, artifacts_for_run, consecutive_requeues,
-    consecutive_reviewer_infra_failures, consecutive_reviewer_requeues, human_approval_title,
-    last_run_id, prior_review_from_events, retry_backoff,
+    AnswerNote, INFRA_FAILURE_MARKER, REVIEWER_INFRA_FAILURE_PREFIX, REVIEWER_REQUEUED_PREFIX,
+    ReviewNote, answers_from_events, approval_decision_note, artifacts_for_run,
+    consecutive_infra_requeues, consecutive_requeues, consecutive_reviewer_infra_failures,
+    consecutive_reviewer_requeues, human_approval_title, infra_backoff_delay, last_run_id,
+    prior_review_from_events, retry_backoff,
 };
 use task_worker::{
     ActiveMilestoneContext, ActiveProjectContext, AdapterError, Answer, ChildSummary,
@@ -67,6 +68,11 @@ const SLOW_TICK: Duration = Duration::from_secs(1);
 
 /// tick の中の 1 段階がこれを超えたら `warn`（ADR-0015 D2。遅いのが DB かファイルかを切り分ける）。
 const SLOW_STEP: Duration = Duration::from_millis(500);
+
+/// ADR-0070 D5（Phase 116）: `StoreSink::heartbeat` が `renew_lease` の DB busy/locked をリトライする回数。
+const RENEW_LEASE_RETRIES: u32 = 3;
+/// ADR-0070 D5: 上のリトライの間隔。
+const RENEW_LEASE_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 fn log_slow_step(step: &'static str, started: Instant) {
     let elapsed = started.elapsed();
@@ -498,6 +504,13 @@ pub struct DispatchConfig {
     /// を「reviewer infra failure ×N」として不合格にする（`fail_all` はしない。人の承認・command・
     /// artifact_exists の結果は保持する）。既定 3。
     pub max_reviewer_retries: u32,
+    /// ADR-0070 D3（Phase 116）: `[dispatch] max_infra_retries`。ワーカー run **自身のインフラ都合の
+    /// 失敗**（lease 失効・切替による中断・result.json 不在・セッション再開拒否・レート制限・DB busy。
+    /// `provider_failure_outcome` が分類できない `Err`）で `attempts` を消費せず再試行できる連続回数の
+    /// 上限（`consecutive_infra_requeues`）。達したら `WorkerError{retryable:false}` で
+    /// `"infra failure ×N: …"` として打ち切る（`Trigger::LeaseExpired` は使わなくなった。
+    /// `reclaim_expired_leases` もこの上限を通す）。既定 5。
+    pub max_infra_retries: u32,
     /// ADR-0016 D1: `[[roles]]`。run 開始時に `RunContext.role`（指示文）を載せ、委譲された子の既定に使う。
     pub roles: Vec<RoleSpec>,
     /// ADR-0027 D1: `[[genres]]`。委譲の分野解決（`default_role` の既定の穴埋め）と、委譲できる run に渡す
@@ -1063,6 +1076,10 @@ impl EventSink for StoreSink {
         }
     }
 
+    /// ADR-0070 D5（Phase 116）: `renew_lease` が DB busy/locked で失敗しても、すぐには諦めない。
+    /// この呼び出しの中で最大 [`RENEW_LEASE_RETRIES`] 回（[`RENEW_LEASE_RETRY_DELAY`] 間隔）やり直す。
+    /// それでも失敗したら WARN のみ（run はこの呼び出しの成否に関わらず続く。DB が一時的に混んでいた
+    /// だけで run を止めない）。
     fn heartbeat(&self) {
         let Ok(mut last) = self.last_renew.lock() else {
             return;
@@ -1071,15 +1088,27 @@ impl EventSink for StoreSink {
             return;
         }
         *last = Instant::now();
-        match self
-            .store
-            .renew_lease(self.task_id, &self.run_id, self.lease_ttl)
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::debug!(task_id = %self.task_id, run_id = %self.run_id, "lease not renewed (no longer running under this run)")
+        let mut attempt = 0;
+        loop {
+            match self
+                .store
+                .renew_lease(self.task_id, &self.run_id, self.lease_ttl)
+            {
+                Ok(true) => return,
+                Ok(false) => {
+                    tracing::debug!(task_id = %self.task_id, run_id = %self.run_id, "lease not renewed (no longer running under this run)");
+                    return;
+                }
+                Err(e) if task_core::is_busy_error(&e) && attempt < RENEW_LEASE_RETRIES => {
+                    attempt += 1;
+                    tracing::debug!(task_id = %self.task_id, run_id = %self.run_id, attempt, "lease renewal hit a busy database; retrying (ADR-0070 D5)");
+                    std::thread::sleep(RENEW_LEASE_RETRY_DELAY);
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %self.task_id, error = %e, "failed to renew lease");
+                    return;
+                }
             }
-            Err(e) => tracing::warn!(task_id = %self.task_id, error = %e, "failed to renew lease"),
         }
     }
 
@@ -1229,6 +1258,11 @@ pub struct Dispatcher {
     reviewing: HashMap<TaskId, ReviewEntry>,
     /// レビューを開始できなかった（`Reviewer` run の枠が無い）タスクの `done` 内容。次 tick で使う。
     pending_subjects: HashMap<TaskId, ReviewSubject>,
+    /// ADR-0070 D3（Phase 116）: `Trigger::InfraRequeue` で `Ready` に戻したタスクの再 dispatch を
+    /// バックオフさせる（`task_ops::derive::infra_backoff_delay`）。プロセス内メモリのみ（DB に
+    /// 永続化しない。dispatcher の再起動で猶予は失われるが、上限判定自体は `consecutive_infra_requeues`
+    /// が events から数え直すので安全側。ADR-0070 §2 D3 参照）。
+    infra_backoff: HashMap<TaskId, OffsetDateTime>,
     /// 「設定に合うプロバイダが無い」警告を出した（連続 tick で繰り返さない）タスク（ADR-0012 D2）。
     warned_unroutable: std::collections::HashSet<TaskId>,
     /// ADR-0062 B1（Phase 107）: 「担当が cluster:<id> を持たない」警告を出した（連続 tick で
@@ -1468,6 +1502,7 @@ impl Dispatcher {
             running: HashMap::new(),
             reviewing: HashMap::new(),
             pending_subjects: HashMap::new(),
+            infra_backoff: HashMap::new(),
             warned_unroutable: std::collections::HashSet::new(),
             warned_cluster_tool: std::collections::HashSet::new(),
             just_aborted: std::collections::HashSet::new(),
@@ -2856,6 +2891,9 @@ impl Dispatcher {
         // （`StoreSink::delegate_impl` が `QuestionRaised` を残している）。
         let cross_department =
             cross_department_questions_of(&self.store.events_for(task_id)?, &run_id);
+        // ADR-0070 D3（Phase 116）: `Trigger::InfraRequeue` を選んだときだけ `Some(n)`（n 回目の
+        // インフラ再試行）。`Ok(outcome) =>` の中で `self.infra_backoff` のバックオフ期限を立てるのに使う。
+        let mut infra_requeue_n: Option<u32> = None;
         let (mut trigger, mut outcome_str, usage, provider_outcome) = match result {
             Ok(RunOutcome {
                 terminal:
@@ -2931,12 +2969,30 @@ impl Dispatcher {
                     None,
                     po,
                 ),
-                None => (
-                    Trigger::WorkerError { retryable: true },
-                    format!("error(retryable=true): adapter: {e}"),
-                    None,
-                    ProviderOutcome::Ok,
-                ),
+                // ADR-0070 D3（Phase 116）: プロバイダが分類できない失敗（resume 拒否・プロセス
+                // I/O・result.json 不在など）は「インフラ都合」として attempts を消費せず、
+                // `max_infra_retries` までバックオフして再試行する。上限に達したときだけ
+                // `WorkerError{retryable:false}`（無条件に `Failed`）で打ち切り、`"infra failure ×N"`
+                // を付ける（D1 の失敗分類がこの接頭辞を見る）。
+                None => {
+                    let infra_n = consecutive_infra_requeues(&self.store.events_for(task_id)?) + 1;
+                    if infra_n <= self.config.max_infra_retries {
+                        infra_requeue_n = Some(infra_n);
+                        (
+                            Trigger::InfraRequeue,
+                            format!("infra_requeue: adapter: {e}"),
+                            None,
+                            ProviderOutcome::Ok,
+                        )
+                    } else {
+                        (
+                            Trigger::WorkerError { retryable: false },
+                            format!("{INFRA_FAILURE_MARKER}{infra_n}: adapter: {e}"),
+                            None,
+                            ProviderOutcome::Ok,
+                        )
+                    }
+                }
             },
         };
         // ADR-0054 D1（Phase 67）: CoS の対話 run（継続セッション）は、この run の usage を
@@ -3038,6 +3094,13 @@ impl Dispatcher {
         {
             Ok(outcome) => {
                 tracing::info!(%task_id, %run_id, next = ?outcome.next, attempts = outcome.attempts, outcome = %outcome_str, "worker finished");
+                // ADR-0070 D3（Phase 116）: `InfraRequeue` は `dispatch_ready` がすぐ拾わないよう、
+                // バックオフの期限を立てる（30秒/2分/5分。`infra_backoff_delay`）。
+                if let Some(n) = infra_requeue_n {
+                    let until = OffsetDateTime::now_utc() + infra_backoff_delay(n);
+                    tracing::warn!(%task_id, %run_id, attempt = n, until = %until, "infra failure; requeued with backoff (attempts not consumed; ADR-0070 D3)");
+                    self.infra_backoff.insert(task_id, until);
+                }
                 // ADR-0033 D4（Phase 24 / 監査 M-5）: 対話用タスクの run なら、`summary`（質問なら本文、
                 // 失敗なら理由）をそのノードの返事として `messages` に残す。**「返事できませんでした」は
                 // タスクが `Failed` に落ちたときだけ**（requeue / まだ試行が残る失敗では書かない）。
@@ -3913,6 +3976,13 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// ADR-0070 D5（Phase 116）: lease が期限切れでも、**このインスタンスが持っている run**
+    /// （`self.running` に entry がある）のプロセスがまだ生きていれば（`process_group::group_alive`）、
+    /// reclaim せず lease を延長して続行する（DB busy で数 tick 更新できなかっただけ、という実際に
+    /// 起きた事故〈PROGRESS Phase 116〉をここで救う）。延長にも失敗したら次の tick に持ち越す。
+    /// 死んでいる（またはこのインスタンスの管理外）ときだけ、ADR-0070 D3 の分岐
+    /// （`InfraRequeue` でバックオフ再試行、`max_infra_retries` 到達で打ち切り）に乗せる。
+    /// `Trigger::LeaseExpired`（無条件に attempts を消費する）はもう使わない。
     fn reclaim_expired_leases(&mut self) -> Result<usize, DispatchError> {
         let now = OffsetDateTime::now_utc();
         let mut count = 0;
@@ -3924,6 +3994,24 @@ impl Dispatcher {
             let Some(lease) = &task.lease else { continue };
             if lease.expires_at > now {
                 continue;
+            }
+            if let Some(entry) = self.running.get(&task.id)
+                && task_worker::process_group::group_alive(&entry.run_id)
+            {
+                let ttl = Duration::from_secs(task.budget.max_wall_secs) + self.config.lease_grace;
+                match self.store.renew_lease(task.id, &entry.run_id, ttl) {
+                    Ok(true) => {
+                        tracing::warn!(task_id = %task.id, run_id = %entry.run_id, "lease expired but the run's process is still alive; extended instead of reclaiming (ADR-0070 D5)");
+                        continue;
+                    }
+                    Ok(false) => {
+                        // 一致しない（レース。他の何かがリースを動かした）。下の通常の reclaim へ。
+                    }
+                    Err(e) => {
+                        tracing::warn!(task_id = %task.id, run_id = %entry.run_id, error = %e, "failed to extend the lease for a still-alive run; will retry reclaiming next tick");
+                        continue;
+                    }
+                }
             }
             // ADR-0061（Phase 104）: `entry` を消費する前に `since`（wall time 計算用）を取っておく。
             let mut run_since: Option<OffsetDateTime> = None;
@@ -3937,20 +4025,38 @@ impl Dispatcher {
                 wall_ms: wall_ms_since(since),
                 retries: task.attempts,
             });
+            let infra_n = consecutive_infra_requeues(&self.store.events_for(task.id)?) + 1;
+            let (trigger, outcome_text) = if infra_n <= self.config.max_infra_retries {
+                (
+                    Trigger::InfraRequeue,
+                    format!("infra_requeue: lease expired (run_id={})", lease.worker_run_id),
+                )
+            } else {
+                (
+                    Trigger::WorkerError { retryable: false },
+                    format!(
+                        "{INFRA_FAILURE_MARKER}{infra_n}: lease expired (run_id={})",
+                        lease.worker_run_id
+                    ),
+                )
+            };
             let finished = Event::WorkerFinished {
                 run_id: lease.worker_run_id.clone(),
-                outcome: "lease_expired".to_string(),
+                outcome: outcome_text,
                 usage: None,
                 role: None,
                 metrics,
             };
-            match self.store.apply_transition_with_events(
-                task.id,
-                Trigger::LeaseExpired,
-                vec![finished],
-            ) {
+            match self
+                .store
+                .apply_transition_with_events(task.id, trigger, vec![finished])
+            {
                 Ok(outcome) => {
                     tracing::warn!(task_id = %task.id, run_id = %lease.worker_run_id, next = ?outcome.next, attempts = outcome.attempts, "lease expired; reclaimed");
+                    if matches!(trigger, Trigger::InfraRequeue) {
+                        let until = now + infra_backoff_delay(infra_n);
+                        self.infra_backoff.insert(task.id, until);
+                    }
                     count += 1;
                 }
                 Err(StoreError::InvalidTransition(e)) => {
@@ -4175,6 +4281,16 @@ impl Dispatcher {
                     tracing::debug!(task_id = %task.id, attempts = task.attempts, delay_ms = delay.as_millis() as u64, "retry backoff; not dispatching yet");
                     continue;
                 }
+            }
+            // ADR-0070 D3（Phase 116）: インフラ都合の再試行のバックオフ（`self.infra_backoff`。
+            // `task.attempts` に依らない別軸。上のバックオフとは独立にゲートする）。期限を過ぎたら
+            // このタスクへのゲートは外す（次に infra 失敗すればまた立て直す）。
+            if let Some(until) = self.infra_backoff.get(&task.id).copied() {
+                if OffsetDateTime::now_utc() < until {
+                    tracing::debug!(task_id = %task.id, %until, "infra backoff; not dispatching yet");
+                    continue;
+                }
+                self.infra_backoff.remove(&task.id);
             }
             // ADR-0018: リモート実行のタスクは、クラスタの設定・cooldown・並列度・多重接続を先に確かめる。
             // ADR-0062 B1（Phase 107）: `cluster_of` が `None` の理由を分ける。(a) 設定に無いクラスタ
@@ -7745,6 +7861,7 @@ mod tests {
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
                 max_reviewer_retries: 3,
+                max_infra_retries: 5,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -8712,6 +8829,7 @@ mod tests {
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
                 max_reviewer_retries: 3,
+                max_infra_retries: 5,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -8867,6 +8985,7 @@ mod tests {
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
                 max_reviewer_retries: 3,
+                max_infra_retries: 5,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -9039,6 +9158,7 @@ mod tests {
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
                 max_reviewer_retries: 3,
+                max_infra_retries: 5,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -9811,6 +9931,101 @@ mod tests {
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
     }
 
+    /// レビューが無く、`sink.heartbeat()` も呼ばない（テストが lease の自然な更新に邪魔されないよう
+    /// に）、しばらく走り続けるだけのアダプタ。
+    struct SlowNoHeartbeatAdapter;
+
+    #[async_trait]
+    impl WorkerAdapter for SlowNoHeartbeatAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            _req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            Ok(done_outcome())
+        }
+    }
+
+    /// ADR-0070 D5（Phase 116。D6(c)）: lease が期限切れでも、dispatcher が抱えている run の
+    /// プロセスがまだ生きていれば（`process_group::group_alive`）、`reclaim_expired_leases` は
+    /// reclaim せず lease を延長する（DB busy で数 tick 更新できなかっただけ、という実際の事故を
+    /// 再現する）。「偽の子プロセス」はテスト自身の pid を run_id に登録するだけで作る（本物の
+    /// 子プロセスを起こす必要はない。`process_group::group_alive` は「その pid が生きているか」しか
+    /// 見ないため）。
+    #[tokio::test]
+    async fn a_lease_past_its_expiry_is_extended_instead_of_reclaimed_while_the_process_is_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.budget.max_wall_secs = 0;
+        store.insert(&task).unwrap();
+        let mut d = dispatcher(store.clone(), Arc::new(SlowNoHeartbeatAdapter), 1);
+        d.config.lease_grace = Duration::from_millis(20);
+        assert_eq!(d.tick().unwrap().dispatched, 1);
+
+        let run_id = store
+            .get(task.id)
+            .unwrap()
+            .unwrap()
+            .lease
+            .expect("running with a lease")
+            .worker_run_id;
+        assert!(
+            !task_worker::process_group::group_alive(&run_id),
+            "the fake in-process adapter never registers a real child"
+        );
+        // 「偽の子プロセス」を自分の pid で登録する（本物の子プロセスは要らない。生死しか見ないため）。
+        let guard =
+            task_worker::process_group::ProcessGroup::register(&run_id, Some(std::process::id()));
+        assert!(task_worker::process_group::group_alive(&run_id));
+
+        // lease が確実に切れるまで待つ（max_wall_secs(0) + lease_grace(20ms)）。
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            store.get(task.id).unwrap().unwrap().lease.unwrap().expires_at < OffsetDateTime::now_utc(),
+            "the lease must actually be expired before reclaim runs"
+        );
+
+        let reclaimed = d.reclaim_expired_leases().unwrap();
+        assert_eq!(reclaimed, 0, "a still-alive process is extended, not reclaimed");
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Running, 0));
+        assert!(
+            t.lease.unwrap().expires_at > OffsetDateTime::now_utc(),
+            "the lease was extended instead of reclaimed"
+        );
+        assert!(
+            d.running.contains_key(&task.id),
+            "the run entry is still tracked (not removed by reclaim)"
+        );
+
+        drop(guard);
+        // 死んでいれば（登録を外せば `group_alive` が偽になる）今度こそ reclaim される。
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let reclaimed = d.reclaim_expired_leases().unwrap();
+        assert_eq!(reclaimed, 1, "a dead process is reclaimed as usual");
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Ready, 0), "InfraRequeue does not consume attempts");
+        let events = store.events_for(task.id).unwrap();
+        assert!(events.iter().any(|(_, e)| matches!(
+            e,
+            Event::Transitioned { from: Status::Running, to: Status::Ready, reason } if reason == "infra_requeue"
+        )));
+    }
+
     /// 2 回目以降の run でだけ `second` を作るアダプタ。
     struct CountingAdapter {
         calls: AtomicUsize,
@@ -10191,6 +10406,87 @@ mod tests {
             transition_reasons(&store, task0.id),
             vec!["dispatch", "worker_error"]
         );
+    }
+
+    /// 常に分類できない `Err`（`AdapterError::Other`）を返すワーカー run（ADR-0070 D3。resume 拒否や
+    /// result.json 不在などが実機で取る経路のスタンド・イン）。
+    struct AlwaysInfraFailingWorkerAdapter {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for AlwaysInfraFailingWorkerAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            _req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(AdapterError::Other("session resume rejected".into()))
+        }
+    }
+
+    /// ADR-0070 D3（Phase 116。D6(b)）: ワーカー run 自身のインフラ都合の失敗（プロバイダが分類でき
+    /// ない `Err`）は `max_infra_retries` まで `attempts` を消費せず `Trigger::InfraRequeue` で
+    /// 再試行し、上限に達したときだけ `WorkerError{retryable:false}` で `"infra failure ×N"` として
+    /// 打ち切る（そのときだけ `attempts` が 1 進む）。`infra_backoff` はテストのために毎 tick 手で
+    /// 解除する（本番の 30秒/2分/5分のタイミングそのものは `derive::infra_backoff_delay` の単体
+    /// テストで確かめている）。
+    #[tokio::test]
+    async fn infra_failure_retry_limit_fails_the_task_without_consuming_attempts_until_then() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(AlwaysInfraFailingWorkerAdapter {
+            calls: AtomicUsize::new(0),
+        });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.max_infra_retries = 2;
+
+        let mut report = TickReport::default();
+        for _ in 0..200 {
+            report = d.tick().unwrap();
+            // インフラ再試行のバックオフ（30秒〜）を待たない。カウント・分類のテストなので、
+            // タイミングそのものは触らない（別途 derive::infra_backoff_delay の単体テストが確かめる）。
+            d.infra_backoff.clear();
+            if report.idle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!(
+            (t.status, t.attempts),
+            (Status::Failed, 1),
+            "2回のinfra_requeueはattemptsを消費せず、3回目で初めてfailed（attempts+1）"
+        );
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            transition_reasons(&store, task.id),
+            vec!["dispatch", "infra_requeue", "dispatch", "infra_requeue", "dispatch", "worker_error"]
+        );
+        let events = store.events_for(task.id).unwrap();
+        assert!(events.iter().any(|(_, e)| matches!(
+            e,
+            Event::WorkerFinished { outcome, .. } if outcome.starts_with("infra failure ×3: ")
+        )));
+        let (class, reason) = task_ops::derive::classify_task_failure(&events);
+        assert_eq!(class, task_ops::derive::FailureClass::Infra);
+        assert!(reason.starts_with("infra failure ×3: "));
     }
 
     /// 監査 M-1〜M-3（ADR-0034 D2）: 報告はタスクの終端状態に合わせて作るテスト向けの、最小の組織（秘書 → coding → coding-poc）。
@@ -13169,6 +13465,7 @@ mod tests {
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues,
                 max_reviewer_retries: 3,
+                max_infra_retries: 5,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -18414,6 +18711,7 @@ mod knowledge_fallback_tests {
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
                 max_reviewer_retries: 3,
+                max_infra_retries: 5,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),

@@ -203,6 +203,7 @@ fn scan_at(
     out.extend(scan_bad_news(store, started_at, base_url)?);
     out.extend(scan_secretary_reply(store, &org, started_at, base_url)?);
     out.extend(scan_task_ready(store, started_at, base_url)?);
+    out.extend(scan_task_failed(store, started_at, base_url)?);
     out.extend(scan_cluster_login_needed(store, started_at, base_url)?);
     // リリースの引き渡しは最新の対話・途中目標・走査時刻に隠されない。
     for delivery in store.delivery_list()? {
@@ -593,6 +594,56 @@ fn scan_task_ready(
                 excerpt(summary, REVIEW_EXCERPT_CHARS),
                 link(base_url, &format!("/tasks/{}", task.id))
             ),
+            project_id: task.project_id,
+        });
+    }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    Ok(out)
+}
+
+/// ADR-0070 D1（Phase 116）: タスクが `failed` になった。**celeris の起動時刻より後**（backfill 禁止。
+/// ADR-0037 D5 と同じ規律）。分類（`infra`/`work`）と理由 1 行、配送済み（`deliveries` に `release` が
+/// 付いた記録がある）なら「成果は配送済み（release <sha12>）だがレビューで不合格」を文面に組み立てる
+/// （判定は task_ops の純粋関数、文面の組み立てだけをここで行う）。`key` は `transition_key`（同じ
+/// タスクが後で再び failed になれば新しい key になる）。
+fn scan_task_failed(
+    store: &dyn TaskStore,
+    since: OffsetDateTime,
+    base_url: Option<&str>,
+) -> Result<Vec<Candidate>, StoreError> {
+    let tasks = store.list_page(
+        &ListFilter {
+            statuses: vec![Status::Failed],
+            ..Default::default()
+        },
+        ListOrder::UpdatedDesc,
+        None,
+        TASK_SCAN,
+    )?;
+    let mut out = Vec::new();
+    for task in tasks
+        .items
+        .into_iter()
+        .filter(|t| t.updated_at >= since && task_core::support_kind(t).is_none())
+    {
+        let events = store.events_for(task.id)?;
+        let (class, reason) = task_ops::derive::classify_task_failure(&events);
+        let delivered_release = store.delivery_get(task.id)?.and_then(|d| d.release);
+        let delivered_note = match &delivered_release {
+            Some(sha12) => format!("成果は配送済み（release {sha12}）だがレビューで不合格。"),
+            None => String::new(),
+        };
+        let body = format!(
+            "失敗（{}）: {}{delivered_note}{}{}",
+            class.as_str(),
+            excerpt(&task.title, EXCERPT_CHARS),
+            excerpt(&reason, EXCERPT_CHARS),
+            link(base_url, &format!("/tasks/{}", task.id))
+        );
+        out.push(Candidate {
+            kind: NotificationKind::TaskFailed,
+            key: transition_key(&task, &events),
+            body,
             project_id: task.project_id,
         });
     }
