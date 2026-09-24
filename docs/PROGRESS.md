@@ -17724,6 +17724,86 @@ frontier=`gpt-6-astra`(high) / standard=`gpt-6-sol`(medium) / cheap=`gpt-6-luna`
 - 実機: 昇格後の `celerisctl routing show --config`（読み取り）と `GET /providers` が同じ表を返す: claude-pool / claude-code-local = fable → claude-fable-5-1 / opus → claude-opus-5-5 / sonnet → claude-sonnet-5、codex-pool = astra → gpt-6-astra [high] / sol → gpt-6-sol [medium] / luna → gpt-6-luna [low]。`[llm_proxy.models]` も同じ。以後のタスクは lane ごとにこれらが選ばれる（Routing パネルの `resolution.model_id` / `reasoning_effort` で run ごとに確認できる）。
 - 未解決（Phase 118 から）: P-118-1 `pricing.rs` が `claude-fable` の単価を知らず frontier の費用推定が None。P-118-2 プロキシ経由の tier 別 effort は未対応。
 
+## Phase E0「Task execution decomposition の調査と設計」（2026-09-24）
+
+コードは変えていない（docs だけ）。成果物:
+- 調査報告: `docs/execution-architecture-2026-09-24.md`
+- 設計: `docs/adr/0072-task-execution-decomposition.md`（状態は Proposed。E1 に着手するときに Accepted にする）
+
+### 調査の要点（根拠の file:line は調査報告にある）
+
+- **Task と run は実質 1:1 で結合している。** 結合している箇所は次のとおり。
+  - `running: HashMap<TaskId, RunEntry>`（dispatcher.rs:1279）
+  - `tasks` 行の lease は 1 つだけ（`acquire_lease` store.rs:2428）
+  - run の終わりは必ず Task の Trigger に写る（`on_worker_finished` dispatcher.rs:2873）
+  - `attempts` は Task の欄
+  - 仕事の run は `--no-session-persistence`（claude_code.rs:830）。resume の単位はノード（CoS / lead）であって、タスクではない
+- **予算切れの扱い**: `error_max_turns` と wall-clock 超過は `Terminal::Error{retryable:true}` → `WorkerError` → attempts+1 になり、`max_retries` を使い切ると failed。
+  - 次の試行は何も引き継がずに最初からやり直す。
+  - usage も捨てる（claude_code.rs:1236-1253）。
+  - 予算をモデルに伝える文面は無い。turn の上限を持つのは claude-code だけ。
+- **reviewer の不合格は Task 全体の再実行になる**（`ReviewFail` → `retry_or_fail`）。局所修復の仕組みは無い（配送の `[delivery-repair]` も `Reopen` で全体をやり直す）。
+- **既存の分解（`Plan` kind・委譲）はどちらもユーザーに見える子 Task を作る。** `TaskFeatures` は lane の決定にしか使われていない。
+- `SCHEMA_VERSION = 25`。events が正本で、`tasks` は派生のスナップショット。`Status` は 8 つ、`Trigger` は 23 個。
+
+### 設計の要点（ADR-0072 D1〜D24）
+
+- **層の構成**: Task（goal。UX と配送の単位のまま）→ ExecutionPlan（版つき）→ WorkUnit → Run（既存の run_id）。
+  - 計画を持たない Task は「暗黙の WorkUnit」で、行を作らない。
+  - 1 Task の中の WU は直列に実行する（worktree と TaskId キーの lease を共有するため）。
+- **Task の `Status` は増やさない。** 表示用の `ExecutionPhase` を導出する。
+  - Trigger は 2 つだけ足す: `Continue{why}`（Running → Ready）と `ReviewRepair`（Reviewing → Ready）。どちらも attempts を変えない。
+- **予算切れは失敗にしない。**
+  - `RunEnd::BudgetExhausted` / `Yielded` → checkpoint → **新しい session** で continuation する（resume はしない。wrap-up だけ任意）。
+  - 上限到達と進捗なしは `blocked` にして人に聞く。
+  - Task が failed になるのは D12 の 5 条件だけ。
+- **checkpoint** は schema `celeris.checkpoint/1`。3 つの出所を合成する: worker の rolling `checkpoint.json`、result.json の `yield`、daemon の mechanical（git と progress）。
+- **Complexity Gate** は `TaskFeatures` と追加の信号（工程語・成果物の数・過去の予算切れの率など）の決定的な点数表で判定する。
+  - 点数が 5 以上なら compound。
+  - `[execution] gate = off|shadow|on`。E3 の既定は shadow。
+- **Planner** は task-local の run。
+  - lead の実効 profile で走る。node_sessions は resume しない。
+  - 出力の schema は `celeris.execution-plan/1`（担当とモデルの欄は持たない）。
+  - 不正なら 1 回だけ再試行し、それでも不正なら atomic に倒す。
+- **reviewer repair**: fmt / lint / 小さな test / reviewer_local / merge_base に分類する。repair WU には最小の context だけを渡す。人の承認は再利用する。
+- **replanning**: 新しい版の全体を出させ、done の WU は不変にする。`ExecutionPlanned.supersedes` で監査できる。
+- **データ**: events が正本（新しい Event は 4 つ）。migration 0026（`execution_plans` / `work_units` / `runs`。派生の索引）は E2 で入れる。E1 は migration 無し。
+
+### E1 の受け入れ条件（ADR-0072 §6 E1 の要約）
+
+- (a) claude-code の `error_max_turns` と wall-clock 超過が `BudgetExhausted` になる。usage を保持し、`Continue` で Ready に戻る（attempts は不変）。
+- (b) worker と mechanical の checkpoint を合成し、`CheckpointSaved` として残す。schema 違反なら mechanical だけにする。16 KiB で切り詰める。
+- (c) 次の run の request.json / prompt.txt に、続きの節と checkpoint が載る。会話は載らない。
+- (d) result.json の `yield` が Yielded になる。
+- (e) continuation の上限と、進捗なし 2 回で blocked になる。人の回答で窓が戻る。
+- (f) 既存の遷移とテストは不変。`[execution] continuation = false` で従来の挙動に戻る。
+- (g) attempt_history / replay / classify_task_failure / stats が continue を数えない。
+- (h) 再起動後も continuation が組まれる。
+- (i) codex / acp / aider の wall-clock 超過も continuation する。
+
+### 検証
+
+- `git status --short`: 差分は `docs/` 配下の 3 ファイルだけ（調査報告・ADR-0072・本節）。コードを変えていないので `cargo fmt` / `cargo test` / `cargo clippy` は実行していない。依頼の指示どおり docs だけ。
+
+### 未解決事項（ADR-0072 §7）
+
+- U1: context 超過の実際の文言（claude-code / codex / ACP）は実機で未確認。E1 は字句の候補で判定し、分類できなければ従来の WorkerError に倒す（安全側）。E6 で実機を確かめる。
+- U2: codex / acp の turn ごとの usage（peak context）が取れるかは未確認。
+- U3: 1 Task の中での WU の並列は別 ADR にする。
+- U4: WU ごとの WIP commit は求めない（既定）。E6 で再検討する。
+- U5: 部署をまたぐ WU は別の Task にする（既定）。
+- U6: pricing は claude-fable を知らない（P-118-1）。
+- U7: idle timeout の分類をインフラ扱いに変えるかは未定（E1 では遷移を変えない）。
+- U8: 上限到達の質問への回答を GUI のボタンにするかは E5 で決める。
+- U9: remote の worktree の mechanical checkpoint は E1 の対象外。
+- U10: gate の閾値と重みは初期値で、shadow の記録と E6 で調整する。
+
+### 提案
+
+- P-E0-1: DESIGN §5.6（「計画が不正なら failed」）に「Task 内部の実行計画（ADR-0072）は atomic に倒す」という注記を足す（DESIGN.md は書き換えない。人の判断待ち）。
+- P-E0-2: 調査で見つけた既存の不整合。ADR-0070 D3 の記述では「result.json の不在はインフラ扱い」だが、claude-code では `Ok(Terminal::Error)` として届くので attempts を消費している（`Err(AdapterError)` だけがインフラの経路を通る。dispatcher.rs:2966-3016）。E1 で `RunEnd` の分類を入れるときに合わせて直すか、人が判断する。
+- P-E0-3: `task-api::stats::classify_outcome` に `infra_requeue:` の分類が無く、Error として数えている。E5 の metrics で `end` を優先する際に合わせて直す。
+
 ## qwen source が unreachable のままだった件の修正（2026-09-24、task 01M3A0A0XKW5VYG8TB2RD0J57A）
 
 - 原因（ADR-0053「2026-09-24 追記」）: forward の転送先 `bnode150:18000` は pegasus03 から見て eno1（10.120.0.150）。
