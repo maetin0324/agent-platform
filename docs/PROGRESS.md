@@ -18254,3 +18254,9 @@ claude-code で `result` メッセージは観測できたのに `artifacts/resu
 - `docs/protocol/worker-protocol.md` の `context` の表に `context.work_unit` の行を追加していない
   （E1 が `context.continuation` も表に追加しなかったのと同じ扱いに揃えたが、GUI 節〈E5〉の前に
   一度ドキュメントを棚卸しした方がよい）。
+
+## 障害: drain 後に旧デーモンが終了せず、E2 の停止→起動昇格が失敗（2026-09-24 19:33〜）
+
+- release `1f663a83ff6c`（Phase E2、schema 26）は verify ok（live_ok=false は N-1 が schema 26 を読めない想定どおり）。`promote.sh 1f663a83ff6c` の停止→起動が「old celeris (pid 2385468) is still serving after 300s; refusing to start a second daemon」で失敗。`current` は f7338ad123bb（Celeris の自己改善配送「UI/UX 課の追加、ADR-0073」、19:08Z に昇格）のまま。
+- 原因: 過去 4 世代（0e20e1b2a058 / 2f1fcc0a6227 / 6566ad486acd / 93076d0f4c76）の `celeris@` unit が active running のまま残っていた。journal には「drained; exiting 0」「celeris stopped, exit: Drained」が出ているのにプロセスが終了しない（tick は止まっている、SIGTERM も効かない）。最初に残ったのは 0e20e1b2a058（Phase 116 / 117 を含む最初の release）。promote.sh は旧 pid を pgrep 相当で決めるため最も古い無関係の pid（0e20e1b）を対象にして待った。93076d0f4c76 の cgroup には `sleep 3600` が 3 つ（ワーカー run の子孫）、現行 unit には `[codex] <defunct>`。
+- 対処: `systemctl --user stop` を 4 unit に発行（TimeoutStopSec=3900 なので SIGKILL まで最大 65 分）。`kill -9` は auto mode で拒否されたため人に依頼。Phase 119（Sonnet）で終了経路（背景スレッド / Runtime の shutdown_timeout / process::exit）、孤児プロセスの掃除、promote.sh の停止対象（`current` の unit MainPID）と stale 一覧、監視を修正する。
