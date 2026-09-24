@@ -266,7 +266,10 @@ pub fn artifacts_for_run_with_idx(
     events
         .iter()
         .filter_map(|(_, ev)| match ev {
-            Event::ArtifactProduced { run_id: r, artifact } => Some((r, artifact)),
+            Event::ArtifactProduced {
+                run_id: r,
+                artifact,
+            } => Some((r, artifact)),
             _ => None,
         })
         .enumerate()
@@ -728,6 +731,7 @@ mod tests {
     fn sample_task(title: &str, attempts: u32) -> Task {
         let now = time::OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),

@@ -935,6 +935,22 @@ impl StoreSink {
         // `standing_rules` の前方一致だけを見る決定的なもので、LLM は使わない（DESIGN 原則 1）。
         // Phase 27（監査 H-2）: **バッチは分ける** — 同じ部宛ての提案はその場で子にする。
         let org = self.store.org_list().map_err(|e| format!("store: {e}"))?;
+        // ADR-0069 D1（Phase 114）: 委譲（LLM）が書いた担当は使わない。担当は matching が決めるので、
+        // 部をまたぐ認可（下の split）も担当を名指しした提案には起きなくなる。捨てた事実は進行に残す。
+        let stripped: Vec<DelegateTask> = tasks
+            .iter()
+            .map(|t| {
+                let mut t = t.clone();
+                if let Some(a) = t.assignee.take().filter(|a| !a.trim().is_empty()) {
+                    self.note(format!(
+                        "delegate: 担当の指定 {a} は使わない（「{}」の担当は celeris が skills と harness から決定的に選ぶ。ADR-0069 D1）",
+                        t.title
+                    ));
+                }
+                t
+            })
+            .collect();
+        let tasks: &[DelegateTask] = &stripped;
         let split =
             task_ops::conversation::split_delegation(self.store.as_ref(), &org, &parent, tasks)
                 .map_err(|e| format!("authorization: {e}"))?;
@@ -4397,6 +4413,13 @@ impl Dispatcher {
                 task.budget.max_wall_secs = KNOWLEDGE_FALLBACK_MAX_WALL_SECS;
                 tracing::info!(task_id = %task.id, %reason, ?tier, "knowledge: falling back to a generic harness");
             }
+            // ADR-0069 D3 / D6（Phase 114）: `routing` を持つ execute タスクは、lane を決定的な policy
+            // （TaskFeatures → 規則表 → 組織の天井）とリトライのエスカレーションで決める。人の明示・
+            // System の tier はそのまま（記録だけ）。残量による調整はこの後の `select_tier`（別の層）。
+            let lane_decision = self.decide_lane(&task)?;
+            if let Some(decision) = &lane_decision {
+                task.worker_hint.tier = decision.lane;
+            }
             // ADR-0054 Phase 67c: CoS の対話 run だけ、継続セッションの (adapter, account) に留まれるかを
             // 先に試す（`run_extras` の `is_cos_conversation` と同じ判定を select_provider より前に
             // 軽く行う。継続セッションを見つけてから選ぶのでないと、ADR-0049 ランキングが先に別の
@@ -4485,7 +4508,7 @@ impl Dispatcher {
                 &Event::WorkerStarted {
                     run_id: run_id.clone(),
                     adapter: adapter_id.clone(),
-                    model,
+                    model: model.clone(),
                     provider: Some(provider_id.clone()),
                     // ADR-0024 D4: `account_pool` のプロバイダで選んだアカウント（プールを使わなければ `None`）。
                     account: account.clone(),
@@ -4493,6 +4516,38 @@ impl Dispatcher {
                     task_role: task.role.clone(),
                 },
             )?;
+            // ADR-0069 D5: この run の routing の監査記録（担当・harness・lane・model・features・規則）。
+            if let Some(mut decision) = lane_decision {
+                if task_core::model_policy::lane_rank(task.worker_hint.tier)
+                    < task_core::model_policy::lane_rank(decision.lane)
+                {
+                    decision.reasons.push(format!(
+                        "quota layer lowered lane {:?} -> {:?} (budget guard)",
+                        decision.lane, task.worker_hint.tier
+                    ));
+                }
+                let record = task_core::RoutingRecord {
+                    org_node: task.assignee.clone(),
+                    harness: task.genre.clone(),
+                    resolution: task_core::model_routing::LaneResolution {
+                        lane: Some(task.worker_hint.tier),
+                        adapter: adapter_id.clone(),
+                        provider: Some(provider_id.clone()),
+                        account: account.clone(),
+                        model_id: model,
+                        reasoning_effort: adapter.reasoning_effort_for_tier(task.worker_hint.tier),
+                    },
+                    quota_reason: Some(routing_reason.clone()),
+                    decision,
+                };
+                self.store.append_event(
+                    task.id,
+                    &Event::RoutingDecided {
+                        run_id: run_id.clone(),
+                        record: Box::new(record),
+                    },
+                )?;
+            }
             if matches!(adapter_id.as_str(), "claude-code" | "codex") {
                 self.store.append_event(task.id, &Event::worker_progress(&run_id,
                     format!("model routing: {routing_reason}; execution tier={:?}; provider={provider_id}", task.worker_hint.tier)))?;
@@ -5471,6 +5526,13 @@ impl Dispatcher {
         ) {
             tracing::warn!(task_id = %task.id, "{note}");
         }
+        // ADR-0069 D1（Phase 114）: 計画（LLM）が書いた担当は使わない（子の `routing.dropped_assignee`
+        // に残り、担当は matching が決める）。捨てた事実をここで 1 行ずつ残す。
+        for (index, t) in plan.tasks.iter().enumerate() {
+            if let Some(a) = t.assignee.as_deref().filter(|a| !a.trim().is_empty()) {
+                tracing::info!(task_id = %task.id, index, dropped_assignee = %a, "plan-supplied assignee ignored; matching decides (ADR-0069 D1)");
+            }
+        }
     }
 
     /// Phase 33（ADR-0033 D4 追記）: `node_id` の直近の仕事（対話・まとめ・承認・レビューは除く）を
@@ -5887,6 +5949,7 @@ impl Dispatcher {
     ) -> Result<Task, DispatchError> {
         let now = OffsetDateTime::now_utc();
         let approval = Task {
+            routing: None,
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: Some(task.id),
@@ -6730,6 +6793,51 @@ impl Dispatcher {
     /// ADR-0043 D4: レビュー担当の `Check::Command` の既定になる検査コマンド
     /// （タスクに `acceptance` が明示されていればそれが勝つ。決めるのはここではなく `review.rs` の
     /// 呼び出し側）。**先頭のリポジトリの** `[commands] check` だけを使う。
+    /// ADR-0069 D3 / D6（Phase 114）: このタスクの lane を決める（`routing` を持つ execute タスクだけ。
+    /// それ以外は `None` で従来どおり `worker_hint.tier`）。担当の実効 profile の天井（`allowed_tiers` /
+    /// `budget.max_lane`）で丸め、やり直し（`attempts > 0`）ならイベントの履歴から
+    /// `EscalationPolicy` で 1 段まで上げる。LLM は使わない（DESIGN 原則 1）。
+    fn decide_lane(&self, task: &Task) -> Result<Option<task_core::LaneDecision>, DispatchError> {
+        if task.routing.is_none() || task.kind != TaskKind::Execute {
+            return Ok(None);
+        }
+        let org = self.store.org_list()?;
+        let profile = task
+            .assignee
+            .as_deref()
+            .filter(|_| !org.is_empty())
+            .map(|a| task_core::profile::resolve(&org, a));
+        let ceiling = profile
+            .as_ref()
+            .map(|p| p.lane_ceiling())
+            .unwrap_or_default();
+        let Some(mut decision) = task_core::model_policy::decide_for_task(task, &ceiling) else {
+            return Ok(None);
+        };
+        if task.attempts > 0 && decision.source.policy_decides() {
+            let events: Vec<Event> = self
+                .store
+                .events_for(task.id)?
+                .into_iter()
+                .map(|(_, e)| e)
+                .collect();
+            let history = task_core::retry_policy::attempt_history(task, &events);
+            let policy = task_core::EscalationPolicy::for_task(task, profile.as_ref());
+            let next = policy.decide(&history, decision.lane, task_core::BudgetState::Ok);
+            if next.lane() != decision.lane {
+                decision.reasons.push(format!(
+                    "retry lane {:?} -> {:?}",
+                    decision.lane,
+                    next.lane()
+                ));
+            }
+            decision.lane = next.lane();
+            decision.escalation = Some(next.describe());
+            tracing::info!(task_id = %task.id, attempts = task.attempts, decision = %next.describe(), "retry lane decided (ADR-0069 D6)");
+        }
+        Ok(Some(decision))
+    }
+
     /// ADR-0046 D5（Phase 59）: `assignee` が無い `ready` のタスクの担当を**決定的に**決める。
     ///
     /// - 決まったら `Event::Assigned { node, score, reason }` を残して担当を書き戻し、そのタスクを返す。
@@ -7777,6 +7885,7 @@ mod tests {
     fn new_task(dir: &std::path::Path, check: Check, max_retries: u32) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),
@@ -14649,134 +14758,14 @@ mod tests {
         );
     }
 
-    /// ADR-0033 D4 / SPEC §3.1: 別の部の課へ委譲しようとしたら、子は作られず、親は質問して止まる。
+    /// ADR-0033 D4 / SPEC §3.1 → ADR-0069 D1（Phase 114）: 委譲（LLM）が別の部の課を `assignee` に
+    /// 書いても、その担当は使わない（捨てて進行に残す）。担当を名指ししないので部をまたぐ認可の質問も
+    /// 起きず、子はその場で作られ、担当は matching が決める。以前はここで子を作らずに秘書へ質問し、
+    /// 人が `once` / `standing` で認めると次の run で通っていた（その 2 本のテストはこの挙動変更で
+    /// 役目を終えたので、1 本にまとめて新しい規則を確かめる。`split_delegation` 自体の単体テストは
+    /// `task-ops` に残る）。
     #[tokio::test]
-    async fn a_delegation_across_departments_asks_the_secretary_instead_of_creating_children() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace_root = dir.path().join("workspaces");
-        std::fs::create_dir_all(&workspace_root).unwrap();
-        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        seed_conversation_org(store.as_ref());
-
-        let task = assigned_task(&workspace_root, "t1", "research-survey");
-        store.create_task(&task, vec![]).unwrap();
-
-        let adapter = Arc::new(PersonAdapter {
-            terminal: Terminal::Done {
-                summary: "delegated".into(),
-                evidence: vec![],
-                usage: None,
-            },
-            seen: Arc::new(StdMutex::new(None)),
-            memory: None,
-            proposals: vec![delegate_to("coding-poc")],
-        });
-        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
-        run_until_idle(&mut d, 40).await;
-
-        assert!(
-            store.children(task.id).unwrap().is_empty(),
-            "子は作られない"
-        );
-        let after = store.get(task.id).unwrap().unwrap();
-        assert_eq!(after.status, Status::Blocked, "秘書の返事待ちで止まる");
-        // Phase 27（監査 H-1）: 質問は `approvals` の行として構造化された固定の形。
-        let question = task_ops::derive::latest_question(&store.events_for(task.id).unwrap());
-        assert_eq!(
-            question,
-            "cross-department: research-survey -> coding-poc: 任せたい仕事"
-        );
-        let pending = store.approval_list(Some(true), None, None).unwrap();
-        assert_eq!(pending.len(), 1, "{pending:?}");
-        assert_eq!(pending[0].node_id, "research-survey", "委譲元のノード宛て");
-        assert_eq!(pending[0].task_id, Some(task.id), "親タスク");
-        assert_eq!(pending[0].question, question);
-    }
-
-    /// Phase 27（監査 H-1）: 人が `once` で認めたら、**次の run で同じ委譲が通る**（永久ループしない）。
-    /// `standing` なら以後ずっと、`denied` なら通らない。
-    #[tokio::test]
-    async fn an_authorized_cross_department_delegation_goes_through_on_the_next_run() {
-        for (decision, expect_children) in [
-            (Decision::Once, 1usize),
-            (Decision::Standing, 1),
-            (Decision::Denied, 0),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let workspace_root = dir.path().join("workspaces");
-            std::fs::create_dir_all(&workspace_root).unwrap();
-            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-            seed_conversation_org(store.as_ref());
-            let task = assigned_task(&workspace_root, "t1", "research-survey");
-            store.create_task(&task, vec![]).unwrap();
-
-            let adapter = Arc::new(PersonAdapter {
-                terminal: Terminal::Done {
-                    summary: "delegated".into(),
-                    evidence: vec![],
-                    usage: None,
-                },
-                seen: Arc::new(StdMutex::new(None)),
-                memory: None,
-                proposals: vec![delegate_to("coding-poc")],
-            });
-            let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
-            run_until_idle(&mut d, 40).await;
-            let pending = store.approval_list(Some(true), None, None).unwrap();
-            assert_eq!(pending.len(), 1, "1 回目は認可待ち: {pending:?}");
-
-            // 人が答える（既存の `task_ops::approval::decide` = `answers[]` の経路に相乗り）。
-            task_ops::approval::decide(
-                store.as_ref(),
-                pending[0].clone(),
-                decision,
-                "認める".into(),
-                task_ops::approval::Scope::Node,
-                OffsetDateTime::now_utc(),
-            )
-            .unwrap();
-            assert_eq!(
-                store.get(task.id).unwrap().unwrap().status,
-                Status::Ready,
-                "答えるとタスクが再開する"
-            );
-
-            // 2 回目の run: 同じ提案が上がってくる。
-            run_until_idle(&mut d, 40).await;
-            let children: Vec<Task> = store
-                .children(task.id)
-                .unwrap()
-                .into_iter()
-                .filter(|c| c.kind == TaskKind::Execute)
-                .collect();
-            assert_eq!(
-                children.len(),
-                expect_children,
-                "{decision:?}: {children:?}"
-            );
-            if decision == Decision::Standing {
-                let rules = store.standing_rule_list(Some("research-survey")).unwrap();
-                assert_eq!(
-                    rules.iter().map(|r| r.rule.as_str()).collect::<Vec<_>>(),
-                    vec!["cross-department: research-survey -> coding-poc"],
-                    "standing の規則は質問の鍵（答えの文ではない）"
-                );
-            }
-            if decision == Decision::Denied {
-                // もう聞き直さない（同じ質問の未決の行は増えない）。
-                assert!(
-                    store
-                        .approval_list(Some(true), None, None)
-                        .unwrap()
-                        .is_empty()
-                );
-            }
-        }
-    }
-
-    /// Phase 27（監査 H-2）: バッチは分ける。同じ部宛ての提案はその場で子になり、部またぎだけが質問になる。
-    #[tokio::test]
-    async fn a_batch_with_one_crossing_still_creates_the_same_department_children() {
+    async fn a_delegation_naming_other_departments_creates_children_and_drops_the_assignees() {
         let dir = tempfile::tempdir().unwrap();
         let workspace_root = dir.path().join("workspaces");
         std::fs::create_dir_all(&workspace_root).unwrap();
@@ -14804,20 +14793,19 @@ mod tests {
             .into_iter()
             .filter(|c| c.kind == TaskKind::Execute)
             .collect();
-        assert_eq!(children.len(), 1, "同じ部宛ては止めない: {children:?}");
-        assert_eq!(children[0].assignee.as_deref(), Some("research-data"));
-        assert_eq!(
-            store.get(task.id).unwrap().unwrap().status,
-            Status::Blocked,
-            "部またぎは聞いて止まる"
+        assert_eq!(children.len(), 2, "部をまたいでも止めない: {children:?}");
+        assert!(
+            children.iter().all(|c| c.assignee.is_none()),
+            "{children:?}"
         );
-        let pending = store.approval_list(Some(true), None, None).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(
-            pending[0].question,
-            "cross-department: research-survey -> coding-poc: 任せたい仕事"
+        assert!(
+            store
+                .approval_list(Some(true), None, None)
+                .unwrap()
+                .is_empty(),
+            "担当を名指ししないので部をまたぐ認可は起きない"
         );
-        // ワーカーには「N 件は作った、M 件は秘書の認可待ち」が見える（`progress` として残る）。
+        assert_ne!(store.get(task.id).unwrap().unwrap().status, Status::Blocked);
         let notes: Vec<String> = store
             .events_for(task.id)
             .unwrap()
@@ -14827,15 +14815,18 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            notes
-                .iter()
-                .any(|m| m.contains("delegated 1 child task(s)（1 件は秘書の認可待ち）")),
-            "{notes:?}"
-        );
+        for dropped in ["research-data", "coding-poc"] {
+            assert!(
+                notes
+                    .iter()
+                    .any(|m| m.contains(&format!("担当の指定 {dropped} は使わない"))),
+                "{notes:?}"
+            );
+        }
     }
 
-    /// 同じ部の中の委譲は、これまでどおり子タスクになる（規則が効きすぎないこと）。担当も子に残る。
+    /// 同じ部の中の委譲は、これまでどおり子タスクになる（規則が効きすぎないこと）。ADR-0069 D1 以降、
+    /// 委譲が書いた担当は子に残らない。
     #[tokio::test]
     async fn a_delegation_inside_the_same_department_still_creates_children() {
         let dir = tempfile::tempdir().unwrap();
@@ -14868,7 +14859,8 @@ mod tests {
             .filter(|c| c.kind == TaskKind::Execute)
             .collect();
         assert_eq!(children.len(), 1, "同じ部の中なら子ができる");
-        assert_eq!(children[0].assignee.as_deref(), Some("research-data"));
+        // ADR-0069 D1: 委譲が書いた担当は使わない（matching が決める）。
+        assert_eq!(children[0].assignee, None);
         assert_eq!(children[0].title, "任せたい仕事");
     }
 
@@ -18407,6 +18399,7 @@ mod tests {
                             name: id.into(),
                             model_id: Some(id.into()),
                             unavailable_reason: None,
+                            reasoning_effort: None,
                         },
                     )
                 })
@@ -18454,6 +18447,7 @@ mod tests {
                     name: "fable".into(),
                     model_id: None,
                     unavailable_reason: Some("unverified executable ID".into()),
+                    reasoning_effort: None,
                 },
             )]
             .into(),
@@ -18470,6 +18464,208 @@ mod tests {
                 .any(|(_, e)| matches!(e, Event::WorkerStarted { .. }))
         );
         assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.contains("unverified executable ID"))));
+    }
+
+    /// ADR-0069（Phase 114）テスト用: 3 lane の束縛を持つ TieredAdapter（cheap だけ reasoning effort 付き）。
+    fn three_lane_adapter() -> Arc<dyn WorkerAdapter> {
+        use task_core::model_routing::ModelBinding;
+        Arc::new(task_worker::tiered::TieredAdapter {
+            base: Arc::new(InstantAdapter {
+                terminal: Terminal::Question {
+                    text: "not needed".into(),
+                },
+                delay: Duration::ZERO,
+            }),
+            models: [
+                (Tier::Frontier, "frontier-id", None),
+                (Tier::Standard, "standard-id", None),
+                (Tier::Cheap, "cheap-id", Some("low")),
+            ]
+            .into_iter()
+            .map(|(tier, id, effort)| {
+                (
+                    tier,
+                    ModelBinding {
+                        name: id.into(),
+                        model_id: Some(id.into()),
+                        unavailable_reason: None,
+                        reasoning_effort: effort.map(str::to_string),
+                    },
+                )
+            })
+            .collect(),
+            account_id: None,
+            credential_error: None,
+        })
+    }
+
+    fn routing_record(events: &[(u64, Event)]) -> Option<task_core::RoutingRecord> {
+        events.iter().rev().find_map(|(_, e)| match e {
+            Event::RoutingDecided { record, .. } => Some((**record).clone()),
+            _ => None,
+        })
+    }
+
+    /// ADR-0069 D3 / D5: `routing` を持つ execute タスクは、LLM のヒント（frontier）ではなく
+    /// TaskFeatures の規則表で lane が決まり（機械的・検証可能・戻せる → cheap）、その lane の model が
+    /// 走り、`RoutingDecided` に features・規則・版・reasoning effort が残る。
+    #[tokio::test]
+    async fn lane_policy_decides_the_tier_and_records_the_routing_decision() {
+        let ws = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(
+            ws.path(),
+            Check::Command {
+                cmd: "cargo test".into(),
+                expect_exit: 0,
+            },
+            2,
+        );
+        task.objective = "crates/task-core/src/model.rs の typo を直す".into();
+        task.genre = Some("coding".into());
+        task.worker_hint.tier = Tier::Frontier;
+        task.routing = Some(task_core::TaskRouting {
+            tier_source: task_core::TierSource::Hint,
+            ..Default::default()
+        });
+        store.insert(&task).unwrap();
+        let mut d = dispatcher(store.clone(), three_lane_adapter(), 1);
+        d.tick().unwrap();
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events.iter().any(
+                |(_, e)| matches!(e, Event::WorkerStarted { model, .. } if model == "cheap-id")
+            ),
+            "{events:?}"
+        );
+        let record = routing_record(&events).expect("routing_decided");
+        assert_eq!(record.decision.lane, Tier::Cheap);
+        assert_eq!(record.decision.hint, Some(Tier::Frontier));
+        assert_eq!(
+            record.decision.rule_id,
+            "cheap/mechanical-verifiable-reversible"
+        );
+        assert_eq!(
+            record.decision.policy_version,
+            task_core::LANE_POLICY_VERSION
+        );
+        assert_eq!(record.harness.as_deref(), Some("coding"));
+        assert_eq!(record.resolution.model_id, "cheap-id");
+        assert_eq!(record.resolution.reasoning_effort.as_deref(), Some("low"));
+        // 監査の集計に乗る。
+        let audit = task_ops::routing_audit::task_routing_audit(store.as_ref(), task.id).unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].lane, Some(Tier::Cheap));
+        assert_eq!(
+            audit[0].rule_id.as_deref(),
+            Some("cheap/mechanical-verifiable-reversible")
+        );
+
+        // 人の明示 tier は policy が触らない。`routing` の無い既存タスクは記録も出さない。
+        let store2: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut human = task.clone();
+        human.id = TaskId::new();
+        human.routing = Some(task_core::TaskRouting {
+            tier_source: task_core::TierSource::Human,
+            ..Default::default()
+        });
+        store2.insert(&human).unwrap();
+        let mut legacy = task.clone();
+        legacy.id = TaskId::new();
+        legacy.routing = None;
+        store2.insert(&legacy).unwrap();
+        let mut d2 = dispatcher(store2.clone(), three_lane_adapter(), 2);
+        d2.tick().unwrap();
+        let h = store2.events_for(human.id).unwrap();
+        assert!(h.iter().any(
+            |(_, e)| matches!(e, Event::WorkerStarted { model, .. } if model == "frontier-id")
+        ));
+        assert_eq!(
+            routing_record(&h).map(|r| r.decision.rule_id),
+            Some("explicit/human".to_string())
+        );
+        let l = store2.events_for(legacy.id).unwrap();
+        assert!(l.iter().any(
+            |(_, e)| matches!(e, Event::WorkerStarted { model, .. } if model == "frontier-id")
+        ));
+        assert!(routing_record(&l).is_none());
+    }
+
+    /// ADR-0069 D6: 同じ lane でレビュー不合格が 2 回続いたタスクのやり直しは 1 段だけ上がり
+    /// （cheap → standard）、理由が `RoutingDecided.decision.escalation` に残る。
+    #[tokio::test]
+    async fn repeated_review_failures_escalate_the_retry_lane_one_step() {
+        let ws = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(
+            ws.path(),
+            Check::Command {
+                cmd: "cargo test".into(),
+                expect_exit: 0,
+            },
+            3,
+        );
+        task.objective = "crates/task-core/src/model.rs の typo を直す".into();
+        task.genre = Some("coding".into());
+        task.routing = Some(task_core::TaskRouting::default());
+        task.attempts = 2;
+        task.updated_at = OffsetDateTime::now_utc() - time::Duration::days(1);
+        store.insert(&task).unwrap();
+        let decision =
+            task_core::model_policy::decide_for_task(&task, &Default::default()).unwrap();
+        assert_eq!(decision.lane, Tier::Cheap);
+        for run in ["r1", "r2"] {
+            let record = task_core::RoutingRecord {
+                org_node: None,
+                harness: Some("coding".into()),
+                decision: decision.clone(),
+                resolution: task_core::model_routing::LaneResolution {
+                    lane: Some(Tier::Cheap),
+                    ..Default::default()
+                },
+                quota_reason: None,
+            };
+            for event in [
+                Event::RoutingDecided {
+                    run_id: run.into(),
+                    record: Box::new(record),
+                },
+                Event::ReviewVerdict {
+                    run_id: format!("{run}-review"),
+                    criterion_idx: 0,
+                    pass: false,
+                    reason: "tests fail".into(),
+                },
+                Event::Transitioned {
+                    from: Status::Reviewing,
+                    to: Status::Ready,
+                    reason: "review_fail".into(),
+                },
+            ] {
+                store.append_event(task.id, &event).unwrap();
+            }
+        }
+        let mut d = dispatcher(store.clone(), three_lane_adapter(), 1);
+        d.tick().unwrap();
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events.iter().any(
+                |(_, e)| matches!(e, Event::WorkerStarted { model, .. } if model == "standard-id")
+            ),
+            "{events:?}"
+        );
+        let record = routing_record(&events).expect("routing_decided");
+        assert_eq!(record.decision.lane, Tier::Standard);
+        assert_eq!(record.decision.proposed, Tier::Cheap);
+        assert!(
+            record
+                .decision
+                .escalation
+                .as_deref()
+                .is_some_and(|e| e.starts_with("escalate Cheap -> Standard")),
+            "{:?}",
+            record.decision.escalation
+        );
     }
 
     // ---- ADR-0056 D3（Phase 79）: mount された skills を run に届ける ----
@@ -18706,6 +18902,7 @@ mod knowledge_fallback_tests {
     fn knowledge_task(dir: &std::path::Path) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),

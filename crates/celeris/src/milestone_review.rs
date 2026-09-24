@@ -183,6 +183,7 @@ mod tests {
             Budget, MilestoneId, Status, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec,
         };
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),
@@ -261,6 +262,7 @@ mod tests {
     ) -> Task {
         use task_core::{Budget, TaskId, Tier, WorkerHint, WorkspaceSpec};
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),

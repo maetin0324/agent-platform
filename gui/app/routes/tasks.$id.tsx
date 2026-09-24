@@ -45,6 +45,7 @@ import type {
   TaskComment,
   TaskDetail,
   TaskRef,
+  TaskRoutingView,
   Timeline,
   TimelineItem,
 } from "~/celeris/types";
@@ -66,6 +67,7 @@ import { ImageViewer } from "~/components/ImageViewer";
 import { LocalTime } from "~/components/LocalTime";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { Sha256Badge } from "~/components/Sha256Badge";
+import { TaskRoutingPanel } from "~/components/TaskRoutingPanel";
 import { Badge, GenreLabel, KindBadge, RoleLabel, StatusBadge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -243,6 +245,11 @@ export interface TaskDetailData {
    */
   assignedEvent: { node: string; score: number; reason: string } | null;
   /**
+   * celeris ADR-0069 D5: なぜその担当・harness・lane・model か（`GET /tasks/{id}/routing`）。
+   * 落ちたら（この API を持たない古い celeris 等）null でパネルを出さない。画面は落とさない。
+   */
+  routing: TaskRoutingView | null;
+  /**
    * ADR-0043 D6 + ADR-0044 D5（Phase 52 + 53 のマージ）: 「ファイル」タブの中身。
    * **`?tab=files` のときだけ**引く（他のタブで毎回 `GET /tasks/{id}/tree` を叩かないため）。
    * 作業ツリーが無いタスク（404 `file_not_found`）やリポジトリを使わないタスクでは `error` に
@@ -301,7 +308,7 @@ export async function loadTaskDetail(client: CelerisClient, taskId: string, requ
   // 案件・途中目標・担当の名前（監査 M2）と、編集フォームの選択肢（ADR-0044 D1、ADR-0046 D3 の「ハーネス」）。
   const assigneeId = detail.task.assignee ?? null;
   const projectId = detail.task.project_id ?? null;
-  const [project, org, config] = await Promise.all([
+  const [project, org, config, routing] = await Promise.all([
     projectId
       ? client
           .get<ProjectDetail>(`/projects/${encodeURIComponent(projectId)}`, { signal: request.signal })
@@ -309,6 +316,7 @@ export async function loadTaskDetail(client: CelerisClient, taskId: string, requ
       : Promise.resolve(null),
     client.get<OrgList>("/org", { signal: request.signal }).catch(() => null),
     client.get<ConfigView>("/config", { signal: request.signal }).catch(() => null),
+    client.get<TaskRoutingView>(`/tasks/${taskId}/routing`, { signal: request.signal }).catch(() => null),
   ]);
   // ADR-0046 D5（Phase 59 / G21）: 「なぜこの担当か」。`assigned` は matching が決めたときに 1 件だけ
   // 付く（明示の assignee で作られたタスクには無い）。複数走っていれば直近を出す。
@@ -358,6 +366,7 @@ export async function loadTaskDetail(client: CelerisClient, taskId: string, requ
     assignedEvent: assignedEvent
       ? { node: assignedEvent.node, score: assignedEvent.score, reason: assignedEvent.reason }
       : null,
+    routing,
     files,
     changes,
     humanReview,
@@ -436,6 +445,7 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
     milestones,
     genres,
     assignedEvent,
+    routing,
     files,
     changes,
     humanReview,
@@ -556,6 +566,8 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                 )}
                 {place.milestoneTitle && <p data-testid="task-milestone">途中目標: {place.milestoneTitle}</p>}
               </div>
+              {/* celeris ADR-0069 D5: なぜこの担当・harness・lane・model か。閉じた状態は 1 行。 */}
+              <TaskRoutingPanel view={routing} />
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-fg-muted">
                 {detail.cluster && (
                   <p data-testid="task-cluster">

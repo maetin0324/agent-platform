@@ -363,6 +363,7 @@ listen = "127.0.0.1:7710"      # これを書いたときだけ API が動く（
 | 104 | DELETE | `/skills/{name}` | skill を消す（mount されていれば 409 `skill_mounted`。**管理系**） | 204 | ファイル + コミット |
 | 105 | POST | `/org/{id}/skills` | ノードに skill を mount する（**管理系**） | 200 `OrgNode` | store |
 | 106 | DELETE | `/org/{id}/skills/{skill}` | ノードから skill を unmount する（**管理系**） | 200 `OrgNode` | store |
+| 107 | GET | `/tasks/{id}/routing` | なぜその担当・harness・lane・model になったか（run ごとの監査と routing の出自。ADR-0069 D5） | `TaskRoutingView` | `task_ops::routing_audit` |
 
 ---
 
@@ -3474,3 +3475,13 @@ review_run, worker_run, criterion_idx, decision, detail, release, prepare_pid, n
 管理系 `POST /tasks/{id}/rereview` は `ReopenBody {expected_status?: "done"}` を受け取り、
 Reviewer条件がある通常のdone仕事をreviewingへ戻す。返却は `TransitionResult`。
 実装runは再実行せず、既存成果のレビューを再実行する。認証、404、409、422は他の管理操作と同じ。
+
+### タスクの routing の監査（ADR-0069 D5）
+
+`GET /tasks/{id}/routing` → 200 `TaskRoutingView {task_id, assignee?, routing?, runs[]}`（読み取り。認証は他の
+読み取りと同じ）。`routing` は `Task.routing`（`tier_source`・`assignee_explicit`・CoS/計画/委譲が書いたが
+捨てた担当 `dropped_assignee`・`features` の上書き）。`runs[]` はワーカー run ごとの `RoutingAudit`（古い順:
+`org_node, harness, adapter, provider, account, lane, model, reasoning_effort, features, rule_id,
+policy_version, reasons, escalation, outcome, cost_usd, input_tokens, output_tokens, wall_ms, retries, review`）。
+各 run の `escalation` がエスカレーションの履歴。run が無いタスクは `runs: []`、知らないタスクは 404、
+クエリパラメータは 400。

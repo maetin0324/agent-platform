@@ -27,6 +27,9 @@ impl WorkerAdapter for TieredAdapter {
         }
         resolve(&self.models, tier)
     }
+    fn reasoning_effort_for_tier(&self, tier: Tier) -> Option<String> {
+        task_core::model_routing::reasoning_effort(&self.models, tier)
+    }
     async fn run(
         &self,
         req: RunRequest,

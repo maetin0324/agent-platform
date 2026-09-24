@@ -44,7 +44,13 @@ const CODE_EXTENSIONS: [&str; 10] = [
     ".rs", ".ts", ".tsx", ".py", ".go", ".java", ".rb", ".toml", ".yaml", ".yml",
 ];
 const ISOLATED_ISSUE_KEYWORDS: [&str; 8] = [
-    "再現", "traceback", "stack trace", "スタックトレース", "ログを確認", "reproduce", "エラーログ",
+    "再現",
+    "traceback",
+    "stack trace",
+    "スタックトレース",
+    "ログを確認",
+    "reproduce",
+    "エラーログ",
     "unit test",
 ];
 
@@ -271,13 +277,12 @@ mod tests {
 
     #[test]
     fn signals_from_task_extracts_file_hints_and_keywords_deterministically() {
-        use crate::model::{
-            Budget, Check, TaskId, TaskKind, WorkerHint, WorkspaceSpec,
-        };
+        use crate::model::{Budget, Check, TaskId, TaskKind, WorkerHint, WorkspaceSpec};
         use time::OffsetDateTime;
 
         let now = OffsetDateTime::now_utc();
         let task = Task {
+            routing: None,
             mode: TaskMode::default(),
             skills: Vec::new(),
             repos: Vec::new(),

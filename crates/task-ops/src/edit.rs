@@ -151,8 +151,9 @@ pub fn edit_task(
             return Err(OpsError::InvalidState {
                 id,
                 context: format!("status={:?}", task.status),
-                action: "edited (workspace); only draft/ready/blocked/failed accept a workspace change"
-                    .to_string(),
+                action:
+                    "edited (workspace); only draft/ready/blocked/failed accept a workspace change"
+                        .to_string(),
             });
         }
     } else if task.status.is_terminal() {
@@ -323,6 +324,10 @@ pub fn edit_task(
         && tier != task.worker_hint.tier
     {
         task.worker_hint.tier = tier;
+        // ADR-0069 D1: 人が編集した tier は人の明示（lane policy は触らない）。
+        if let Some(routing) = task.routing.as_mut() {
+            routing.tier_source = task_core::TierSource::Human;
+        }
         fields.push("tier".to_string());
     }
     if let Some(adapter) = edit.adapter
@@ -500,6 +505,7 @@ mod tests {
     fn task_with(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             id: TaskId::new(),
@@ -1115,7 +1121,11 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .expect("edit");
-        assert_eq!(result.task.status, Status::Ready, "経路が通ったので ready に戻る");
+        assert_eq!(
+            result.task.status,
+            Status::Ready,
+            "経路が通ったので ready に戻る"
+        );
         assert_eq!(
             store.get(id).expect("get").expect("task").status,
             Status::Ready

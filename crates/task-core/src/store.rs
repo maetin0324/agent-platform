@@ -891,7 +891,8 @@ pub trait TaskStore:
     // ---- ADR-0059 D6（Phase 99）: クラスタの作業ディレクトリの DB 上書き ----
 
     /// 1 クラスタ分の上書き。無ければ `Ok(None)`（設定ファイルの値を使う）。
-    fn cluster_settings_get(&self, cluster_id: &str) -> Result<Option<ClusterSettings>, StoreError>;
+    fn cluster_settings_get(&self, cluster_id: &str)
+    -> Result<Option<ClusterSettings>, StoreError>;
     /// 全クラスタの上書き一覧（`cluster_id` 昇順。`GET /clusters` が一括で使う）。
     fn cluster_settings_list(&self) -> Result<Vec<ClusterSettings>, StoreError>;
     /// `work_dir = Some(..)` なら upsert、`None` なら行を消す（上書きの解除）。
@@ -951,7 +952,10 @@ impl ReadPool {
             if let Some(conn) = guard.pop() {
                 return Ok(conn);
             }
-            guard = self.available.wait(guard).map_err(|_| StoreError::Poisoned)?;
+            guard = self
+                .available
+                .wait(guard)
+                .map_err(|_| StoreError::Poisoned)?;
         }
     }
 
@@ -1027,7 +1031,11 @@ pub(crate) fn parse_rfc3339(s: &str) -> Result<OffsetDateTime, StoreError> {
 /// `Mutex` は取らない**専用の接続**を新たに開くので、進行中の書き込み・読み取りを長く待たせない
 /// （WAL のバックアップはページ単位で進み、途中でも一貫したスナップショットになる）。呼び出し側
 /// （`celeris` の背景バックアップ tick、`celerisctl db backup`、`relocate-db.sh`）が使う。
-pub fn backup_database(src: &Path, dest: &Path, busy_timeout: StdDuration) -> Result<(), StoreError> {
+pub fn backup_database(
+    src: &Path,
+    dest: &Path,
+    busy_timeout: StdDuration,
+) -> Result<(), StoreError> {
     let src_conn = Connection::open(src)?;
     src_conn.busy_timeout(busy_timeout)?;
     let mut dest_conn = Connection::open(dest)?;
@@ -1181,9 +1189,11 @@ impl SqliteStore {
         // ADR-0064 D4: ファイル DB でだけ、読み取り専用の小さな接続プールを作る（`read_pool_size = 0`
         // にすれば無効化できる）。
         let read_pool = match path {
-            Some(path) if options.read_pool_size > 0 => {
-                Some(ReadPool::open(path, options.read_pool_size, options.busy_timeout)?)
-            }
+            Some(path) if options.read_pool_size > 0 => Some(ReadPool::open(
+                path,
+                options.read_pool_size,
+                options.busy_timeout,
+            )?),
             _ => None,
         };
         Ok(Self {
@@ -2349,8 +2359,8 @@ impl TaskStore for SqliteStore {
             match filter {
                 Some(status) => {
                     let mut stmt = conn.prepare("SELECT json FROM tasks WHERE status = ?1")?;
-                    let rows = stmt
-                        .query_map(params![status_str(status)], |row| row.get::<_, String>(0))?;
+                    let rows =
+                        stmt.query_map(params![status_str(status)], |row| row.get::<_, String>(0))?;
                     for row in rows {
                         tasks.push(Self::row_to_task(row?)?);
                     }
@@ -2379,8 +2389,8 @@ impl TaskStore for SqliteStore {
 
     fn events_for(&self, task_id: TaskId) -> Result<Vec<(u64, Event)>, StoreError> {
         self.with_read_conn(|conn| {
-            let mut stmt = conn
-                .prepare("SELECT seq, json FROM events WHERE task_id = ?1 ORDER BY seq ASC")?;
+            let mut stmt =
+                conn.prepare("SELECT seq, json FROM events WHERE task_id = ?1 ORDER BY seq ASC")?;
             let rows = stmt.query_map(params![task_id.to_string()], |row| {
                 let seq: i64 = row.get(0)?;
                 let json: String = row.get(1)?;
@@ -4020,7 +4030,10 @@ impl TaskStore for SqliteStore {
         Ok(removed)
     }
 
-    fn cluster_settings_get(&self, cluster_id: &str) -> Result<Option<ClusterSettings>, StoreError> {
+    fn cluster_settings_get(
+        &self,
+        cluster_id: &str,
+    ) -> Result<Option<ClusterSettings>, StoreError> {
         self.with_read_conn(|conn| {
             conn.query_row(
                 "SELECT cluster_id, work_dir, updated_at FROM cluster_settings WHERE cluster_id = ?1",
@@ -4110,6 +4123,7 @@ mod tests {
     fn sample_task(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),
@@ -4130,7 +4144,7 @@ mod tests {
                 path: "spec.md".to_string(),
                 sha256: "abc".to_string(),
                 kind: "doc".to_string(),
-            declared: true,
+                declared: true,
             }],
             depends_on: vec![],
             status,
@@ -5365,14 +5379,19 @@ mod tests {
             Some("/work/NBB/other")
         );
 
-        store.cluster_settings_set("sirius", Some("~/work"), now).unwrap();
+        store
+            .cluster_settings_set("sirius", Some("~/work"), now)
+            .unwrap();
         let mut list = store.cluster_settings_list().unwrap();
         list.sort_by(|a, b| a.cluster_id.cmp(&b.cluster_id));
         assert_eq!(
             list.iter()
                 .map(|c| (c.cluster_id.as_str(), c.work_dir.as_deref()))
                 .collect::<Vec<_>>(),
-            vec![("pegasus", Some("/work/NBB/other")), ("sirius", Some("~/work"))]
+            vec![
+                ("pegasus", Some("/work/NBB/other")),
+                ("sirius", Some("~/work"))
+            ]
         );
 
         // `None` で消す。
@@ -5407,7 +5426,10 @@ mod tests {
             conn.query_row("PRAGMA wal_autocheckpoint", [], |row| row.get(0))
                 .unwrap()
         };
-        assert_ne!(default_autocheckpoint, 0, "the default keeps sqlite's own autocheckpoint");
+        assert_ne!(
+            default_autocheckpoint, 0,
+            "the default keeps sqlite's own autocheckpoint"
+        );
 
         let bg_path = dir.path().join("bg.sqlite3");
         let bg_store = SqliteStore::open_with(

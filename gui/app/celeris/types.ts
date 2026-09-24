@@ -423,6 +423,11 @@ export type Event =
        */
       removed: string[];
       type: "workspace_pruned";
+    }
+  | {
+      record: RoutingRecord;
+      run_id: string;
+      type: "routing_decided";
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -447,6 +452,10 @@ export type Check =
   | {
       type: "human";
     };
+/**
+ * 各軸の段階（小さな順序尺度）。
+ */
+export type Level = "low" | "medium" | "high";
 /**
  * DESIGN §5.8 の境界。`Remote{cluster, path}` は `[[clusters]] id` と**クラスタ側の**作業ディレクトリ（ADR-0018、Phase 12）。
  * celeris はその写しを `workspace_root/<task_id>` に持ち、コマンドはクラスタで実行する。
@@ -486,6 +495,10 @@ export type WorkspaceMode = "worktree" | "shared";
  * run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。
  */
 export type RunRole = "worker" | "reviewer";
+/**
+ * ADR-0069 D1: `worker_hint.tier` を誰が決めたか。
+ */
+export type TierSource = "human" | "system" | "hint" | "default";
 export type RunOutcomeKind = ("done" | "question" | "error" | "requeue" | "lease_expired") | "interrupted";
 export type AttentionItem =
   | {
@@ -828,6 +841,7 @@ export interface ApiV1Schema {
   task_edit: TaskEdit;
   task_edit_result: EditResult;
   task_list: TaskList;
+  task_routing: TaskRoutingView;
   timeline: Timeline;
   transition_result: TransitionResult;
   tree: TreeView;
@@ -1658,6 +1672,11 @@ export interface ProviderConfigView {
 export interface ModelBinding {
   model_id?: string | null;
   name: string;
+  /**
+   * ADR-0069 D4（Phase 114）: この lane で使う reasoning effort（例 `"medium"`）。Phase 1 では
+   * 監査記録（`LaneResolution`）に残すだけで、CLI には渡さない。無ければ `None`。
+   */
+  reasoning_effort?: string | null;
   unavailable_reason?: string | null;
 }
 export interface ReviewerConfigView {
@@ -2506,6 +2525,12 @@ export interface Task {
    */
   role?: string | null;
   /**
+   * ADR-0069（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。
+   * **これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。
+   * 導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。
+   */
+  routing?: TaskRouting | null;
+  /**
    * ADR-0046 D2: このタスクに必要な能力タグ（`org_nodes` の実効 `skills` と突き合わせて担当を決める。
    * ADR-0046 D5 の matching）。導入前のタスクには無いので既定は空。
    */
@@ -2546,6 +2571,42 @@ export interface Lease {
 export interface RepoRef {
   name: string;
   repo_id: RepoId;
+}
+/**
+ * ADR-0069 D1 / D3: タスクの routing の出自（`Task.routing`）。
+ */
+export interface TaskRouting {
+  /**
+   * 担当（`assignee`）を人が明示したか（false なら matching が決めた／これから決める）。
+   */
+  assignee_explicit?: boolean;
+  /**
+   * LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0069 D1）。
+   */
+  dropped_assignee?: string | null;
+  /**
+   * TaskFeatures の明示の上書き（ADR-0069 D3）。
+   */
+  features?: TaskFeatureHints | null;
+  /**
+   * ADR-0069 D1: `worker_hint.tier` を誰が決めたか。
+   */
+  tier_source?: "human" | "system" | "hint" | "default";
+}
+/**
+ * ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の
+ * `create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。
+ */
+export interface TaskFeatureHints {
+  ambiguity?: Level | null;
+  consequence?: Level | null;
+  context_size?: Level | null;
+  cross_cutting?: Level | null;
+  expected_length?: Level | null;
+  judgment?: Level | null;
+  reversibility?: Level | null;
+  tool_intensity?: Level | null;
+  verifiability?: Level | null;
 }
 export interface WorkerHint {
   adapter?: string | null;
@@ -2590,6 +2651,126 @@ export interface Usage {
   cost_usd?: number | null;
   input_tokens?: number | null;
   output_tokens?: number | null;
+}
+/**
+ * ADR-0069 D5: `Event::RoutingDecided` の中身。
+ */
+export interface RoutingRecord {
+  decision: LaneDecision;
+  /**
+   * Harness 層: ハーネス id（`Task.genre`）。
+   */
+  harness?: string | null;
+  /**
+   * Ownership 層: 担当（`org_nodes.id`）。
+   */
+  org_node?: string | null;
+  /**
+   * 残量による調整の理由（`select_tier`）。
+   */
+  quota_reason?: string | null;
+  resolution: LaneResolution;
+}
+/**
+ * Model 層（lane）。
+ */
+export interface LaneDecision {
+  clamped_by?: string | null;
+  /**
+   * リトライでのエスカレーションの判断（`retry_policy`）。
+   */
+  escalation?: string | null;
+  features: TaskFeatures;
+  /**
+   * LLM が書いた tier（`TierSource::Hint`。記録するだけ）。
+   */
+  hint?: Tier | null;
+  /**
+   * DESIGN §5.4 の `WorkerHint`。
+   */
+  lane: "frontier" | "standard" | "cheap";
+  policy_version: string;
+  /**
+   * DESIGN §5.4 の `WorkerHint`。
+   */
+  proposed: "frontier" | "standard" | "cheap";
+  reasons?: string[];
+  rule_id: string;
+  /**
+   * Phase 2 の予約（shadow 分類器）。Phase 1 では常に `None`。
+   */
+  shadow?: ShadowDecision | null;
+  source: TierSource;
+}
+/**
+ * ADR-0069 D3: lane を決めるためのタスクの性質（9 軸）。
+ */
+export interface TaskFeatures {
+  /**
+   * 各軸の段階（小さな順序尺度）。
+   */
+  ambiguity: "low" | "medium" | "high";
+  /**
+   * 各軸の段階（小さな順序尺度）。
+   */
+  consequence: "low" | "medium" | "high";
+  /**
+   * 各軸の段階（小さな順序尺度）。
+   */
+  context_size: "low" | "medium" | "high";
+  /**
+   * 各軸の段階（小さな順序尺度）。
+   */
+  cross_cutting: "low" | "medium" | "high";
+  /**
+   * 各軸の段階（小さな順序尺度）。
+   */
+  expected_length: "low" | "medium" | "high";
+  /**
+   * 各軸の段階（小さな順序尺度）。
+   */
+  judgment: "low" | "medium" | "high";
+  /**
+   * 各軸の段階（小さな順序尺度）。
+   */
+  reversibility: "low" | "medium" | "high";
+  /**
+   * 各軸の段階（小さな順序尺度）。
+   */
+  tool_intensity: "low" | "medium" | "high";
+  /**
+   * 各軸の段階（小さな順序尺度）。
+   */
+  verifiability: "low" | "medium" | "high";
+}
+/**
+ * ADR-0069 §5（Phase 2 の予約）: shadow mode の分類器（例: Jev）の判断。lane は heuristic のままで、
+ * これは並べて記録するだけ。**Phase 1 では作られない**。
+ */
+export interface ShadowDecision {
+  classifier: string;
+  /**
+   * 0.0..=1.0。
+   */
+  confidence: number;
+  lane: Tier;
+}
+/**
+ * Model 層（lane → provider / model）。
+ */
+export interface LaneResolution {
+  account?: string | null;
+  adapter?: string;
+  /**
+   * 残量による調整の後に実際に走らせる lane（`None` は解決前）。
+   */
+  lane?: Tier | null;
+  /**
+   * 実行するモデル（アダプタの既定モデルなら空文字列のこともある）。
+   */
+  model_id?: string;
+  provider?: string | null;
+  reasoning_effort?: string | null;
 }
 export interface Graph {
   edges: GraphEdge[];
@@ -3410,6 +3591,10 @@ export interface NewTaskSpec {
   cluster?: string | null;
   depends_on?: TaskId[];
   /**
+   * ADR-0069 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。
+   */
+  features?: TaskFeatureHints | null;
+  /**
    * ADR-0027 D1: 分野名（自由記述）。省略時は `role` の分野（`[[genres]] roles` に含む分野がちょうど
    * 1 つのとき）を継ぐ。`genres` が設定されていれば、知らない `genre` や `role` とその分野の不整合は
    * エラー（`genres` が空の設定では検証しない。分野は任意）。
@@ -3567,6 +3752,7 @@ export interface OrgCreateBody {
  * `org_nodes.profile_json` にも JSON にも出ない（導入前のノードと 1 バイトも変わらない）。
  */
 export interface Profile {
+  budget?: BudgetPrefs;
   /**
    * 禁止する道具。和だが**常に勝つ**（実効の `tools` から引かれる）。
    */
@@ -3598,6 +3784,19 @@ export interface Profile {
    * ADR-0046 D8 の語彙。親と和。
    */
   tools?: string[];
+}
+/**
+ * ADR-0069 D2（Phase 114）: 予算の天井（最も厳しい値が勝つ）。
+ */
+export interface BudgetPrefs {
+  /**
+   * 1 タスクあたりの試行回数の上限（エスカレーション込み。タスクの `max_retries + 1` も超えない）。
+   */
+  max_attempts?: number | null;
+  /**
+   * 使ってよい最も高い lane（`allowed_tiers` と合わせて天井になる）。
+   */
+  max_lane?: Tier | null;
 }
 /**
  * ADR-0046 D1 / D3: このノードが受けられるハーネス。`allowed` は親と和、`default` は子が勝つ。
@@ -3655,6 +3854,11 @@ export interface Permissions {
  * ADR-0046 D1: レビューの既定（子が勝つ）。
  */
 export interface ReviewPrefs {
+  /**
+   * ADR-0069 D2 / D6（Phase 114）: レビュー不合格のやり直しで lane を 1 段上げてよいか
+   * （`false` なら上げない。省略時は上げてよい）。子が勝つ。
+   */
+  escalate_on_fail?: boolean | null;
   harness?: string | null;
   tier?: Tier | null;
 }
@@ -3689,10 +3893,22 @@ export interface EffectiveProfile {
   harnesses_allowed?: string[];
   knowledge?: KnowledgeMount[];
   /**
+   * ADR-0069 D2: 継いだ試行回数の上限（根→葉の最小）。
+   */
+  max_attempts?: number | null;
+  /**
+   * ADR-0069 D2: 継いだ lane の上限（根→葉の最小）。
+   */
+  max_lane?: Tier | null;
+  /**
    * 対象のノード（知らない id なら空文字列）。
    */
   node_id: string;
   policy?: string[];
+  /**
+   * ADR-0069 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。
+   */
+  review_escalate_on_fail?: boolean | null;
   review_harness?: string | null;
   review_tier?: Tier | null;
   run?: ProfileRun | null;
@@ -3742,6 +3958,7 @@ export interface OrgNode {
  * `org_nodes.profile_json` にも JSON にも出ない（導入前のノードと 1 バイトも変わらない）。
  */
 export interface Profile1 {
+  budget?: BudgetPrefs;
   /**
    * 禁止する道具。和だが**常に勝つ**（実効の `tools` から引かれる）。
    */
@@ -5053,6 +5270,58 @@ export interface TaskList {
   items: TaskSummary[];
   next_cursor?: string | null;
   total: number;
+}
+/**
+ * ADR-0069 D5: `GET /tasks/{id}/routing`。
+ */
+export interface TaskRoutingView {
+  /**
+   * 現在の担当（`Task.assignee`）。
+   */
+  assignee?: string | null;
+  /**
+   * routing の出自（tier を誰が決めたか・捨てた LLM の担当 `dropped_assignee`・features の上書き）。
+   */
+  routing?: TaskRouting | null;
+  runs: RoutingAudit[];
+  task_id: TaskId;
+}
+/**
+ * ワーカー run 1 件の routing の監査。
+ */
+export interface RoutingAudit {
+  account?: string | null;
+  adapter?: string | null;
+  cost_usd?: number | null;
+  escalation?: string | null;
+  features?: TaskFeatures | null;
+  harness?: string | null;
+  input_tokens?: number | null;
+  lane?: Tier | null;
+  model?: string | null;
+  org_node?: string | null;
+  outcome?: string | null;
+  output_tokens?: number | null;
+  policy_version?: string | null;
+  provider?: string | null;
+  reasoning_effort?: string | null;
+  reasons?: string[];
+  retries?: number | null;
+  review?: ReviewResult | null;
+  rule_id?: string | null;
+  run_id: string;
+  task_id: TaskId;
+  wall_ms?: number | null;
+}
+/**
+ * レビューの結果（その run の後の `review_pass` / `review_fail`）。
+ */
+export interface ReviewResult {
+  /**
+   * 不合格だった受け入れ条件の番号。
+   */
+  failed_criteria?: number[];
+  passed: boolean;
 }
 /**
  * ADR-0044 D5: `GET /tasks/{id}/timeline`。

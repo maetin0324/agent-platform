@@ -369,8 +369,9 @@ fn assignee_instructions_for_plan(context: &RunContext) -> String {
      \u{3000}分からなければ空でよい（その harness を既定に持つ担当に回る）\n\
      - `mode`: `prototype`（動くことを最短で示す）/ `production`（既定。テストと lint を通す）/ \
      `research`（主張に出典か計測を付ける）\n\
-     どうしても人を名指ししたいときだけ `assignee` を書ける。その人がその harness を受けられなければ\n\
-     その計画は差し戻される。\n\n"
+     - `repos` と、仕事の制約（検証方法・戻せるか・失敗したときの損失）は objective と acceptance に書け。\n\
+     **担当（`assignee`）とモデル（`tier`）は選ぶな。** 書いても使われない（ADR-0069: 担当は matching、\n\
+     lane は仕事の性質から celeris が決定的に決める）。\n\n"
         .to_string()
 }
 
@@ -380,9 +381,9 @@ fn assignee_instructions_for_delegation(context: &RunContext) -> String {
     if context.organization.is_empty() {
         return String::new();
     }
-    "委譲する子には、上の組織図を見て `assignee`（任せる課の id）を書け。`role` は必要なときだけでよい。\n\
-     自分と**別の部**の課へ委譲したいときは、子は作られず、代わりに秘書への質問になる（部をまたぐ連携は \
-     秘書が認める）。\n\n"
+    "委譲する子には goal（title / objective）・受け入れ条件・`genre`（harness）を書け。**担当（`assignee`）と\n\
+     モデル（`tier`）は選ぶな**。書いても使われない（ADR-0069: 担当は celeris が skills と harness から決定的に\n\
+     選び、lane は仕事の性質から決める）。上の組織図は「どんな担当がいるか」を知るためだけに使え。\n\n"
         .to_string()
 }
 
@@ -440,9 +441,10 @@ fn delegation_instructions(artifacts: &str) -> String {
          (create the `{artifacts}/` directory if it does not exist yet) as a single JSON object of the form \
          `{{\"tasks\":[{{\"title\":\"...\",\"objective\":\"...\",\"acceptance\":[{{\"text\":\"...\",\
          \"check\":{{\"type\":\"command\",\"cmd\":\"...\",\"expect_exit\":0}}}}],\"role\":\"<optional>\",\
-         \"genre\":\"<optional>\",\"assignee\":\"<optional org node id>\",\
+         \"genre\":\"<optional>\",\
          \"depends_on\":[<index into this array, or an existing task id>]}}]}}`. \
-         Set `tier` to `cheap` for routine work, `standard` for normal implementation, or `frontier` for difficult design/research. The dispatcher adjusts it only using observed quota; unknown remaining quota is not assumed.\n\
+         Do not choose an assignee or a model tier: celeris assigns the owner deterministically and picks the \
+         model lane from the task's nature (ADR-0069). Describe the work, its acceptance checks, and constraints instead.\n\
          `check` may also be \
          `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, `{{\"type\":\"reviewer\"}}`, or `{{\"type\":\"human\"}}`. \
          celeris will validate this after this run ends and insert whatever proposals pass validation as child \
@@ -558,9 +560,9 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
          \"kind\":\"execute\"|\"plan\" (omit for \"execute\"),\
          \"harness\":\"<harness id>\", \"skills\":[\"<skill tag>\"], \
          \"mode\":\"prototype\"|\"production\"|\"research\" (optional), \
-         \"assignee\":\"<org node id>\" (optional), \
-         \"tier\":\"frontier\"|\"standard\"|\"cheap\" (optional)}}]}}\n\
+         \"repos\":[\"<repo name>\"] (optional)}}]}}\n\
          ```\n\
+         Do not write `assignee` or `tier`: the owner and the model lane are decided by celeris (ADR-0069).\n\
          `check` may also be `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, \
          `{{\"type\":\"knowledge_page\",\"path\":\"...\"}}` (a page in the knowledge base), \
          `{{\"type\":\"reviewer\"}}`, or `{{\"type\":\"human\"}}`. Unknown fields are rejected, so do not \
@@ -1169,7 +1171,9 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
                 input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
                 output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
                 cache_read_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
-                cache_creation_tokens: u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
+                cache_creation_tokens: u
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64()),
                 cost_usd: None,
             });
             let result = value
@@ -1444,7 +1448,9 @@ mod tests {
         let other = build_prompt(&task, &other_context, "run-other", "artifacts");
         assert!(!other.contains("artifacts/delegate.json"), "{other}");
         assert!(
-            other.contains("この run は返事だけを書く。仕事は返事の `actions` で作る（ファイルは書けない）。"),
+            other.contains(
+                "この run は返事だけを書く。仕事は返事の `actions` で作る（ファイルは書けない）。"
+            ),
             "{other}"
         );
 
@@ -1522,7 +1528,7 @@ mod tests {
                 path: "artifacts/readme.diff".into(),
                 sha256: "deadbeef".into(),
                 kind: "diff".into(),
-            declared: true,
+                declared: true,
             }],
             ..RunContext::default()
         };
@@ -2284,16 +2290,17 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let execute = build_prompt(&task, &context, "run-o1", "artifacts");
         assert!(execute.contains("## 組織図 (who you can assign work to)"));
         assert!(execute.contains("- research-survey [課] 関連研究調査課 (親: research, 分野: literature) — 関連研究を洗う"));
-        assert!(
-            execute.contains("別の部"),
-            "部をまたぐ委譲の注意が入る: {execute}"
-        );
-        assert!(execute.contains("\"assignee\":\"<optional org node id>\""));
+        // ADR-0069 D1（Phase 114）: 委譲でも担当とモデルは選ばせない（書いても使われない）。
+        assert!(execute.contains("**担当（`assignee`）と"), "{execute}");
+        assert!(!execute.contains("\"assignee\":\"<optional org node id>\""));
 
         task.kind = task_core::TaskKind::Plan;
         let plan = build_prompt(&task, &context, "run-o2", "artifacts");
         // ADR-0046 D5（Phase 59）: 計画は人選をしない。組織図も渡さない。
-        assert!(plan.contains("**`assignee`（担当）は書くな"), "{plan}");
+        assert!(
+            plan.contains("**担当（`assignee`）とモデル（`tier`）は選ぶな。**"),
+            "{plan}"
+        );
         assert!(
             plan.contains("`harness`: その仕事の実行契約の id"),
             "{plan}"
@@ -2932,6 +2939,7 @@ printf '%s\n' '{"type":"turn.completed"}'
                         name: "requested-name".into(),
                         model_id: Some(expected.clone()),
                         unavailable_reason: None,
+                        reasoning_effort: None,
                     },
                 )]
                 .into(),
@@ -3086,12 +3094,24 @@ printf '%s\n' '{"type":"turn.completed"}'
             .position(|a| a == "--allowedTools")
             .expect("--allowedTools present");
         let allowed = &args[idx + 1];
-        assert!(allowed.contains("Bash(celerisctl knowledge search:*)"), "{allowed}");
-        assert!(allowed.contains("Bash(celerisctl knowledge get:*)"), "{allowed}");
+        assert!(
+            allowed.contains("Bash(celerisctl knowledge search:*)"),
+            "{allowed}"
+        );
+        assert!(
+            allowed.contains("Bash(celerisctl knowledge get:*)"),
+            "{allowed}"
+        );
         assert!(allowed.contains("Bash(celerisctl ls:*)"), "{allowed}");
         assert!(allowed.contains("Bash(celerisctl show:*)"), "{allowed}");
-        assert!(allowed.contains("Bash(celerisctl projects ls:*)"), "{allowed}");
-        assert!(allowed.contains("Bash(celerisctl projects show:*)"), "{allowed}");
+        assert!(
+            allowed.contains("Bash(celerisctl projects ls:*)"),
+            "{allowed}"
+        );
+        assert!(
+            allowed.contains("Bash(celerisctl projects show:*)"),
+            "{allowed}"
+        );
     }
 
     /// 対話でない run・CoS 以外の対話（`Other`）には `--allowedTools` は付かない。
@@ -3103,7 +3123,12 @@ printf '%s\n' '{"type":"turn.completed"}'
         let req = sample_req(dir.path().to_path_buf());
         assert_eq!(req.context.conversation_addressee, None);
         let _ = adapter
-            .run(req, "run-plain", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-plain",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -3115,7 +3140,12 @@ printf '%s\n' '{"type":"turn.completed"}'
         let mut req2 = sample_req(dir2.path().to_path_buf());
         req2.context.conversation_addressee = Some(crate::protocol::ConversationAddressee::Other);
         let _ = adapter2
-            .run(req2, "run-other", default_limits(), &RecordingSink::default())
+            .run(
+                req2,
+                "run-other",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args2 = captured_args(dir2.path());
@@ -3139,10 +3169,9 @@ printf '%s\n' '{"type":"turn.completed"}'
             .run(req, "run-4", default_limits(), &RecordingSink::default())
             .await
             .unwrap();
-        let request_json = std::fs::read_to_string(
-            dir.path().join("runs").join("run-4").join("request.json"),
-        )
-        .unwrap();
+        let request_json =
+            std::fs::read_to_string(dir.path().join("runs").join("run-4").join("request.json"))
+                .unwrap();
         let value: serde_json::Value = serde_json::from_str(&request_json).unwrap();
         assert_eq!(value["context"]["session"]["resume"], true);
         assert_eq!(
@@ -3199,7 +3228,13 @@ printf '%s\n' '{"type":"turn.completed"}'
         let outcome = adapter.run(req, "run-6", default_limits(), &sink).await;
         // 供給側失敗としては分類されない文面なので run 自体は retryable な通常のエラーで返る。
         match outcome {
-            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Ok(o) => assert!(matches!(
+                o.terminal,
+                Terminal::Error {
+                    retryable: true,
+                    ..
+                }
+            )),
             Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
         }
         let failed = sink.session_resume_failed.lock().unwrap();
@@ -3248,11 +3283,15 @@ printf '%s\n' '{"type":"turn.completed"}'
             resume: true,
         });
         let sink = RecordingSink::default();
-        let outcome = adapter
-            .run(req, "run-113a", default_limits(), &sink)
-            .await;
+        let outcome = adapter.run(req, "run-113a", default_limits(), &sink).await;
         match outcome {
-            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Ok(o) => assert!(matches!(
+                o.terminal,
+                Terminal::Error {
+                    retryable: true,
+                    ..
+                }
+            )),
             Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
         }
         let failed = sink.session_resume_failed.lock().unwrap();

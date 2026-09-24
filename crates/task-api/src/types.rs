@@ -111,6 +111,21 @@ pub struct Timeline {
     pub items: Vec<TimelineItem>,
 }
 
+/// `GET /tasks/{id}/routing` の応答（ADR-0069 D5）。なぜその担当・harness・lane・model になったかの監査。
+/// `runs` はワーカー run ごと（古い run が先）で、各 run の `escalation` がエスカレーションの履歴になる。
+/// まだ run が無いタスクは `runs` が空（404 にはしない。知らないタスクだけが 404）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct TaskRoutingView {
+    pub task_id: TaskId,
+    /// 現在の担当（`Task.assignee`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// routing の出自（tier を誰が決めたか・捨てた LLM の担当 `dropped_assignee`・features の上書き）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<task_core::TaskRouting>,
+    pub runs: Vec<task_core::RoutingAudit>,
+}
+
 /// タイムラインの 1 件（ADR-0044 D5）。`at` は RFC 3339。
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]

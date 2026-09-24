@@ -495,7 +495,16 @@ pub fn materialize(
     workspace: WorkspaceContext<'_>,
     now: OffsetDateTime,
 ) -> Vec<Task> {
-    materialize_logging(parent, plan, org, roles, genres, workspace, now, &mut |_, _| {})
+    materialize_logging(
+        parent,
+        plan,
+        org,
+        roles,
+        genres,
+        workspace,
+        now,
+        &mut |_, _| {},
+    )
 }
 
 /// [`materialize`] と同じだが、ADR-0062 B2 の「Remote → Local への降格」が起きるたびに
@@ -548,6 +557,12 @@ pub fn materialize_logging(
                     .collect(),
                 status: Status::Draft,
                 priority: parent.priority,
+                // ADR-0069 D1: 計画の子は lane policy の対象（tier はヒント、捨てた担当を記録）。
+                routing: Some(crate::model::TaskRouting {
+                    tier_source: defaults.tier_source,
+                    dropped_assignee: defaults.dropped_assignee.clone(),
+                    ..Default::default()
+                }),
                 worker_hint: WorkerHint {
                     tier: defaults.tier,
                     adapter: defaults.adapter,
@@ -686,6 +701,7 @@ mod tests {
     fn parent() -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),
@@ -1050,7 +1066,7 @@ mod tests {
     /// ADR-0033 D4（Phase 24）: 計画の `assignee` は子タスクに残り、`role` が無いときだけ
     /// そのノードの分野が既定（tier / adapter / 予算）の解決に効く。
     #[test]
-    fn materialize_carries_the_assignee_and_uses_its_genre_only_without_a_role() {
+    fn materialize_drops_the_plan_supplied_assignee_and_records_it() {
         use crate::org::{OrgKind, OrgNode};
         let now = OffsetDateTime::now_utc();
         let node = |id: &str, genre_id: Option<&str>| OrgNode {
@@ -1111,20 +1127,35 @@ mod tests {
             now,
         );
 
-        assert_eq!(children[0].assignee.as_deref(), Some("research-survey"));
-        assert_eq!(children[0].genre.as_deref(), Some("literature"));
-        assert_eq!(children[0].worker_hint.adapter.as_deref(), Some("paperqa"));
-        assert_eq!(children[0].budget.max_turns, 5);
+        // ADR-0069 D1（Phase 114）: 計画（LLM）が書いた担当は捨て、`routing.dropped_assignee` に残す
+        // （以前は組織にある id なら子に記録し、その分野を既定に使っていた）。担当の分野も使わない。
+        let dropped = |i: usize| {
+            children[i]
+                .routing
+                .as_ref()
+                .and_then(|r| r.dropped_assignee.clone())
+        };
+        assert_eq!(children[0].assignee, None);
+        assert_eq!(dropped(0).as_deref(), Some("research-survey"));
+        assert_eq!(
+            children[0].genre, p.genre,
+            "the dropped assignee's genre is not used"
+        );
 
-        assert_eq!(children[1].assignee.as_deref(), Some("research-writing"));
+        assert_eq!(children[1].assignee, None);
+        assert_eq!(dropped(1).as_deref(), Some("research-writing"));
         assert_eq!(
             children[1].worker_hint.adapter.as_deref(),
             Some("claude-code")
         );
         assert_eq!(children[1].worker_hint.tier, Tier::Frontier);
+        assert_eq!(
+            children[1].routing.as_ref().map(|r| r.tier_source),
+            Some(crate::model::TierSource::Default)
+        );
 
-        // 組織に無い id は担当にしない（既定も変えない）。
         assert_eq!(children[2].assignee, None);
+        assert_eq!(dropped(2).as_deref(), Some("nobody"));
         assert_eq!(children[2].genre, p.genre);
     }
 
@@ -1189,7 +1220,7 @@ mod tests {
     fn fix_harness_artifacts_drops_unknown_artifact_checks_and_notes_the_real_ones() {
         let (org, roles, genres) = harness_setup();
         let mut t = new_task("候補テーマの抽出", vec![]);
-        t.assignee = Some("research-literature".into());
+        t.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         t.objective = "候補テーマを 3〜5 件、引用付きで candidates.json にまとめよ".into();
         t.acceptance = vec![
             Criterion {
@@ -1242,7 +1273,7 @@ mod tests {
     fn fix_harness_artifacts_keeps_the_criterion_as_a_reviewer_check_when_nothing_else_remains() {
         let (org, roles, genres) = harness_setup();
         let mut t = new_task("候補テーマの抽出", vec![]);
-        t.assignee = Some("research-literature".into());
+        t.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         t.acceptance = vec![Criterion {
             text: "候補テーマ 3 件が引用付きで書かれている".into(),
             check: Check::ArtifactExists {
@@ -1268,7 +1299,7 @@ mod tests {
     fn fix_harness_artifacts_leaves_other_genres_and_matching_names_alone() {
         let (org, roles, genres) = harness_setup();
         let mut coding = new_task("実装", vec![]);
-        coding.assignee = Some("coding-poc".into());
+        coding.genre = Some("coding".into()); // ADR-0069: 担当ではなく harness で指定する
         coding.acceptance = vec![Criterion {
             text: "design.md がある".into(),
             check: Check::ArtifactExists {
@@ -1276,7 +1307,7 @@ mod tests {
             },
         }];
         let mut literature = new_task("調べる", vec![]);
-        literature.assignee = Some("research-literature".into());
+        literature.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         literature.acceptance = vec![Criterion {
             text: "answer.md がある".into(),
             check: Check::ArtifactExists {
@@ -1298,7 +1329,7 @@ mod tests {
     fn warn_missing_partial_ok_flags_research_children_without_the_escape_hatch() {
         let (org, roles, genres) = harness_setup();
         let mut t = new_task("CHFS の関連研究", vec![]);
-        t.assignee = Some("research-literature".into());
+        t.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         t.acceptance = vec![Criterion {
             text: "CHFS/FinchFS/GekkoFS/UnifyFS の関連研究をまとめている".into(),
             check: Check::Reviewer,
@@ -1316,13 +1347,15 @@ mod tests {
     /// 逃げ道（受け入れ条件の一文、または `partial_ok: true`）があれば警告しない。coding のような
     /// 調査系でない分野は対象外。
     #[test]
-    fn warn_missing_partial_ok_is_quiet_when_the_escape_hatch_is_present_or_the_genre_is_not_research() {
+    fn warn_missing_partial_ok_is_quiet_when_the_escape_hatch_is_present_or_the_genre_is_not_research()
+     {
         let (org, roles, genres) = harness_setup();
 
         let mut with_marker = new_task("CHFS の関連研究", vec![]);
-        with_marker.assignee = Some("research-literature".into());
+        with_marker.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         with_marker.acceptance = vec![Criterion {
-            text: "一次情報で確認できなかった項目は「未確認」と明記されていれば不合格にしない".into(),
+            text: "一次情報で確認できなかった項目は「未確認」と明記されていれば不合格にしない"
+                .into(),
             check: Check::Reviewer,
         }];
 
@@ -1335,7 +1368,7 @@ mod tests {
         }];
 
         let mut coding = new_task("実装", vec![]);
-        coding.assignee = Some("coding-poc".into());
+        coding.genre = Some("coding".into()); // ADR-0069: 担当ではなく harness で指定する
         coding.acceptance = vec![Criterion {
             text: "design.md がある".into(),
             check: Check::ArtifactExists {
@@ -1474,11 +1507,12 @@ mod tests {
         }
     }
 
-    /// ADR-0062 B2（Phase 107）: plan の子も、案件から継いだ Remote workspace を、担当が
-    /// `cluster:<id>` を持たなければ Local に落とす（委譲の子と同じ規則。`materialize_delegated` の
-    /// `inherited_remote_workspace_downgrades_to_local_when_the_assignee_lacks_the_cluster_tool` を参照）。
+    /// ADR-0062 B2（Phase 107）→ ADR-0069 D1（Phase 114）: 計画が書いた担当は捨てるので、案件から継いだ
+    /// Remote workspace は**担当未定のまま Remote に残る**（ADR-0062 B2 の「担当未定なら判定しない」側。
+    /// matching が `cluster:<id>` を持つノードだけを候補にするので後で矛盾しない）。以前は計画の
+    /// `assignee` が道具を持たなければここで Local に落としていた。
     #[test]
-    fn plan_child_inherited_remote_workspace_downgrades_when_the_assignee_lacks_the_cluster_tool() {
+    fn plan_child_inherited_remote_workspace_stays_remote_because_the_plan_assignee_is_dropped() {
         let p = parent();
         let project = WorkspaceSpec::Remote {
             cluster: "sirius".into(),
@@ -1510,22 +1544,16 @@ mod tests {
             OffsetDateTime::now_utc(),
             &mut |id, reason| reasons.push((id, reason.to_string())),
         );
+        assert_eq!(children[0].workspace, project);
+        assert!(reasons.is_empty(), "{reasons:?}");
+        assert_eq!(children[0].assignee, None);
         assert_eq!(
-            children[0].workspace,
-            WorkspaceSpec::Local {
-                path: PathBuf::from(children[0].id.to_string()),
-                mode: None,
-            }
+            children[0]
+                .routing
+                .as_ref()
+                .and_then(|r| r.dropped_assignee.as_deref()),
+            Some("web-research")
         );
-        assert_eq!(reasons.len(), 1);
-
-        let mut with_tool = new_task("compute", vec![]);
-        with_tool.assignee = Some("cluster-hpc".into());
-        let plan2 = PlanOutput {
-            tasks: vec![with_tool],
-        };
-        let children2 = materialize(&p, &plan2, &org, &[], &[], ws, OffsetDateTime::now_utc());
-        assert_eq!(children2[0].workspace, project);
     }
 
     /// ADR-0039 D2: 案件が Remote なら子も Remote（従来の ADR-0018 経路に乗る）。D5: `~` は展開する。

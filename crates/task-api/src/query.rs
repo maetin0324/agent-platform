@@ -149,7 +149,7 @@ pub(crate) fn parse_snake<T: DeserializeOwned>(what: &str, value: &str) -> Resul
 }
 
 /// `Event` の serde の `type` 名（`types` クエリの語彙）。
-pub(crate) const EVENT_TYPES: [&str; 20] = [
+pub(crate) const EVENT_TYPES: [&str; 21] = [
     "created",
     "transitioned",
     "worker_started",
@@ -174,6 +174,8 @@ pub(crate) const EVENT_TYPES: [&str; 20] = [
     "cluster_master_exited",
     // ADR-0066 D2（Phase 110b）: 終端タスクの作業場所からビルド生成物を刈った。
     "workspace_pruned",
+    // ADR-0069 D5（Phase 114）: run ごとの routing の監査記録。
+    "routing_decided",
 ];
 
 pub(crate) fn event_type_name(event: &Event) -> &'static str {
@@ -198,6 +200,7 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::WorkspaceModeDowngraded { .. } => "workspace_mode_downgraded",
         Event::ClusterMasterExited { .. } => "cluster_master_exited",
         Event::WorkspacePruned { .. } => "workspace_pruned",
+        Event::RoutingDecided { .. } => "routing_decided",
     }
 }
 

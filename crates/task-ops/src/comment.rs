@@ -81,7 +81,14 @@ pub fn post_human_comment_as(
 ) -> Result<CommentResult, OpsError> {
     TaskComment::validate_body(&body).map_err(OpsError::Validation)?;
     let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
-    let comment = TaskComment::new(id, CommentAuthorKind::Human, author, body.clone(), None, now);
+    let comment = TaskComment::new(
+        id,
+        CommentAuthorKind::Human,
+        author,
+        body.clone(),
+        None,
+        now,
+    );
 
     match task.status {
         // 走っている（レビュー中も含む）run を止めて `ready` に戻す。コメントと遷移は同じトランザクション。
@@ -274,14 +281,10 @@ fn consumes_interrupt(outcome: &str) -> bool {
 /// 実装 run 自体が供給側失敗の requeue 上限や `max_retries` の枯渇で `failed` になった場合
 /// （`Trigger::Requeue`/`WorkerError` 経由）はこの条件を満たさない（reopen で仕切り直すべき）。
 pub fn review_fail_is_the_only_reason_for_failure(events: &[(u64, Event)]) -> bool {
-    events
-        .iter()
-        .rev()
-        .find_map(|(_, e)| match e {
-            Event::Transitioned { reason, .. } => Some(reason.as_str()),
-            _ => None,
-        })
-        == Some("review_fail")
+    events.iter().rev().find_map(|(_, e)| match e {
+        Event::Transitioned { reason, .. } => Some(reason.as_str()),
+        _ => None,
+    }) == Some("review_fail")
 }
 
 /// 既存成果を部署のレビュアーで再判定する。新しい実装runは作らない。
@@ -370,6 +373,7 @@ mod tests {
     fn sample_task(status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             id: TaskId::new(),
@@ -459,7 +463,10 @@ mod tests {
         store2
             .apply_transition(task2.id, Trigger::ReviewFail, None)
             .unwrap();
-        assert_eq!(store2.get(task2.id).unwrap().unwrap().status, Status::Failed);
+        assert_eq!(
+            store2.get(task2.id).unwrap().unwrap().status,
+            Status::Failed
+        );
         let result = rereview(&store2, task2.id, None).unwrap();
         assert_eq!(result.to, Status::Reviewing);
     }

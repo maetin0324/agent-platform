@@ -121,9 +121,11 @@ pub fn find_prune_candidate(
     now: OffsetDateTime,
     after_secs: u64,
 ) -> Result<Option<PruneCandidate>, StoreError> {
-    Ok(find_prune_candidates(store, workspace_root, now, after_secs)?
-        .into_iter()
-        .next())
+    Ok(
+        find_prune_candidates(store, workspace_root, now, after_secs)?
+            .into_iter()
+            .next(),
+    )
 }
 
 /// 実際に消す。消せなかったパスは無視して残りを続ける（途中で 1 つ失敗しても他は消す）。
@@ -170,6 +172,7 @@ mod tests {
         let id = TaskId::new();
         let now = OffsetDateTime::now_utc();
         let task = Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),

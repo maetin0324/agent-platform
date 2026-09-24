@@ -39,6 +39,8 @@ pub mod plan;
 pub mod project_plan;
 pub mod replay;
 pub mod retry;
+/// ADR-0069 D5（Phase 114）: run ごとの routing の監査（担当・harness・lane・model・メトリクス・レビュー）。
+pub mod routing_audit;
 pub mod view;
 pub mod workspace;
 

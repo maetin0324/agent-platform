@@ -163,6 +163,62 @@ pub struct NewTaskSpec {
     #[serde(default)]
     pub status: Option<Status>,
     // ---- ADR-0044 D1/D3（Phase 53）: ここまで ----
+    /// ADR-0069 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。
+    #[serde(default)]
+    pub features: Option<task_core::TaskFeatureHints>,
+    /// ADR-0069 D1: この spec の出自。**API の JSON からは入らない**（`serde(skip)`。偽装できない）。
+    /// 既定は人（`POST /tasks` / `celerisctl add`）。LLM の経路（CoS の actions）はコードが `Agent` を立てる。
+    #[serde(skip)]
+    pub provenance: SpecProvenance,
+}
+
+/// ADR-0069 D1: `NewTaskSpec` を誰が書いたか。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SpecOrigin {
+    /// 人（API / CLI）。`tier` / `assignee` は人の明示として従う。
+    #[default]
+    Human,
+    /// LLM（CoS の Console actions）。`tier` はヒント、`assignee` は人の明示が確かめられたときだけ残る。
+    Agent,
+    /// celeris のコード（計画 run・報告・知識整理など）。`tier` は固定値として従う。
+    System,
+}
+
+/// ADR-0069 D1: spec の出自と、LLM 経路で捨てた値（`Task.routing` に写す）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpecProvenance {
+    pub origin: SpecOrigin,
+    /// `origin = Agent` でも、人の発言に `tier:<lane>` があった（人の明示の tier）。
+    pub human_explicit_tier: bool,
+    /// LLM が書いたが人の明示ではないので捨てた担当。
+    pub dropped_assignee: Option<String>,
+}
+
+impl SpecProvenance {
+    pub fn system() -> Self {
+        Self {
+            origin: SpecOrigin::System,
+            ..Self::default()
+        }
+    }
+
+    /// ADR-0069 D1: `tier` を誰が決めたか。
+    pub fn tier_source(&self, tier_given: bool) -> task_core::TierSource {
+        use task_core::TierSource;
+        // celeris のコードが作るタスク（計画 run・報告・知識整理）は lane policy の対象にしない。
+        if self.origin == SpecOrigin::System {
+            return TierSource::System;
+        }
+        if !tier_given {
+            return TierSource::Default;
+        }
+        match self.origin {
+            SpecOrigin::Human => TierSource::Human,
+            SpecOrigin::System => TierSource::System,
+            SpecOrigin::Agent if self.human_explicit_tier => TierSource::Human,
+            SpecOrigin::Agent => TierSource::Hint,
+        }
+    }
 }
 
 /// ADR-0044 D3: `priority` の入力。`"P1"` のようなラベルでも整数でも書ける（API は `priority_label` を
@@ -561,7 +617,15 @@ fn build_task(
         max_retries: spec.max_retries,
     };
 
+    // ADR-0069 D1 / D3: routing の出自（tier を誰が決めたか・捨てた担当・features の上書き）。
+    let routing = task_core::TaskRouting {
+        tier_source: spec.provenance.tier_source(spec.tier.is_some()),
+        assignee_explicit: spec.assignee.is_some(),
+        dropped_assignee: spec.provenance.dropped_assignee.clone(),
+        features: spec.features.filter(|f| !f.is_empty()),
+    };
     let task = Task {
+        routing: Some(routing),
         repos,
         id,
         parent_id: spec.parent,
@@ -649,6 +713,8 @@ mod tests {
             labels: Vec::new(),
             category: None,
             status: None,
+            features: None,
+            provenance: SpecProvenance::default(),
         }
     }
 
@@ -841,6 +907,42 @@ mod tests {
         assert_eq!(task.budget.max_turns, 5);
         assert_eq!(task.budget.max_wall_secs, 1200);
         assert_eq!(task.role, None, "assignee does not invent a role name");
+    }
+
+    /// ADR-0069 D1（Phase 114）: 人の経路（API / CLI。`SpecOrigin::Human` が既定）の `assignee` / `tier` は
+    /// 人の明示として従い、`routing` に出自が残る。`provenance` は API の JSON からは偽装できない。
+    #[test]
+    fn human_spec_records_explicit_provenance_and_cannot_be_spoofed() {
+        let store = org_store();
+        let (roles, genres) = literature_setup();
+        let mut spec = base_spec();
+        spec.assignee = Some("research-survey".into());
+        spec.tier = Some(Tier::Frontier);
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).expect("create");
+        assert_eq!(task.assignee.as_deref(), Some("research-survey"));
+        let routing = task.routing.expect("routing");
+        assert_eq!(routing.tier_source, task_core::TierSource::Human);
+        assert!(routing.assignee_explicit);
+
+        // tier を書かなければ policy が決める（Default）。System はいつも System。
+        let task = create_task_with_roles(&store, base_spec(), &roles, &genres, now()).unwrap();
+        assert_eq!(
+            task.routing.map(|r| r.tier_source),
+            Some(task_core::TierSource::Default)
+        );
+        let mut spec = base_spec();
+        spec.provenance = SpecProvenance::system();
+        let task = create_task_with_roles(&store, spec, &roles, &genres, now()).unwrap();
+        assert_eq!(
+            task.routing.map(|r| r.tier_source),
+            Some(task_core::TierSource::System)
+        );
+
+        // `provenance` は `serde(skip)`: JSON に書いても未知フィールドとして拒否される。
+        let err = serde_json::from_str::<NewTaskSpec>(
+            r#"{"title":"t","objective":"o","acceptance":[],"provenance":{"origin":"system"}}"#,
+        );
+        assert!(err.is_err());
     }
 
     /// タスク自身の値は `assignee` より強い。`role` を明示したら、その役割・分野が優先される。

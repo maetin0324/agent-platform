@@ -17,6 +17,7 @@ use time::OffsetDateTime;
 fn sample_task(i: usize) -> Task {
     let now = OffsetDateTime::now_utc();
     Task {
+        routing: None,
         mode: Default::default(),
         skills: Vec::new(),
         repos: Vec::new(),

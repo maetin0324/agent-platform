@@ -243,6 +243,8 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         skills: Vec::new(),
         mode: None,
         status: None,
+        features: None,
+        provenance: task_ops::add::SpecProvenance::default(),
     };
 
     let task = create_task_with_roles(store, spec, &roles, &genres, OffsetDateTime::now_utc())?;

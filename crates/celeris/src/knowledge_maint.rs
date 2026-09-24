@@ -97,7 +97,8 @@ pub fn schedule(
         {
             continue;
         }
-        let Some(spec) = build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
+        let Some(spec) =
+            build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
         else {
             continue;
         };
@@ -147,7 +148,8 @@ pub fn retry_failed(
         let Some(task) = store.get(run.task_id)? else {
             continue; // 元のタスクが消えている（やり直しても依頼文を組めない）。
         };
-        let Some(spec) = build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
+        let Some(spec) =
+            build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
         else {
             continue;
         };
@@ -284,6 +286,8 @@ fn build_run_spec(
             labels: Vec::new(),
             category: None,
             status: None,
+            features: None,
+            provenance: task_ops::add::SpecProvenance::system(),
         };
         Ok(Some(spec))
     }
@@ -443,6 +447,7 @@ mod tests {
     ) -> task_core::Task {
         let now = OffsetDateTime::now_utc();
         task_core::Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),

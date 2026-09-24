@@ -472,7 +472,11 @@ fn clusters_section(context: &RunContext) -> String {
     }
     let mut out = String::from("## クラスタ (clusters)\n");
     for cluster in &context.clusters {
-        let connected = if cluster.connected { "接続中" } else { "未接続" };
+        let connected = if cluster.connected {
+            "接続中"
+        } else {
+            "未接続"
+        };
         match &cluster.work_dir {
             Some(work_dir) => {
                 out.push_str(&format!(
@@ -862,7 +866,7 @@ fn actions_instructions() -> String {
      作ったり道具を使ったりはしません）。\n\
      - `{\"type\": \"create_task\", \"title\": \"…\", \"objective\": \"…\", \"acceptance\": [\"…\"], \
      \"harness\": \"coding\", \"skills\": [\"rust\"], \"mode\": \"prototype\", \"repos\": [], \
-     \"project\": \"<案件の id か null>\", \"milestone\": \"<途中目標の id か null>\", \"assignee\": null, \
+     \"project\": \"<案件の id か null>\", \"milestone\": \"<途中目標の id か null>\", \
      \"workspace\": {\"kind\":\"remote\",\"cluster\":\"<id>\",\"path\":\"<作業ディレクトリ>\",\
      \"mode\":\"shared\"}}`\
      （`workspace` は省略可。クラスタでの仕事だけ入れる。\
@@ -873,16 +877,21 @@ fn actions_instructions() -> String {
      - `{\"type\": \"propose_project\", \"title\": \"…\", \"request\": \"…\", \"repos\": [\"/abs/path\"]}`\n\
      - `{\"type\": \"add_milestone\", \"project\": \"<案件の id>\", \"title\": \"…\", \"description\": \"…\"}`\n\
      - `{\"type\": \"ask_human\", \"text\": \"…\"}`\n\
-     `create_task.tier` は難易度に合わせ cheap（定型）、standard（通常実装）、frontier（難しい設計・調査）を指定できます。残量による調整は実行直前の観測値で行います。\n\
-     `create_task.mode` は進め方で、prototype / production / research のいずれかです。通常実装は `tier: \"standard\", mode: \"production\"` とし、mode に standard は書かないでください。\n\
+     **あなた（CoS）は goal / harness / skills / mode / repos / 制約を定義し、担当（`assignee`）とモデル（`tier`）は\
+     選びません**（ADR-0069）。担当は celeris が skills と harness から決定的に選び、モデルの lane は仕事の性質から\
+     決めます。仕事の性質を伝えたいときは任意の `\"features\": {\"judgment\": \"high\", \"verifiability\": \"low\"}` \
+     （各軸 low / medium / high。judgment, ambiguity, verifiability, reversibility, consequence, context_size, \
+     tool_intensity, expected_length, cross_cutting）を書けます。人が発言で `@<担当 id>` や `tier:<lane>` と明示した\
+     ときだけ、その値を `assignee` / `tier` に写してください（celeris は人の発言を確かめてから従います）。\n\
+     `create_task.mode` は進め方で、prototype / production / research のいずれかです。通常実装は `mode: \"production\"` とし、mode に standard（tier の名前）は書かないでください。\n\
      `create_task.repos` は案件内の登録名です。指定するときは必ず所属する案件の ID を `project` に書き、\
      上の登録済み repos から選んでください。`project: null` と非空の `repos` の組み合わせは禁止です。\
      既存のコードを直す依頼は、そのリポジトリが登録された既存案件に紐づけます。\
      案件に属さない仕事は `project: null, repos: []`。判断できないときは推測せず質問してください。\n\
      目安: **1 つのタスクで 1 時間以内に終わり、承認が要らない変更**なら `create_task` を 1 つ書けば \
      十分です。「案件として」「途中目標に」のように人が儀式を求めていれば `propose_project` /\
-     `add_milestone`。判断に必要な情報が欠けるときは `ask_human`。通常の実装判断は担当に任せます。案件・担当が分かっていれば `project` / `assignee` \
-     を書いてください（`assignee` を省けば celeris が skills と harness から決定的に選びます）。\
+     `add_milestone`。判断に必要な情報が欠けるときは `ask_human`。通常の実装判断は担当に任せます。案件が分かっていれば `project` \
+     を書いてください（担当は書かなくても celeris が skills と harness から決定的に選びます）。\
      検証に落ちた action（知らない harness / repos / 案件など）は実行されず、理由が人に見えます。\n\
      人の確認が要る `acceptance`（`\"human\"`）を書くときは、必ず `artifact_exists` か\
      `knowledge_page`（知識ベースのページ参照）の条件も添えてください。人が読む決定材料は登録済みの\
@@ -1249,7 +1258,10 @@ mod tests {
         };
         let out = render(&secretary, "artifacts");
         assert!(out.contains("自分で実行しないでください"), "{out}");
-        assert!(out.contains("『ssh が禁止されている』『read-only』を理由に断らないで"), "{out}");
+        assert!(
+            out.contains("『ssh が禁止されている』『read-only』を理由に断らないで"),
+            "{out}"
+        );
         assert!(out.contains("cluster:<id>"), "{out}");
         assert!(
             out.contains(
@@ -1323,7 +1335,10 @@ mod tests {
             "{out}"
         );
         // 道具が無いノードは「道具:」を出さない（従来どおり）。
-        assert!(out.contains("- `cos` Chief of Staff / harnesses: conversation\n"), "{out}");
+        assert!(
+            out.contains("- `cos` Chief of Staff / harnesses: conversation\n"),
+            "{out}"
+        );
     }
 
     /// ADR-0059 D6（Phase 99）: CoS 宛てに「クラスタ」の節が付き、実効 work_dir の有無で文面が変わる
@@ -1395,7 +1410,10 @@ mod tests {
             out.contains("- `pegasus`（接続中） 作業ディレクトリ: `/work/NBB/rmaeda`"),
             "{out}"
         );
-        assert!(!out.contains("## 組織"), "継続中は組織の一覧を流し直さない: {out}");
+        assert!(
+            !out.contains("## 組織"),
+            "継続中は組織の一覧を流し直さない: {out}"
+        );
     }
 
     /// ADR-0048 D3（Phase 60b）: CoS の対話にだけ「進行中の案件」の節と `actions` の説明が付く。
@@ -1431,10 +1449,13 @@ mod tests {
         assert!(out.contains("propose_project"), "{out}");
         assert!(out.contains("add_milestone"), "{out}");
         assert!(out.contains("ask_human"), "{out}");
+        assert!(out.contains("mode: \"production\""), "{out}");
+        // ADR-0069 D1（Phase 114）: CoS は担当とモデルを選ばない。
         assert!(
-            out.contains("tier: \"standard\", mode: \"production\""),
+            out.contains("担当（`assignee`）とモデル（`tier`）は"),
             "{out}"
         );
+        assert!(!out.contains("\"assignee\": null"), "{out}");
         // ADR-0063 D3（Phase 109）: 調査系の受け入れ条件は「未確認」の一文（または `partial_ok`）で
         // 1 件の欠落による全体不合格を避ける、という案内が付く。
         assert!(out.contains("未確認"), "{out}");

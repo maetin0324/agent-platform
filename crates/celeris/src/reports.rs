@@ -179,6 +179,8 @@ fn compaction_spec(
         labels: Vec::new(),
         category: None,
         status: None,
+        features: None,
+        provenance: task_ops::add::SpecProvenance::system(),
     }
 }
 

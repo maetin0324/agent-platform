@@ -20,9 +20,9 @@ pub mod integrations;
 pub mod knowledge;
 /// ADR-0047 D4（Phase 62）: 知識整理 run の追跡（`knowledge_runs`）。
 pub mod knowledge_run;
-pub mod message;
 /// ADR-0056 D1 / D4（Phase 78）: MCP サーバーの認証（`mcp_clients`）とログ（`mcp_calls`）。
 pub mod mcp;
+pub mod message;
 pub mod model;
 /// ADR-0064 D1（Phase 110a）: `/proc/self/mountinfo` からマウント点のファイルシステム種別・ソースを
 /// 引く純関数（DB がネットワーク越し／loop デバイス上にあることを警告するため）。
@@ -92,9 +92,10 @@ pub use model::{
     ArtifactRef, Budget, Check, Criterion, DEFAULT_PRIORITY, Event, GenreSpec, HARNESS_ADAPTERS,
     Lease, MAX_LABELS, MAX_SKILLS, PRIORITY_LABELS, PROGRESS_DETAIL_MAX_BYTES, ProgressFields,
     ProgressKind, RoleSpec, RunMetrics, RunRole, Status, Task, TaskCategory, TaskId, TaskKind,
-    TaskMode, Tier, Usage, WorkerHint, WorkspaceMode, WorkspaceSpec, artifact_entry_description,
-    artifact_entry_name, expand_home, home_dir, is_valid_label, normalize_labels, normalize_skills,
-    priority_from_label, priority_label, validate_human_checks_have_deliverable,
+    TaskMode, TaskRouting, Tier, TierSource, Usage, WorkerHint, WorkspaceMode, WorkspaceSpec,
+    artifact_entry_description, artifact_entry_name, expand_home, home_dir, is_valid_label,
+    normalize_labels, normalize_skills, priority_from_label, priority_label,
+    validate_human_checks_have_deliverable,
 };
 // ---- ADR-0061（Phase 104）: harness routing 基盤（cost 推定・タスク特性ベースの routing）----
 pub mod pricing;
@@ -138,3 +139,15 @@ pub use store::{
 pub use transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
 
 pub mod model_routing;
+// ---- ADR-0069（Phase 114）: routing の 4 層（lane policy・retry/escalation・監査）----
+pub mod model_policy;
+pub mod retry_policy;
+pub mod routing_audit;
+pub use model_policy::{
+    LANE_POLICY_VERSION, LaneCeiling, LaneDecision, Level, ModelPolicy, RoutingRecord,
+    ShadowClassifier, ShadowDecision, TaskFeatureHints, TaskFeatures,
+};
+pub use retry_policy::{
+    AttemptOutcome, AttemptRecord, BudgetState, EscalationPolicy, RetryDecision,
+};
+pub use routing_audit::{ReviewResult, RoutingAudit, routing_audit};

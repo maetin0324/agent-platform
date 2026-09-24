@@ -30,8 +30,13 @@ impl RunningDbMaintenance {
         let _ = self.stop.send(());
         match tokio::time::timeout(Duration::from_secs(5), self.handle).await {
             Ok(Ok(())) => tracing::info!(task = self.name, "db maintenance task stopped"),
-            Ok(Err(e)) => tracing::error!(task = self.name, error = %e, "db maintenance task panicked"),
-            Err(_) => tracing::warn!(task = self.name, "db maintenance task did not stop within 5s"),
+            Ok(Err(e)) => {
+                tracing::error!(task = self.name, error = %e, "db maintenance task panicked")
+            }
+            Err(_) => tracing::warn!(
+                task = self.name,
+                "db maintenance task did not stop within 5s"
+            ),
         }
     }
 }
@@ -62,7 +67,11 @@ pub fn spawn_checkpoint_task(
             }
         }
     });
-    RunningDbMaintenance { stop: stop_tx, handle, name: "checkpoint" }
+    RunningDbMaintenance {
+        stop: stop_tx,
+        handle,
+        name: "checkpoint",
+    }
 }
 
 fn checkpoint_once(db_path: &Path, busy_timeout: Duration) -> Result<(), rusqlite::Error> {
@@ -127,7 +136,11 @@ pub fn spawn_backup_task(
             }
         }
     });
-    RunningDbMaintenance { stop: stop_tx, handle, name: "backup" }
+    RunningDbMaintenance {
+        stop: stop_tx,
+        handle,
+        name: "backup",
+    }
 }
 
 /// ADR-0064 D3: 1 回分のバックアップ。書いたファイルのパスを返す。
@@ -216,15 +229,15 @@ mod tests {
             .filter(|p| is_backup_file_name(p))
             .collect();
         assert_eq!(remaining.len(), 2, "{remaining:?}");
-        assert!(!remaining.contains(&written[0]), "the oldest generation should have been pruned");
+        assert!(
+            !remaining.contains(&written[0]),
+            "the oldest generation should have been pruned"
+        );
 
         // 残った最新のバックアップは復元して読める。
         let latest = written.last().unwrap();
         let restored = task_core::SqliteStore::open(latest).unwrap();
-        assert_eq!(
-            restored.get(task.id).unwrap().map(|t| t.id),
-            Some(task.id)
-        );
+        assert_eq!(restored.get(task.id).unwrap().map(|t| t.id), Some(task.id));
     }
 
     #[test]
@@ -273,12 +286,16 @@ mod tests {
             .map(|e| e.path())
             .filter(|p| is_backup_file_name(p))
             .collect();
-        assert!(!backups.is_empty(), "expected at least one backup file to be written");
+        assert!(
+            !backups.is_empty(),
+            "expected at least one backup file to be written"
+        );
     }
 
     fn sample_task() -> task_core::Task {
         let now = OffsetDateTime::now_utc();
         task_core::Task {
+            routing: None,
             repos: Vec::new(),
             id: task_core::TaskId::new(),
             parent_id: None,
