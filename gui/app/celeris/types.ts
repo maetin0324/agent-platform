@@ -307,6 +307,11 @@ export type Event =
     }
   | {
       /**
+       * ADR-0072 D7（Phase E1）: この run の終わり方の構造化した分類。導入前のイベント、または
+       * 分類できなかった run（旧経路の字句判定に頼るしかないもの）は `None`。
+       */
+      end?: RunEnd | null;
+      /**
        * ADR-0061（Phase 104）: harness routing 基盤のメトリクス（wall time・retry 回数）。
        * `WorkerStarted.adapter`/`model` と同じ `run_id` で突き合わせる。導入前のイベント・
        * この run の起点時刻を持たない経路（無い）は `None`。
@@ -428,6 +433,15 @@ export type Event =
       record: RoutingRecord;
       run_id: string;
       type: "routing_decided";
+    }
+  | {
+      checkpoint: Checkpoint;
+      run_id: string;
+      type: "checkpoint_saved";
+      /**
+       * E1 では常に `None`（暗黙の WorkUnit）。E2 以降で WorkUnit の id を持つ。
+       */
+      work_unit_id?: string | null;
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -496,10 +510,52 @@ export type WorkspaceMode = "worktree" | "shared";
  */
 export type RunRole = "worker" | "reviewer";
 /**
+ * D7: `task_core::execution::RunEnd`（`WorkerFinished.end` に入れる）。
+ */
+export type RunEnd =
+  | {
+      type: "completed";
+    }
+  | {
+      type: "yielded";
+    }
+  | {
+      kind: BudgetKind;
+      type: "budget_exhausted";
+    }
+  | {
+      type: "question";
+    }
+  | {
+      retryable: boolean;
+      type: "failed";
+    }
+  | {
+      class: HarnessErrorClass;
+      type: "harness_error";
+    }
+  | {
+      type: "cancelled";
+    };
+/**
+ * D7: 予算切れの種類。
+ */
+export type BudgetKind = "turns" | "wall_clock" | "context";
+/**
+ * D7: harness / 供給側都合の失敗の種類。
+ */
+export type HarnessErrorClass = "supply" | "infra" | "lease_expired" | "idle_timeout";
+/**
  * ADR-0069 D1: `worker_hint.tier` を誰が決めたか。
  */
 export type TierSource = "human" | "system" | "hint" | "default";
-export type RunOutcomeKind = ("done" | "question" | "error" | "requeue" | "lease_expired") | "interrupted";
+export type CheckpointEnd = "completed" | "yielded" | "budget_exhausted";
+/**
+ * checkpoint を合成した出所（D8）。
+ */
+export type CheckpointSource = "worker" | "yield" | "mechanical" | "merged";
+export type RunOutcomeKind =
+  ("done" | "question" | "error" | "requeue" | "lease_expired") | "interrupted" | "continued";
 export type AttentionItem =
   | {
       at: string;
@@ -2626,10 +2682,20 @@ export interface WorkerHint {
  */
 export interface RunMetrics {
   /**
+   * ADR-0072 D19（Phase E1）: この run で観測した context 量（input + cache_read + cache_creation）
+   * の最大値。取れないアダプタ（codex / acp。ADR-0072 §7 U2）は `None`。
+   */
+  peak_context_tokens?: number | null;
+  /**
    * この run が始まった時点で、同じタスクが既に消費していた試行回数（`Task.attempts`）。
    * 0 なら初回の試行。
    */
   retries: number;
+  /**
+   * ADR-0072 D19（Phase E1）: この run のモデルの turn 数（取れる範囲。claude-code はアシスタント
+   * メッセージの件数）。取れなければ `None`。
+   */
+  turns?: number | null;
   /**
    * dispatch してからこの run が終わるまでの壁時計時間（ミリ秒）。
    */
@@ -2778,6 +2844,64 @@ export interface LaneResolution {
   provider?: string | null;
   reasoning_effort?: string | null;
 }
+/**
+ * D8: daemon が確定させた checkpoint（`celeris.checkpoint/1`）。`CheckpointSaved` イベントと
+ * `runs/<run_id>/checkpoint.json` に残す。
+ */
+export interface Checkpoint {
+  artifact_refs?: CheckpointArtifactRef[];
+  completed?: string[];
+  created_at: string;
+  decisions?: CheckpointDecision[];
+  end: CheckpointEnd;
+  files_changed?: CheckpointFileChange[];
+  known_failures?: CheckpointKnownFailure[];
+  next_action: string;
+  open_questions?: string[];
+  plan_issue?: string | null;
+  recent_activity?: string[];
+  remaining?: string[];
+  repo_state?: RepoState | null;
+  run_id: string;
+  run_seq: number;
+  schema: string;
+  source: CheckpointSource;
+  task_id: string;
+  tests_run?: CheckpointTestRun[];
+  work_unit?: string | null;
+}
+export interface CheckpointArtifactRef {
+  kind?: string | null;
+  path: string;
+}
+export interface CheckpointDecision {
+  what: string;
+  why: string;
+}
+export interface CheckpointFileChange {
+  /**
+   * `"added" | "modified" | "deleted"`（自由記述。worker の申告も daemon の git 検出もここに入る）。
+   */
+  change: string;
+  note?: string | null;
+  path: string;
+}
+export interface CheckpointKnownFailure {
+  detail?: string | null;
+  what: string;
+}
+export interface RepoState {
+  base: string;
+  branch: string;
+  diff_stat: string;
+  head: string;
+  uncommitted: boolean;
+}
+export interface CheckpointTestRun {
+  command: string;
+  exit?: number | null;
+  summary?: string | null;
+}
 export interface Graph {
   edges: GraphEdge[];
   nodes: GraphNode[];
@@ -2920,6 +3044,11 @@ export interface RunSummary {
   account?: string | null;
   adapter: string;
   artifacts: number;
+  /**
+   * ADR-0072 D19/D20（Phase E1）: この run の構造化した終わり方（`WorkerFinished.end`）。
+   * 導入前の run・分類できなかった run は `None`。
+   */
+  end?: RunEnd | null;
   /**
    * `runs/<run_id>/` のファイルの有無。task-ops は `None` を入れ、task-api が埋める。
    */

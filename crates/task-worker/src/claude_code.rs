@@ -434,6 +434,33 @@ fn result_json_instructions(artifacts: &str) -> String {
     )
 }
 
+/// ADR-0072 D10（Phase E1）: 予算の予告と rolling checkpoint の指示。coding 系の execute run
+/// （対話は除く。D10）にだけ足す。claude-code は `--max-turns` で turn の上限を実際に強制するが、
+/// codex/acp/aider は強制しない（目安として出す。§7 U1 と同じ「分類できなければ安全側」の考え方）。
+/// **決定的**（壁時計の現在時刻は埋め込まない。DESIGN 原則 1 / 同じ入力から同じプロンプトを保つため。
+/// 「開始時刻」は `WorkerStarted` イベントに残るので、ここに書かなくても run の記録からは追える）。
+fn budget_preamble(task: &Task, artifacts: &str) -> String {
+    format!(
+        "## 予算 (budget)\n\
+         この run の上限の目安: 最大 {} turn（claude-code はこれを `--max-turns` で実際に強制する。\
+         他の harness では目安）/ 最大 {} 秒（壁時計はどの harness でも celeris が強制する）。\n\
+         残りが約 20% になったら、または context が長くなってきたと感じたら、作業を区切りのよい所で \
+         止め、`{artifacts}/checkpoint.json` を最新の状態にしてから `{artifacts}/result.json` に \
+         `{{\"yield\": {{\"completed\": [...], \"remaining\": [...], \"next_action\": \"...\"}}}}` \
+         （フィールドは全て任意、`checkpoint.json` と同じ形）を書いて終了せよ（予算切れで打ち切られる \
+         より、区切って自分から止まる方が良い。これは失敗ではなく、続きは新しい session が checkpoint \
+         から引き継ぐ）。\n\
+         意味のある区切り（1 つの小目標の完了・方針の決定・テストの実行）のたびに \
+         `{artifacts}/checkpoint.json` を次の形で上書きせよ（無ければ新規に作る。全欄が任意）:\n\
+         `{{\"completed\":[\"...\"],\"remaining\":[\"...\"],\
+         \"decisions\":[{{\"what\":\"...\",\"why\":\"...\"}}],\
+         \"files_changed\":[{{\"path\":\"...\",\"change\":\"modified\"}}],\
+         \"tests_run\":[{{\"command\":\"...\",\"exit\":0}}],\
+         \"known_failures\":[{{\"what\":\"...\"}}],\"next_action\":\"...\"}}`\n\n",
+        task.budget.max_turns, task.budget.max_wall_secs
+    )
+}
+
 /// 実行中の委譲の方法（ADR-0016 D2 / M8, ADR-0027 D1）。
 fn delegation_instructions(artifacts: &str) -> String {
     format!(
@@ -493,6 +520,14 @@ fn build_execute_prompt(
     artifacts: &str,
 ) -> String {
     let mut out = prompt_header(task, context, run_id, artifacts);
+    // ADR-0072 D9（Phase E1）: 続きの実行（continuation）の節。`context.continuation` が無い run の
+    // 出力はここで 1 バイトも増えない。
+    out.push_str(&crate::preamble::continuation_section(context));
+    // ADR-0072 D10（Phase E1）: 予算の予告と rolling checkpoint の指示。対話 run には出さない
+    // （D10: 対話・レビュー・計画・研究 harness は除く）。
+    if context.conversation_addressee.is_none() {
+        out.push_str(&budget_preamble(task, artifacts));
+    }
     out.push_str("## Acceptance criteria\n");
     for (i, c) in task.acceptance.iter().enumerate() {
         let detail = match &c.check {
@@ -710,6 +745,11 @@ struct ResultFile {
     /// Phase 5 のドッグフードで、ワーカーが文字列の配列を書いて run 全体が `error` になる事故があった）。
     #[serde(default)]
     evidence: serde_json::Value,
+    /// ADR-0072 D9/D10（Phase E1）: graceful yield（`{"yield": {...checkpoint の意味の欄...}}`）。
+    /// 中身は寛容に読む（`task_core::WorkerCheckpointInput` と同じ形。生の JSON のまま保持し、
+    /// 検証・合成はディスパッチャ側の `task_core::merge_checkpoint` が行う）。
+    #[serde(default, rename = "yield")]
+    r#yield: Option<serde_json::Value>,
 }
 
 /// `evidence` のうち `Evidence` として読めた要素だけを残す。配列でない／要素が不正でも `done` を失敗にしない。
@@ -906,15 +946,20 @@ async fn run_claude_code(
     loop {
         let wall_elapsed = start.elapsed();
         if wall_elapsed >= limits.wall_clock {
-            timeout_terminal = Some(Terminal::Error {
+            // ADR-0072 D7（Phase E1）: wall-clock の打ち切りは予算切れ（continuation の対象）。
+            // usage はここでは取れない（`result` メッセージを観測する前に打ち切っている）。
+            timeout_terminal = Some(Terminal::BudgetExhausted {
+                kind: task_core::BudgetKind::WallClock,
                 message: "wall clock exceeded".into(),
-                retryable: true,
+                usage: None,
             });
             force_kill = true;
             break;
         }
         let idle_elapsed = last_activity.elapsed();
         if idle_elapsed >= limits.idle_timeout {
+            // ADR-0072 D7（Phase E1）: idle timeout は E1 では harness_error に分類変更しない
+            // （§7 U7。従来どおり retryable な `Error` のまま attempts を消費する）。
             timeout_terminal = Some(Terminal::Error {
                 message: "idle timeout".into(),
                 retryable: true,
@@ -1227,6 +1272,17 @@ fn tool_result_text(item: &serde_json::Value) -> String {
 /// `result` メッセージを一度でも観測できた場合にのみこれを呼ぶ（観測できなかった場合は
 /// クラッシュとして扱い、この関数を呼ばずに `Error` にする。ADR-0006 D4）。`is_error`/`subtype != "success"`
 /// のときは `result` のテキスト（無ければ `subtype`）を供給側失敗として分類する。
+/// ADR-0061（Phase 104）: model が分かる時だけ静的単価表から USD を推定して埋める（不明なモデル・
+/// token 欠落は `None` のまま。ここでは断定しない）。
+fn usage_with_cost(usage: Option<Usage>, model: Option<&str>) -> Option<Usage> {
+    usage.map(|mut u| {
+        if let Some(model) = model {
+            u.cost_usd = task_core::estimate_cost_usd(model, &u);
+        }
+        u
+    })
+}
+
 async fn terminal_from_result(
     artifacts_dir: &Path,
     artifacts_rel: &str,
@@ -1234,10 +1290,39 @@ async fn terminal_from_result(
     model: Option<&str>,
 ) -> (Terminal, Option<ProviderFailure>) {
     if last_result.is_error || last_result.subtype != "success" {
+        // ADR-0072 D7（Phase E1）: `error_max_turns` は `--max-turns` の上限に当たったという
+        // claude-code 自身の分類なので、字句判定なしで構造化できる（wall-clock は別経路。上の呼び出し元
+        // の loop の timeout で検出する）。それ以外の `is_error`/`subtype != success` は、`result` の
+        // 文言が context 超過の語彙に当たれば `BudgetExhausted{kind: Context}`（§7 U1: 実機の文言は
+        // 未確認。分類できなければ従来どおり `Error`）。usage は予算切れでも運ぶ（従来は捨てていた）。
+        let usage = usage_with_cost(last_result.usage, model);
+        if last_result.subtype == "error_max_turns" {
+            return (
+                Terminal::BudgetExhausted {
+                    kind: task_core::BudgetKind::Turns,
+                    message: "claude result: error_max_turns".to_string(),
+                    usage,
+                },
+                None,
+            );
+        }
         let text_for_classification = last_result
             .result
             .clone()
             .unwrap_or_else(|| last_result.subtype.clone());
+        if task_core::looks_like_context_exceeded(&text_for_classification) {
+            return (
+                Terminal::BudgetExhausted {
+                    kind: task_core::BudgetKind::Context,
+                    message: format!(
+                        "claude result: {}: {text_for_classification}",
+                        last_result.subtype
+                    ),
+                    usage,
+                },
+                None,
+            );
+        }
         let pf = classify_provider_failure(&text_for_classification);
         let message = match &last_result.result {
             Some(result_text) => format!("claude result: {}: {result_text}", last_result.subtype),
@@ -1268,26 +1353,24 @@ async fn terminal_from_result(
 
     let terminal = match serde_json::from_str::<ResultFile>(&text) {
         Ok(rf) => {
+            // ADR-0072 D9: 優先順位は `question` > `summary` > `yield`。
             if let Some(question) = rf.question {
                 Terminal::Question { text: question }
             } else if let Some(summary) = rf.summary {
-                // ADR-0061（Phase 104）: model が分かる時だけ静的単価表から USD を推定して埋める
-                // （不明なモデル・token 欠落は `None` のまま。ここでは断定しない）。
-                let usage = last_result.usage.map(|mut u| {
-                    if let Some(model) = model {
-                        u.cost_usd = task_core::estimate_cost_usd(model, &u);
-                    }
-                    u
-                });
                 Terminal::Done {
                     summary,
                     evidence: lenient_evidence(rf.evidence),
-                    usage,
+                    usage: usage_with_cost(last_result.usage, model),
+                }
+            } else if let Some(checkpoint) = rf.r#yield {
+                Terminal::Yielded {
+                    checkpoint,
+                    usage: usage_with_cost(last_result.usage, model),
                 }
             } else {
                 Terminal::Error {
                     message: format!(
-                        "{artifacts_rel}/result.json has neither 'summary' nor 'question'"
+                        "{artifacts_rel}/result.json has neither 'summary', 'question' nor 'yield'"
                     ),
                     retryable: true,
                 }
@@ -1410,6 +1493,58 @@ mod tests {
         assert!(prompt.contains("reviewer will independently re-run"));
         assert!(prompt.contains("run-xyz"));
         assert!(prompt.contains("attempt 1 of"));
+    }
+
+    /// ADR-0072 D10（Phase E1）: 予算の予告と rolling checkpoint の指示は execute run（対話を除く）
+    /// に出るが、対話 run には出ない（D10 の除外表のとおり）。
+    #[test]
+    fn budget_preamble_appears_for_execute_runs_but_not_conversation_runs() {
+        let task = crate::protocol::tests::sample_task();
+        let ordinary = build_prompt(&task, &RunContext::default(), "run-budget", "artifacts");
+        assert!(ordinary.contains("## 予算 (budget)"), "{ordinary}");
+        assert!(ordinary.contains("checkpoint.json"), "{ordinary}");
+        assert!(ordinary.contains(&format!("{}", task.budget.max_turns)));
+        assert!(ordinary.contains(&format!("{}", task.budget.max_wall_secs)));
+
+        let conversation_context = RunContext {
+            conversation_addressee: Some(crate::protocol::ConversationAddressee::Other),
+            ..RunContext::default()
+        };
+        let conversation = build_prompt(&task, &conversation_context, "run-conv", "artifacts");
+        assert!(!conversation.contains("## 予算 (budget)"), "{conversation}");
+    }
+
+    /// ADR-0072 D9（Phase E1）: `request.json`/`prompt.txt` に続きの実行の節と checkpoint が載る。
+    /// `context.continuation` を持たない run のプロンプトは、D10 の追加分を除きバイト単位で同じ
+    /// （budget_preamble/continuation_section 以外の内容は変わらない）。
+    #[test]
+    fn build_prompt_carries_the_continuation_section_when_present() {
+        let task = crate::protocol::tests::sample_task();
+        let context = RunContext {
+            continuation: Some(crate::protocol::ContinuationContext {
+                run_seq: 2,
+                previous_end: "budget_exhausted(turns)".into(),
+                checkpoint: serde_json::json!({
+                    "completed": ["A"],
+                    "remaining": ["B"],
+                    "next_action": "do B",
+                }),
+                prior_runs: vec!["Run #1 budget_exhausted(turns)".into()],
+            }),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-cont", "artifacts");
+        assert!(prompt.contains("## 続きの実行（Run #2）"), "{prompt}");
+        assert!(
+            prompt.contains("### checkpoint（Run #1 の終わり）"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("do B"), "{prompt}");
+        // 前の run の会話全文は載らない。
+        assert!(
+            !prompt.contains("prior conversation transcript"),
+            "{prompt}"
+        );
     }
 
     /// Phase 98（ADR-0054 D2、実機障害 2026-09-22）: 対話 run（`conversation_addressee` が Some）の
@@ -1928,14 +2063,17 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         }
     }
 
+    /// ADR-0072 D7（Phase E1）: `error_max_turns` は `result.json` が書けていても
+    /// `Terminal::BudgetExhausted{kind: Turns}` になる（result.json より優先。継続の対象で、
+    /// `Error` ではない）。usage があれば運ぶ（従来は捨てていた）。
     #[tokio::test]
-    async fn error_subtype_wins_even_if_result_file_claims_done() {
+    async fn error_max_turns_subtype_wins_and_becomes_budget_exhausted_with_usage() {
         let dir = tempfile::tempdir().unwrap();
         let config = stub_claude(
             dir.path(),
             r#"mkdir -p artifacts
 printf '%s' '{"summary":"claimed done","evidence":[]}' > artifacts/result.json
-echo '{"type":"result","subtype":"error_max_turns","is_error":true}'
+echo '{"type":"result","subtype":"error_max_turns","is_error":true,"usage":{"input_tokens":100,"output_tokens":50}}'
 "#,
         );
         let adapter = ClaudeCodeAdapter::new(config);
@@ -1946,11 +2084,46 @@ echo '{"type":"result","subtype":"error_max_turns","is_error":true}'
             .await
             .unwrap();
         match outcome.terminal {
-            Terminal::Error { retryable, message } => {
-                assert!(retryable);
+            Terminal::BudgetExhausted {
+                kind,
+                message,
+                usage,
+            } => {
+                assert_eq!(kind, task_core::BudgetKind::Turns);
                 assert!(message.contains("error_max_turns"), "{message}");
+                let usage = usage.expect("usage carried through");
+                assert_eq!(usage.input_tokens, Some(100));
+                assert_eq!(usage.output_tokens, Some(50));
             }
-            other => panic!("expected error, got {other:?}"),
+            other => panic!("expected budget_exhausted, got {other:?}"),
+        }
+    }
+
+    /// ADR-0072 D9（Phase E1）: `result.json` の `{"yield": {...}}` が `Terminal::Yielded` になる。
+    #[tokio::test]
+    async fn result_yield_becomes_terminal_yielded() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"yield":{"completed":["A"],"remaining":["B"],"next_action":"do B"}}' > artifacts/result.json
+echo '{"type":"result","subtype":"success","is_error":false,"usage":{"input_tokens":10,"output_tokens":20}}'
+"#,
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-yield", default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Yielded { checkpoint, usage } => {
+                assert_eq!(checkpoint["next_action"], "do B");
+                let usage = usage.expect("usage carried through");
+                assert_eq!(usage.input_tokens, Some(10));
+            }
+            other => panic!("expected yielded, got {other:?}"),
         }
     }
 
@@ -2034,8 +2207,10 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         }
     }
 
+    /// ADR-0072 D7（Phase E1）: wall-clock の打ち切りは `Terminal::BudgetExhausted{kind: WallClock}`
+    /// になる（continuation の対象。従来の `Error` ではない）。
     #[tokio::test]
-    async fn wall_clock_exceeded_kills_and_reports_error() {
+    async fn wall_clock_exceeded_kills_and_reports_budget_exhausted() {
         let dir = tempfile::tempdir().unwrap();
         let config = stub_claude(dir.path(), "sleep 30");
         let adapter = ClaudeCodeAdapter::new(config);
@@ -2050,11 +2225,16 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let outcome = adapter.run(req, "run-6", limits, &sink).await.unwrap();
         assert!(start.elapsed() < Duration::from_secs(5));
         match outcome.terminal {
-            Terminal::Error { retryable, message } => {
-                assert!(retryable);
+            Terminal::BudgetExhausted {
+                kind,
+                message,
+                usage,
+            } => {
+                assert_eq!(kind, task_core::BudgetKind::WallClock);
                 assert!(message.contains("wall clock exceeded"), "{message}");
+                assert!(usage.is_none(), "wall-clock 打ち切りでは usage は取れない");
             }
-            other => panic!("expected error, got {other:?}"),
+            other => panic!("expected budget_exhausted, got {other:?}"),
         }
     }
 

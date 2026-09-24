@@ -11,6 +11,10 @@ use task_core::{ArtifactRef, ProgressFields, RateLimitObservation, Usage};
 use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 
 /// run の終端結果（ADR-0003 D3）。タイムアウト・終端無し exit も `Error{retryable:true}` に正規化する（D4）。
+///
+/// ADR-0072 D7（Phase E1）: `Yielded` / `BudgetExhausted` を追加した。アダプタが構造化して返せない
+/// 古い経路のためには、dispatcher 側に `task_core::is_budget_outcome` を使う「二重の安全網」がある
+/// （`Terminal::Error` のままでも予算切れとして拾われる）。
 #[derive(Debug, Clone, PartialEq)]
 pub enum Terminal {
     Done {
@@ -24,6 +28,18 @@ pub enum Terminal {
     Error {
         message: String,
         retryable: bool,
+    },
+    /// ADR-0072 D9/D10: result.json の `{"yield": {...}}`（graceful yield）。`checkpoint` は
+    /// checkpoint の意味の欄（`task_core::WorkerCheckpointInput` と同じ形）を寛容に持つ生の JSON。
+    Yielded {
+        checkpoint: serde_json::Value,
+        usage: Option<Usage>,
+    },
+    /// ADR-0072 D7: turn / wall-clock / context の上限に当たった（予算切れでも usage を運ぶ）。
+    BudgetExhausted {
+        kind: task_core::BudgetKind,
+        message: String,
+        usage: Option<Usage>,
     },
 }
 

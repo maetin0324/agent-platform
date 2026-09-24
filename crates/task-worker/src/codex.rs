@@ -167,6 +167,9 @@ struct ResultFile {
     question: Option<String>,
     #[serde(default)]
     evidence: serde_json::Value,
+    /// ADR-0072 D9（Phase E1）: graceful yield（`claude_code::ResultFile::r#yield` と同じ規約）。
+    #[serde(default, rename = "yield")]
+    r#yield: Option<serde_json::Value>,
 }
 
 /// ADR-0061（Phase 104）: model が分かる時だけ静的単価表から USD を推定して埋める
@@ -474,15 +477,19 @@ async fn run_codex_once(
     loop {
         let wall_elapsed = start.elapsed();
         if wall_elapsed >= limits.wall_clock {
-            timeout_terminal = Some(Terminal::Error {
+            // ADR-0072 D7/§6 (i)（Phase E1）: wall-clock の打ち切りは予算切れ（continuation の対象）。
+            // codex には turn の上限が無いので wall-clock だけがこの経路。
+            timeout_terminal = Some(Terminal::BudgetExhausted {
+                kind: task_core::BudgetKind::WallClock,
                 message: "wall clock exceeded".into(),
-                retryable: true,
+                usage: None,
             });
             force_kill = true;
             break;
         }
         let idle_elapsed = last_activity.elapsed();
         if idle_elapsed >= limits.idle_timeout {
+            // ADR-0072 D7: idle timeout は E1 では harness_error に分類変更しない（§7 U7）。
             timeout_terminal = Some(Terminal::Error {
                 message: "idle timeout".into(),
                 retryable: true,
@@ -741,17 +748,30 @@ async fn run_codex(
             )
         }
         (None, Some(TurnSignal::Failed { message })) => {
-            let pf = classify_provider_failure(message);
             if resume_id.is_some() && crate::provider::looks_like_resume_rejection(message) {
                 sink.session_resume_failed(message);
             }
-            (
-                Terminal::Error {
-                    message: format!("codex turn failed: {message}"),
-                    retryable: true,
-                },
-                pf,
-            )
+            // ADR-0072 D7/§6 (i)（Phase E1）: `turn.failed` の文言が context 超過の語彙に当たれば
+            // `BudgetExhausted{kind: Context}`（実機の文言は未確認。§7 U1。分類できなければ従来どおり）。
+            if task_core::looks_like_context_exceeded(message) {
+                (
+                    Terminal::BudgetExhausted {
+                        kind: task_core::BudgetKind::Context,
+                        message: format!("codex turn failed: {message}"),
+                        usage: None,
+                    },
+                    None,
+                )
+            } else {
+                let pf = classify_provider_failure(message);
+                (
+                    Terminal::Error {
+                        message: format!("codex turn failed: {message}"),
+                        retryable: true,
+                    },
+                    pf,
+                )
+            }
         }
         (None, Some(TurnSignal::Completed { usage })) => {
             // ADR-0006 Phase 115 D2: 結果ファイルを読む（`result_path` の有無を見る）前に、work_dir 側の
@@ -1042,6 +1062,7 @@ async fn terminal_from_result(
 
     match serde_json::from_str::<ResultFile>(&text) {
         Ok(rf) => {
+            // ADR-0072 D9: 優先順位は `question` > `summary` > `yield`。
             if let Some(question) = rf.question {
                 Terminal::Question { text: question }
             } else if let Some(summary) = rf.summary {
@@ -1050,10 +1071,12 @@ async fn terminal_from_result(
                     evidence: lenient_evidence(rf.evidence),
                     usage,
                 }
+            } else if let Some(checkpoint) = rf.r#yield {
+                Terminal::Yielded { checkpoint, usage }
             } else {
                 Terminal::Error {
                     message: format!(
-                        "{artifacts_rel}/result.json has neither 'summary' nor 'question'"
+                        "{artifacts_rel}/result.json has neither 'summary', 'question' nor 'yield'"
                     ),
                     retryable: true,
                 }
@@ -1745,8 +1768,10 @@ exit 9
         }
     }
 
+    /// ADR-0072 D7/§6 (i)（Phase E1）: codex には turn の上限が無いので、wall-clock の打ち切りが
+    /// continuation の唯一の入口になる（`Terminal::BudgetExhausted{kind: WallClock}`）。
     #[tokio::test]
-    async fn wall_clock_exceeded_kills_and_reports_error() {
+    async fn wall_clock_exceeded_kills_and_reports_budget_exhausted() {
         let dir = tempfile::tempdir().unwrap();
         let config = stub_codex(dir.path(), "sleep 30");
         let adapter = CodexAdapter::new(config);
@@ -1761,11 +1786,37 @@ exit 9
         let outcome = adapter.run(req, "run-8", limits, &sink).await.unwrap();
         assert!(start.elapsed() < Duration::from_secs(5));
         match outcome.terminal {
-            Terminal::Error { retryable, message } => {
-                assert!(retryable);
+            Terminal::BudgetExhausted { kind, message, .. } => {
+                assert_eq!(kind, task_core::BudgetKind::WallClock);
                 assert!(message.contains("wall clock exceeded"), "{message}");
             }
-            other => panic!("expected error, got {other:?}"),
+            other => panic!("expected budget_exhausted, got {other:?}"),
+        }
+    }
+
+    /// ADR-0072 D9（Phase E1）: `result.json` の `{"yield": {...}}` が `Terminal::Yielded` になる。
+    #[tokio::test]
+    async fn result_yield_becomes_terminal_yielded() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"yield":{"completed":["A"],"next_action":"do B"}}' > artifacts/result.json
+echo '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":3}}'
+"#,
+        );
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-yield", default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Yielded { checkpoint, .. } => {
+                assert_eq!(checkpoint["next_action"], "do B");
+            }
+            other => panic!("expected yielded, got {other:?}"),
         }
     }
 

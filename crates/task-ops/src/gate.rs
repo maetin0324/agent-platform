@@ -575,6 +575,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .expect("append worker finished");

@@ -78,6 +78,96 @@ pub fn render(context: &RunContext, artifacts: &str) -> String {
     out
 }
 
+/// ADR-0072 D9（Phase E1）: 「続きの実行（continuation）」の節。`context.continuation` が `None`
+/// （継続でない run）なら空文字列を返し、呼び出し側の出力は 1 バイトも増えない（(c) の要件）。
+/// `execute` run（`build_execute_prompt`）から呼ばれる（Plan/Review には無い）。
+pub fn continuation_section(context: &RunContext) -> String {
+    let Some(cont) = &context.continuation else {
+        return String::new();
+    };
+    let mut out = format!("## 続きの実行（Run #{}）\n", cont.run_seq);
+    out.push_str(&format!(
+        "これは新しい session です。前の Run の会話は引き継がれていません。前の Run は{}で\
+         終わりました。下の checkpoint と作業ツリーの現状から再開してください。完了済みの作業は\
+         やり直さないこと。最初に `git status` と `git diff --stat` で現状を確かめてください。\n",
+        cont.previous_end
+    ));
+    out.push_str(&format!(
+        "### checkpoint（Run #{} の終わり）\n",
+        cont.run_seq.saturating_sub(1)
+    ));
+    out.push_str(&checkpoint_bullets(&cont.checkpoint));
+    if !cont.prior_runs.is_empty() {
+        out.push_str("### これまでの Run（1 行ずつ）\n");
+        for line in &cont.prior_runs {
+            out.push_str(&format!("- {line}\n"));
+        }
+    }
+    out.push('\n');
+    out
+}
+
+/// `checkpoint`（`task_core::Checkpoint` と同じ形の生の JSON）から、人が読める箇条書きを作る。
+/// 未知の欄・型が合わない欄は黙って飛ばす（寛容に読む。D9 は「表示できる範囲で見せる」の精神）。
+fn checkpoint_bullets(cp: &serde_json::Value) -> String {
+    fn str_array(v: &serde_json::Value, key: &str) -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|i| i.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn field_list(v: &serde_json::Value, key: &str, field: &str) -> Vec<String> {
+        v.get(key)
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|i| i.get(field).and_then(|f| f.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    fn join_or_none(items: &[String]) -> String {
+        if items.is_empty() {
+            "（なし）".to_string()
+        } else {
+            items.join("; ")
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "- 完了: {}\n",
+        join_or_none(&str_array(cp, "completed"))
+    ));
+    out.push_str(&format!(
+        "- 残り: {}\n",
+        join_or_none(&str_array(cp, "remaining"))
+    ));
+    let decisions = field_list(cp, "decisions", "what");
+    if !decisions.is_empty() {
+        out.push_str(&format!("- 決めたこと: {}\n", decisions.join("; ")));
+    }
+    let files = field_list(cp, "files_changed", "path");
+    if !files.is_empty() {
+        out.push_str(&format!("- 変えたファイル: {}\n", files.join(", ")));
+    }
+    let tests = field_list(cp, "tests_run", "command");
+    if !tests.is_empty() {
+        out.push_str(&format!("- 実行したテスト: {}\n", tests.join("; ")));
+    }
+    let known_failures = field_list(cp, "known_failures", "what");
+    if !known_failures.is_empty() {
+        out.push_str(&format!("- 既知の失敗: {}\n", known_failures.join("; ")));
+    }
+    let next_action = cp.get("next_action").and_then(|v| v.as_str()).unwrap_or("");
+    out.push_str(&format!("- 次の一手: {next_action}\n"));
+    out
+}
+
 /// ADR-0044 D2（Phase 53）: 「コメント」の節。**前置きの先頭**に出す。
 ///
 /// - 人のコメントで直前の run を止めた（`context.interrupt`）ときは、その本文を
@@ -1822,5 +1912,81 @@ mod tests {
             outcome: outcome.map(str::to_string),
             artifacts: artifacts.to_vec(),
         }
+    }
+
+    /// ADR-0072 D9（Phase E1）: `context.continuation` が無ければ、この節は 1 バイトも出ない。
+    #[test]
+    fn continuation_section_is_empty_without_continuation_context() {
+        assert_eq!(continuation_section(&RunContext::default()), "");
+    }
+
+    /// ADR-0072 D9: 続きの実行の節は「Run #N」「前の run の終わり方」「checkpoint の要点」
+    /// 「これまでの run の 1 行ずつ」を含み、会話・出力の全文は載せない。
+    #[test]
+    fn continuation_section_summarizes_the_checkpoint_without_the_full_transcript() {
+        use crate::protocol::ContinuationContext;
+        let context = RunContext {
+            continuation: Some(ContinuationContext {
+                run_seq: 3,
+                previous_end: "budget_exhausted(turns)".into(),
+                checkpoint: serde_json::json!({
+                    "completed": ["store に execution.rs を追加した", "単体テスト 12 本を通した"],
+                    "remaining": ["dispatcher の配線"],
+                    "decisions": [{"what": "WU は直列実行", "why": "worktree 共有のため"}],
+                    "files_changed": [{"path": "crates/task-core/src/execution.rs"}],
+                    "tests_run": [{"command": "cargo test -p task-core execution"}],
+                    "known_failures": [{"what": "clippy の needless_borrow 1 件"}],
+                    "next_action": "dispatcher.rs の dispatch_ready で next_work_unit を呼ぶ",
+                }),
+                prior_runs: vec![
+                    "Run #1 budget_exhausted(turns)".into(),
+                    "Run #2 budget_exhausted(turns)".into(),
+                ],
+            }),
+            ..RunContext::default()
+        };
+        let out = continuation_section(&context);
+        assert!(out.contains("## 続きの実行（Run #3）"), "{out}");
+        assert!(out.contains("budget_exhausted(turns)"), "{out}");
+        assert!(out.contains("### checkpoint（Run #2 の終わり）"), "{out}");
+        assert!(
+            out.contains("store に execution.rs を追加した; 単体テスト 12 本を通した"),
+            "{out}"
+        );
+        assert!(out.contains("dispatcher の配線"), "{out}");
+        assert!(out.contains("WU は直列実行"), "{out}");
+        assert!(out.contains("crates/task-core/src/execution.rs"), "{out}");
+        assert!(out.contains("cargo test -p task-core execution"), "{out}");
+        assert!(out.contains("clippy の needless_borrow 1 件"), "{out}");
+        assert!(
+            out.contains("dispatcher.rs の dispatch_ready で next_work_unit を呼ぶ"),
+            "{out}"
+        );
+        assert!(out.contains("### これまでの Run（1 行ずつ）"), "{out}");
+        assert!(out.contains("- Run #1 budget_exhausted(turns)"), "{out}");
+        assert!(out.contains("- Run #2 budget_exhausted(turns)"), "{out}");
+        // 前の run の生の会話・出力は載らない（checkpoint 由来の要約だけ）。
+        assert!(!out.contains("assistant"), "{out}");
+    }
+
+    /// 型が合わない・未知の欄は黙って飛ばす（寛容に読む）。
+    #[test]
+    fn continuation_section_tolerates_a_sparse_or_malformed_checkpoint() {
+        use crate::protocol::ContinuationContext;
+        let context = RunContext {
+            continuation: Some(ContinuationContext {
+                run_seq: 1,
+                previous_end: "yielded".into(),
+                checkpoint: serde_json::json!({"completed": "not-an-array"}),
+                prior_runs: vec![],
+            }),
+            ..RunContext::default()
+        };
+        let out = continuation_section(&context);
+        assert!(out.contains("完了: （なし）"), "{out}");
+        assert!(
+            !out.contains("### これまでの Run"),
+            "prior_runs が空なら節ごと出さない: {out}"
+        );
     }
 }

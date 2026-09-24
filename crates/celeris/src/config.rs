@@ -74,6 +74,9 @@ pub struct Config {
     /// attempts を消費せず再試行できる回数の上限。
     #[serde(default)]
     pub dispatch: DispatchTomlConfig,
+    /// ADR-0072 D18（Phase E1）: `[execution]`。continuation（予算切れ・yield の続き）の可否と上限。
+    #[serde(default)]
+    pub execution: ExecutionTomlConfig,
     #[serde(default)]
     pub api: ApiConfig,
     #[serde(default)]
@@ -1110,6 +1113,42 @@ impl Default for DispatchTomlConfig {
 
 fn default_max_infra_retries() -> u32 {
     5
+}
+
+/// `[execution]`（ADR-0072 D18, Phase E1）: continuation（予算切れ・yield の続き）の可否と上限。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionTomlConfig {
+    /// `false` で E1 の continuation を無効にする（予算切れ・yield は従来どおり
+    /// `WorkerError{retryable:true}` に戻る。ADR-0072 §6 (f)）。
+    #[serde(default = "default_execution_continuation")]
+    pub continuation: bool,
+    /// 1 つの WorkUnit（E1 は暗黙の WorkUnit）が continuation できる回数の上限。
+    #[serde(default = "default_max_continuations_per_work_unit")]
+    pub max_continuations_per_work_unit: u32,
+    /// 進捗なしの continuation が連続この回数で `blocked` にする。
+    #[serde(default = "default_no_progress_limit")]
+    pub no_progress_limit: u32,
+}
+
+impl Default for ExecutionTomlConfig {
+    fn default() -> Self {
+        Self {
+            continuation: default_execution_continuation(),
+            max_continuations_per_work_unit: default_max_continuations_per_work_unit(),
+            no_progress_limit: default_no_progress_limit(),
+        }
+    }
+}
+
+fn default_execution_continuation() -> bool {
+    true
+}
+fn default_max_continuations_per_work_unit() -> u32 {
+    3
+}
+fn default_no_progress_limit() -> u32 {
+    2
 }
 fn default_retry_backoff_base_secs() -> u64 {
     10
@@ -2796,6 +2835,12 @@ impl Config {
             shared_build_cache: self.workspace.shared_build_cache,
             build_cache_dir: self.workspace.build_cache_dir.clone(),
             workspace_prune_after_secs: self.workspace.prune_after_secs,
+            // ADR-0072 D18（Phase E1）: continuation の可否と上限。
+            execution: task_dispatch::ExecutionConfig {
+                continuation: self.execution.continuation,
+                max_continuations_per_work_unit: self.execution.max_continuations_per_work_unit,
+                no_progress_limit: self.execution.no_progress_limit,
+            },
         }
     }
 

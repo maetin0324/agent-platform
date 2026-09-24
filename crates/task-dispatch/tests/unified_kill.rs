@@ -147,6 +147,7 @@ fn dispatcher(
             shared_build_cache: false,
             build_cache_dir: std::path::PathBuf::from("/nonexistent-build-cache"),
             workspace_prune_after_secs: 0,
+            execution: task_dispatch::ExecutionConfig::default(),
         },
     )
 }

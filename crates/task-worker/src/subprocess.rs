@@ -251,6 +251,25 @@ pub async fn run_subprocess(
                             provider_failure = pf;
                             terminal = Some(Terminal::Error { message, retryable });
                         }
+                        // ADR-0072 D7/D9（Phase E1）: 外部ハーネスが直接プロトコルで yield /
+                        // 予算切れを申告する経路（claude-code / codex / acp / aider は自前で終端を
+                        // 合成するのでこの経路は通らない）。
+                        WorkerMessage::Yielded { checkpoint, usage } => {
+                            terminal_raw = Some(trimmed.to_string());
+                            terminal = Some(Terminal::Yielded { checkpoint, usage });
+                        }
+                        WorkerMessage::BudgetExhausted {
+                            kind,
+                            message,
+                            usage,
+                        } => {
+                            terminal_raw = Some(trimmed.to_string());
+                            terminal = Some(Terminal::BudgetExhausted {
+                                kind,
+                                message,
+                                usage,
+                            });
+                        }
                     },
                     Err(parse_err) => {
                         if serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
@@ -344,6 +363,19 @@ pub(crate) async fn write_result_json(
             message: message.clone(),
             retryable: *retryable,
             provider_failure,
+        },
+        Terminal::Yielded { checkpoint, usage } => WorkerMessage::Yielded {
+            checkpoint: checkpoint.clone(),
+            usage: *usage,
+        },
+        Terminal::BudgetExhausted {
+            kind,
+            message,
+            usage,
+        } => WorkerMessage::BudgetExhausted {
+            kind: *kind,
+            message: message.clone(),
+            usage: *usage,
         },
     };
     let text = serde_json::to_string(&msg).map_err(std::io::Error::other)?;

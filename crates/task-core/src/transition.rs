@@ -62,6 +62,12 @@ pub enum Trigger {
     /// （`Requeue` と同じ形だが、`consecutive_infra_requeues` という別のカウンタで数える。
     /// `[dispatch] max_infra_retries` に達したら `WorkerError{retryable:false}` で打ち切る）。
     InfraRequeue,
+    /// ADR-0072 D6/D11（Phase E1）: `running → ready`、attempts 据え置き。`why` は E1 では常に
+    /// `Continue`（予算切れ・yield の続き）。`why` ごとに `reason` の文字列が変わる（`ContinueWhy::name`）。
+    /// `advance`/`work_unit_retry`/`planned`/`replan` は E2 以降の配線先。
+    Continue {
+        why: crate::execution::ContinueWhy,
+    },
 }
 
 impl Trigger {
@@ -92,6 +98,7 @@ impl Trigger {
             Trigger::MilestoneCancelled => "milestone_cancelled",
             Trigger::Unroutable => "unroutable",
             Trigger::InfraRequeue => "infra_requeue",
+            Trigger::Continue { why } => why.name(),
         }
     }
 
@@ -170,6 +177,20 @@ pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransiti
         // ADR-0010 D1（P-21）: 供給側失敗は attempts を消費せず ready に戻す。
         // ADR-0070 D3（Phase 116）: インフラ都合の失敗も同じ形（別のカウンタで数える。dispatcher 側）。
         Trigger::Requeue | Trigger::InfraRequeue => {
+            if s.status == Status::Running {
+                Ok(Outcome {
+                    next: Status::Ready,
+                    attempts: s.attempts,
+                    reason: t.name(),
+                })
+            } else {
+                Err(invalid(s, t))
+            }
+        }
+
+        // ADR-0072 D6/D11（Phase E1）: 予算切れ・yield の続き。attempts は消費しない
+        // （`retry_policy::attempt_history` は `reason` がここで返す静的な名前を試行に数えない）。
+        Trigger::Continue { .. } => {
             if s.status == Status::Running {
                 Ok(Outcome {
                     next: Status::Ready,
@@ -467,7 +488,8 @@ mod tests {
                 }
             }
             // ADR-0070 D3（Phase 116）: インフラ都合の失敗も `Requeue` と同じ形。
-            Trigger::Requeue | Trigger::InfraRequeue => {
+            // ADR-0072（Phase E1）: `Continue` も同じ形（running からだけ、attempts 据え置き）。
+            Trigger::Requeue | Trigger::InfraRequeue | Trigger::Continue { .. } => {
                 if status == Status::Running {
                     expect_ok(Status::Ready)
                 } else {
@@ -597,6 +619,10 @@ mod tests {
             Trigger::Unroutable,
             // ADR-0070 D3（Phase 116）: インフラ都合の失敗（別カウンタで数える。attempts 据え置き）。
             Trigger::InfraRequeue,
+            // ADR-0072（Phase E1）: 予算切れ・yield の続き（attempts 据え置き）。
+            Trigger::Continue {
+                why: crate::execution::ContinueWhy::Continue,
+            },
         ];
 
         let mut count = 0usize;
@@ -640,9 +666,42 @@ mod tests {
                 }
             }
         }
-        // 4 kinds * 8 statuses * 17 triggers（Phase 53 で Interrupt / Reopen、Phase 59 で Unroutable、
-        // Phase 116（ADR-0070 D3）で InfraRequeue を追加）
-        assert_eq!(count, 4 * 8 * 17);
+        // 4 kinds * 8 statuses * 18 triggers（Phase 53 で Interrupt / Reopen、Phase 59 で Unroutable、
+        // Phase 116（ADR-0070 D3）で InfraRequeue、Phase E1（ADR-0072）で Continue を追加）
+        assert_eq!(count, 4 * 8 * 18);
+    }
+
+    /// ADR-0072 D6（Phase E1）: `Trigger::Continue` の `reason` は `why` ごとに静的な名前になる
+    /// （状態機械の遷移そのものは `why` に依らず running → ready・attempts 据え置き）。
+    #[test]
+    fn continue_reason_matches_the_why_variant() {
+        use crate::execution::ContinueWhy;
+        let cases = [
+            (ContinueWhy::Continue, "continue"),
+            (ContinueWhy::Advance, "advance"),
+            (ContinueWhy::WorkUnitRetry, "work_unit_retry"),
+            (ContinueWhy::Planned, "planned"),
+            (ContinueWhy::Replan, "replan"),
+        ];
+        for (why, expected_reason) in cases {
+            let s = StateView {
+                kind: TaskKind::Execute,
+                status: Status::Running,
+                attempts: 1,
+                max_retries: 3,
+            };
+            let outcome = transition(&s, &Trigger::Continue { why }).unwrap();
+            assert_eq!(outcome.next, Status::Ready);
+            assert_eq!(outcome.attempts, 1, "attempts は据え置き");
+            assert_eq!(outcome.reason, expected_reason);
+
+            let not_running = StateView {
+                status: Status::Ready,
+                ..s
+            };
+            let err = transition(&not_running, &Trigger::Continue { why }).unwrap_err();
+            assert_eq!(err.trigger, expected_reason);
+        }
     }
 
     /// ADR-0044 D2（Phase 53）: 割り込みは attempts を消費せず理由は `comment`、再開は attempts を 0 に戻す。

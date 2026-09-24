@@ -365,6 +365,7 @@ async fn list_accounts_merges_filesystem_snapshot_and_stats() {
                 }),
                 role: None,
                 metrics: None,
+                end: None,
             },
         ],
     );

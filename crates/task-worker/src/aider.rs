@@ -122,6 +122,10 @@ struct ResultFile {
     question: Option<String>,
     #[serde(default)]
     evidence: serde_json::Value,
+    /// ADR-0072 D9（Phase E1）: graceful yield（`claude_code::ResultFile::r#yield` と同じ規約）。
+    /// aider は 1 回の `--message` で終わる（graceful yield の前置きは静的な予告だけ。D10）。
+    #[serde(default, rename = "yield")]
+    r#yield: Option<serde_json::Value>,
 }
 
 fn lenient_evidence(value: serde_json::Value) -> Vec<Evidence> {
@@ -221,15 +225,19 @@ async fn run_aider(
     loop {
         let wall_elapsed = start.elapsed();
         if wall_elapsed >= limits.wall_clock {
-            timeout_terminal = Some(Terminal::Error {
+            // ADR-0072 D7/§6 (i)（Phase E1）: aider には turn の上限が無いので、wall-clock の打ち切り
+            // が continuation の唯一の入口になる（`Terminal::BudgetExhausted{kind: WallClock}`）。
+            timeout_terminal = Some(Terminal::BudgetExhausted {
+                kind: task_core::BudgetKind::WallClock,
                 message: "wall clock exceeded".into(),
-                retryable: true,
+                usage: None,
             });
             force_kill = true;
             break;
         }
         let idle_elapsed = last_activity.elapsed();
         if idle_elapsed >= limits.idle_timeout {
+            // ADR-0072 D7: idle timeout は E1 では harness_error に分類変更しない（§7 U7）。
             timeout_terminal = Some(Terminal::Error {
                 message: "idle timeout".into(),
                 retryable: true,
@@ -330,6 +338,7 @@ async fn terminal_from_result(
     };
     match serde_json::from_str::<ResultFile>(&text) {
         Ok(rf) => {
+            // ADR-0072 D9: 優先順位は `question` > `summary` > `yield`。
             if let Some(question) = rf.question {
                 Terminal::Question { text: question }
             } else if let Some(summary) = rf.summary {
@@ -338,10 +347,12 @@ async fn terminal_from_result(
                     evidence: lenient_evidence(rf.evidence),
                     usage,
                 }
+            } else if let Some(checkpoint) = rf.r#yield {
+                Terminal::Yielded { checkpoint, usage }
             } else {
                 Terminal::Error {
                     message: format!(
-                        "{artifacts_rel}/result.json has neither 'summary' nor 'question'"
+                        "{artifacts_rel}/result.json has neither 'summary', 'question' nor 'yield'"
                     ),
                     retryable: true,
                 }
@@ -568,8 +579,10 @@ printf '%s' '{"question": "which file?"}' > artifacts/result.json
         );
     }
 
+    /// ADR-0072 D7/§6 (i)（Phase E1）: aider には turn の上限が無いので、wall-clock の打ち切りが
+    /// continuation の唯一の入口になる（`Terminal::BudgetExhausted{kind: WallClock}`）。
     #[tokio::test]
-    async fn wall_clock_timeout_kills_the_process_and_is_not_classified() {
+    async fn wall_clock_timeout_kills_the_process_and_becomes_budget_exhausted() {
         let dir = tempfile::tempdir().unwrap();
         let config = stub_aider(dir.path(), "sleep 30\n");
         let adapter = AiderAdapter::new(config);
@@ -583,11 +596,36 @@ printf '%s' '{"question": "which file?"}' > artifacts/result.json
             .await
             .expect("timeout is not a provider failure");
         match outcome.terminal {
-            Terminal::Error { retryable, message } => {
-                assert!(retryable);
+            Terminal::BudgetExhausted { kind, message, .. } => {
+                assert_eq!(kind, task_core::BudgetKind::WallClock);
                 assert_eq!(message, "wall clock exceeded");
             }
-            other => panic!("expected Error, got {other:?}"),
+            other => panic!("expected budget_exhausted, got {other:?}"),
+        }
+    }
+
+    /// ADR-0072 D9（Phase E1）: `result.json` の `{"yield": {...}}` が `Terminal::Yielded` になる。
+    #[tokio::test]
+    async fn result_yield_becomes_terminal_yielded() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_aider(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"yield":{"completed":["A"],"next_action":"do B"}}' > artifacts/result.json
+"#,
+        );
+        let adapter = AiderAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-yield", default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Yielded { checkpoint, .. } => {
+                assert_eq!(checkpoint["next_action"], "do B");
+            }
+            other => panic!("expected yielded, got {other:?}"),
         }
     }
 

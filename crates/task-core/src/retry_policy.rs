@@ -247,8 +247,10 @@ impl EscalationPolicy {
     }
 }
 
-/// `WorkerFinished.outcome` が予算切れか（wall-clock / max_turns / budget の文言。決定的な字句判定）。
-fn is_budget_outcome(outcome: &str) -> bool {
+/// `WorkerFinished.outcome` が予算切れか（wall-clock / max_turns / budget / context 超過の文言。
+/// 決定的な字句判定）。ADR-0072 D7: 構造化した `RunEnd` を返さない古い経路・アダプタのための
+/// 「二重の安全網」として `pub` にした（`task-dispatch` がここを呼ぶ）。
+pub fn is_budget_outcome(outcome: &str) -> bool {
     let o = outcome.to_lowercase();
     [
         "wall-clock",
@@ -260,6 +262,7 @@ fn is_budget_outcome(outcome: &str) -> bool {
     ]
     .iter()
     .any(|w| o.contains(w))
+        || crate::execution::looks_like_context_exceeded(&o)
 }
 
 /// ADR-0069 D6: イベント列（古い順）から試行の履歴を作る。`reopen` で履歴はリセットする。
@@ -534,6 +537,7 @@ mod tests {
             usage: None,
             role: None,
             metrics: None,
+            end: None,
         };
         let events = vec![
             verdict(0),

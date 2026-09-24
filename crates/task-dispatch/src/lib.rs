@@ -5,6 +5,8 @@
 pub mod accounts;
 /// ADR-0033 D5（Phase 26）: `Question` 終端から `approvals` に 1 件作る。
 pub(crate) mod approvals;
+/// ADR-0072 D8（Phase E1）: daemon が決定的に集める mechanical checkpoint（git の読み取りだけ）。
+pub mod checkpoint;
 pub mod dispatcher;
 pub mod policy;
 /// ADR-0033 D3（Phase 25）: run の終端から決定的に作る報告。
@@ -23,8 +25,8 @@ pub use accounts::{
 };
 pub use dispatcher::{
     AccountsRuntimeConfig, ClusterSpec, ContainerDecision, ContainerRun, ContainersRuntimeConfig,
-    DispatchConfig, DispatchError, Dispatcher, KnowledgeRuntimeConfig, SnapshotPublisher,
-    TaskFilter, TickReport,
+    DispatchConfig, DispatchError, Dispatcher, ExecutionConfig, KnowledgeRuntimeConfig,
+    SnapshotPublisher, TaskFilter, TickReport,
 };
 pub use policy::{
     AdapterId, ProviderId, ProviderOutcome, ProviderPolicy, ProviderSpec, StaticPolicy,

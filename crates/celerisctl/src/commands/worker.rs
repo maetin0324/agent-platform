@@ -686,6 +686,25 @@ fn normalize_outcome(result: Result<RunOutcome, AdapterError>) -> (WorkerMessage
                 },
                 4,
             ),
+            // ADR-0072 D7/D9（Phase E1）: `celerisctl worker run` は単発の CLI 呼び出しで、
+            // continuation の対象外（daemon の仕組みなので）。`done` と同じ exit 0 で終わる
+            // （yield は「自分から区切った」正常終了）。
+            Terminal::Yielded { checkpoint, usage } => {
+                (WorkerMessage::Yielded { checkpoint, usage }, 0)
+            }
+            // 予算切れは `error{retryable:true}` と同じ exit code（4）にする。
+            Terminal::BudgetExhausted {
+                kind,
+                message,
+                usage,
+            } => (
+                WorkerMessage::BudgetExhausted {
+                    kind,
+                    message,
+                    usage,
+                },
+                4,
+            ),
         },
         Err(e) => {
             let provider_failure = match &e {
@@ -874,6 +893,7 @@ mod tests {
             sessions: Default::default(),
             mcp: Default::default(),
             source_path: None,
+            execution: Default::default(),
         }
     }
 

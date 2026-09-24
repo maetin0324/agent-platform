@@ -1162,6 +1162,15 @@
       ],
       "type": "object"
     },
+    "BudgetKind": {
+      "description": "D7: 予算切れの種類。",
+      "enum": [
+        "turns",
+        "wall_clock",
+        "context"
+      ],
+      "type": "string"
+    },
     "BudgetPrefs": {
       "additionalProperties": false,
       "description": "ADR-0069 D2（Phase 114）: そのノード以下の予算の天井。どちらも**最も厳しい値が勝つ**\n（根→葉の最小。子は緩められない）。",
@@ -1390,6 +1399,246 @@
           "type": "object"
         }
       ]
+    },
+    "Checkpoint": {
+      "description": "D8: daemon が確定させた checkpoint（`celeris.checkpoint/1`）。`CheckpointSaved` イベントと\n`runs/<run_id>/checkpoint.json` に残す。",
+      "properties": {
+        "artifact_refs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CheckpointArtifactRef"
+          },
+          "type": "array"
+        },
+        "completed": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "decisions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CheckpointDecision"
+          },
+          "type": "array"
+        },
+        "end": {
+          "$ref": "#/$defs/CheckpointEnd"
+        },
+        "files_changed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CheckpointFileChange"
+          },
+          "type": "array"
+        },
+        "known_failures": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CheckpointKnownFailure"
+          },
+          "type": "array"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "open_questions": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "plan_issue": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "recent_activity": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "remaining": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "repo_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RepoState"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "run_seq": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/CheckpointSource"
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "tests_run": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CheckpointTestRun"
+          },
+          "type": "array"
+        },
+        "work_unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "task_id",
+        "run_id",
+        "run_seq",
+        "end",
+        "source",
+        "next_action",
+        "created_at"
+      ],
+      "type": "object"
+    },
+    "CheckpointArtifactRef": {
+      "properties": {
+        "kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "CheckpointDecision": {
+      "properties": {
+        "what": {
+          "type": "string"
+        },
+        "why": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "what",
+        "why"
+      ],
+      "type": "object"
+    },
+    "CheckpointEnd": {
+      "enum": [
+        "completed",
+        "yielded",
+        "budget_exhausted"
+      ],
+      "type": "string"
+    },
+    "CheckpointFileChange": {
+      "properties": {
+        "change": {
+          "description": "`\"added\" | \"modified\" | \"deleted\"`（自由記述。worker の申告も daemon の git 検出もここに入る）。",
+          "type": "string"
+        },
+        "note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "change"
+      ],
+      "type": "object"
+    },
+    "CheckpointKnownFailure": {
+      "properties": {
+        "detail": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "what": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "what"
+      ],
+      "type": "object"
+    },
+    "CheckpointSource": {
+      "description": "checkpoint を合成した出所（D8）。",
+      "enum": [
+        "worker",
+        "yield",
+        "mechanical",
+        "merged"
+      ],
+      "type": "string"
+    },
+    "CheckpointTestRun": {
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "exit": {
+          "format": "int32",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
     },
     "ClusterConfigView": {
       "description": "`[[clusters]]` 1 行の要約（ADR-0018 D7: `env` の値は出さない）。",
@@ -4221,6 +4470,17 @@
         },
         {
           "properties": {
+            "end": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RunEnd"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "ADR-0072 D7（Phase E1）: この run の終わり方の構造化した分類。導入前のイベント、または\n分類できなかった run（旧経路の字句判定に頼るしかないもの）は `None`。"
+            },
             "metrics": {
               "anyOf": [
                 {
@@ -4626,6 +4886,34 @@
             "record"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0072 D5/D8（Phase E1）: run 終了時に daemon が確定させた checkpoint（worker の申告 +\nmechanical の合成）。状態は変えない（`replay` の attempts 計算は無視する）。",
+          "properties": {
+            "checkpoint": {
+              "$ref": "#/$defs/Checkpoint"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "checkpoint_saved",
+              "type": "string"
+            },
+            "work_unit_id": {
+              "description": "E1 では常に `None`（暗黙の WorkUnit）。E2 以降で WorkUnit の id を持つ。",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "checkpoint"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -4879,6 +5167,16 @@
         "kind"
       ],
       "type": "object"
+    },
+    "HarnessErrorClass": {
+      "description": "D7: harness / 供給側都合の失敗の種類。",
+      "enum": [
+        "supply",
+        "infra",
+        "lease_expired",
+        "idle_timeout"
+      ],
+      "type": "string"
     },
     "HarnessPrefs": {
       "additionalProperties": false,
@@ -9429,6 +9727,33 @@
       ],
       "type": "string"
     },
+    "RepoState": {
+      "properties": {
+        "base": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "diff_stat": {
+          "type": "string"
+        },
+        "head": {
+          "type": "string"
+        },
+        "uncommitted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "branch",
+        "base",
+        "head",
+        "uncommitted",
+        "diff_stat"
+      ],
+      "type": "object"
+    },
     "RepoSync": {
       "description": "リモートのリポジトリの同期方式（ADR-0043 D1。ADR-0019 の `sync` と同じ語彙）。\n省略（`None`）は既定の `worktree`（ADR-0019 の (a)）。",
       "enum": [
@@ -10044,6 +10369,107 @@
       ],
       "type": "object"
     },
+    "RunEnd": {
+      "description": "D7: `task_core::execution::RunEnd`（`WorkerFinished.end` に入れる）。",
+      "oneOf": [
+        {
+          "properties": {
+            "type": {
+              "const": "completed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "yielded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/BudgetKind"
+            },
+            "type": {
+              "const": "budget_exhausted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "retryable": {
+              "type": "boolean"
+            },
+            "type": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "retryable"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "class": {
+              "$ref": "#/$defs/HarnessErrorClass"
+            },
+            "type": {
+              "const": "harness_error",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "class"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "cancelled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "RunFiles": {
       "properties": {
         "prompt": {
@@ -10091,11 +10517,29 @@
     "RunMetrics": {
       "description": "ADR-0061（Phase 104）: `Event::WorkerFinished` に添える run 単位のメトリクス。\nharness・model・account は同じ `run_id` の `Event::WorkerStarted` に既にあるのでここには持たない\n（二重管理をしない）。success/failure は `WorkerFinished.outcome` の文字列を\n`task-api::stats::classify_outcome` が分類する既存の仕組みのままにする。",
       "properties": {
+        "peak_context_tokens": {
+          "description": "ADR-0072 D19（Phase E1）: この run で観測した context 量（input + cache_read + cache_creation）\nの最大値。取れないアダプタ（codex / acp。ADR-0072 §7 U2）は `None`。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "retries": {
           "description": "この run が始まった時点で、同じタスクが既に消費していた試行回数（`Task.attempts`）。\n0 なら初回の試行。",
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "turns": {
+          "description": "ADR-0072 D19（Phase E1）: この run のモデルの turn 数（取れる範囲。claude-code はアシスタント\nメッセージの件数）。取れなければ `None`。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "wall_ms": {
           "description": "dispatch してからこの run が終わるまでの壁時計時間（ミリ秒）。",
@@ -10126,6 +10570,11 @@
           "const": "interrupted",
           "description": "ADR-0044 D2/D8（Phase 53）: 人のコメントで止めた run（`interrupted: comment`）。\n**失敗ではない**ので `bad_news` にも `error_cooldown` にも数えない。",
           "type": "string"
+        },
+        {
+          "const": "continued",
+          "description": "ADR-0072 D9/D11（Phase E1）: 予算切れ・yield の続き（`Trigger::Continue`）。**失敗ではない**\n（checkpoint から新しい run が続く。`Interrupted` と同じく集計には数えない）。",
+          "type": "string"
         }
       ]
     },
@@ -10153,6 +10602,17 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RunEnd"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0072 D19/D20（Phase E1）: この run の構造化した終わり方（`WorkerFinished.end`）。\n導入前の run・分類できなかった run は `None`。"
         },
         "files": {
           "anyOf": [

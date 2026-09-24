@@ -2488,6 +2488,16 @@ async fn check_provider(
             task_worker::Terminal::Error { message, .. } => {
                 (task_api::ProviderCheckResult::Ok, Some(message))
             }
+            // ADR-0072 D7（Phase E1）: 疎通確認はアカウントの問題を見るだけなので、yield / 予算切れも
+            // 起動して応答した証拠として `Ok` にする（continuation はしない。短命の疎通 run のため）。
+            task_worker::Terminal::Yielded { .. } => (
+                task_api::ProviderCheckResult::Ok,
+                Some("yielded".to_string()),
+            ),
+            task_worker::Terminal::BudgetExhausted { kind, message, .. } => (
+                task_api::ProviderCheckResult::Ok,
+                Some(format!("budget exhausted ({kind:?}): {message}")),
+            ),
         },
         Err(e @ task_worker::AdapterError::AuthFailed(_)) => (
             task_api::ProviderCheckResult::AuthFailed,

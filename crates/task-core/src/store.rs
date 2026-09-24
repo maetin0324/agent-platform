@@ -4599,6 +4599,7 @@ mod tests {
                 usage: None,
                 role: None,
                 metrics: None,
+                end: None,
             },
             Event::worker_progress("run-1", "extra"),
         ];
@@ -5081,6 +5082,7 @@ mod tests {
                 usage: None,
                 role: None,
                 metrics: None,
+                end: None,
             }
         );
         assert_eq!(serde_json::to_string(&ev).unwrap(), old);
@@ -7537,6 +7539,7 @@ mod tests {
             usage: None,
             role: None,
             metrics: None,
+            end: None,
         };
         let outcome = store
             .comment_add(&human, Some((Trigger::Interrupt, vec![finished])))

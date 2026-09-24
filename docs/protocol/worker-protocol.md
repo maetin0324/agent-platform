@@ -291,6 +291,68 @@ JSON Lines プロトコルを直接話す `fake` 等のワーカーは `provider
 `claude-code`/`codex` はこのプロトコルを話さないので、代わりにエラー文面を決定的な文字列規則で分類する
 （§9 参照）。
 
+### 4.5b `yielded`（終端。ADR-0072 D9/D10, Phase E1）
+
+```json
+{"type":"yielded",
+ "checkpoint":{"completed":["store に execution.rs を追加"],"remaining":["dispatcher の配線"],
+   "next_action":"dispatcher.rs の on_worker_finished を直す"},
+ "usage":{"input_tokens":12345,"output_tokens":678}}
+```
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `checkpoint` | object | – | checkpoint の意味の欄（下記 §4.5d と同じ形。省略可だが、省略すると daemon は mechanical だけで checkpoint を作る） |
+| `usage` | object | – | `done` と同じ形 |
+
+自分から「ここで区切る」と判断した run（graceful yield。§9 の予算の予告を参照）。予算切れではないが、
+**完了でもない**。`Trigger::Continue` で `ready` に戻り、`checkpoint` を引き継いで**新しい session**が
+続く（`Task` は `failed` にも `blocked` にもならない。ADR-0072 D9）。`[execution] continuation = false`
+のときは従来どおり `error(retryable=true)` と同じ扱いになる。
+
+### 4.5c `budget_exhausted`（終端。ADR-0072 D7, Phase E1）
+
+```json
+{"type":"budget_exhausted","kind":"turns","message":"error_max_turns","usage":{"input_tokens":12345,"output_tokens":678}}
+```
+
+| フィールド | 型 | 必須 | 説明 |
+|---|---|---|---|
+| `kind` | string | ✓ | `turns` \| `wall_clock` \| `context` |
+| `message` | string | ✓ | 人間向けの理由 |
+| `usage` | object | – | `done` と同じ形（予算切れでも usage は運ぶ。従来は捨てていた） |
+
+JSON Lines プロトコルを直接話す `fake` 等のワーカーが自己申告することもできるが、通常は
+`claude-code`/`codex`/`acp` アダプタが `--max-turns` の上限や wall-clock の打ち切りから構造化して作る
+（§9）。`yielded` と同じく `Trigger::Continue` で続く（checkpoint は `<artifacts_dir>/checkpoint.json`
+（§4.5d）と mechanical な git の読み取りから daemon が合成する）。
+
+### 4.5d rolling checkpoint（`<artifacts_dir>/checkpoint.json`。任意、何度でも上書き。ADR-0072 D8/D10）
+
+予算が尽きる前に区切りよく止まれるよう、全 harness の前置き（§9）でワーカーに
+「意味のある区切りのたびに `<artifacts_dir>/checkpoint.json` を上書きせよ」と指示する。
+`result.json` のプロトコルの外（run の終端を待たずに、途中で何度でも書き直せるファイル）。
+schema は `celeris.checkpoint/1`（`docs/protocol/checkpoint.schema.json`。daemon が生成）:
+
+```json
+{"completed":["A を実装した"],"remaining":["B のテスト"],
+ "decisions":[{"what":"WU は直列実行","why":"worktree 共有のため"}],
+ "files_changed":[{"path":"src/lib.rs","change":"modified","note":"A の実装"}],
+ "tests_run":[{"command":"cargo test -p foo","exit":0,"summary":"12 passed"}],
+ "known_failures":[{"what":"clippy の警告 1 件","detail":"lib.rs:42"}],
+ "artifact_refs":[{"path":"artifacts/notes.md","kind":"doc"}],
+ "next_action":"B のテストを書く",
+ "open_questions":[],"plan_issue":null}
+```
+
+ここに書けるのは**意味の欄だけ**（`completed`/`remaining`/`decisions`/`files_changed`/`tests_run`/
+`known_failures`/`artifact_refs`/`next_action`/`open_questions`/`plan_issue`）。`schema`/`task_id`/
+`run_id`/`run_seq`/`end`/`source`/`repo_state`/`recent_activity`/`created_at` は daemon が run 終了後に
+埋める（mechanical。git の読み取りと `WorkerProgress` の tool_use から決定的に作る）。ワーカー側は
+寛容に読まれる（`deny_unknown_fields` ではない。未知の欄は捨てる）。schema 違反（型が合わない・JSON が
+壊れている）や、このファイルを書かなかった run は、daemon が mechanical な事実だけで checkpoint を作る。
+全体は 16 KiB、配列はそれぞれ 30 件、文字列はそれぞれ 500 文字で決定的に切り詰められる。
+
 ### 4.6 `delegate`（任意回、非終端。v2, ADR-0016 D2）
 
 ```json
@@ -585,6 +647,19 @@ celeris はこれを直接パースできない。そこでこれらのアダプ
 ```json
 {"question": "..."}
 ```
+
+**`yield`（ADR-0072 D9/D10, Phase E1）**: `summary`/`question` の代わりに `yield` を書くと、
+`Terminal::Yielded` になる（§4.5b と同じ意味）。予算の予告（§9 末尾）を見て、区切りのよい所で
+自分から止まりたいときに使う。
+
+```json
+{"yield": {"completed": ["A を実装した"], "remaining": ["B のテスト"], "next_action": "B のテストを書く"}}
+```
+
+`yield` の中身は `<artifacts_dir>/checkpoint.json`（§4.5d）と同じ意味の欄（省略した欄は
+`checkpoint.json` の最後の内容、または mechanical な事実で埋める。優先順位は `yield` >
+`checkpoint.json` > mechanical。ADR-0072 D9）。`ResultFile` は寛容に読むが、celeris が見るのは
+`question` > `summary` > `yield` の優先順（3 つとも書かれていたら `question` が勝つ）。
 
 **置き場は必ず成果物ディレクトリの絶対パス（Phase 115、ADR-0006 追記）**: プロンプトの結果ファイル
 指示（`result_json_instructions`）は `RunRequest::artifacts_rel()` を使うので、`work_dir`（§3.1）が

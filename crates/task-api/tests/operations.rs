@@ -24,6 +24,7 @@ fn blocked_task(env: &TestEnv) -> Task {
             usage: None,
             role: None,
             metrics: None,
+            end: None,
         }],
     );
     task

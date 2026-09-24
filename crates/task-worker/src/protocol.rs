@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    ArtifactRef, DelegateTask, GenreSpec, ProgressFields, ProgressKind, Status, Task, TaskId, Usage,
+    ArtifactRef, BudgetKind, DelegateTask, GenreSpec, ProgressFields, ProgressKind, Status, Task,
+    TaskId, Usage,
 };
 
 /// `run.protocol`。v2（ADR-0016 M9）: `delegate` メッセージ、`context.role`、`context.children`、`task.role` / `task.aggregate` を追加。
@@ -494,6 +495,30 @@ pub struct RunContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<SkillMount>,
     // ---- ADR-0056 D3（Phase 79）: ここまで ----
+    // ---- ADR-0072 D9（Phase E1）: continuation。ここから ----
+    /// ADR-0072 D9: この run が予算切れ・yield の続き（continuation）のときだけ `Some`。
+    /// `preamble::render` がこれを見て「続きの実行（Run #N）」の節と checkpoint を描く
+    /// （`None` の run のプロンプトは D9 の追加分を除きバイト単位で従来どおり）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<ContinuationContext>,
+    // ---- ADR-0072 D9（Phase E1）: ここまで ----
+}
+
+/// ADR-0072 D9（Phase E1）: 続きの実行に渡す最小限の文脈。前の run の会話・出力の全文は載せない
+/// （checkpoint と、これまでの run の 1 行要約だけ）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ContinuationContext {
+    /// これから始まる run の番号（1 始まり。前の run が `run_seq` なら、これは `run_seq + 1`）。
+    pub run_seq: u32,
+    /// 直前の run の終わり方（`"yielded"` | `"budget_exhausted(turns)"` | …。
+    /// `describe_run_end` と同じ書式。人が読む前置き用の文字列であり、遷移の判断には使わない）。
+    pub previous_end: String,
+    /// 直前の run が確定させた checkpoint（`task_core::Checkpoint` と同じ形。生の JSON のまま
+    /// 前置きに埋め込む。celeris 側の型に依存させないため `serde_json::Value`）。
+    pub checkpoint: serde_json::Value,
+    /// これまでの run の 1 行要約（新しい順、最大 10 件。例: `"Run #2 budget_exhausted(turns)"`）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_runs: Vec<String>,
 }
 
 /// `context.skills[]`（ADR-0056 D3。Phase 79）: mount された skill 1 件。ディスパッチャが KB から
@@ -731,6 +756,22 @@ pub enum WorkerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_failure: Option<ProviderFailure>,
     },
+    /// ADR-0072 D9/D10（Phase E1）: graceful yield（`result.json` の `{"yield": {...}}`）。`checkpoint`
+    /// は checkpoint の意味の欄を寛容に持つ生の JSON（`task_core::WorkerCheckpointInput` と同じ形）。
+    /// この行を出さないワーカーはそのまま動く（追加のみ。`PROTOCOL_VERSION` は変えない）。
+    Yielded {
+        checkpoint: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
+    },
+    /// ADR-0072 D7（Phase E1）: turn / wall-clock / context の上限に当たった（予算切れでも usage を運ぶ）。
+    /// 追加のみ（`PROTOCOL_VERSION` は変えない）。
+    BudgetExhausted {
+        kind: BudgetKind,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
+    },
 }
 
 impl WorkerMessage {
@@ -741,6 +782,8 @@ impl WorkerMessage {
             WorkerMessage::Question { .. }
                 | WorkerMessage::Done { .. }
                 | WorkerMessage::Error { .. }
+                | WorkerMessage::Yielded { .. }
+                | WorkerMessage::BudgetExhausted { .. }
         )
     }
 

@@ -712,6 +712,7 @@ fn task_failed_fires_once_and_is_classified_infra_or_work() {
                 usage: None,
                 role: None,
                 metrics: None,
+                end: None,
             },
         )
         .unwrap_or_else(|e| panic!("event: {e}"));
@@ -729,6 +730,7 @@ fn task_failed_fires_once_and_is_classified_infra_or_work() {
                 usage: None,
                 role: None,
                 metrics: None,
+                end: None,
             },
         )
         .unwrap_or_else(|e| panic!("event: {e}"));
@@ -782,6 +784,7 @@ fn task_failed_notes_when_the_task_was_already_delivered() {
                 usage: None,
                 role: None,
                 metrics: None,
+                end: None,
             },
         )
         .unwrap_or_else(|e| panic!("event: {e}"));
