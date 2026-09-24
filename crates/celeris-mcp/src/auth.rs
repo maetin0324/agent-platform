@@ -17,7 +17,13 @@ pub fn hash_token(token: &str) -> String {
 /// `celerisctl mcp client add` が発行するトークン（新しいクレートを足さないため、乱数は
 /// `ulid`（OS の乱数源を使う thread-local RNG）に頼る。3 本つなげて十分な当てずっぽう耐性を持たせる）。
 pub fn generate_token() -> String {
-    format!("{}{}{}", ulid::Ulid::new(), ulid::Ulid::new(), ulid::Ulid::new()).to_lowercase()
+    format!(
+        "{}{}{}",
+        ulid::Ulid::new(),
+        ulid::Ulid::new(),
+        ulid::Ulid::new()
+    )
+    .to_lowercase()
 }
 
 /// 認証を通ったクライアント（スコープ込み。トークンの値は持たない）。
@@ -56,7 +62,9 @@ pub fn authenticate(
 ) -> Result<AuthedClient, AuthError> {
     let client = match listener_auth {
         ListenerAuth::Token => {
-            let token = bearer.filter(|t| !t.is_empty()).ok_or(AuthError::MissingToken)?;
+            let token = bearer
+                .filter(|t| !t.is_empty())
+                .ok_or(AuthError::MissingToken)?;
             let hash = hash_token(token);
             store
                 .mcp_client_by_token_hash(&hash)
@@ -83,7 +91,10 @@ pub fn authenticate(
 
 /// `Authorization: Bearer <token>` からトークンの値だけを取り出す。
 pub fn bearer_token(value: Option<&str>) -> Option<&str> {
-    value?.strip_prefix("Bearer ").map(str::trim).filter(|t| !t.is_empty())
+    value?
+        .strip_prefix("Bearer ")
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
 }
 
 #[cfg(test)]
@@ -121,10 +132,20 @@ mod tests {
     fn token_listener_accepts_a_matching_bearer_token() {
         let store = store();
         store
-            .mcp_client_create(&client("c1", Some("secret"), vec![McpScope::KnowledgeRead], false))
+            .mcp_client_create(&client(
+                "c1",
+                Some("secret"),
+                vec![McpScope::KnowledgeRead],
+                false,
+            ))
             .unwrap();
-        let authed = authenticate(&store, &ListenerAuth::Token, Some("secret"), OffsetDateTime::now_utc())
-            .expect("authed");
+        let authed = authenticate(
+            &store,
+            &ListenerAuth::Token,
+            Some("secret"),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("authed");
         assert_eq!(authed.id, "c1");
         assert!(authed.has_scope(McpScope::KnowledgeRead));
     }
@@ -138,17 +159,34 @@ mod tests {
         store
             .mcp_client_create(&client("c2", Some("secret2"), vec![], false))
             .unwrap();
-        store.mcp_client_revoke("c2", OffsetDateTime::now_utc()).unwrap();
+        store
+            .mcp_client_revoke("c2", OffsetDateTime::now_utc())
+            .unwrap();
         assert_eq!(
-            authenticate(&store, &ListenerAuth::Token, None, OffsetDateTime::now_utc()),
+            authenticate(
+                &store,
+                &ListenerAuth::Token,
+                None,
+                OffsetDateTime::now_utc()
+            ),
             Err(AuthError::MissingToken)
         );
         assert_eq!(
-            authenticate(&store, &ListenerAuth::Token, Some("wrong"), OffsetDateTime::now_utc()),
+            authenticate(
+                &store,
+                &ListenerAuth::Token,
+                Some("wrong"),
+                OffsetDateTime::now_utc()
+            ),
             Err(AuthError::InvalidToken)
         );
         assert_eq!(
-            authenticate(&store, &ListenerAuth::Token, Some("secret2"), OffsetDateTime::now_utc()),
+            authenticate(
+                &store,
+                &ListenerAuth::Token,
+                Some("secret2"),
+                OffsetDateTime::now_utc()
+            ),
             Err(AuthError::Revoked)
         );
     }
@@ -156,14 +194,26 @@ mod tests {
     #[test]
     fn a_no_token_client_can_never_authenticate_on_a_token_listener() {
         let store = store();
-        store.mcp_client_create(&client("c1", None, vec![], false)).unwrap();
+        store
+            .mcp_client_create(&client("c1", None, vec![], false))
+            .unwrap();
         // トークンが無いので、どんな値を当てても一致しない（ハッシュ比較が `NULL` に当たらない）。
         assert_eq!(
-            authenticate(&store, &ListenerAuth::Token, Some(""), OffsetDateTime::now_utc()),
+            authenticate(
+                &store,
+                &ListenerAuth::Token,
+                Some(""),
+                OffsetDateTime::now_utc()
+            ),
             Err(AuthError::MissingToken)
         );
         assert!(matches!(
-            authenticate(&store, &ListenerAuth::Token, Some("anything"), OffsetDateTime::now_utc()),
+            authenticate(
+                &store,
+                &ListenerAuth::Token,
+                Some("anything"),
+                OffsetDateTime::now_utc()
+            ),
             Err(AuthError::InvalidToken)
         ));
     }
@@ -172,7 +222,12 @@ mod tests {
     fn fixed_listener_binds_to_the_named_client_ignoring_bearer() {
         let store = store();
         store
-            .mcp_client_create(&client("chatgpt", None, vec![McpScope::KnowledgePropose], false))
+            .mcp_client_create(&client(
+                "chatgpt",
+                None,
+                vec![McpScope::KnowledgePropose],
+                false,
+            ))
             .unwrap();
         let authed = authenticate(
             &store,
@@ -197,8 +252,12 @@ mod tests {
             ),
             Err(AuthError::UnknownFixedClient)
         );
-        store.mcp_client_create(&client("chatgpt", None, vec![], false)).unwrap();
-        store.mcp_client_revoke("chatgpt", OffsetDateTime::now_utc()).unwrap();
+        store
+            .mcp_client_create(&client("chatgpt", None, vec![], false))
+            .unwrap();
+        store
+            .mcp_client_revoke("chatgpt", OffsetDateTime::now_utc())
+            .unwrap();
         assert_eq!(
             authenticate(
                 &store,

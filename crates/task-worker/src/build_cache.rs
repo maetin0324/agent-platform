@@ -36,7 +36,9 @@ pub fn repo_cache_key(repo_source: &Path) -> String {
 
 /// このリポジトリの `CARGO_TARGET_DIR`（`<build_cache_dir>/cargo/<repo-key>`）。
 pub fn cargo_target_dir(build_cache_dir: &Path, repo_source: &Path) -> PathBuf {
-    build_cache_dir.join(CARGO_SUBDIR).join(repo_cache_key(repo_source))
+    build_cache_dir
+        .join(CARGO_SUBDIR)
+        .join(repo_cache_key(repo_source))
 }
 
 /// `run_worker` に渡す環境変数の 1 行（`(CARGO_TARGET_DIR, <path>)`）。

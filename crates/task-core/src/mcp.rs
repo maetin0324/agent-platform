@@ -88,7 +88,8 @@ impl Serialize for McpScope {
 impl<'de> Deserialize<'de> for McpScope {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(deserializer)?;
-        McpScope::parse(&raw).ok_or_else(|| serde::de::Error::custom(format!("unknown mcp scope {raw:?}")))
+        McpScope::parse(&raw)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown mcp scope {raw:?}")))
     }
 }
 
@@ -111,7 +112,11 @@ impl schemars::JsonSchema for McpScope {
 
 /// スコープの集合をカンマ区切りの文字列にする（DB の `mcp_clients.scopes`）。
 pub fn scopes_to_string(scopes: &[McpScope]) -> String {
-    scopes.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(",")
+    scopes
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// カンマ区切りの文字列からスコープの集合を読む。知らない語は無視する（前方互換）。
@@ -182,7 +187,8 @@ pub trait McpClientStore: Send + Sync {
     fn mcp_client_list(&self) -> Result<Vec<McpClient>, StoreError>;
     /// 無ければ `false`。
     fn mcp_client_revoke(&self, id: &str, now: OffsetDateTime) -> Result<bool, StoreError>;
-    fn mcp_client_touch_last_used(&self, id: &str, now: OffsetDateTime) -> Result<bool, StoreError>;
+    fn mcp_client_touch_last_used(&self, id: &str, now: OffsetDateTime)
+    -> Result<bool, StoreError>;
 }
 
 /// MCP 呼び出しログの永続状態（`SqliteStore` が実装する）。
@@ -217,7 +223,11 @@ impl McpClientStore for SqliteStore {
     fn mcp_client_get(&self, id: &str) -> Result<Option<McpClient>, StoreError> {
         let conn = self.lock()?;
         let row = conn
-            .query_row(&format!("{SELECT_MCP_CLIENT} WHERE id = ?1"), [id], row_to_mcp_client)
+            .query_row(
+                &format!("{SELECT_MCP_CLIENT} WHERE id = ?1"),
+                [id],
+                row_to_mcp_client,
+            )
             .optional()?;
         match row {
             Some(r) => Ok(Some(r?)),
@@ -242,7 +252,9 @@ impl McpClientStore for SqliteStore {
 
     fn mcp_client_list(&self) -> Result<Vec<McpClient>, StoreError> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(&format!("{SELECT_MCP_CLIENT} ORDER BY created_at ASC, id ASC"))?;
+        let mut stmt = conn.prepare(&format!(
+            "{SELECT_MCP_CLIENT} ORDER BY created_at ASC, id ASC"
+        ))?;
         let rows = stmt.query_map([], row_to_mcp_client)?;
         let mut out = Vec::new();
         for row in rows {
@@ -261,7 +273,11 @@ impl McpClientStore for SqliteStore {
         Ok(changed > 0)
     }
 
-    fn mcp_client_touch_last_used(&self, id: &str, now: OffsetDateTime) -> Result<bool, StoreError> {
+    fn mcp_client_touch_last_used(
+        &self,
+        id: &str,
+        now: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
         let ts = format_rfc3339(now)?;
         let conn = self.lock()?;
         let changed = conn.execute(
@@ -430,11 +446,15 @@ mod tests {
             Some(client.clone())
         );
         assert_eq!(
-            store.mcp_client_by_token_hash("deadbeef").expect("by token"),
+            store
+                .mcp_client_by_token_hash("deadbeef")
+                .expect("by token"),
             Some(client.clone())
         );
         assert_eq!(
-            store.mcp_client_by_token_hash("nope").expect("by token none"),
+            store
+                .mcp_client_by_token_hash("nope")
+                .expect("by token none"),
             None
         );
         assert_eq!(store.mcp_client_list().expect("list"), vec![client]);
@@ -477,7 +497,11 @@ mod tests {
                 .expect("revoke again")
         );
         // 無いクライアントは false。
-        assert!(!store.mcp_client_touch_last_used("nope", now).expect("touch nope"));
+        assert!(
+            !store
+                .mcp_client_touch_last_used("nope", now)
+                .expect("touch nope")
+        );
         assert!(!store.mcp_client_revoke("nope", now).expect("revoke nope"));
     }
 

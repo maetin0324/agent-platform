@@ -19,8 +19,8 @@ use crate::credentials::{
 };
 use crate::neterr::safe_reqwest_error;
 use crate::openai::{
-    ChatCompletionResponse, ChatMessage, Delta, FunctionCall, FunctionCallDelta,
-    MessageContent, ToolCall, ToolCallDelta, Usage,
+    ChatCompletionResponse, ChatMessage, Delta, FunctionCall, FunctionCallDelta, MessageContent,
+    ToolCall, ToolCallDelta, Usage,
 };
 use crate::sse::SseDecoder;
 
@@ -61,7 +61,11 @@ fn message_to_anthropic(msg: &ChatMessage) -> Option<Value> {
         "system" => None, // 呼び出し側が別に集める
         "tool" => {
             let tool_use_id = msg.tool_call_id.clone().unwrap_or_default();
-            let content = msg.content.as_ref().map(MessageContent::as_text).unwrap_or_default();
+            let content = msg
+                .content
+                .as_ref()
+                .map(MessageContent::as_text)
+                .unwrap_or_default();
             Some(json!({
                 "role": "user",
                 "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": content}]
@@ -89,7 +93,11 @@ fn message_to_anthropic(msg: &ChatMessage) -> Option<Value> {
         }
         // "user" とその他は user として扱う（Anthropic は user/assistant の 2 種）。
         _ => {
-            let text = msg.content.as_ref().map(MessageContent::as_text).unwrap_or_default();
+            let text = msg
+                .content
+                .as_ref()
+                .map(MessageContent::as_text)
+                .unwrap_or_default();
             Some(json!({"role": "user", "content": [{"type": "text", "text": text}]}))
         }
     }
@@ -101,9 +109,18 @@ pub fn to_anthropic_body(req: &crate::openai::ChatCompletionRequest, model: &str
         .messages
         .iter()
         .filter(|m| m.role == "system")
-        .map(|m| m.content.as_ref().map(MessageContent::as_text).unwrap_or_default())
+        .map(|m| {
+            m.content
+                .as_ref()
+                .map(MessageContent::as_text)
+                .unwrap_or_default()
+        })
         .collect();
-    let messages: Vec<Value> = req.messages.iter().filter_map(message_to_anthropic).collect();
+    let messages: Vec<Value> = req
+        .messages
+        .iter()
+        .filter_map(message_to_anthropic)
+        .collect();
 
     let mut body = json!({
         "model": model,
@@ -111,7 +128,9 @@ pub fn to_anthropic_body(req: &crate::openai::ChatCompletionRequest, model: &str
         "max_tokens": req.max_tokens.unwrap_or(4096),
         "stream": req.stream,
     });
-    let obj = body.as_object_mut().unwrap_or_else(|| unreachable!("body is always an object"));
+    let obj = body
+        .as_object_mut()
+        .unwrap_or_else(|| unreachable!("body is always an object"));
     if !system.is_empty() {
         obj.insert("system".to_string(), json!(system.join("\n\n")));
     }
@@ -157,39 +176,71 @@ fn map_stop_reason(reason: &str) -> String {
     .to_string()
 }
 
-pub fn from_anthropic_response(body: &Value, requested_model: &str) -> Result<ChatCompletionResponse, SourceError> {
+pub fn from_anthropic_response(
+    body: &Value,
+    requested_model: &str,
+) -> Result<ChatCompletionResponse, SourceError> {
     if let Some(err) = body.get("error") {
-        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("upstream error");
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("upstream error");
         return Err(SourceError::Upstream {
             status: 200,
             summary: msg.chars().take(200).collect(),
         });
     }
-    let id = body.get("id").and_then(|v| v.as_str()).map(str::to_string).unwrap_or_else(|| format!("chatcmpl-{}", ulid::Ulid::new()));
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("chatcmpl-{}", ulid::Ulid::new()));
     let mut text = String::new();
     let mut tool_calls = Vec::new();
-    for block in body.get("content").and_then(|v| v.as_array()).into_iter().flatten() {
+    for block in body
+        .get("content")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
         match block.get("type").and_then(|v| v.as_str()) {
             Some("text") => {
-                text.push_str(block.get("text").and_then(|v| v.as_str()).unwrap_or_default());
+                text.push_str(
+                    block
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default(),
+                );
             }
             Some("tool_use") => {
-                let name = block.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let name = block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 let input = block.get("input").cloned().unwrap_or(json!({}));
-                let call_id = block.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let call_id = block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 tool_calls.push(ToolCall {
                     id: call_id,
                     kind: "function".to_string(),
                     function: FunctionCall {
                         name,
-                        arguments: serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string()),
+                        arguments: serde_json::to_string(&input)
+                            .unwrap_or_else(|_| "{}".to_string()),
                     },
                 });
             }
             _ => {}
         }
     }
-    let stop_reason = body.get("stop_reason").and_then(|v| v.as_str()).unwrap_or("end_turn");
+    let stop_reason = body
+        .get("stop_reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("end_turn");
     let finish_reason = map_stop_reason(stop_reason);
     let usage = body.get("usage").map(|u| Usage {
         prompt_tokens: u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -199,9 +250,17 @@ pub fn from_anthropic_response(body: &Value, requested_model: &str) -> Result<Ch
     });
     let message = ChatMessage {
         role: "assistant".to_string(),
-        content: if text.is_empty() { None } else { Some(MessageContent::Text(text)) },
+        content: if text.is_empty() {
+            None
+        } else {
+            Some(MessageContent::Text(text))
+        },
         name: None,
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
         tool_call_id: None,
     };
     Ok(ChatCompletionResponse::new(
@@ -251,9 +310,22 @@ impl AnthropicStreamMapper {
         }
     }
 
-    fn chunk(&self, delta: Delta, finish_reason: Option<String>) -> crate::openai::ChatCompletionChunk {
-        let mut c = crate::openai::ChatCompletionChunk::new(&self.id, &self.model, self.created, delta, finish_reason);
-        if c.choices.first().map(|ch| ch.finish_reason.is_some()).unwrap_or(false)
+    fn chunk(
+        &self,
+        delta: Delta,
+        finish_reason: Option<String>,
+    ) -> crate::openai::ChatCompletionChunk {
+        let mut c = crate::openai::ChatCompletionChunk::new(
+            &self.id,
+            &self.model,
+            self.created,
+            delta,
+            finish_reason,
+        );
+        if c.choices
+            .first()
+            .map(|ch| ch.finish_reason.is_some())
+            .unwrap_or(false)
             && let (Some(i), Some(o)) = (self.input_tokens, self.output_tokens)
         {
             c.usage = Some(Usage {
@@ -269,7 +341,11 @@ impl AnthropicStreamMapper {
     pub fn feed(&mut self, event: &str, data: &Value) -> Vec<crate::openai::ChatCompletionChunk> {
         match event {
             "message_start" => {
-                if let Some(id) = data.get("message").and_then(|m| m.get("id")).and_then(|v| v.as_str()) {
+                if let Some(id) = data
+                    .get("message")
+                    .and_then(|m| m.get("id"))
+                    .and_then(|v| v.as_str())
+                {
                     self.id = id.to_string();
                 }
                 self.input_tokens = data
@@ -294,8 +370,16 @@ impl AnthropicStreamMapper {
                         self.next_tool_index += 1;
                         self.tool_index_by_block.insert(idx, tool_idx);
                         self.block_kind.insert(idx, BlockKind::ToolUse);
-                        let id = block.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                        let name = block.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        let id = block
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let name = block
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
                         vec![self.chunk(
                             Delta {
                                 tool_calls: Some(vec![ToolCallDelta {
@@ -323,7 +407,11 @@ impl AnthropicStreamMapper {
                 let delta = data.get("delta").cloned().unwrap_or_default();
                 match delta.get("type").and_then(|v| v.as_str()) {
                     Some("text_delta") => {
-                        let text = delta.get("text").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        let text = delta
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
                         vec![self.chunk(
                             Delta {
                                 content: Some(text),
@@ -333,7 +421,11 @@ impl AnthropicStreamMapper {
                         )]
                     }
                     Some("input_json_delta") => {
-                        let partial = delta.get("partial_json").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                        let partial = delta
+                            .get("partial_json")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
                         let tool_idx = self.tool_index_by_block.get(&idx).copied().unwrap_or(0);
                         if self.block_kind.get(&idx) == Some(&BlockKind::ToolUse) {
                             vec![self.chunk(
@@ -358,16 +450,33 @@ impl AnthropicStreamMapper {
                 }
             }
             "message_delta" => {
-                if let Some(reason) = data.get("delta").and_then(|d| d.get("stop_reason")).and_then(|v| v.as_str()) {
+                if let Some(reason) = data
+                    .get("delta")
+                    .and_then(|d| d.get("stop_reason"))
+                    .and_then(|v| v.as_str())
+                {
                     self.finish_reason = Some(map_stop_reason(reason));
                 }
-                if let Some(out) = data.get("usage").and_then(|u| u.get("output_tokens")).and_then(|v| v.as_u64()) {
+                if let Some(out) = data
+                    .get("usage")
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|v| v.as_u64())
+                {
                     self.output_tokens = Some(out);
                 }
                 vec![]
             }
             "message_stop" => {
-                vec![self.chunk(Delta::default(), Some(self.finish_reason.clone().unwrap_or_else(|| "stop".to_string())))]
+                vec![
+                    self.chunk(
+                        Delta::default(),
+                        Some(
+                            self.finish_reason
+                                .clone()
+                                .unwrap_or_else(|| "stop".to_string()),
+                        ),
+                    ),
+                ]
             }
             "error" => {
                 vec![]
@@ -417,14 +526,19 @@ async fn refresh_tokens(
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| SourceError::Credentials("refresh response missing access_token".to_string()))?
+        .ok_or_else(|| {
+            SourceError::Credentials("refresh response missing access_token".to_string())
+        })?
         .to_string();
     let refresh_token = body
         .get("refresh_token")
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| tokens.refresh_token.clone());
-    let expires_in = body.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
+    let expires_in = body
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
     let new_tokens = ClaudeTokens {
         access_token,
         refresh_token,
@@ -516,11 +630,13 @@ pub async fn send(
 fn build_chunk_stream(
     byte_stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     model: String,
-) -> futures_util::stream::BoxStream<'static, Result<crate::openai::ChatCompletionChunk, SourceError>> {
+) -> futures_util::stream::BoxStream<'static, Result<crate::openai::ChatCompletionChunk, SourceError>>
+{
     let mut byte_stream = Box::pin(byte_stream);
     let mut decoder = SseDecoder::new();
     let mut mapper = AnthropicStreamMapper::new(&model);
-    let mut pending: std::collections::VecDeque<crate::openai::ChatCompletionChunk> = std::collections::VecDeque::new();
+    let mut pending: std::collections::VecDeque<crate::openai::ChatCompletionChunk> =
+        std::collections::VecDeque::new();
     Box::pin(futures_util::stream::poll_fn(move |cx| {
         loop {
             if let Some(chunk) = pending.pop_front() {
@@ -537,7 +653,9 @@ fn build_chunk_stream(
                     continue;
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(SourceError::Network(safe_reqwest_error(&e)))));
+                    return std::task::Poll::Ready(Some(Err(SourceError::Network(
+                        safe_reqwest_error(&e),
+                    ))));
                 }
                 std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
                 std::task::Poll::Pending => return std::task::Poll::Pending,
@@ -549,7 +667,12 @@ fn build_chunk_stream(
 fn extract_error_summary(body: &str) -> String {
     serde_json::from_str::<Value>(body)
         .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| "upstream error".to_string())
         .chars()
         .take(200)

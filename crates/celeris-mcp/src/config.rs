@@ -172,7 +172,10 @@ mod tests {
         let listeners = cfg.resolve_listeners().unwrap();
         assert_eq!(listeners.len(), 2);
         assert_eq!(listeners[0].auth, ListenerAuth::Token);
-        assert_eq!(listeners[1].auth, ListenerAuth::Fixed("chatgpt".to_string()));
+        assert_eq!(
+            listeners[1].auth,
+            ListenerAuth::Fixed("chatgpt".to_string())
+        );
     }
 
     #[test]

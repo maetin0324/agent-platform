@@ -716,7 +716,10 @@ mod tests {
         };
         let outcome = transition(&from_failed, &Trigger::Rereview).unwrap();
         assert_eq!(outcome.next, Status::Reviewing);
-        assert_eq!(outcome.attempts, 2, "the review_fail that reached failed is undone");
+        assert_eq!(
+            outcome.attempts, 2,
+            "the review_fail that reached failed is undone"
+        );
 
         // 0 を下回らない（`saturating_sub`）。
         let from_failed_at_zero = StateView {
@@ -740,7 +743,12 @@ mod tests {
                 "{kind:?} は Rereview の対象外"
             );
         }
-        for status in [Status::Ready, Status::Running, Status::Reviewing, Status::Cancelled] {
+        for status in [
+            Status::Ready,
+            Status::Running,
+            Status::Reviewing,
+            Status::Cancelled,
+        ] {
             let s = StateView {
                 kind: TaskKind::Execute,
                 status,

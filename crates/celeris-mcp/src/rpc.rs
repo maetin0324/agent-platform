@@ -150,9 +150,15 @@ pub async fn dispatch(
                     })
                 })
                 .collect();
-            (RpcResponse::ok(id, serde_json::json!({"tools": items})), None)
+            (
+                RpcResponse::ok(id, serde_json::json!({"tools": items})),
+                None,
+            )
         }
-        "tools/call" => (call_tool(state, client, &id, req.params.clone()).await, None),
+        "tools/call" => (
+            call_tool(state, client, &id, req.params.clone()).await,
+            None,
+        ),
         "resources/list" => match crate::resources::list(state, client).await {
             Ok(items) => (
                 RpcResponse::ok(id, serde_json::json!({"resources": items})),
@@ -211,22 +217,39 @@ async fn call_tool(
     let Some(params) = params else {
         return RpcResponse::err(id.clone(), INVALID_PARAMS, "params is required");
     };
-    let Some(name) = params.get("name").and_then(|v| v.as_str()).map(str::to_string) else {
+    let Some(name) = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
         return RpcResponse::err(id.clone(), INVALID_PARAMS, "params.name is required");
     };
-    let arguments = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
 
     let Some(def) = tools::find(&name) else {
-        return RpcResponse::err(id.clone(), METHOD_NOT_FOUND, format!("unknown tool {name:?}"));
+        return RpcResponse::err(
+            id.clone(),
+            METHOD_NOT_FOUND,
+            format!("unknown tool {name:?}"),
+        );
     };
     if !client.has_scope(def.scope) {
-        return RpcResponse::err(id.clone(), METHOD_NOT_FOUND, format!("unknown tool {name:?}"));
+        return RpcResponse::err(
+            id.clone(),
+            METHOD_NOT_FOUND,
+            format!("unknown tool {name:?}"),
+        );
     }
 
     // ADR-0056 D4: クライアントごとの流量制限。
     let retry_after = {
         let mut limiter = state.limiter.lock().unwrap_or_else(|e| e.into_inner());
-        limiter.check(&client.id, state.rate_limit_per_min, Instant::now()).err()
+        limiter
+            .check(&client.id, state.rate_limit_per_min, Instant::now())
+            .err()
     };
     if let Some(retry_after) = retry_after {
         record_call(state, &client.id, &name, false, Some("rate_limited"), 0).await;
@@ -254,7 +277,15 @@ async fn call_tool(
             )
         }
         Err(e) => {
-            record_call(state, &client.id, &name, false, Some(error_kind_label(e.code)), latency_ms).await;
+            record_call(
+                state,
+                &client.id,
+                &name,
+                false,
+                Some(error_kind_label(e.code)),
+                latency_ms,
+            )
+            .await;
             RpcResponse::err(id.clone(), tool_error_code(e.code), e.message)
         }
     }

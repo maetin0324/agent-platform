@@ -139,11 +139,7 @@ fn extract_marker_targets(scope: &str) -> Option<Vec<String>> {
     let without_parens = strip_all_parens(raw_segment);
     let normalized = collapse_whitespace_around_join_chars(without_parens.trim());
     let chain = extract_target_chain(&normalized);
-    if chain.len() >= 2 {
-        Some(chain)
-    } else {
-        None
-    }
+    if chain.len() >= 2 { Some(chain) } else { None }
 }
 
 /// `(...)`/`（...）` を中身ごとまるごと 1 個の空白に置き換える（`strip_optional_parens` と違い、
@@ -327,11 +323,7 @@ fn extract_marker_aspects(scope: &str) -> Option<Vec<String>> {
         .unwrap_or(after.len());
     let segment = &after[..stop];
     let items = split_by_best_delimiter(segment);
-    if items.len() >= 2 {
-        Some(items)
-    } else {
-        None
-    }
+    if items.len() >= 2 { Some(items) } else { None }
 }
 
 /// 「各…の A・B・C を整理」の形（「を整理」の直前、それより前にある最後の「の」からの区間）を
@@ -342,11 +334,7 @@ fn extract_enumerate_aspects(scope: &str) -> Option<Vec<String>> {
     let start = before.rfind('の').map(|i| i + 'の'.len_utf8())?;
     let segment = &before[start..];
     let items = split_by_best_delimiter(segment);
-    if items.len() >= 2 {
-        Some(items)
-    } else {
-        None
-    }
+    if items.len() >= 2 { Some(items) } else { None }
 }
 
 /// `・`/`、`/`，`/`,`/`/` のうち、`text` に実際に含まれる最初のもの（この優先順）だけで割る。
@@ -551,7 +539,10 @@ mod tests {
     #[test]
     fn accepts_a_mixed_separator_style() {
         let objective = "Lustre・BeeGFS・WekaFS の一次情報を確認する。";
-        assert_eq!(research_targets(objective), vec!["Lustre", "BeeGFS", "WekaFS"]);
+        assert_eq!(
+            research_targets(objective),
+            vec!["Lustre", "BeeGFS", "WekaFS"]
+        );
     }
 
     #[test]
@@ -560,7 +551,11 @@ mod tests {
         // 対象の列挙（`com`/`otatebe`/`chfs`）と誤認されていた。1 件しか対象が無い目的文なので
         // 空（列挙にならない）。
         let objective = "CHFS（https://github.com/otatebe/chfs）を調べる";
-        assert!(research_targets(objective).is_empty(), "{:?}", research_targets(objective));
+        assert!(
+            research_targets(objective).is_empty(),
+            "{:?}",
+            research_targets(objective)
+        );
     }
 
     #[test]
@@ -632,8 +627,7 @@ mod tests {
     /// 言い回しを含む 1 文）。
     #[test]
     fn comparison_target_paragraph_returns_the_sentence_around_the_compare_phrase() {
-        let objective =
-            "CHFS/FINCHFS の学術文献を調査する。BenchFSとの比較が『公平比較可能』か『背景比較のみ』かを\
+        let objective = "CHFS/FINCHFS の学術文献を調査する。BenchFSとの比較が『公平比較可能』か『背景比較のみ』かを\
 分類すること。既存knowledgeの設計と対比できるよう根拠付きで書くこと。";
         assert_eq!(
             comparison_target_paragraph(objective),

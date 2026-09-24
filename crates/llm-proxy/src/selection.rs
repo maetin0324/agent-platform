@@ -36,7 +36,10 @@ pub struct SelectedAccount {
 }
 
 fn dir_for(dirs: &[AccountDir], id: &str) -> PathBuf {
-    dirs.iter().find(|d| d.id == id).map(|d| d.dir.clone()).unwrap_or_default()
+    dirs.iter()
+        .find(|d| d.id == id)
+        .map(|d| d.dir.clone())
+        .unwrap_or_default()
 }
 
 /// スコア降順、同点は in_use 昇順→id 昇順（ADR-0024 D3-4 と同じ規律）。除外は含めない。
@@ -51,9 +54,14 @@ fn rank_in_pool(input: &PoolInput<'_>, now: i64) -> Vec<(String, f64, usize)> {
                 logged_in: d.logged_in,
                 in_use,
             };
-            evaluate(&cand, input.book.state(&d.id), input.max_concurrent_per_account, now)
-                .score
-                .map(|s| (d.id.clone(), s, in_use))
+            evaluate(
+                &cand,
+                input.book.state(&d.id),
+                input.max_concurrent_per_account,
+                now,
+            )
+            .score
+            .map(|s| (d.id.clone(), s, in_use))
         })
         .collect();
     scored.sort_by(|a, b| {
@@ -77,13 +85,21 @@ pub fn rank_pool(source: SourceKind, input: &PoolInput<'_>, now: i64) -> Vec<Sel
         .collect()
 }
 
-pub fn select_from_pool(source: SourceKind, input: &PoolInput<'_>, now: i64) -> Option<SelectedAccount> {
+pub fn select_from_pool(
+    source: SourceKind,
+    input: &PoolInput<'_>,
+    now: i64,
+) -> Option<SelectedAccount> {
     rank_pool(source, input, now).into_iter().next()
 }
 
 /// `celeris/<tier>` の (b): Claude と Codex を跨いで残量スコアを比較し、順位付きの列にする。
 /// 同点は設定順（claude を先に見る）→ in_use 少ない方 → id 昇順。
-pub fn rank_across_pools(claude: Option<&PoolInput<'_>>, codex: Option<&PoolInput<'_>>, now: i64) -> Vec<SelectedAccount> {
+pub fn rank_across_pools(
+    claude: Option<&PoolInput<'_>>,
+    codex: Option<&PoolInput<'_>>,
+    now: i64,
+) -> Vec<SelectedAccount> {
     let mut combined: Vec<(SourceKind, String, f64, usize)> = Vec::new();
     if let Some(input) = claude {
         combined.extend(
@@ -124,17 +140,30 @@ pub fn rank_across_pools(claude: Option<&PoolInput<'_>>, codex: Option<&PoolInpu
         .collect()
 }
 
-pub fn select_across_pools(claude: Option<&PoolInput<'_>>, codex: Option<&PoolInput<'_>>, now: i64) -> Option<SelectedAccount> {
+pub fn select_across_pools(
+    claude: Option<&PoolInput<'_>>,
+    codex: Option<&PoolInput<'_>>,
+    now: i64,
+) -> Option<SelectedAccount> {
     rank_across_pools(claude, codex, now).into_iter().next()
 }
 
 /// `qwen/<tier>` / `celeris/<tier>` の (a): 設定順で到達可能な relay を順位付きで返す。
 /// `reachable` は呼び出し側が probe 済みの結果を返す（副作用なし。テストしやすくするため）。
-pub fn rank_relays(sources: &[OpenAiCompatibleConfig], reachable: impl Fn(&str) -> bool) -> Vec<&OpenAiCompatibleConfig> {
-    sources.iter().filter(|s| s.enabled && reachable(&s.id)).collect()
+pub fn rank_relays(
+    sources: &[OpenAiCompatibleConfig],
+    reachable: impl Fn(&str) -> bool,
+) -> Vec<&OpenAiCompatibleConfig> {
+    sources
+        .iter()
+        .filter(|s| s.enabled && reachable(&s.id))
+        .collect()
 }
 
-pub fn pick_relay(sources: &[OpenAiCompatibleConfig], reachable: impl Fn(&str) -> bool) -> Option<&OpenAiCompatibleConfig> {
+pub fn pick_relay(
+    sources: &[OpenAiCompatibleConfig],
+    reachable: impl Fn(&str) -> bool,
+) -> Option<&OpenAiCompatibleConfig> {
     rank_relays(sources, reachable).into_iter().next()
 }
 
@@ -192,7 +221,10 @@ mod tests {
             max_concurrent_per_account: 4,
         };
         let ranked = rank_pool(SourceKind::Claude, &input, 1_000);
-        assert_eq!(ranked.into_iter().map(|s| s.account_id).collect::<Vec<_>>(), vec!["b"]);
+        assert_eq!(
+            ranked.into_iter().map(|s| s.account_id).collect::<Vec<_>>(),
+            vec!["b"]
+        );
     }
 
     #[test]
@@ -329,6 +361,12 @@ mod tests {
     fn rank_relays_keeps_config_order_among_reachable_sources() {
         let sources = vec![relay("a"), relay("b"), relay("c")];
         let ranked = rank_relays(&sources, |id| id != "b");
-        assert_eq!(ranked.into_iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
+        assert_eq!(
+            ranked
+                .into_iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
     }
 }

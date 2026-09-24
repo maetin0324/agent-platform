@@ -13,8 +13,7 @@ mod common;
 use common::*;
 use serde_json::{Value, json};
 
-const SAMPLE_SKILL_MD: &str =
-    "---\nname: rust-review\ndescription: Rust のコードレビューの手順\n---\n\n# rust-review\n\n手順...\n";
+const SAMPLE_SKILL_MD: &str = "---\nname: rust-review\ndescription: Rust のコードレビューの手順\n---\n\n# rust-review\n\n手順...\n";
 
 fn g(path: &str) -> axum::http::Request<axum::body::Body> {
     get_with(
@@ -59,7 +58,15 @@ async fn seed_org(app: &axum::Router) {
         json!({"id": "coding", "name": "コーディング部", "kind": "department", "parent_id": "secretary"}),
         json!({"id": "coding-poc", "name": "PoC 課", "kind": "section", "parent_id": "coding"}),
     ] {
-        let resp = send(app, post_json_with("/api/v1/org", &body, &[("authorization", format!("Bearer {TOKEN}").as_str())])).await;
+        let resp = send(
+            app,
+            post_json_with(
+                "/api/v1/org",
+                &body,
+                &[("authorization", format!("Bearer {TOKEN}").as_str())],
+            ),
+        )
+        .await;
         assert_eq!(resp.status.as_u16(), 201, "{}", resp.text());
     }
 }
@@ -74,7 +81,10 @@ async fn an_uninitialized_knowledge_base_lists_no_skills() {
     assert_eq!(list.status.as_u16(), 200, "{}", list.text());
     assert_eq!(list.json()["initialized"], false);
     assert_eq!(list.json()["items"].as_array().map(Vec::len), Some(0));
-    assert!(!env.knowledge_root.exists(), "読み取りが KB を作ってはいけない");
+    assert!(
+        !env.knowledge_root.exists(),
+        "読み取りが KB を作ってはいけない"
+    );
 }
 
 /// `PUT /skills/{name}` は作成・更新の両方に使え、`GET /skills` / `GET /skills/{name}` に反映される。
@@ -124,10 +134,12 @@ async fn put_skill_creates_and_updates_and_requires_admin() {
 
     let detail = send(&app, g("/api/v1/skills/rust-review")).await;
     assert_eq!(detail.status.as_u16(), 200, "{}", detail.text());
-    assert!(detail.json()["skill_md"]
-        .as_str()
-        .unwrap_or_default()
-        .contains("rust-review"));
+    assert!(
+        detail.json()["skill_md"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rust-review")
+    );
 
     // 名前の不一致は 422 `validation`。
     let mismatch = send(

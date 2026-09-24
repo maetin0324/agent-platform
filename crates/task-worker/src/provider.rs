@@ -428,7 +428,9 @@ ImportError: cannot import name 'Image' from 'PIL' (unknown location)
     /// Phase 113 D1: `could not resume` と、id が間に挟まる「session <id> not found」の形。
     #[test]
     fn phase_113_matches_could_not_resume_and_session_id_not_found_with_a_gap() {
-        assert!(looks_like_resume_rejection("Error: could not resume conversation"));
+        assert!(looks_like_resume_rejection(
+            "Error: could not resume conversation"
+        ));
         assert!(looks_like_resume_rejection(
             "session 01a0d017-e32a-4cad-b10c-0cb63869ae13 not found"
         ));

@@ -78,6 +78,13 @@ async fn returns_the_readers_view_when_configured() {
 async fn requires_a_bearer_token() {
     let env = env_with_llm_sources();
     let app = env.router();
-    let resp = send(&app, axum::http::Request::get("/api/v1/llm/sources").header("host", "127.0.0.1:7710").body(axum::body::Body::empty()).expect("request")).await;
+    let resp = send(
+        &app,
+        axum::http::Request::get("/api/v1/llm/sources")
+            .header("host", "127.0.0.1:7710")
+            .body(axum::body::Body::empty())
+            .expect("request"),
+    )
+    .await;
     assert_eq!(resp.status.as_u16(), 401, "{}", resp.text());
 }

@@ -458,9 +458,7 @@ fn build_attention(
 
         // ADR-0070 D1（Phase 116）: 分類・配送済みの release・「再レビュー」操作を足す。
         let (class, _) = derive::classify_task_failure(&events);
-        let delivered_release = store
-            .delivery_get(t.id)?
-            .and_then(|d| d.release.clone());
+        let delivered_release = store.delivery_get(t.id)?.and_then(|d| d.release.clone());
         let mut task_ref = view::task_ref(t);
         task_ref.actions = view::actions_with_events(t, &events);
 

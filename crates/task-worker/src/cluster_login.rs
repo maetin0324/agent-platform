@@ -1265,7 +1265,11 @@ mod tests {
         assert_eq!(program, "systemd-run");
         assert_eq!(
             &full_args[..3],
-            &["--user".to_string(), "--scope".to_string(), "--quiet".to_string()]
+            &[
+                "--user".to_string(),
+                "--scope".to_string(),
+                "--quiet".to_string()
+            ]
         );
         assert_eq!(full_args[3], "--unit");
         assert!(
@@ -1303,7 +1307,8 @@ mod tests {
     #[test]
     fn launch_master_command_inline_is_unchanged() {
         let args = vec!["-M".to_string(), "-N".to_string(), "pegasus".to_string()];
-        let (program, full_args) = launch_master_command(&MasterLauncher::Inline, "ssh", &args, "pegasus");
+        let (program, full_args) =
+            launch_master_command(&MasterLauncher::Inline, "ssh", &args, "pegasus");
         assert_eq!(program, "ssh");
         assert_eq!(full_args, args);
     }
@@ -1410,9 +1415,9 @@ mod tests {
         let master = session.submit_code("123456", Duration::from_secs(5)).await;
         match master {
             Ok(_master) => {}
-            Err(e) => panic!(
-                "expected Ok(ClusterMaster) through the fake systemd-run wrapper, got {e:?}"
-            ),
+            Err(e) => {
+                panic!("expected Ok(ClusterMaster) through the fake systemd-run wrapper, got {e:?}")
+            }
         }
     }
 
@@ -1578,9 +1583,12 @@ mod tests {
         // ブロックしない）。`poll_until_connected_or_timeout` は子の終了を見て `-O check` を試すが、
         // このスクリプトは check にも常に失敗するので `ChildExited` → `Failed` になる。ここでは
         // `spawn_master` の戻り値を直接使うため、`start_connect` は経由せず低レベルの挙動を確認する。
-        let (mut child, stderr_buf, err_task) =
-            spawn_master(&ssh[0], &["-M".into(), "-N".into(), "cluster-host".into()], &[])
-                .unwrap();
+        let (mut child, stderr_buf, err_task) = spawn_master(
+            &ssh[0],
+            &["-M".into(), "-N".into(), "cluster-host".into()],
+            &[],
+        )
+        .unwrap();
         let status = child.wait().await.unwrap();
         assert_eq!(status.code(), Some(7));
         join_with_timeout(err_task, READER_JOIN_TIMEOUT).await;

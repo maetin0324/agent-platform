@@ -96,9 +96,12 @@ async fn get_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: GetArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: GetArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let root = kb_root(state)?;
-    let detail = state.blocking(move |_store| kb::skills_get(&root, &args.name)).await;
+    let detail = state
+        .blocking(move |_store| kb::skills_get(&root, &args.name))
+        .await;
     match detail {
         Some(d) => ToolOutput::from_serialize(&GetOutput {
             name: d.name,
@@ -154,12 +157,19 @@ async fn put_impl(
     client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: PutArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: PutArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let root = kb_root(state)?;
     let source = format!("mcp:{}", client.id);
-    let files: Vec<(String, String)> = args.files.into_iter().map(|f| (f.path, f.content)).collect();
+    let files: Vec<(String, String)> = args
+        .files
+        .into_iter()
+        .map(|f| (f.path, f.content))
+        .collect();
     let outcome = state
-        .blocking(move |_store| kb::skills_put(&root, &args.name, &args.skill_md, &files, Some(&source)))
+        .blocking(move |_store| {
+            kb::skills_put(&root, &args.name, &args.skill_md, &files, Some(&source))
+        })
         .await;
     match outcome {
         Ok(path) => ToolOutput::from_serialize(&PutOutput { path }),

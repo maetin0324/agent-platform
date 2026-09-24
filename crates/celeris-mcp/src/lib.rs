@@ -30,5 +30,7 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let app = router(state, auth);
-    axum::serve(listener, app).with_graceful_shutdown(shutdown).await
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
 }

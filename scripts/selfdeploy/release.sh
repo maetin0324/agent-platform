@@ -186,6 +186,8 @@ if len(args) == 2:
     raise SystemExit("no workspace packages found; refusing an unrestricted clean")
 subprocess.run(args, check=True)
 '
+# Phase 116 追記: Celeris の reviewer は `cargo fmt --check` を見るので、main が未整形だと配送が全部落ちる。
+run_step cargo-fmt-check "$BUILD" -- cargo fmt --all -- --check
 run_step cargo-test "$BUILD" -- cargo test --workspace
 run_step cargo-clippy "$BUILD" -- cargo clippy --workspace -- -D warnings
 run_step cargo-build "$BUILD" -- cargo build --release -p celeris -p celerisctl

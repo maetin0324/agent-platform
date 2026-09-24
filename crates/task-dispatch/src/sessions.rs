@@ -225,8 +225,22 @@ fn random_uuid_v4() -> String {
     b[8] = (b[8] & 0x3f) | 0x80; // variant 10xxxxxx（RFC 4122）
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13],
-        b[14], b[15],
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6],
+        b[7],
+        b[8],
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15],
     )
 }
 
@@ -335,7 +349,13 @@ mod tests {
     fn a_claude_code_session_with_a_non_uuid_id_self_heals() {
         let mut s = session("claude-code", Some("claude_max_lab"), 10);
         s.session_id = "01M323X6TJQSFEP0MKXABWVY78".to_string(); // 本番で観測された ULID。
-        let action = decide(Some(&s), "claude-code", Some("claude_max_lab"), 400_000, false);
+        let action = decide(
+            Some(&s),
+            "claude-code",
+            Some("claude_max_lab"),
+            400_000,
+            false,
+        );
         assert_eq!(action, SessionAction::Fresh(FreshReason::InvalidSessionId));
         assert!(FreshReason::InvalidSessionId.needs_summary());
     }

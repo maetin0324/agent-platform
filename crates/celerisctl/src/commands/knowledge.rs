@@ -197,7 +197,9 @@ fn run_rerun(store: &SqliteStore, args: &RerunArgs) -> Result<ExitCode, CliError
         before.state.as_str(),
         before.run_task_id
     );
-    outln!("次の tick で celeris が新しい知識整理 run を 1 回だけ作ります（デーモンの再起動は不要）。");
+    outln!(
+        "次の tick で celeris が新しい知識整理 run を 1 回だけ作ります（デーモンの再起動は不要）。"
+    );
     Ok(ExitCode::SUCCESS)
 }
 

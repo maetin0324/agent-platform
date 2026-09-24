@@ -96,7 +96,9 @@ fn resolve_token(token_file: Option<&PathBuf>) -> Result<Option<String>, CliErro
                 .map_err(|e| CliError::msg(format!("{}: {e}", path.display())))?
                 .read_to_string(&mut raw)
                 .map_err(|e| CliError::msg(format!("{}: {e}", path.display())))?;
-            Ok(Some(raw.lines().next().unwrap_or_default().trim().to_string()))
+            Ok(Some(
+                raw.lines().next().unwrap_or_default().trim().to_string(),
+            ))
         }
         None => Ok(std::env::var("CELERIS_MCP_TOKEN").ok()),
     }
@@ -186,8 +188,19 @@ fn run_ls(store: &SqliteStore) -> Result<ExitCode, CliError> {
             .last_used_at
             .map(|t| t.to_string())
             .unwrap_or_else(|| "-".to_string());
-        let revoked = if c.revoked_at.is_some() { " revoked" } else { "" };
-        outln!("{}\t{}\t{}\tlast_used={}{}", c.id, c.name, scopes, last_used, revoked);
+        let revoked = if c.revoked_at.is_some() {
+            " revoked"
+        } else {
+            ""
+        };
+        outln!(
+            "{}\t{}\t{}\tlast_used={}{}",
+            c.id,
+            c.name,
+            scopes,
+            last_used,
+            revoked
+        );
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -210,8 +223,13 @@ pub fn run_stdio(args: StdioArgs) -> Result<ExitCode, CliError> {
     let token = resolve_token(args.token_file.as_ref())?;
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    celeris_mcp::stdio::run(&args.base_url, token.as_deref(), stdin.lock(), stdout.lock())
-        .map_err(CliError::msg)?;
+    celeris_mcp::stdio::run(
+        &args.base_url,
+        token.as_deref(),
+        stdin.lock(),
+        stdout.lock(),
+    )
+    .map_err(CliError::msg)?;
     let _ = std::io::stdout().flush();
     Ok(ExitCode::SUCCESS)
 }
@@ -223,7 +241,8 @@ pub fn run_call(args: CallArgs) -> Result<ExitCode, CliError> {
     let token = resolve_token(args.token_file.as_ref())?;
 
     if args.list {
-        let tools = celeris_mcp::call::list_tools(&args.base_url, token.as_deref()).map_err(|e| CliError::msg(e.to_string()))?;
+        let tools = celeris_mcp::call::list_tools(&args.base_url, token.as_deref())
+            .map_err(|e| CliError::msg(e.to_string()))?;
         for t in tools {
             outln!("{}\t{}", t.name, t.description);
         }

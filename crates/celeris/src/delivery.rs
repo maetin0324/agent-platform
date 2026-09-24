@@ -53,7 +53,11 @@ fn tail_bytes(s: &str, max: usize) -> String {
 fn push_already_up_to_date(repo: &Path, remote: &str, branch: &str) -> bool {
     git_text(
         repo,
-        &["rev-list", "--count", &format!("{remote}/{branch}..{branch}")],
+        &[
+            "rev-list",
+            "--count",
+            &format!("{remote}/{branch}..{branch}"),
+        ],
     )
     .map(|s| s.trim() == "0")
     .unwrap_or(false)
@@ -671,7 +675,11 @@ mod tests {
         let p = dir.path();
         merge_reviewed(p, &d).unwrap();
         let bare = bare_remote();
-        git_text(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]).unwrap();
+        git_text(
+            p,
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        )
+        .unwrap();
         push_merged(p, "origin", "main", Duration::from_secs(20)).unwrap();
         assert_eq!(sha(bare.path(), "refs/heads/main").unwrap(), d.head);
     }

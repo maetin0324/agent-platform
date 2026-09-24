@@ -64,7 +64,10 @@ async fn routing_returns_per_run_audit_and_dropped_assignee() {
     });
     env.seed(&task);
     let id = task.id;
-    for (run, esc) in [("run-1", None), ("run-2", Some("escalated: standard -> frontier"))] {
+    for (run, esc) in [
+        ("run-1", None),
+        ("run-2", Some("escalated: standard -> frontier")),
+    ] {
         env.store
             .append_event(id, &routing_decided(run, esc))
             .expect("routing");
@@ -132,7 +135,10 @@ async fn routing_is_empty_without_runs_and_404_for_unknown_tasks() {
 
     let resp = send(
         &app,
-        get_with(&format!("/api/v1/tasks/{}/routing", TaskId::new()), &admin()),
+        get_with(
+            &format!("/api/v1/tasks/{}/routing", TaskId::new()),
+            &admin(),
+        ),
     )
     .await;
     assert_eq!(resp.status, 404, "{}", resp.text());

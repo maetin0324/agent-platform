@@ -854,9 +854,7 @@ fn task_failure(
         return Ok(None);
     }
     let (class, reason) = derive::classify_task_failure(events);
-    let delivered_release = store
-        .delivery_get(task.id)?
-        .and_then(|d| d.release.clone());
+    let delivered_release = store.delivery_get(task.id)?.and_then(|d| d.release.clone());
     Ok(Some(FailureSummary {
         class,
         reason,

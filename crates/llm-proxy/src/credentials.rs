@@ -91,9 +91,18 @@ pub fn parse_claude_tokens(value: &serde_json::Value) -> Result<ClaudeTokens, Cr
 
 /// `value` の `claudeAiOauth` の 3 フィールドだけを書き換える（`scopes`/`subscriptionType` 等はそのまま残す）。
 pub fn apply_claude_tokens(value: &mut serde_json::Value, tokens: &ClaudeTokens) {
-    if let Some(oauth) = value.get_mut("claudeAiOauth").and_then(|v| v.as_object_mut()) {
-        oauth.insert("accessToken".to_string(), tokens.access_token.clone().into());
-        oauth.insert("refreshToken".to_string(), tokens.refresh_token.clone().into());
+    if let Some(oauth) = value
+        .get_mut("claudeAiOauth")
+        .and_then(|v| v.as_object_mut())
+    {
+        oauth.insert(
+            "accessToken".to_string(),
+            tokens.access_token.clone().into(),
+        );
+        oauth.insert(
+            "refreshToken".to_string(),
+            tokens.refresh_token.clone().into(),
+        );
         oauth.insert("expiresAt".to_string(), tokens.expires_at_ms.into());
     }
 }
@@ -124,7 +133,9 @@ impl std::fmt::Debug for CodexTokens {
 pub const CODEX_CREDENTIALS_FILE: &str = "auth.json";
 
 pub fn parse_codex_tokens(value: &serde_json::Value) -> Result<CodexTokens, CredentialError> {
-    let tokens = value.get("tokens").ok_or(CredentialError::Shape("tokens"))?;
+    let tokens = value
+        .get("tokens")
+        .ok_or(CredentialError::Shape("tokens"))?;
     let access_token = tokens
         .get("access_token")
         .and_then(|v| v.as_str())
@@ -156,8 +167,14 @@ pub fn parse_codex_tokens(value: &serde_json::Value) -> Result<CodexTokens, Cred
 /// `value` の `tokens.*` を書き換え、`last_refresh` を今の RFC3339 にする。
 pub fn apply_codex_tokens(value: &mut serde_json::Value, tokens: &CodexTokens, now_rfc3339: &str) {
     if let Some(t) = value.get_mut("tokens").and_then(|v| v.as_object_mut()) {
-        t.insert("access_token".to_string(), tokens.access_token.clone().into());
-        t.insert("refresh_token".to_string(), tokens.refresh_token.clone().into());
+        t.insert(
+            "access_token".to_string(),
+            tokens.access_token.clone().into(),
+        );
+        t.insert(
+            "refresh_token".to_string(),
+            tokens.refresh_token.clone().into(),
+        );
         t.insert("id_token".to_string(), tokens.id_token.clone().into());
     }
     if let Some(obj) = value.as_object_mut() {
@@ -226,7 +243,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(CLAUDE_CREDENTIALS_FILE);
         write_json_atomic(&path, &claude_fixture()).unwrap();
-        assert!(!dir.path().join(format!("{CLAUDE_CREDENTIALS_FILE}.tmp")).exists());
+        assert!(
+            !dir.path()
+                .join(format!("{CLAUDE_CREDENTIALS_FILE}.tmp"))
+                .exists()
+        );
 
         let mut value = read_json(&path).unwrap();
         let new_tokens = ClaudeTokens {

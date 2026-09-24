@@ -28,7 +28,11 @@ impl std::fmt::Display for CallError {
             CallError::Http { status, body } => {
                 write!(f, "MCP サーバーが HTTP {status} を返しました: {body}")
             }
-            CallError::Rpc { code, message, data } => match data {
+            CallError::Rpc {
+                code,
+                message,
+                data,
+            } => match data {
                 Some(d) => write!(f, "MCP エラー {code}: {message} ({d})"),
                 None => write!(f, "MCP エラー {code}: {message}"),
             },
@@ -65,14 +69,18 @@ fn post_rpc(
     if let Some(sid) = session {
         req = req.header("mcp-session-id", sid);
     }
-    let resp = req.send().map_err(|e| CallError::Transport(e.to_string()))?;
+    let resp = req
+        .send()
+        .map_err(|e| CallError::Transport(e.to_string()))?;
     let status = resp.status();
     let session_header = resp
         .headers()
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    let text = resp.text().map_err(|e| CallError::Transport(e.to_string()))?;
+    let text = resp
+        .text()
+        .map_err(|e| CallError::Transport(e.to_string()))?;
     if !status.is_success() {
         return Err(CallError::Http {
             status: status.as_u16(),
@@ -140,11 +148,18 @@ pub fn list_tools(base_url: &str, token: Option<&str>) -> Result<Vec<ToolInfo>, 
     if let Some(e) = rpc_error(&value) {
         return Err(e);
     }
-    let tools = value["result"]["tools"].as_array().cloned().unwrap_or_default();
+    let tools = value["result"]["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     Ok(tools
         .into_iter()
         .map(|t| ToolInfo {
-            name: t.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+            name: t
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
             description: t
                 .get("description")
                 .and_then(|v| v.as_str())
@@ -181,7 +196,9 @@ pub fn call_tool(
     }
     let result = value.get("result").cloned().unwrap_or(Value::Null);
     if let Some(structured) = result.get("structuredContent") {
-        return Ok(serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string()));
+        return Ok(
+            serde_json::to_string_pretty(structured).unwrap_or_else(|_| structured.to_string())
+        );
     }
     if let Some(text) = result
         .get("content")
@@ -206,7 +223,11 @@ mod tests {
 
     async fn spawn(
         scopes: Vec<task_core::McpScope>,
-    ) -> (SocketAddr, tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<std::io::Result<()>>) {
+    ) -> (
+        SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    ) {
         let store = Arc::new(task_core::SqliteStore::open_in_memory().expect("open"));
         {
             use task_core::McpClientStore;
@@ -222,13 +243,27 @@ mod tests {
                 })
                 .expect("create client");
         }
-        let state = crate::state::McpState::from_store(store, 60, Vec::new(), Vec::new(), "secretary".to_string(), None);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let state = crate::state::McpState::from_store(
+            store,
+            60,
+            Vec::new(),
+            Vec::new(),
+            "secretary".to_string(),
+            None,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
         let addr = listener.local_addr().expect("addr");
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let handle = tokio::spawn(crate::serve(listener, state, crate::config::ListenerAuth::Token, async {
-            let _ = stop_rx.await;
-        }));
+        let handle = tokio::spawn(crate::serve(
+            listener,
+            state,
+            crate::config::ListenerAuth::Token,
+            async {
+                let _ = stop_rx.await;
+            },
+        ));
         (addr, stop_tx, handle)
     }
 
@@ -255,8 +290,13 @@ mod tests {
         let (addr, stop_tx, handle) = rt.block_on(spawn(vec![task_core::McpScope::TasksRead]));
         let base_url = format!("http://{addr}");
 
-        let out = call_tool(&base_url, Some("secret"), "tasks_list", serde_json::json!({}))
-            .expect("call_tool");
+        let out = call_tool(
+            &base_url,
+            Some("secret"),
+            "tasks_list",
+            serde_json::json!({}),
+        )
+        .expect("call_tool");
         let parsed: Value = serde_json::from_str(&out).expect("pretty json");
         assert_eq!(parsed["items"], serde_json::json!([]));
 
@@ -270,8 +310,13 @@ mod tests {
         let (addr, stop_tx, handle) = rt.block_on(spawn(vec![]));
         let base_url = format!("http://{addr}");
 
-        let err = call_tool(&base_url, Some("secret"), "tasks_list", serde_json::json!({}))
-            .expect_err("should fail");
+        let err = call_tool(
+            &base_url,
+            Some("secret"),
+            "tasks_list",
+            serde_json::json!({}),
+        )
+        .expect_err("should fail");
         assert!(matches!(err, CallError::Rpc { code, .. } if code == crate::rpc::METHOD_NOT_FOUND));
 
         let _ = stop_tx.send(());
@@ -284,8 +329,13 @@ mod tests {
         let (addr, stop_tx, handle) = rt.block_on(spawn(vec![task_core::McpScope::TasksRead]));
         let base_url = format!("http://{addr}");
 
-        let err = call_tool(&base_url, Some("wrong"), "tasks_list", serde_json::json!({}))
-            .expect_err("should fail");
+        let err = call_tool(
+            &base_url,
+            Some("wrong"),
+            "tasks_list",
+            serde_json::json!({}),
+        )
+        .expect_err("should fail");
         assert!(matches!(err, CallError::Http { status: 401, .. }), "{err}");
 
         let _ = stop_tx.send(());
@@ -300,8 +350,13 @@ mod tests {
         drop(listener);
         let base_url = format!("http://{addr}");
 
-        let err = call_tool(&base_url, Some("secret"), "tasks_list", serde_json::json!({}))
-            .expect_err("should fail");
+        let err = call_tool(
+            &base_url,
+            Some("secret"),
+            "tasks_list",
+            serde_json::json!({}),
+        )
+        .expect_err("should fail");
         assert!(matches!(err, CallError::Transport(_)), "{err}");
     }
 }

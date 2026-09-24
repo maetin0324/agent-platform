@@ -206,7 +206,12 @@ pub async fn deliver_claude_code(cwd: &Path, skills: &[SkillMount]) -> std::io::
 mod tests {
     use super::*;
 
-    fn write_skill(dir: &std::path::Path, name: &str, description: &str, body_extra: &str) -> SkillMount {
+    fn write_skill(
+        dir: &std::path::Path,
+        name: &str,
+        description: &str,
+        body_extra: &str,
+    ) -> SkillMount {
         let skill_dir = dir.join(name);
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
@@ -377,7 +382,11 @@ mod tests {
             "stale body\n",
         )
         .unwrap();
-        std::fs::write(cwd.path().join(".claude/skills/writing/stale.txt"), "gone\n").unwrap();
+        std::fs::write(
+            cwd.path().join(".claude/skills/writing/stale.txt"),
+            "gone\n",
+        )
+        .unwrap();
 
         deliver_claude_code(cwd.path(), &[mount]).await.unwrap();
 
@@ -416,7 +425,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mount = write_skill(dir.path(), "rust-review", "d", "");
         let cwd = tempfile::tempdir().unwrap();
-        std::fs::write(cwd.path().join("AGENTS.md"), "# Notes\n\nBuild with cargo.\n").unwrap();
+        std::fs::write(
+            cwd.path().join("AGENTS.md"),
+            "# Notes\n\nBuild with cargo.\n",
+        )
+        .unwrap();
 
         deliver_agents_md(cwd.path(), std::slice::from_ref(&mount))
             .await

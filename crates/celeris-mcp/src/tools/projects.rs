@@ -40,7 +40,8 @@ async fn list_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: ListArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: ListArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let limit = clamp_limit(args.limit);
     let status = match args.status.as_deref() {
         Some(s) => Some(
@@ -113,14 +114,18 @@ async fn get_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: GetArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: GetArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let id: ProjectId = args
         .id
         .parse()
         .map_err(|_| ToolError::invalid_params(format!("{:?} is not a project id", args.id)))?;
     let out = state
         .blocking(move |store| -> Result<Option<GetOutput>, ToolError> {
-            let Some(project) = store.project_get(id).map_err(|e| ToolError::internal(e.to_string()))? else {
+            let Some(project) = store
+                .project_get(id)
+                .map_err(|e| ToolError::internal(e.to_string()))?
+            else {
                 return Ok(None);
             };
             let milestones = store
@@ -160,7 +165,10 @@ async fn get_impl(
         .await?;
     match out {
         Some(o) => ToolOutput::from_serialize(&o),
-        None => Err(ToolError::not_found(format!("project {} was not found", args.id))),
+        None => Err(ToolError::not_found(format!(
+            "project {} was not found",
+            args.id
+        ))),
     }
 }
 

@@ -182,7 +182,9 @@ pub trait NodeSessionStore: Send + Sync {
 const SELECT_NODE_SESSION: &str = "SELECT id, node_id, kind, project_id, adapter, account_id, \
      session_id, turns, approx_tokens, created_at, last_used_at, retired_at FROM node_sessions";
 
-fn row_to_node_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<NodeSession, StoreError>> {
+fn row_to_node_session(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<NodeSession, StoreError>> {
     let id: String = row.get(0)?;
     let node_id: String = row.get(1)?;
     let kind_col: String = row.get(2)?;
@@ -302,7 +304,12 @@ impl NodeSessionStore for SqliteStore {
         let changed = conn.execute(
             "UPDATE node_sessions SET retired_at = ?4 \
              WHERE node_id = ?1 AND kind = ?2 AND project_id IS ?3 AND retired_at IS NULL",
-            rusqlite::params![node_id, kind.as_str(), project_id.map(|p| p.to_string()), ts],
+            rusqlite::params![
+                node_id,
+                kind.as_str(),
+                project_id.map(|p| p.to_string()),
+                ts
+            ],
         )?;
         Ok(changed > 0)
     }
@@ -343,7 +350,12 @@ impl NodeSessionStore for SqliteStore {
         let changed = conn.execute(
             "UPDATE node_sessions SET session_id = ?4 \
              WHERE node_id = ?1 AND kind = ?2 AND project_id IS ?3 AND retired_at IS NULL",
-            rusqlite::params![node_id, kind.as_str(), project_id.map(|p| p.to_string()), session_id],
+            rusqlite::params![
+                node_id,
+                kind.as_str(),
+                project_id.map(|p| p.to_string()),
+                session_id
+            ],
         )?;
         Ok(changed > 0)
     }

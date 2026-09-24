@@ -27,12 +27,17 @@ pub struct ResourceDescriptor {
     pub mime_type: &'static str,
 }
 
-pub async fn list(state: &Arc<McpState>, client: &AuthedClient) -> Result<Vec<ResourceDescriptor>, ToolError> {
+pub async fn list(
+    state: &Arc<McpState>,
+    client: &AuthedClient,
+) -> Result<Vec<ResourceDescriptor>, ToolError> {
     let mut out = Vec::new();
     if client.has_scope(McpScope::KnowledgeRead)
         && let Some(root) = state.knowledge_root.clone()
     {
-        let items = state.blocking(move |_store| task_ops::knowledge::ensure_index(&root).items).await;
+        let items = state
+            .blocking(move |_store| task_ops::knowledge::ensure_index(&root).items)
+            .await;
         for item in items {
             out.push(ResourceDescriptor {
                 uri: format!("celeris://knowledge/{}", item.path),
@@ -59,7 +64,9 @@ pub async fn list(state: &Arc<McpState>, client: &AuthedClient) -> Result<Vec<Re
     if client.has_scope(McpScope::SkillsRead)
         && let Some(root) = state.knowledge_root.clone()
     {
-        let skills = state.blocking(move |_store| task_ops::knowledge::skills_list(&root)).await;
+        let skills = state
+            .blocking(move |_store| task_ops::knowledge::skills_list(&root))
+            .await;
         for skill in skills {
             out.push(ResourceDescriptor {
                 uri: format!("celeris://skills/{}", skill.name),
@@ -75,10 +82,14 @@ pub async fn list(state: &Arc<McpState>, client: &AuthedClient) -> Result<Vec<Re
 /// `celeris://<kind>/<id>` を `(tool 名, args)` に写す。
 fn resolve(uri: &str) -> Result<(&'static str, serde_json::Value), ToolError> {
     let Some(rest) = uri.strip_prefix("celeris://") else {
-        return Err(ToolError::invalid_params(format!("{uri:?} is not a celeris:// resource")));
+        return Err(ToolError::invalid_params(format!(
+            "{uri:?} is not a celeris:// resource"
+        )));
     };
     let Some((kind, id)) = rest.split_once('/') else {
-        return Err(ToolError::invalid_params(format!("{uri:?} is missing an id")));
+        return Err(ToolError::invalid_params(format!(
+            "{uri:?} is missing an id"
+        )));
     };
     match kind {
         "knowledge" => Ok(("knowledge_get", serde_json::json!({"path": id}))),
@@ -86,7 +97,9 @@ fn resolve(uri: &str) -> Result<(&'static str, serde_json::Value), ToolError> {
         "projects" => Ok(("projects_get", serde_json::json!({"id": id}))),
         "org" => Ok(("org_get", serde_json::json!({"node_id": id}))),
         "skills" => Ok(("skills_get", serde_json::json!({"name": id}))),
-        other => Err(ToolError::invalid_params(format!("unknown resource kind {other:?}"))),
+        other => Err(ToolError::invalid_params(format!(
+            "unknown resource kind {other:?}"
+        ))),
     }
 }
 
@@ -96,7 +109,8 @@ pub async fn read(
     uri: &str,
 ) -> Result<ToolOutput, ToolError> {
     let (tool_name, args) = resolve(uri)?;
-    let def = tools::find(tool_name).ok_or_else(|| ToolError::internal("unregistered resource tool"))?;
+    let def =
+        tools::find(tool_name).ok_or_else(|| ToolError::internal("unregistered resource tool"))?;
     if !client.has_scope(def.scope) {
         return Err(ToolError::not_found(format!("{uri:?} was not found")));
     }

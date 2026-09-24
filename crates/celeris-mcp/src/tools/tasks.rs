@@ -29,11 +29,16 @@ use crate::state::McpState;
 fn map_ops_err(e: OpsError) -> ToolError {
     match e {
         OpsError::NotFound(id) => ToolError::not_found(format!("task {id} was not found")),
-        OpsError::ProjectNotFound(id) => ToolError::not_found(format!("project {id} was not found")),
-        OpsError::MilestoneNotFound(id) => ToolError::not_found(format!("milestone {id} was not found")),
-        OpsError::InvalidState { .. } | OpsError::Validation(_) | OpsError::Conflict { .. } | OpsError::InvalidLifecycle { .. } => {
-            ToolError::invalid_params(e.to_string())
+        OpsError::ProjectNotFound(id) => {
+            ToolError::not_found(format!("project {id} was not found"))
         }
+        OpsError::MilestoneNotFound(id) => {
+            ToolError::not_found(format!("milestone {id} was not found"))
+        }
+        OpsError::InvalidState { .. }
+        | OpsError::Validation(_)
+        | OpsError::Conflict { .. }
+        | OpsError::InvalidLifecycle { .. } => ToolError::invalid_params(e.to_string()),
         OpsError::Store(_) => ToolError::internal(e.to_string()),
     }
 }
@@ -78,7 +83,8 @@ async fn list_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: ListArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: ListArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let limit = clamp_limit(args.limit);
     let statuses = match args.status.as_deref() {
         Some(s) => vec![
@@ -112,7 +118,10 @@ async fn list_impl(
             status: t.status,
             assignee: t.assignee,
             project_id: t.project_id.map(|p| p.to_string()),
-            updated_at: t.updated_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+            updated_at: t
+                .updated_at
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
         })
         .collect();
     ToolOutput::from_serialize(&ListOutput { items })
@@ -172,14 +181,18 @@ async fn get_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: GetArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: GetArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let id: TaskId = args
         .id
         .parse()
         .map_err(|_| ToolError::invalid_params(format!("{:?} is not a task id", args.id)))?;
     let out = state
         .blocking(move |store| -> Result<Option<GetOutput>, ToolError> {
-            let Some(task) = store.get(id).map_err(|e| ToolError::internal(e.to_string()))? else {
+            let Some(task) = store
+                .get(id)
+                .map_err(|e| ToolError::internal(e.to_string()))?
+            else {
                 return Ok(None);
             };
             let latest_report = store
@@ -204,7 +217,9 @@ async fn get_impl(
                 after_seq = rows.last().map(|r| r.seq);
                 for row in &rows {
                     if let Event::ArtifactProduced { artifact, .. } = &row.event
-                        && !artifacts.iter().any(|a: &ArtifactSummary| a.path == artifact.path)
+                        && !artifacts
+                            .iter()
+                            .any(|a: &ArtifactSummary| a.path == artifact.path)
                     {
                         artifacts.push(ArtifactSummary {
                             name: artifact.name.clone(),
@@ -230,7 +245,10 @@ async fn get_impl(
         .await?;
     match out {
         Some(o) => ToolOutput::from_serialize(&o),
-        None => Err(ToolError::not_found(format!("task {} was not found", args.id))),
+        None => Err(ToolError::not_found(format!(
+            "task {} was not found",
+            args.id
+        ))),
     }
 }
 
@@ -266,14 +284,23 @@ async fn comment_impl(
     client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: CommentArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: CommentArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let id = parse_task_id(&args.id)?;
     let author = format!("mcp:{}", client.id);
     let result = state
-        .blocking(move |store| -> Result<task_ops::comment::CommentResult, ToolError> {
-            task_ops::comment::post_human_comment_as(store, id, Some(author), args.text, OffsetDateTime::now_utc())
+        .blocking(
+            move |store| -> Result<task_ops::comment::CommentResult, ToolError> {
+                task_ops::comment::post_human_comment_as(
+                    store,
+                    id,
+                    Some(author),
+                    args.text,
+                    OffsetDateTime::now_utc(),
+                )
                 .map_err(map_ops_err)
-        })
+            },
+        )
         .await?;
     ToolOutput::from_serialize(&result)
 }
@@ -313,14 +340,16 @@ async fn answer_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: AnswerArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: AnswerArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     if args.answer.trim().is_empty() {
         return Err(ToolError::invalid_params("answer must not be blank"));
     }
     let id = parse_task_id(&args.id)?;
     let result = state
         .blocking(move |store| {
-            task_ops::gate::answer(store, id, args.answer, args.expected_status).map_err(map_ops_err)
+            task_ops::gate::answer(store, id, args.answer, args.expected_status)
+                .map_err(map_ops_err)
         })
         .await?;
     ToolOutput::from_serialize(&result)
@@ -357,7 +386,8 @@ async fn retry_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: RetryArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: RetryArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let id = parse_task_id(&args.id)?;
     let result = state
         .blocking(move |store| {
@@ -401,27 +431,30 @@ async fn cancel_impl(
     client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: CancelArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: CancelArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let id = parse_task_id(&args.id)?;
     let author = format!("mcp:{}", client.id);
     let reason = args.reason.filter(|r| !r.trim().is_empty());
     let result = state
-        .blocking(move |store| -> Result<task_ops::gate::TransitionResult, ToolError> {
-            if let Some(reason) = reason {
-                // ADR-0044 D2 の `post_node_comment` と同じ「人を起こさない」記録（`reason` の監査）。
-                // `gate::cancel` 自体には actor / reason を運ぶ欄が無いので、これで補う。
-                task_ops::comment::post_node_comment(
-                    store,
-                    id,
-                    Some(author),
-                    None,
-                    reason,
-                    OffsetDateTime::now_utc(),
-                )
-                .map_err(map_ops_err)?;
-            }
-            task_ops::gate::cancel(store, id, None).map_err(map_ops_err)
-        })
+        .blocking(
+            move |store| -> Result<task_ops::gate::TransitionResult, ToolError> {
+                if let Some(reason) = reason {
+                    // ADR-0044 D2 の `post_node_comment` と同じ「人を起こさない」記録（`reason` の監査）。
+                    // `gate::cancel` 自体には actor / reason を運ぶ欄が無いので、これで補う。
+                    task_ops::comment::post_node_comment(
+                        store,
+                        id,
+                        Some(author),
+                        None,
+                        reason,
+                        OffsetDateTime::now_utc(),
+                    )
+                    .map_err(map_ops_err)?;
+                }
+                task_ops::gate::cancel(store, id, None).map_err(map_ops_err)
+            },
+        )
         .await?;
     ToolOutput::from_serialize(&result)
 }
@@ -459,11 +492,14 @@ async fn approve_impl(
     client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: ApproveArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: ApproveArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let id = parse_task_id(&args.id)?;
     let by = format!("mcp:{}", client.id);
     let result = state
-        .blocking(move |store| task_ops::gate::approve_as(store, id, &by, args.note, None).map_err(map_ops_err))
+        .blocking(move |store| {
+            task_ops::gate::approve_as(store, id, &by, args.note, None).map_err(map_ops_err)
+        })
         .await?;
     ToolOutput::from_serialize(&result)
 }
@@ -500,7 +536,8 @@ async fn reject_impl(
     client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: RejectArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: RejectArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     if args.reason.trim().is_empty() {
         return Err(ToolError::invalid_params("reason must not be blank"));
     }

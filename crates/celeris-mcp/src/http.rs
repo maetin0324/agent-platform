@@ -78,7 +78,12 @@ async fn post_mcp(State(state): State<HttpState>, headers: HeaderMap, body: Byte
     let authed = mcp
         .blocking(move |store| {
             let bearer = auth::bearer_token(bearer_header.as_deref());
-            auth::authenticate(store, &listener_auth, bearer, time::OffsetDateTime::now_utc())
+            auth::authenticate(
+                store,
+                &listener_auth,
+                bearer,
+                time::OffsetDateTime::now_utc(),
+            )
         })
         .await;
     let client = match authed {
@@ -97,10 +102,17 @@ async fn post_mcp(State(state): State<HttpState>, headers: HeaderMap, body: Byte
     if req.method != "initialize" {
         let session_id = headers.get(SESSION_HEADER).and_then(|v| v.to_str().ok());
         match session_id {
-            None => return json_error(StatusCode::BAD_REQUEST, "Mcp-Session-Id header is required"),
+            None => {
+                return json_error(StatusCode::BAD_REQUEST, "Mcp-Session-Id header is required");
+            }
             Some(sid) => match state.mcp.session_client(sid) {
                 Some(owner) if owner == client.id => {}
-                Some(_) => return json_error(StatusCode::BAD_REQUEST, "session belongs to another client"),
+                Some(_) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "session belongs to another client",
+                    );
+                }
                 None => return json_error(StatusCode::NOT_FOUND, "unknown or expired session"),
             },
         }

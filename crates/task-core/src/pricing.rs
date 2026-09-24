@@ -83,8 +83,7 @@ pub fn estimate_cost_usd(model: &str, usage: &Usage) -> Option<f64> {
     let price = price_for(model)?;
     let cost = usage.input_tokens.unwrap_or(0) as f64 / 1_000_000.0 * price.input_per_million
         + usage.output_tokens.unwrap_or(0) as f64 / 1_000_000.0 * price.output_per_million
-        + usage.cache_read_tokens.unwrap_or(0) as f64 / 1_000_000.0
-            * price.cache_read_per_million
+        + usage.cache_read_tokens.unwrap_or(0) as f64 / 1_000_000.0 * price.cache_read_per_million
         + usage.cache_creation_tokens.unwrap_or(0) as f64 / 1_000_000.0
             * price.cache_write_per_million;
     Some(cost)
@@ -129,7 +128,10 @@ mod tests {
 
     #[test]
     fn no_tokens_at_all_is_none_even_for_a_known_model() {
-        assert_eq!(estimate_cost_usd("claude-sonnet-5", &Usage::default()), None);
+        assert_eq!(
+            estimate_cost_usd("claude-sonnet-5", &Usage::default()),
+            None
+        );
     }
 
     #[test]

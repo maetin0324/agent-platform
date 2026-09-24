@@ -47,12 +47,7 @@ fn run_ls(store: &dyn TaskStore, args: ProjectsLsArgs) -> Result<ExitCode, CliEr
     }
     projects.sort_by_key(|p| p.created_at);
     for project in &projects {
-        outln!(
-            "{} {:?} {}",
-            project.id,
-            project.status,
-            project.title
-        );
+        outln!("{} {:?} {}", project.id, project.status, project.title);
     }
     Ok(ExitCode::SUCCESS)
 }
