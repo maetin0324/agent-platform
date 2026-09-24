@@ -209,12 +209,19 @@ pub struct Lease {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Check {
-    Command { cmd: String, expect_exit: i32 },
-    ArtifactExists { name: String },
+    Command {
+        cmd: String,
+        expect_exit: i32,
+    },
+    ArtifactExists {
+        name: String,
+    },
     /// ADR-0067 D2: 知識ベースのページ参照（`task_core::knowledge::page_path` と同じ形。KB の根からの
     /// 相対、`.md`、`..` 不可。実在の検証は組み立て時には行わない — `Check::ArtifactExists` と同様、
     /// 人が確認するときに知識ベース側で気付く）。
-    KnowledgePage { path: String },
+    KnowledgePage {
+        path: String,
+    },
     Reviewer,
     Human,
 }
@@ -261,10 +268,7 @@ pub fn validate_human_checks_have_deliverable(acceptance: &[Criterion]) -> Resul
     if has_deliverable {
         Ok(())
     } else {
-        Err(
-            "人が確認する成果物が GUI から見える場所（artifacts か知識ベース）に無い"
-                .to_string(),
-        )
+        Err("人が確認する成果物が GUI から見える場所（artifacts か知識ベース）に無い".to_string())
     }
 }
 
@@ -1176,10 +1180,9 @@ mod tests {
     /// Phase 98 までの JSON と 1 バイトも変わらない。
     #[test]
     fn the_remote_workspace_mode_defaults_to_worktree_and_stays_out_of_the_json_when_omitted() {
-        let plain: WorkspaceSpec = serde_json::from_str(
-            r#"{"kind":"remote","cluster":"pegasus","path":"/work/x"}"#,
-        )
-        .expect("parse");
+        let plain: WorkspaceSpec =
+            serde_json::from_str(r#"{"kind":"remote","cluster":"pegasus","path":"/work/x"}"#)
+                .expect("parse");
         assert_eq!(
             plain,
             WorkspaceSpec::Remote {
@@ -1188,7 +1191,11 @@ mod tests {
                 mode: None,
             }
         );
-        assert_eq!(plain.remote_mode(), WorkspaceMode::Worktree, "既定は worktree");
+        assert_eq!(
+            plain.remote_mode(),
+            WorkspaceMode::Worktree,
+            "既定は worktree"
+        );
         assert_eq!(
             serde_json::to_string(&plain).expect("json"),
             r#"{"kind":"remote","cluster":"pegasus","path":"/work/x"}"#
@@ -1207,7 +1214,11 @@ mod tests {
             }
         );
         assert_eq!(shared.remote_mode(), WorkspaceMode::Shared);
-        assert!(serde_json::to_string(&shared).expect("json").contains(r#""mode":"shared""#));
+        assert!(
+            serde_json::to_string(&shared)
+                .expect("json")
+                .contains(r#""mode":"shared""#)
+        );
 
         // ADR-0059 D6: `path` は省略可（省略すると空文字列。celeris が実効 `work_dir` から解決する）。
         let no_path: WorkspaceSpec =

@@ -45,7 +45,8 @@ async fn list_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: ListArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: ListArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let root = kb_root(state)?;
     let limit = clamp_limit(args.limit);
     let scope = args.scope;
@@ -112,7 +113,8 @@ async fn search_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: SearchArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: SearchArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let root = kb_root(state)?;
     let limit = clamp_limit(args.limit);
     let items = state
@@ -168,7 +170,8 @@ async fn get_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: GetArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: GetArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let root = kb_root(state)?;
     let path = task_core::knowledge::page_path(&args.path)
         .map_err(|e| ToolError::invalid_params(format!("{:?}: {e}", args.path)))?;
@@ -241,7 +244,8 @@ async fn propose_impl(
     client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: ProposeArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: ProposeArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let root = kb_root(state)?;
     let mut sources = args.sources;
     let mcp_source = format!("mcp:{}", client.id);
@@ -257,9 +261,14 @@ async fn propose_impl(
         body: args.body,
         path: None,
     };
-    let outcome = state.blocking(move |_store| kb::record(&root, &request)).await;
+    let outcome = state
+        .blocking(move |_store| kb::record(&root, &request))
+        .await;
     match outcome {
-        Ok(o) => ToolOutput::from_serialize(&ProposeOutput { path: o.path, id: o.id }),
+        Ok(o) => ToolOutput::from_serialize(&ProposeOutput {
+            path: o.path,
+            id: o.id,
+        }),
         Err(kb::RecordError::Secret(why)) => {
             Err(ToolError::rejected(format!("秘密が含まれています: {why}")))
         }

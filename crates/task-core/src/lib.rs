@@ -20,9 +20,9 @@ pub mod integrations;
 pub mod knowledge;
 /// ADR-0047 D4（Phase 62）: 知識整理 run の追跡（`knowledge_runs`）。
 pub mod knowledge_run;
-pub mod message;
 /// ADR-0056 D1 / D4（Phase 78）: MCP サーバーの認証（`mcp_clients`）とログ（`mcp_calls`）。
 pub mod mcp;
+pub mod message;
 pub mod model;
 /// ADR-0064 D1（Phase 110a）: `/proc/self/mountinfo` からマウント点のファイルシステム種別・ソースを
 /// 引く純関数（DB がネットワーク越し／loop デバイス上にあることを警告するため）。

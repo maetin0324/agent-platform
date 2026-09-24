@@ -82,7 +82,9 @@ async fn refresh_tokens(
     let access_token = body
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| SourceError::Credentials("refresh response missing access_token".to_string()))?
+        .ok_or_else(|| {
+            SourceError::Credentials("refresh response missing access_token".to_string())
+        })?
         .to_string();
     let refresh_token = body
         .get("refresh_token")
@@ -153,16 +155,30 @@ fn message_to_input_items(msg: &ChatMessage) -> Vec<Value> {
 
 /// クライアントに system メッセージが無いときに送る既定の `instructions`（Codex CLI は常に
 /// 何らかの instructions を送るため、空にしない。ADR-0053 Phase 65b 追記）。
-const DEFAULT_INSTRUCTIONS: &str = "You are a helpful assistant, accessed through the celeris LLM proxy.";
+const DEFAULT_INSTRUCTIONS: &str =
+    "You are a helpful assistant, accessed through the celeris LLM proxy.";
 
-pub fn to_responses_body(req: &crate::openai::ChatCompletionRequest, model: &str, cfg: &CodexOauthConfig) -> Value {
+pub fn to_responses_body(
+    req: &crate::openai::ChatCompletionRequest,
+    model: &str,
+    cfg: &CodexOauthConfig,
+) -> Value {
     let instructions: Vec<String> = req
         .messages
         .iter()
         .filter(|m| m.role == "system")
-        .map(|m| m.content.as_ref().map(MessageContent::as_text).unwrap_or_default())
+        .map(|m| {
+            m.content
+                .as_ref()
+                .map(MessageContent::as_text)
+                .unwrap_or_default()
+        })
         .collect();
-    let input: Vec<Value> = req.messages.iter().flat_map(message_to_input_items).collect();
+    let input: Vec<Value> = req
+        .messages
+        .iter()
+        .flat_map(message_to_input_items)
+        .collect();
     let instructions_text = if instructions.is_empty() {
         DEFAULT_INSTRUCTIONS.to_string()
     } else {
@@ -180,7 +196,9 @@ pub fn to_responses_body(req: &crate::openai::ChatCompletionRequest, model: &str
         "instructions": instructions_text,
         "parallel_tool_calls": true,
     });
-    let obj = body.as_object_mut().unwrap_or_else(|| unreachable!("body is always an object"));
+    let obj = body
+        .as_object_mut()
+        .unwrap_or_else(|| unreachable!("body is always an object"));
     // Codex CLI は temperature / max_output_tokens を送らない（送ると拒否されることがある）。
     // 既定では省略し、`send_sampling_params = true` で明示的に opt-in したときだけ転送する。
     if cfg.send_sampling_params {
@@ -192,8 +210,14 @@ pub fn to_responses_body(req: &crate::openai::ChatCompletionRequest, model: &str
         }
     }
     if let Some(effort) = &cfg.reasoning_effort {
-        obj.insert("reasoning".to_string(), json!({"effort": effort, "summary": "auto"}));
-        obj.insert("include".to_string(), json!(["reasoning.encrypted_content"]));
+        obj.insert(
+            "reasoning".to_string(),
+            json!({"effort": effort, "summary": "auto"}),
+        );
+        obj.insert(
+            "include".to_string(),
+            json!(["reasoning.encrypted_content"]),
+        );
     }
     if let Some(tools) = &req.tools {
         let mapped: Vec<Value> = tools
@@ -230,30 +254,67 @@ pub fn to_responses_body(req: &crate::openai::ChatCompletionRequest, model: &str
 // 応答の写し（Codex Responses → OpenAI、非 stream）
 // ---------------------------------------------------------------------------
 
-pub fn from_responses_body(body: &Value, requested_model: &str) -> Result<ChatCompletionResponse, SourceError> {
+pub fn from_responses_body(
+    body: &Value,
+    requested_model: &str,
+) -> Result<ChatCompletionResponse, SourceError> {
     if let Some(err) = body.get("error") {
-        let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("upstream error");
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("upstream error");
         return Err(SourceError::Upstream {
             status: 200,
             summary: msg.chars().take(200).collect(),
         });
     }
-    let id = body.get("id").and_then(|v| v.as_str()).map(str::to_string).unwrap_or_else(|| format!("chatcmpl-{}", Ulid::new()));
+    let id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("chatcmpl-{}", Ulid::new()));
     let mut text = String::new();
     let mut tool_calls = Vec::new();
-    for item in body.get("output").and_then(|v| v.as_array()).into_iter().flatten() {
+    for item in body
+        .get("output")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+    {
         match item.get("type").and_then(|v| v.as_str()) {
             Some("message") => {
-                for part in item.get("content").and_then(|v| v.as_array()).into_iter().flatten() {
+                for part in item
+                    .get("content")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
                     if part.get("type").and_then(|v| v.as_str()) == Some("output_text") {
-                        text.push_str(part.get("text").and_then(|v| v.as_str()).unwrap_or_default());
+                        text.push_str(
+                            part.get("text")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default(),
+                        );
                     }
                 }
             }
             Some("function_call") => {
-                let call_id = item.get("call_id").or_else(|| item.get("id")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                let arguments = item.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+                let call_id = item
+                    .get("call_id")
+                    .or_else(|| item.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                let arguments = item
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}")
+                    .to_string();
                 tool_calls.push(ToolCall {
                     id: call_id,
                     kind: "function".to_string(),
@@ -264,7 +325,10 @@ pub fn from_responses_body(body: &Value, requested_model: &str) -> Result<ChatCo
         }
     }
     let has_tool_calls = !tool_calls.is_empty();
-    let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("completed");
+    let status = body
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("completed");
     let incomplete_reason = body
         .get("incomplete_details")
         .and_then(|d| d.get("reason"))
@@ -286,9 +350,17 @@ pub fn from_responses_body(body: &Value, requested_model: &str) -> Result<ChatCo
     });
     let message = ChatMessage {
         role: "assistant".to_string(),
-        content: if text.is_empty() { None } else { Some(MessageContent::Text(text)) },
+        content: if text.is_empty() {
+            None
+        } else {
+            Some(MessageContent::Text(text))
+        },
         name: None,
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
         tool_call_id: None,
     };
     Ok(ChatCompletionResponse::new(
@@ -328,9 +400,23 @@ impl ResponsesStreamMapper {
         }
     }
 
-    fn chunk(&self, delta: Delta, finish_reason: Option<String>) -> crate::openai::ChatCompletionChunk {
-        let mut c = crate::openai::ChatCompletionChunk::new(&self.id, &self.model, self.created, delta, finish_reason);
-        if c.choices.first().map(|ch| ch.finish_reason.is_some()).unwrap_or(false) {
+    fn chunk(
+        &self,
+        delta: Delta,
+        finish_reason: Option<String>,
+    ) -> crate::openai::ChatCompletionChunk {
+        let mut c = crate::openai::ChatCompletionChunk::new(
+            &self.id,
+            &self.model,
+            self.created,
+            delta,
+            finish_reason,
+        );
+        if c.choices
+            .first()
+            .map(|ch| ch.finish_reason.is_some())
+            .unwrap_or(false)
+        {
             c.usage = self.usage;
         }
         c
@@ -339,15 +425,27 @@ impl ResponsesStreamMapper {
     fn item_key(data: &Value) -> String {
         data.get("item_id")
             .and_then(|v| v.as_str())
-            .or_else(|| data.get("item").and_then(|i| i.get("id")).and_then(|v| v.as_str()))
+            .or_else(|| {
+                data.get("item")
+                    .and_then(|i| i.get("id"))
+                    .and_then(|v| v.as_str())
+            })
             .map(str::to_string)
-            .unwrap_or_else(|| data.get("output_index").map(|v| v.to_string()).unwrap_or_default())
+            .unwrap_or_else(|| {
+                data.get("output_index")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default()
+            })
     }
 
     pub fn feed(&mut self, event: &str, data: &Value) -> Vec<crate::openai::ChatCompletionChunk> {
         match event {
             "response.created" => {
-                if let Some(id) = data.get("response").and_then(|r| r.get("id")).and_then(|v| v.as_str()) {
+                if let Some(id) = data
+                    .get("response")
+                    .and_then(|r| r.get("id"))
+                    .and_then(|v| v.as_str())
+                {
                     self.id = id.to_string();
                 }
                 vec![self.chunk(
@@ -359,7 +457,11 @@ impl ResponsesStreamMapper {
                 )]
             }
             "response.output_text.delta" => {
-                let text = data.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let text = data
+                    .get("delta")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 vec![self.chunk(
                     Delta {
                         content: Some(text),
@@ -376,8 +478,16 @@ impl ResponsesStreamMapper {
                     let idx = self.next_tool_index;
                     self.next_tool_index += 1;
                     self.tool_index_by_item.insert(key, idx);
-                    let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
                     vec![self.chunk(
                         Delta {
                             tool_calls: Some(vec![ToolCallDelta {
@@ -402,7 +512,11 @@ impl ResponsesStreamMapper {
                 let Some(idx) = self.tool_index_by_item.get(&key).copied() else {
                     return vec![];
                 };
-                let partial = data.get("delta").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                let partial = data
+                    .get("delta")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 vec![self.chunk(
                     Delta {
                         tool_calls: Some(vec![ToolCallDelta {
@@ -511,7 +625,9 @@ pub async fn send(
     // （ADR-0053 Phase 65b 追記）。
     if !req.stream {
         let requested_model = req.model.clone();
-        return aggregate_stream(resp.bytes_stream(), &requested_model).await.map(SendOutcome::NonStream);
+        return aggregate_stream(resp.bytes_stream(), &requested_model)
+            .await
+            .map(SendOutcome::NonStream);
     }
 
     let model = req.model.clone();
@@ -543,19 +659,40 @@ async fn aggregate_stream(
             let data: Value = serde_json::from_str(&ev.data).unwrap_or(Value::Null);
             match event_name.as_str() {
                 "response.created" => {
-                    if let Some(id) = data.get("response").and_then(|r| r.get("id")).and_then(|v| v.as_str()) {
+                    if let Some(id) = data
+                        .get("response")
+                        .and_then(|r| r.get("id"))
+                        .and_then(|v| v.as_str())
+                    {
                         response_id = Some(id.to_string());
                     }
                 }
                 "response.output_text.delta" => {
-                    text.push_str(data.get("delta").and_then(|v| v.as_str()).unwrap_or_default());
+                    text.push_str(
+                        data.get("delta")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default(),
+                    );
                 }
                 "response.output_item.done" => {
                     let item = data.get("item").cloned().unwrap_or_default();
                     if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
-                        let call_id = item.get("call_id").or_else(|| item.get("id")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-                        let arguments = item.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+                        let call_id = item
+                            .get("call_id")
+                            .or_else(|| item.get("id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let name = item
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string();
+                        let arguments = item
+                            .get("arguments")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{}")
+                            .to_string();
                         tool_calls.push(ToolCall {
                             id: call_id,
                             kind: "function".to_string(),
@@ -564,27 +701,38 @@ async fn aggregate_stream(
                     }
                 }
                 "response.completed" | "response.incomplete" | "response.failed" => {
-                    let response = data.get("response").cloned().unwrap_or_else(|| data.clone());
+                    let response = data
+                        .get("response")
+                        .cloned()
+                        .unwrap_or_else(|| data.clone());
                     if let Some(id) = response.get("id").and_then(|v| v.as_str()) {
                         response_id = Some(id.to_string());
                     }
                     usage = response.get("usage").map(|u| {
                         let prompt = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                        let completion = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let completion =
+                            u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
                         Usage {
                             prompt_tokens: prompt,
                             completion_tokens: completion,
                             total_tokens: prompt + completion,
                         }
                     });
-                    let incomplete_reason = response.get("incomplete_details").and_then(|d| d.get("reason")).and_then(|v| v.as_str());
+                    let incomplete_reason = response
+                        .get("incomplete_details")
+                        .and_then(|d| d.get("reason"))
+                        .and_then(|v| v.as_str());
                     if incomplete_reason == Some("max_output_tokens") {
                         finish_reason = "length".to_string();
                     } else if !tool_calls.is_empty() {
                         finish_reason = "tool_calls".to_string();
                     }
                     if event_name == "response.failed" {
-                        let msg = response.get("error").and_then(|e| e.get("message")).and_then(|v| v.as_str()).unwrap_or("upstream error");
+                        let msg = response
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("upstream error");
                         return Err(SourceError::Upstream {
                             status: 200,
                             summary: msg.chars().take(300).collect(),
@@ -610,9 +758,17 @@ async fn aggregate_stream(
     let id = response_id.unwrap_or_else(|| format!("chatcmpl-{}", Ulid::new()));
     let message = ChatMessage {
         role: "assistant".to_string(),
-        content: if text.is_empty() { None } else { Some(MessageContent::Text(text)) },
+        content: if text.is_empty() {
+            None
+        } else {
+            Some(MessageContent::Text(text))
+        },
         name: None,
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
         tool_call_id: None,
     };
     Ok(ChatCompletionResponse::new(
@@ -628,11 +784,13 @@ async fn aggregate_stream(
 fn build_chunk_stream(
     byte_stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
     model: String,
-) -> futures_util::stream::BoxStream<'static, Result<crate::openai::ChatCompletionChunk, SourceError>> {
+) -> futures_util::stream::BoxStream<'static, Result<crate::openai::ChatCompletionChunk, SourceError>>
+{
     let mut byte_stream = Box::pin(byte_stream);
     let mut decoder = SseDecoder::new();
     let mut mapper = ResponsesStreamMapper::new(&model);
-    let mut pending: std::collections::VecDeque<crate::openai::ChatCompletionChunk> = std::collections::VecDeque::new();
+    let mut pending: std::collections::VecDeque<crate::openai::ChatCompletionChunk> =
+        std::collections::VecDeque::new();
     Box::pin(futures_util::stream::poll_fn(move |cx| {
         loop {
             if let Some(chunk) = pending.pop_front() {
@@ -649,7 +807,9 @@ fn build_chunk_stream(
                     continue;
                 }
                 std::task::Poll::Ready(Some(Err(e))) => {
-                    return std::task::Poll::Ready(Some(Err(SourceError::Network(safe_reqwest_error(&e)))));
+                    return std::task::Poll::Ready(Some(Err(SourceError::Network(
+                        safe_reqwest_error(&e),
+                    ))));
                 }
                 std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
                 std::task::Poll::Pending => return std::task::Poll::Pending,
@@ -665,7 +825,11 @@ fn extract_error_summary(body: &str) -> String {
     let value = serde_json::from_str::<Value>(body).ok();
     let mut parts: Vec<String> = Vec::new();
     if let Some(v) = &value {
-        if let Some(msg) = v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+        if let Some(msg) = v
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+        {
             parts.push(msg.to_string());
         }
         if let Some(detail) = v.get("detail").and_then(|d| d.as_str()) {
@@ -735,13 +899,22 @@ mod tests {
         let cfg = test_config();
         let body = to_responses_body(&req, "gpt-5", &cfg);
         assert_eq!(body["store"], false);
-        assert_eq!(body["stream"], true, "クライアントの要求(stream:false)に関わらず上流へはいつも stream:true");
+        assert_eq!(
+            body["stream"], true,
+            "クライアントの要求(stream:false)に関わらず上流へはいつも stream:true"
+        );
         assert!(
             body["instructions"].as_str().is_some_and(|s| !s.is_empty()),
             "system が無くても既定の instructions が入る: {body}"
         );
-        assert!(body.get("temperature").is_none(), "既定では temperature を送らない: {body}");
-        assert!(body.get("max_output_tokens").is_none(), "既定では max_output_tokens を送らない: {body}");
+        assert!(
+            body.get("temperature").is_none(),
+            "既定では temperature を送らない: {body}"
+        );
+        assert!(
+            body.get("max_output_tokens").is_none(),
+            "既定では max_output_tokens を送らない: {body}"
+        );
     }
 
     #[test]
@@ -793,8 +966,14 @@ mod tests {
             extract_error_summary(r#"{"detail":"Store must be set to false"}"#),
             "Store must be set to false"
         );
-        assert_eq!(extract_error_summary(r#"{"error":{"message":"bad request"}}"#), "bad request");
-        assert_eq!(extract_error_summary(r#"{"message":"plain message field"}"#), "plain message field");
+        assert_eq!(
+            extract_error_summary(r#"{"error":{"message":"bad request"}}"#),
+            "bad request"
+        );
+        assert_eq!(
+            extract_error_summary(r#"{"message":"plain message field"}"#),
+            "plain message field"
+        );
         assert_eq!(extract_error_summary(""), "upstream error");
     }
 

@@ -169,7 +169,9 @@ async fn run_aider(
     }
     command.args(&config.extra_args);
     command.arg("--message").arg(&prompt);
-    command.envs(config.env.iter().cloned()).current_dir(req.cwd());
+    command
+        .envs(config.env.iter().cloned())
+        .current_dir(req.cwd());
     // ★ ADR-0043 D3 の差し込み点（コンテナ実行）。`None` ならそのまま（ホスト実行は変わらない）。
     let mut command = crate::container::wrap(command, config.container.as_deref());
     command
@@ -237,8 +239,11 @@ async fn run_aider(
         }
         let wait = (limits.wall_clock - wall_elapsed).min(limits.idle_timeout - idle_elapsed);
 
-        let outcome = match tokio::time::timeout(wait, read_line_limited(&mut reader, MAX_LINE_BYTES))
-            .await
+        let outcome = match tokio::time::timeout(
+            wait,
+            read_line_limited(&mut reader, MAX_LINE_BYTES),
+        )
+        .await
         {
             Err(_elapsed) => continue,
             Ok(Err(e)) => return Err(AdapterError::Io(e)),
@@ -622,7 +627,9 @@ printf '%s' '{"question": "which file?"}' > artifacts/result.json
             .output()
             .is_err()
         {
-            eprintln!("skipping real_aider_binary_end_to_end: {bin} is not runnable (set AIDER_TEST_BIN)");
+            eprintln!(
+                "skipping real_aider_binary_end_to_end: {bin} is not runnable (set AIDER_TEST_BIN)"
+            );
             return;
         }
 

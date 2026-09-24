@@ -18,7 +18,9 @@ pub fn run(
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).map_err(|e| format!("stdin を読めませんでした: {e}"))?;
+        let n = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("stdin を読めませんでした: {e}"))?;
         if n == 0 {
             return Ok(());
         }
@@ -36,7 +38,9 @@ pub fn run(
         if let Some(sid) = &session_id {
             req = req.header("mcp-session-id", sid.clone());
         }
-        let resp = req.send().map_err(|e| format!("MCP サーバーに届きませんでした: {e}"))?;
+        let resp = req
+            .send()
+            .map_err(|e| format!("MCP サーバーに届きませんでした: {e}"))?;
         if let Some(sid) = resp
             .headers()
             .get("mcp-session-id")
@@ -48,9 +52,13 @@ pub fn run(
             // 通知（`id` 無し）は応答本体が無い。
             continue;
         }
-        let body = resp.text().map_err(|e| format!("応答を読めませんでした: {e}"))?;
+        let body = resp
+            .text()
+            .map_err(|e| format!("応答を読めませんでした: {e}"))?;
         writeln!(writer, "{body}").map_err(|e| format!("stdout に書けませんでした: {e}"))?;
-        writer.flush().map_err(|e| format!("stdout を flush できませんでした: {e}"))?;
+        writer
+            .flush()
+            .map_err(|e| format!("stdout を flush できませんでした: {e}"))?;
     }
 }
 
@@ -93,11 +101,18 @@ mod tests {
             "secretary".to_string(),
             None,
         );
-        let listener = rt.block_on(tokio::net::TcpListener::bind(addr)).expect("bind tokio");
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind(addr))
+            .expect("bind tokio");
         let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let server = rt.spawn(crate::serve(listener, state, crate::config::ListenerAuth::Token, async {
-            let _ = stop_rx.await;
-        }));
+        let server = rt.spawn(crate::serve(
+            listener,
+            state,
+            crate::config::ListenerAuth::Token,
+            async {
+                let _ = stop_rx.await;
+            },
+        ));
 
         let base_url = format!("http://{addr}");
         let input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n\

@@ -13,10 +13,10 @@ use std::path::Path;
 use std::time::Duration;
 
 use celeris::notify::{self, NotifyConfig, SendResult};
+use task_core::DeliveryStore;
 use task_core::approval::{Approval, ApprovalId, ApprovalStore, Decision};
 use task_core::message::{Message, MessageId, MessageRole};
 use task_core::notify::{MAX_NOTIFY_ATTEMPTS, NotificationKind, NotificationStore};
-use task_core::DeliveryStore;
 use task_core::org::{OrgKind, OrgNode};
 use task_core::report::{Report, ReportId, ReportKind, ReportStore};
 use task_core::{
@@ -747,12 +747,20 @@ fn task_failed_fires_once_and_is_classified_infra_or_work() {
         .iter()
         .find(|n| n.kind == NotificationKind::TaskFailed && n.body.starts_with("失敗（infra）"))
         .unwrap_or_else(|| panic!("no infra task_failed row: {rows:?}"));
-    assert!(infra_row.body.contains("session resume rejected"), "{}", infra_row.body);
+    assert!(
+        infra_row.body.contains("session resume rejected"),
+        "{}",
+        infra_row.body
+    );
     let work_row = rows
         .iter()
         .find(|n| n.kind == NotificationKind::TaskFailed && n.body.starts_with("失敗（work）"))
         .unwrap_or_else(|| panic!("no work task_failed row: {rows:?}"));
-    assert!(work_row.body.contains("cargo test failed"), "{}", work_row.body);
+    assert!(
+        work_row.body.contains("cargo test failed"),
+        "{}",
+        work_row.body
+    );
 }
 
 /// 配送済み（`deliveries` に `release` が付いた記録がある）のに `failed` になったタスクは、
@@ -814,7 +822,8 @@ fn task_failed_notes_when_the_task_was_already_delivered() {
         .find(|n| n.kind == NotificationKind::TaskFailed)
         .unwrap_or_else(|| panic!("no task_failed row"));
     assert!(
-        row.body.contains("成果は配送済み（release 51d24a61c2ba）だがレビューで不合格"),
+        row.body
+            .contains("成果は配送済み（release 51d24a61c2ba）だがレビューで不合格"),
         "{}",
         row.body
     );

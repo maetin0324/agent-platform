@@ -151,8 +151,9 @@ pub fn edit_task(
             return Err(OpsError::InvalidState {
                 id,
                 context: format!("status={:?}", task.status),
-                action: "edited (workspace); only draft/ready/blocked/failed accept a workspace change"
-                    .to_string(),
+                action:
+                    "edited (workspace); only draft/ready/blocked/failed accept a workspace change"
+                        .to_string(),
             });
         }
     } else if task.status.is_terminal() {
@@ -1115,7 +1116,11 @@ mod tests {
             OffsetDateTime::now_utc(),
         )
         .expect("edit");
-        assert_eq!(result.task.status, Status::Ready, "経路が通ったので ready に戻る");
+        assert_eq!(
+            result.task.status,
+            Status::Ready,
+            "経路が通ったので ready に戻る"
+        );
         assert_eq!(
             store.get(id).expect("get").expect("task").status,
             Status::Ready

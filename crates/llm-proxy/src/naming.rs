@@ -98,7 +98,10 @@ pub fn parse_model(name: &str) -> Result<ModelRequest, ModelNameError> {
         return Err(ModelNameError::Unknown(name.to_string()));
     };
     let Some(tier) = parse_tier(rest) else {
-        return Err(ModelNameError::UnknownTier(prefix.to_string(), rest.to_string()));
+        return Err(ModelNameError::UnknownTier(
+            prefix.to_string(),
+            rest.to_string(),
+        ));
     };
     Ok(ModelRequest::Tiered { scope, tier })
 }

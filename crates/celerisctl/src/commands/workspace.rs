@@ -207,10 +207,13 @@ mod tests {
         .unwrap();
         assert_eq!(result, ExitCode::SUCCESS);
         assert!(target.exists(), "dry-run must not delete anything");
-        assert!(store.events_for(id).unwrap().iter().all(|(_, e)| !matches!(
-            e,
-            Event::WorkspacePruned { .. }
-        )));
+        assert!(
+            store
+                .events_for(id)
+                .unwrap()
+                .iter()
+                .all(|(_, e)| !matches!(e, Event::WorkspacePruned { .. }))
+        );
     }
 
     #[test]
@@ -252,7 +255,10 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).unwrap();
         let store = SqliteStore::open_in_memory().unwrap();
         // 5 秒前に終端になった（設定の 1 秒は超えるが、`--older-than 3600` なら超えない）。
-        let id = insert_done_task(&store, OffsetDateTime::now_utc() - time::Duration::seconds(5));
+        let id = insert_done_task(
+            &store,
+            OffsetDateTime::now_utc() - time::Duration::seconds(5),
+        );
         let target = workspace_root
             .join(id.to_string())
             .join("repos")

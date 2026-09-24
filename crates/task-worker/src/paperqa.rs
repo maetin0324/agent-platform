@@ -447,7 +447,11 @@ pub fn classify_seed_url(url: &str) -> SeedUrlKind {
 pub fn extract_urls(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for token in text.split(|c: char| {
-        c.is_whitespace() || matches!(c, '「' | '」' | '（' | '）' | '(' | ')' | '<' | '>' | '"' | '\'' | '　')
+        c.is_whitespace()
+            || matches!(
+                c,
+                '「' | '」' | '（' | '）' | '(' | ')' | '<' | '>' | '"' | '\'' | '　'
+            )
     }) {
         let trimmed = token.trim_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -1133,10 +1137,16 @@ async fn run_acquire(
     // 平文で残る（権限 664）。API キーの実際の値はここには書かず、子プロセスの環境変数（`.envs(config.env)`
     // で既に渡っている）だけで受け渡す。JSON にはプレースホルダだけを書く（`paperqa_acquire.py` の
     // `resolve_env_placeholder` が解決する）。
-    let api_key_placeholder = env_value(config, "OPENAI_API_KEY").map(|_| "<env:OPENAI_API_KEY>".to_string());
+    let api_key_placeholder =
+        env_value(config, "OPENAI_API_KEY").map(|_| "<env:OPENAI_API_KEY>".to_string());
     let seed_urls_json: Vec<serde_json::Value> = seed_urls
         .iter()
-        .filter(|s| matches!(s.kind, SeedUrlKind::Pdf | SeedUrlKind::Doi | SeedUrlKind::Arxiv))
+        .filter(|s| {
+            matches!(
+                s.kind,
+                SeedUrlKind::Pdf | SeedUrlKind::Doi | SeedUrlKind::Arxiv
+            )
+        })
         .map(|s| serde_json::json!({"url": s.url, "kind": s.kind.as_str()}))
         .collect();
     let input = serde_json::json!({
@@ -1579,7 +1589,10 @@ fn render_evidence_section(summary: &EvidenceSummary, dropped_targets: &[String]
     out.push_str(&format!(
         "- 引用された出典: {} 件（本文からの引用: {} 件、アブストラクトのみ: {} 件、\
          うち PaperQA の証拠〈contexts〉との突き合わせ: {} 件）\n",
-        summary.cited, summary.cited_fulltext, summary.cited_abstract_only, summary.cited_from_contexts
+        summary.cited,
+        summary.cited_fulltext,
+        summary.cited_abstract_only,
+        summary.cited_from_contexts
     ));
     if summary.insufficient {
         out.push_str(&format!(
@@ -1649,7 +1662,12 @@ async fn run_paperqa(
     }
     let fetchable_seeds: Vec<SeedUrl> = seed_urls
         .iter()
-        .filter(|s| matches!(s.kind, SeedUrlKind::Pdf | SeedUrlKind::Doi | SeedUrlKind::Arxiv))
+        .filter(|s| {
+            matches!(
+                s.kind,
+                SeedUrlKind::Pdf | SeedUrlKind::Doi | SeedUrlKind::Arxiv
+            )
+        })
         .cloned()
         .collect();
     let github_urls: Vec<String> = seed_urls
@@ -1827,11 +1845,12 @@ async fn run_paperqa(
         Err(_) => None,
     };
     // 成功と見なせる出力（`error` なし・答えが 1 件でも非空）だけを次に渡す。
-    let usable_ask_output = ask_output.clone().filter(|o| {
-        o.error.is_none() && o.answers.iter().any(|a| !a.answer.trim().is_empty())
-    });
+    let usable_ask_output = ask_output
+        .clone()
+        .filter(|o| o.error.is_none() && o.answers.iter().any(|a| !a.answer.trim().is_empty()));
 
-    let (terminal, provider_failure) = if exit_status.code() == Some(ASK_EXIT_PAPERQA_NOT_IMPORTABLE)
+    let (terminal, provider_failure) = if exit_status.code()
+        == Some(ASK_EXIT_PAPERQA_NOT_IMPORTABLE)
     {
         // ADR-0063 Phase 109d C1: `paperqa` が import できない (テスト環境や未整備の venv)。再試行しても
         // 直らないので `retryable: false` の分かりやすいエラーにする（一般の非 0 終了とは区別する）。
@@ -1974,7 +1993,10 @@ async fn run_paperqa(
                 render_sources_section(&marked)
             );
             if let Some(ev) = &evidence {
-                body.push_str(&render_evidence_section(&ev.summary, &ask_output.dropped_targets));
+                body.push_str(&render_evidence_section(
+                    &ev.summary,
+                    &ask_output.dropped_targets,
+                ));
             }
             body.push_str(&render_primary_sources_section(&github_urls));
             body
@@ -2141,8 +2163,7 @@ fn evidence_gate(
         // （ADR-0031 D2 と同じ理由）。
         return EvidenceGateResult {
             error: Some(
-                "literature search returned nothing (possible network or API problem)"
-                    .to_string(),
+                "literature search returned nothing (possible network or API problem)".to_string(),
             ),
             summary: EvidenceSummary {
                 cited,
@@ -2483,7 +2504,10 @@ PY
         let dir = tempfile::tempdir().unwrap();
         let config = stub_pqa(
             dir.path(),
-            &ask_stub_script("PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].", ""),
+            &ask_stub_script(
+                "PaperQA2 finds no evidence of prior work on X [Doe2020, Roe2021].",
+                "",
+            ),
         );
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
@@ -2507,7 +2531,10 @@ PY
         let progress = sink.progress.lock().unwrap();
         // 対象が取れない目的文なので単一のフォールバック問い（`id = "q1"`）になる
         // （`paperqa_ask.py::build_questions_for_targets`）。
-        assert!(progress.iter().any(|m| m.contains("asking:")), "{progress:?}");
+        assert!(
+            progress.iter().any(|m| m.contains("asking:")),
+            "{progress:?}"
+        );
         assert!(*sink.heartbeat_count.lock().unwrap() >= 1);
         // ADR-0048 D2（Phase 60a）: このアダプタが出せる進行は節目（`status`）だけで、
         // すべての行が構造化されている（`msg` は従来どおり）。
@@ -2576,7 +2603,10 @@ PY
     #[tokio::test]
     async fn a_shared_workspace_task_writes_under_its_own_artifacts_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let config = stub_pqa(dir.path(), &ask_stub_script("no prior work on X [Doe2020].", ""));
+        let config = stub_pqa(
+            dir.path(),
+            &ask_stub_script("no prior work on X [Doe2020].", ""),
+        );
         std::fs::create_dir_all(dir.path().join("artifacts")).unwrap();
         std::fs::write(dir.path().join("artifacts/answer.md"), "sibling").unwrap();
         let adapter = PaperQaAdapter::new(config);
@@ -2639,7 +2669,10 @@ PY
     #[tokio::test]
     async fn paperqa_not_importable_is_a_clear_non_retryable_error() {
         let dir = tempfile::tempdir().unwrap();
-        let config = stub_pqa(dir.path(), "echo 'paperqa not importable: no module' 1>&2; exit 3");
+        let config = stub_pqa(
+            dir.path(),
+            "echo 'paperqa not importable: no module' 1>&2; exit 3",
+        );
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -2649,7 +2682,10 @@ PY
             .unwrap();
         match outcome.terminal {
             Terminal::Error { retryable, message } => {
-                assert!(!retryable, "installing paperqa fixes this, retrying alone does not");
+                assert!(
+                    !retryable,
+                    "installing paperqa fixes this, retrying alone does not"
+                );
                 assert!(message.contains("paperqa"), "{message}");
                 assert!(
                     message.to_ascii_lowercase().contains("not importable")
@@ -2752,7 +2788,10 @@ while true; do sleep 0.1; done
         assert_eq!(input["settings_dir"], "/settings", "{input}");
         assert_eq!(input["settings_name"], "qwen-local", "{input}");
         // ADR-0063 Phase 109e: `settings_path`（直接読む絶対パス）も足される。
-        assert_eq!(input["settings_path"], "/settings/qwen-local.json", "{input}");
+        assert_eq!(
+            input["settings_path"], "/settings/qwen-local.json",
+            "{input}"
+        );
         assert_eq!(
             input["paper_directory"],
             format!("/papers/{SHARED_PROJECT_KEY}"),
@@ -2967,8 +3006,14 @@ while true; do sleep 0.1; done
         task.objective = "CHFS/FINCHFS/GekkoFS のデプロイモデルを比較調査する。".to_string();
         let context = RunContext::default();
         let question = build_question(&task, &context, "artifacts");
-        assert!(question.contains("## 回答の形式（必ず守ること）"), "{question}");
-        assert!(question.contains("対象: CHFS、FINCHFS、GekkoFS"), "{question}");
+        assert!(
+            question.contains("## 回答の形式（必ず守ること）"),
+            "{question}"
+        );
+        assert!(
+            question.contains("対象: CHFS、FINCHFS、GekkoFS"),
+            "{question}"
+        );
         assert!(question.contains("観点:"), "{question}");
         assert!(question.contains("未確認"), "{question}");
 
@@ -3494,8 +3539,7 @@ while true; do sleep 0.1; done
     async fn cited_counts_the_union_of_context_docnames_and_text_matches() {
         let dir = tempfile::tempdir().unwrap();
         // Roe への言及を含まない答え（本文一致では拾えない）。
-        let answer_text =
-            "Ad hoc file systems aggregate node-local NVMe (brinkmann2020_10-1007-s11390-020-9801-1.pdf).";
+        let answer_text = "Ad hoc file systems aggregate node-local NVMe (brinkmann2020_10-1007-s11390-020-9801-1.pdf).";
         let contexts_json = r#"[{"text": {"doc": {"docname": "roe2021_arxiv-2101-00001v1", "dockey": "k1", "citation": "Roe (2021)"}}, "score": 5}]"#;
         let config = stub_pqa_with_acquire(
             dir.path(),
@@ -3535,8 +3579,14 @@ while true; do sleep 0.1; done
         assert_eq!(research["evidence"]["cited_from_contexts"], 1, "{research}");
 
         let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
-        assert!(answer_md.contains("## 引用された文献（contexts）"), "{answer_md}");
-        assert!(answer_md.contains("roe2021_arxiv-2101-00001v1"), "{answer_md}");
+        assert!(
+            answer_md.contains("## 引用された文献（contexts）"),
+            "{answer_md}"
+        );
+        assert!(
+            answer_md.contains("roe2021_arxiv-2101-00001v1"),
+            "{answer_md}"
+        );
         assert!(answer_md.contains("Roe (2021)"), "{answer_md}");
     }
 
@@ -3623,7 +3673,10 @@ while true; do sleep 0.1; done
         )
         .unwrap();
         let seed_urls = input["seed_urls"].as_array().unwrap();
-        let urls: Vec<&str> = seed_urls.iter().map(|s| s["url"].as_str().unwrap()).collect();
+        let urls: Vec<&str> = seed_urls
+            .iter()
+            .map(|s| s["url"].as_str().unwrap())
+            .collect();
         assert_eq!(
             urls,
             vec![
@@ -3677,8 +3730,7 @@ while true; do sleep 0.1; done
             "{input}"
         );
         assert_eq!(
-            cc["knowledge_index"][0]["path"],
-            "projects/benchfs/architecture-overview.md",
+            cc["knowledge_index"][0]["path"], "projects/benchfs/architecture-overview.md",
             "{input}"
         );
         assert_eq!(
@@ -3816,7 +3868,8 @@ server/core 利用、data path、BenchFS との比較分類）"
         );
         let adapter = PaperQaAdapter::new(config);
         let mut req = sample_req(dir.path().to_path_buf());
-        req.task.objective = "CHFS/FINCHFS の性能比較調査（cache 方式、file semantics）".to_string();
+        req.task.objective =
+            "CHFS/FINCHFS の性能比較調査（cache 方式、file semantics）".to_string();
         let sink = RecordingSink::default();
         let outcome = adapter
             .run(req, "run-targets", default_limits(), &sink)
@@ -3828,7 +3881,11 @@ server/core 利用、data path、BenchFS との比較分類）"
             &std::fs::read_to_string(dir.path().join("artifacts/research.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(research["targets"], serde_json::json!(["CHFS", "FINCHFS"]), "{research}");
+        assert_eq!(
+            research["targets"],
+            serde_json::json!(["CHFS", "FINCHFS"]),
+            "{research}"
+        );
         assert_eq!(
             research["aspects"],
             serde_json::json!(["cache 方式", "file semantics"]),
@@ -3910,7 +3967,10 @@ server/core 利用、data path、BenchFS との比較分類）"
     async fn acquire_and_the_gate_are_skipped_when_max_candidates_is_zero() {
         let dir = tempfile::tempdir().unwrap();
         // `stub_pqa` は `max_candidates = 0`。
-        let config = stub_pqa(dir.path(), &ask_stub_script("from the local corpus only.", ""));
+        let config = stub_pqa(
+            dir.path(),
+            &ask_stub_script("from the local corpus only.", ""),
+        );
         let adapter = PaperQaAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
@@ -4457,7 +4517,10 @@ print(json.dumps(out))
         assert_eq!(v["seed_arxiv_id"], "2101.00001v2");
         assert_eq!(v["seed_doi"], "10.1109/CHFS.2022.1");
         assert_eq!(v["seed_arxiv"]["arxiv_id"], "2101.00001");
-        assert_eq!(v["seed_arxiv"]["pdf_url"], "https://arxiv.org/pdf/2101.00001");
+        assert_eq!(
+            v["seed_arxiv"]["pdf_url"],
+            "https://arxiv.org/pdf/2101.00001"
+        );
         assert_eq!(v["seed_arxiv"]["source_engine"], "seed:arxiv");
         assert_eq!(v["seed_doi_candidate"]["doi"], "10.1/x");
         assert_eq!(v["seed_doi_candidate"]["url"], "https://doi.org/10.1/x");
@@ -4606,7 +4669,11 @@ print(json.dumps(out))
             r#"{"best_oa_location": {"url_for_pdf": "https://oa.example/found.pdf"}}"#,
         )
         .unwrap();
-        std::fs::write(fixture.join("unpaywall-2.json"), r#"{"best_oa_location": {}}"#).unwrap();
+        std::fs::write(
+            fixture.join("unpaywall-2.json"),
+            r#"{"best_oa_location": {}}"#,
+        )
+        .unwrap();
         // Semantic Scholar のフォールバック（`{"results": []}`）は `parse_semantic_scholar` が
         // 空の値として安全に読めるので、専用のフィクスチャは要らない。
         std::fs::write(fixture.join("pdf-found.pdf"), b"%PDF-1.4\nfound\n").unwrap();
@@ -5392,12 +5459,22 @@ print(json.dumps(out, ensure_ascii=False))
         );
 
         // 既定の max_asks（10）なら 8 対象 + 総括の 9 件すべて入り、何も削られない。
-        assert_eq!(v["default_max_asks"], 10, "既定は 8 から 10 に引き上げ: {v}");
+        assert_eq!(
+            v["default_max_asks"], 10,
+            "既定は 8 から 10 に引き上げ: {v}"
+        );
         assert_eq!(v["eight_default_max_count"], 9, "{v}");
         assert_eq!(v["eight_default_max_dropped"], serde_json::json!([]), "{v}");
 
-        assert_eq!(v["no_comparison_count"], 2, "比較先が無ければ総括は無い: {v}");
-        assert_eq!(v["no_comparison_ids"], serde_json::json!(["t1", "t2"]), "{v}");
+        assert_eq!(
+            v["no_comparison_count"], 2,
+            "比較先が無ければ総括は無い: {v}"
+        );
+        assert_eq!(
+            v["no_comparison_ids"],
+            serde_json::json!(["t1", "t2"]),
+            "{v}"
+        );
         assert_eq!(v["no_comparison_dropped"], serde_json::json!([]), "{v}");
 
         assert_eq!(v["none_count"], 1, "{v}");
@@ -5416,7 +5493,10 @@ print(json.dumps(out, ensure_ascii=False))
 
         let table = v["table"].as_str().unwrap();
         assert!(table.contains("| 対象 | x | y |"), "{table}");
-        assert!(table.contains("| A | fact about A (cite1) | something else entirely |"), "{table}");
+        assert!(
+            table.contains("| A | fact about A (cite1) | something else entirely |"),
+            "{table}"
+        );
         assert!(
             table.contains("| B | 未確認 | 未確認 |"),
             "B の答えにはどちらの観点も無いので未確認: {table}"
@@ -5444,10 +5524,12 @@ print(json.dumps(out, ensure_ascii=False))
             "{v}"
         );
 
-        assert_eq!(v["settings_path_full"], "/settings/celeris-proxy.json", "{v}");
         assert_eq!(
-            v["settings_path_name_already_json"],
-            "/settings/celeris-proxy.json",
+            v["settings_path_full"], "/settings/celeris-proxy.json",
+            "{v}"
+        );
+        assert_eq!(
+            v["settings_path_name_already_json"], "/settings/celeris-proxy.json",
             "{v}"
         );
         assert_eq!(v["settings_path_no_dir"], serde_json::Value::Null, "{v}");
@@ -5592,8 +5674,7 @@ print(json.dumps(out, ensure_ascii=False))
             serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
 
         assert_eq!(
-            v["page_path_found"],
-            "projects/benchfs/architecture-overview.md",
+            v["page_path_found"], "projects/benchfs/architecture-overview.md",
             "{v}"
         );
         assert_eq!(v["page_path_no_target"], serde_json::Value::Null, "{v}");
@@ -5603,21 +5684,18 @@ print(json.dumps(out, ensure_ascii=False))
         // （primary-sources.md や known-issues-inventory.md ではなく）。
         assert_eq!(v["real_index_len"], 25, "{v}");
         assert_eq!(
-            v["real_index_page"],
-            "projects/benchfs/architecture-overview.md",
+            v["real_index_page"], "projects/benchfs/architecture-overview.md",
             "重複や他の benchfs ページより architecture-overview.md を優先: {v}"
         );
 
         assert_eq!(
-            v["stripped"],
-            "BenchFS aggregates node-local NVMe.\n",
+            v["stripped"], "BenchFS aggregates node-local NVMe.\n",
             "{v}"
         );
         assert_eq!(v["stripped_unclosed"], "---\nnot closed", "{v}");
 
         assert_eq!(
-            v["design_from_page"],
-            "BenchFS aggregates node-local NVMe.",
+            v["design_from_page"], "BenchFS aggregates node-local NVMe.",
             "{v}"
         );
         assert_eq!(v["design_from_fallback"], "fallback sentence.", "{v}");
@@ -5659,8 +5737,14 @@ print(json.dumps(out, ensure_ascii=False))
             new_question.contains("判断の確度（高/中/低）も添えよ"),
             "{new_question}"
         );
-        assert!(new_question.contains("### CHFS の対象別の答え"), "{new_question}");
-        assert!(new_question.contains("### FINCHFS の対象別の答え"), "{new_question}");
+        assert!(
+            new_question.contains("### CHFS の対象別の答え"),
+            "{new_question}"
+        );
+        assert!(
+            new_question.contains("### FINCHFS の対象別の答え"),
+            "{new_question}"
+        );
         assert!(new_question.contains("short answer"), "{new_question}");
         // CHFS の答えは 1.5 KB に切り詰められる（4600 文字近い繰り返し文字列 -> 1500 + 省略記号）。
         let chfs_material_len = new_question
@@ -5716,7 +5800,11 @@ print(json.dumps(out, ensure_ascii=False))
         let settings_dir = dir.path().join("settings");
         std::fs::create_dir_all(&settings_dir).unwrap();
         let settings_path = settings_dir.join("celeris-proxy.json");
-        std::fs::write(&settings_path, r#"{"llm": "qwen3.8-27b", "marker": "from-disk"}"#).unwrap();
+        std::fs::write(
+            &settings_path,
+            r#"{"llm": "qwen3.8-27b", "marker": "from-disk"}"#,
+        )
+        .unwrap();
 
         let output_path = dir.path().join("ask_output.json");
         let input = serde_json::json!({
@@ -5840,10 +5928,12 @@ print(json.dumps(calls))
         let ask_output: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&output_path).unwrap()).unwrap();
         assert!(ask_output["error"].is_null(), "{ask_output}");
-        assert_eq!(ask_output["answers"][0]["answer"], "the answer", "{ask_output}");
         assert_eq!(
-            ask_output["answers"][0]["has_successful_answer"],
-            true,
+            ask_output["answers"][0]["answer"], "the answer",
+            "{ask_output}"
+        );
+        assert_eq!(
+            ask_output["answers"][0]["has_successful_answer"], true,
             "{ask_output}"
         );
     }
@@ -6005,7 +6095,8 @@ exit 2
         );
         let adapter = PaperQaAdapter::new(config);
         let mut req = sample_req(dir.path().to_path_buf());
-        req.task.objective = "CHFS/FINCHFS の性能比較調査（cache 方式、file semantics）".to_string();
+        req.task.objective =
+            "CHFS/FINCHFS の性能比較調査（cache 方式、file semantics）".to_string();
         let sink = RecordingSink::default();
         let outcome = adapter
             .run(req, "run-targets-answer", default_limits(), &sink)
@@ -6019,7 +6110,10 @@ exit 2
 
         let answer_md = std::fs::read_to_string(dir.path().join("artifacts/answer.md")).unwrap();
         assert!(answer_md.starts_with("# 対象別の整理"), "{answer_md}");
-        assert!(answer_md.contains("| 対象 | cache 方式 | file semantics |"), "{answer_md}");
+        assert!(
+            answer_md.contains("| 対象 | cache 方式 | file semantics |"),
+            "{answer_md}"
+        );
         assert!(answer_md.contains("### CHFS"), "{answer_md}");
         assert!(answer_md.contains("### FINCHFS"), "{answer_md}");
         assert!(

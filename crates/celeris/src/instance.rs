@@ -761,7 +761,10 @@ mod tests {
             .into_iter()
             .find(|r| r.instance_id == "inst-old")
             .expect("row");
-        assert!(row.drained_at.is_none(), "abort していないので drained_at は書かれない");
+        assert!(
+            row.drained_at.is_none(),
+            "abort していないので drained_at は書かれない"
+        );
         // 手元の run が 0 になれば、通常どおり Drained で終わる。
         assert_eq!(old.step(at(3601), 0).expect("step"), Step::Drained);
     }

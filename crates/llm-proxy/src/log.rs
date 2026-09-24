@@ -104,8 +104,10 @@ mod tests {
     use super::*;
 
     fn create_table(conn: &Connection) {
-        conn.execute_batch(include_str!("../../task-core/migrations/0022_llm_proxy_requests.sql"))
-            .unwrap();
+        conn.execute_batch(include_str!(
+            "../../task-core/migrations/0022_llm_proxy_requests.sql"
+        ))
+        .unwrap();
     }
 
     #[test]

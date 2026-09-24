@@ -606,7 +606,10 @@ mod tests {
                 },
             ),
         ];
-        assert_eq!(resolve(&org, "cos").skills_mounts, vec!["writing".to_string()]);
+        assert_eq!(
+            resolve(&org, "cos").skills_mounts,
+            vec!["writing".to_string()]
+        );
         assert_eq!(
             resolve(&org, "engineering").skills_mounts,
             vec!["writing".to_string(), "rust-review".to_string()]

@@ -758,7 +758,11 @@ mod tests {
         .unwrap();
         assert!(outcome.executed.is_empty());
         assert_eq!(outcome.failed.len(), 1);
-        assert!(outcome.failed[0].reason.contains("unknown cluster"), "{:?}", outcome.failed);
+        assert!(
+            outcome.failed[0].reason.contains("unknown cluster"),
+            "{:?}",
+            outcome.failed
+        );
         assert!(store.list(None).unwrap().is_empty(), "何も作らない");
     }
 
@@ -1048,9 +1052,20 @@ mod tests {
         let bad = parse(
             r#"{"actions":[{"type":"add_milestone","project":"01ZZZZZZZZZZZZZZZZZZZZZZZZ","title":"t"}]}"#,
         );
-        let outcome = execute(&store, &[], &[], &[], &[], &task, "run-2", &bad.0, &bad.1, now())
-            .unwrap()
-            .unwrap();
+        let outcome = execute(
+            &store,
+            &[],
+            &[],
+            &[],
+            &[],
+            &task,
+            "run-2",
+            &bad.0,
+            &bad.1,
+            now(),
+        )
+        .unwrap()
+        .unwrap();
         assert!(outcome.executed.is_empty());
         assert!(outcome.failed[0].reason.contains("does not exist"));
     }

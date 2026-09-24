@@ -29,7 +29,11 @@ pub struct AccountSourceView {
 /// ADR-0053 D4: 1 枠だけの残り（`measured_remaining` と同じ「観測が新しく、枠が有効」という規律を
 /// 1 枠に適用する）。観測が古い（300 秒超）・未来（壁時計のずれ）・枠が無い／期限切れ／範囲外の
 /// `utilization` はすべて `None`（測れない、を捏造しない）。
-fn window_remaining(obs: &task_core::RateLimitObservation, now: i64, window: Option<task_core::RateWindow>) -> Option<f64> {
+fn window_remaining(
+    obs: &task_core::RateLimitObservation,
+    now: i64,
+    window: Option<task_core::RateWindow>,
+) -> Option<f64> {
     if now < obs.observed_at || now - obs.observed_at > 300 {
         return None;
     }
@@ -136,7 +140,11 @@ impl ProxyState {
         // ADR-0053 D4（Phase 66）: 3 tier とも同じ決定的な選択（`server.rs::attempts_for`）で解決先を見る。
         // tier ごとにモデル写像が無ければ「選べない」= `None`（値を捏造しない）。
         let mut celeris_tiers = Vec::new();
-        for tier in [task_core::Tier::Frontier, task_core::Tier::Standard, task_core::Tier::Cheap] {
+        for tier in [
+            task_core::Tier::Frontier,
+            task_core::Tier::Standard,
+            task_core::Tier::Cheap,
+        ] {
             let resolves_to = self.resolves_tier(tier, now).await;
             celeris_tiers.push(CelerisTierView {
                 tier: tier_str(tier).to_string(),

@@ -239,7 +239,11 @@ fn build_must_cover_section(items: &[String]) -> String {
 fn extract_urls(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     for token in text.split(|c: char| {
-        c.is_whitespace() || matches!(c, '「' | '」' | '（' | '）' | '(' | ')' | '<' | '>' | '"' | '\'' | '　')
+        c.is_whitespace()
+            || matches!(
+                c,
+                '「' | '」' | '（' | '）' | '(' | ')' | '<' | '>' | '"' | '\'' | '　'
+            )
     }) {
         let trimmed = token.trim_matches(|c: char| matches!(c, '.' | ',' | ';' | ':' | '!' | '?'));
         if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -419,7 +423,11 @@ async fn run_ldr(
     // ADR-0023 D2 / M1: この run で何を渡したかを残す。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &query, run_id).await;
-    let mode = if is_retry { config.retry_mode } else { config.mode };
+    let mode = if is_retry {
+        config.retry_mode
+    } else {
+        config.mode
+    };
     let iterations = if is_retry {
         config.retry_iterations.or(config.iterations)
     } else {
@@ -1290,7 +1298,10 @@ while true; do sleep 0.1; done
     }
 
     fn python3_available() -> bool {
-        match std::process::Command::new("python3").arg("--version").output() {
+        match std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+        {
             Ok(output) => output.status.success(),
             Err(_) => false,
         }
@@ -1375,7 +1386,10 @@ while true; do sleep 0.1; done
         };
         let query = build_query(&task, &context, None);
         assert!(query.starts_with("CHFS と FinchFS を比べよ"), "{query}");
-        assert!(query.contains("## 前回からの改善点（必ず埋める）"), "{query}");
+        assert!(
+            query.contains("## 前回からの改善点（必ず埋める）"),
+            "{query}"
+        );
         assert!(query.contains("CHFS の一次情報（GitHub）が無い"), "{query}");
         assert!(!query.contains("満たしている"), "{query}");
 
@@ -1485,11 +1499,12 @@ while true; do sleep 0.1; done
             redacted["search.engine.web.tavily.api_key"],
             "<env:LDR_SEARCH_ENGINE_WEB_TAVILY_API_KEY>"
         );
-        assert_eq!(redacted["llm.provider"], "openai_endpoint", "秘密でない値はそのまま");
-        let env_map: std::collections::BTreeMap<&str, &str> = env
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
+        assert_eq!(
+            redacted["llm.provider"], "openai_endpoint",
+            "秘密でない値はそのまま"
+        );
+        let env_map: std::collections::BTreeMap<&str, &str> =
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         assert_eq!(
             env_map["LDR_LLM_OPENAI_ENDPOINT_API_KEY"],
             "sk-should-not-leak"
@@ -1554,7 +1569,10 @@ while true; do sleep 0.1; done
             query.starts_with("CHFS（https://github.com/otatebe/chfs）を調べる"),
             "{seen}"
         );
-        assert!(query.contains("## 前回からの改善点（必ず埋める）"), "{seen}");
+        assert!(
+            query.contains("## 前回からの改善点（必ず埋める）"),
+            "{seen}"
+        );
         assert!(query.contains("CHFS の一次情報が出典に無い"), "{seen}");
         assert_eq!(
             seen["settings"]["llm.openai_endpoint.api_key"],
@@ -2105,9 +2123,15 @@ print(json.dumps({"added": added, "sources": result["sources"]}))
         assert_eq!(v["added"], 1, "既存の URL と空文字は数えない: {v}");
         let sources = v["sources"].as_array().unwrap();
         assert_eq!(sources.len(), 2, "{v}");
-        assert_eq!(sources[0]["link"], "https://a.example.com/x", "元の [1] のまま先頭: {v}");
+        assert_eq!(
+            sources[0]["link"], "https://a.example.com/x",
+            "元の [1] のまま先頭: {v}"
+        );
         assert_eq!(sources[1]["link"], "https://github.com/otatebe/chfs", "{v}");
-        assert_eq!(sources[1]["title"], "T:https://github.com/otatebe/chfs", "{v}");
+        assert_eq!(
+            sources[1]["title"], "T:https://github.com/otatebe/chfs",
+            "{v}"
+        );
     }
 
     /// ADR-0063 Phase 109b B1: `add_must_read_sources` は python 側でも `http(s)://` 以外
@@ -2224,7 +2248,10 @@ print(json.dumps({
         assert_eq!(entries[1]["link"], "https://example.org/paper");
         assert_eq!(entries[1]["title"], "A Paper");
         assert!(
-            entries[1]["excerpt"].as_str().unwrap().contains("Hello & world"),
+            entries[1]["excerpt"]
+                .as_str()
+                .unwrap()
+                .contains("Hello & world"),
             "script は落ち、実体参照は戻る: {v}"
         );
         assert!(
@@ -2232,11 +2259,17 @@ print(json.dumps({
             "{v}"
         );
         assert_eq!(entries[2]["link"], "https://broken.example/x");
-        assert!(entries[2]["fetch_error"].as_str().unwrap().contains("boom"), "{v}");
+        assert!(
+            entries[2]["fetch_error"].as_str().unwrap().contains("boom"),
+            "{v}"
+        );
         assert_eq!(entries[2]["excerpt"], "");
 
         let section = v["section"].as_str().unwrap();
-        assert!(section.starts_with("## 必読の一次情報（本文抜粋）"), "{section}");
+        assert!(
+            section.starts_with("## 必読の一次情報（本文抜粋）"),
+            "{section}"
+        );
         assert!(section.contains("CHFS"), "{section}");
         assert!(section.contains("取得失敗: OSError: boom"), "{section}");
 
@@ -2244,7 +2277,10 @@ print(json.dumps({
             v["readme_url"],
             "https://raw.githubusercontent.com/otatebe/chfs/HEAD/README.md"
         );
-        assert!(v["readme_url_subpath"].is_null(), "サブパスは README にしない: {v}");
+        assert!(
+            v["readme_url_subpath"].is_null(),
+            "サブパスは README にしない: {v}"
+        );
         assert_eq!(
             v["gitlab_readme_url"],
             "https://gitlab.com/foo/bar/-/raw/HEAD/README.md"
@@ -2415,7 +2451,10 @@ print(json.dumps(out))
         assert_eq!(v["stage_exception_wrapped"], true, "{v}");
         assert_eq!(v["disguised_error_raises"], true, "{v}");
         assert_eq!(v["disguised_error_cleanup_called"], true, "{v}");
-        assert_eq!(v["stage_passthrough"], serde_json::json!({"summary": "a real answer"}));
+        assert_eq!(
+            v["stage_passthrough"],
+            serde_json::json!({"summary": "a real answer"})
+        );
     }
 
     // --- ADR-0031 D2: 決定的な証拠ゲート ---
@@ -3174,10 +3213,7 @@ print(json.dumps({
             "README の抜粋が答えの本文に現れるので cited になる: {chfs}"
         );
         // `human`（URL でない）は落ちて sources には現れない。
-        assert!(
-            !sources.iter().any(|s| s["url"] == "human"),
-            "{sources:?}"
-        );
+        assert!(!sources.iter().any(|s| s["url"] == "human"), "{sources:?}");
     }
 
     /// エンドツーエンド: ADR-0063 Phase 109c B3。目的文から対象が取れた（`targets` が非空の）run は
@@ -3375,10 +3411,7 @@ print(json.dumps({
         assert_eq!(v["attempts"], 4, "1 回 + 再試行 3 回 = 4 回: {v}");
         assert_eq!(v["sleeps"], serde_json::json!([2.0, 4.0, 8.0]), "{v}");
         assert_eq!(v["report_exists"], false, "{v}");
-        assert!(
-            v["stderr"].as_str().unwrap().starts_with("llm: "),
-            "{v}"
-        );
+        assert!(v["stderr"].as_str().unwrap().starts_with("llm: "), "{v}");
     }
 
     /// ADR-0063 Phase 109c B2: `is_docs_site` recognizes readthedocs/`doc.`/`docs.`/`/docs/`;
@@ -3515,7 +3548,11 @@ print(json.dumps({"section": section, "entries": entries}))
         let v: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("valid JSON on stdout");
         let entries = v["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 2, "トップページ + config サブページのみ: {v}");
+        assert_eq!(
+            entries.len(),
+            2,
+            "トップページ + config サブページのみ: {v}"
+        );
         assert_eq!(entries[0]["source"], "must-read");
         assert_eq!(entries[1]["source"], "must-read-docs");
         assert_eq!(
@@ -3625,7 +3662,10 @@ print(json.dumps(out, ensure_ascii=False))
             "{v}"
         );
         assert_eq!(v["applied"], true, "{v}");
-        assert_eq!(v["retried_once"], true, "2/4/8 秒バックオフで再試行する: {v}");
+        assert_eq!(
+            v["retried_once"], true,
+            "2/4/8 秒バックオフで再試行する: {v}"
+        );
         assert_eq!(v["table_comes_first"], true, "{v}");
         assert_eq!(v["raw_findings_kept_after"], true, "{v}");
         assert_eq!(v["gives_up_without_touching_the_file"], true, "{v}");

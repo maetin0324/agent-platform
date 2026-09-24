@@ -28,9 +28,7 @@ pub struct McpCallsView {
 async fn list_clients(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> ApiResult {
     no_query(&raw)?;
     let items = state
-        .blocking(|store| {
-            task_core::McpClientStore::mcp_client_list(store).map_err(store_problem)
-        })
+        .blocking(|store| task_core::McpClientStore::mcp_client_list(store).map_err(store_problem))
         .await?;
     Ok(json_response(
         axum::http::StatusCode::OK,

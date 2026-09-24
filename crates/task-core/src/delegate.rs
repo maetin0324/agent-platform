@@ -1263,8 +1263,7 @@ mod tests {
         let mut explicit_child = dt("explicit", vec![]);
         explicit_child.assignee = Some("web-research".into());
         explicit_child.workspace = Some(project.clone());
-        let out3 =
-            materialize_delegated(&p, &[explicit_child], &[0], &org, &[], &[], ws, now);
+        let out3 = materialize_delegated(&p, &[explicit_child], &[0], &org, &[], &[], ws, now);
         assert_eq!(out3[0].workspace, project);
     }
 

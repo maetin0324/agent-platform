@@ -132,7 +132,7 @@ mod tests {
                 path: "p".to_string(),
                 sha256: "s".to_string(),
                 kind: "doc".to_string(),
-            declared: true,
+                declared: true,
             }],
             depends_on: vec![],
             status,

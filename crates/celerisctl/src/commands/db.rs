@@ -52,8 +52,18 @@ pub fn run_backup(args: DbBackupArgs, src: PathBuf) -> Result<ExitCode, CliError
             src.display()
         )));
     }
-    task_core::backup_database(&src, &args.dest, Duration::from_millis(args.busy_timeout_ms))
-        .map_err(|e| CliError::msg(format!("backup {} -> {}: {e}", src.display(), args.dest.display())))?;
+    task_core::backup_database(
+        &src,
+        &args.dest,
+        Duration::from_millis(args.busy_timeout_ms),
+    )
+    .map_err(|e| {
+        CliError::msg(format!(
+            "backup {} -> {}: {e}",
+            src.display(),
+            args.dest.display()
+        ))
+    })?;
     outln!("backed up {} -> {}", src.display(), args.dest.display());
     Ok(ExitCode::SUCCESS)
 }

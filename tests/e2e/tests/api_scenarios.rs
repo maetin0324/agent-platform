@@ -465,7 +465,8 @@ esac"#,
     )
     .assert_problem(422, "validation");
     // ADR-0014 D3（P-G16）: 空白だけの title と存在しない親は 422（field 付き）で、何も作らない。
-    let human = json!([{"type": "human", "text": "t"}, {"type": "artifact_exists", "name": "result.md"}]);
+    let human =
+        json!([{"type": "human", "text": "t"}, {"type": "artifact_exists", "name": "result.md"}]);
     let v = env
         .post(
             "/tasks",

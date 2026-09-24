@@ -971,26 +971,25 @@ async fn run_acp(
         .as_ref()
         .filter(|s| s.adapter == AcpAdapter::ID);
     let resuming = acp_session.is_some_and(|s| s.resume);
-    let (new_session_method, new_session_params) = if let Some(session) =
-        acp_session.filter(|_| resuming)
-    {
-        (
-            "session/load",
-            serde_json::json!({
-                "sessionId": session.session_id,
-                "cwd": req.cwd().to_string_lossy(),
-                "mcpServers": [],
-            }),
-        )
-    } else {
-        (
-            "session/new",
-            serde_json::json!({
-                "cwd": req.cwd().to_string_lossy(),
-                "mcpServers": [],
-            }),
-        )
-    };
+    let (new_session_method, new_session_params) =
+        if let Some(session) = acp_session.filter(|_| resuming) {
+            (
+                "session/load",
+                serde_json::json!({
+                    "sessionId": session.session_id,
+                    "cwd": req.cwd().to_string_lossy(),
+                    "mcpServers": [],
+                }),
+            )
+        } else {
+            (
+                "session/new",
+                serde_json::json!({
+                    "cwd": req.cwd().to_string_lossy(),
+                    "mcpServers": [],
+                }),
+            )
+        };
     if write_line(
         &mut stdin,
         &jsonrpc_request(2, new_session_method, new_session_params),

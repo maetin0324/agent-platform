@@ -666,7 +666,10 @@ mod tests {
     #[test]
     fn shell_remote_path_expands_only_a_leading_tilde() {
         assert_eq!(shell_remote_path("~"), "\"$HOME\"");
-        assert_eq!(shell_remote_path("~/work/project"), "\"$HOME\"'/work/project'");
+        assert_eq!(
+            shell_remote_path("~/work/project"),
+            "\"$HOME\"'/work/project'"
+        );
         // `~user` は展開しない（celeris は他ユーザの home を知らない。ADR-0039 D5 と同じ方針）。
         assert_eq!(shell_remote_path("~user/x"), "'~user/x'");
         // それ以外は従来どおり `shq`。
@@ -738,8 +741,12 @@ mod tests {
         settings.ssh_command = vec!["/nonexistent/ssh-should-not-run".into()];
         settings.rsync_command = vec!["/nonexistent/rsync-should-not-run".into()];
         let ws = SshWorkspace::new(dir.path(), settings);
-        ws.push().await.expect("push is a no-op under SyncMode::None");
-        ws.pull().await.expect("pull is a no-op under SyncMode::None");
+        ws.push()
+            .await
+            .expect("push is a no-op under SyncMode::None");
+        ws.pull()
+            .await
+            .expect("pull is a no-op under SyncMode::None");
     }
 
     // ---- ADR-0059 D3: worktree 準備の exit 65 を型で区別する ----
@@ -778,7 +785,9 @@ mod tests {
     async fn write_remote_exec_helper_writes_celeris_and_cleans_up_the_old_taskd_wrapper() {
         let dir = tempfile::tempdir().unwrap();
         let mirror = dir.path().join("mirror");
-        tokio::fs::create_dir_all(mirror.join(".taskd")).await.unwrap();
+        tokio::fs::create_dir_all(mirror.join(".taskd"))
+            .await
+            .unwrap();
         tokio::fs::write(mirror.join(".taskd").join("remote-exec"), "old wrapper")
             .await
             .unwrap();
@@ -798,7 +807,10 @@ mod tests {
         let script = tokio::fs::read_to_string(&path).await.unwrap();
         assert!(script.contains("\"$HOME\"'/work/proj'"), "{script}");
         // ADR-0062 Phase 108: `$HOME/.ssh/config` があるときだけ `-F` を足す条件分岐を持つ。
-        assert!(script.contains(r#"if [ -f "$HOME/.ssh/config" ]; then"#), "{script}");
+        assert!(
+            script.contains(r#"if [ -f "$HOME/.ssh/config" ]; then"#),
+            "{script}"
+        );
         assert!(script.contains(r#"-F "$HOME/.ssh/config""#), "{script}");
     }
 
@@ -841,7 +853,9 @@ mod tests {
 
         // `$HOME/.ssh/config` があれば `-F "$HOME/.ssh/config"` を付ける。
         let home_with = dir.path().join("home-with");
-        tokio::fs::create_dir_all(home_with.join(".ssh")).await.unwrap();
+        tokio::fs::create_dir_all(home_with.join(".ssh"))
+            .await
+            .unwrap();
         tokio::fs::write(home_with.join(".ssh").join("config"), "Host pegasus\n")
             .await
             .unwrap();

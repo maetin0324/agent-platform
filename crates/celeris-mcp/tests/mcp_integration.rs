@@ -129,16 +129,27 @@ fn seed_org(store: &SqliteStore) {
         parent_id: parent.map(str::to_string),
         name: name.to_string(),
         kind,
-        genre: if id == "cos" { Some("secretary".to_string()) } else { None },
+        genre: if id == "cos" {
+            Some("secretary".to_string())
+        } else {
+            None
+        },
         brief: String::new(),
         profile: Default::default(),
         position: 0,
         created_at: now,
         updated_at: now,
     };
-    store.org_upsert(&node("cos", None, OrgKind::Secretary, "Chief of Staff")).unwrap();
     store
-        .org_upsert(&node("engineering", Some("cos"), OrgKind::Department, "Engineering"))
+        .org_upsert(&node("cos", None, OrgKind::Secretary, "Chief of Staff"))
+        .unwrap();
+    store
+        .org_upsert(&node(
+            "engineering",
+            Some("cos"),
+            OrgKind::Department,
+            "Engineering",
+        ))
         .unwrap();
 }
 
@@ -158,7 +169,9 @@ async fn spawn_server_with(
         "secretary".to_string(),
         knowledge_root,
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("addr");
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let handle = tokio::spawn(celeris_mcp::serve(listener, state, auth, async {
@@ -179,7 +192,13 @@ async fn spawn_token_server(rate_limit_per_min: u32) -> Server {
     seed_org(&store);
     let kb_root = tempfile::tempdir().expect("tmp");
     task_ops::knowledge::init(kb_root.path()).expect("kb init");
-    spawn_server_with(store, ListenerAuth::Token, Some(kb_root), rate_limit_per_min).await
+    spawn_server_with(
+        store,
+        ListenerAuth::Token,
+        Some(kb_root),
+        rate_limit_per_min,
+    )
+    .await
 }
 
 fn create_client(store: &SqliteStore, id: &str, token: Option<&str>, scopes: Vec<McpScope>) {
@@ -266,7 +285,12 @@ fn structured(body: &Value) -> Value {
 #[tokio::test]
 async fn initialize_then_tools_list_then_ping_round_trip() {
     let server = spawn_token_server(60).await;
-    create_client(&server.store, "c1", Some("secret"), McpScope::DEFAULT.to_vec());
+    create_client(
+        &server.store,
+        "c1",
+        Some("secret"),
+        McpScope::DEFAULT.to_vec(),
+    );
     let client = reqwest::Client::new();
     let session = initialize(&client, &server.base_url, Some("secret")).await;
 
@@ -303,12 +327,21 @@ async fn initialize_then_tools_list_then_ping_round_trip() {
 #[tokio::test]
 async fn tools_list_is_filtered_by_scope() {
     let server = spawn_token_server(60).await;
-    create_client(&server.store, "reader", Some("t1"), vec![McpScope::KnowledgeRead]);
+    create_client(
+        &server.store,
+        "reader",
+        Some("t1"),
+        vec![McpScope::KnowledgeRead],
+    );
     create_client(
         &server.store,
         "writer",
         Some("t2"),
-        vec![McpScope::KnowledgeRead, McpScope::OrgWrite, McpScope::SkillsWrite],
+        vec![
+            McpScope::KnowledgeRead,
+            McpScope::OrgWrite,
+            McpScope::SkillsWrite,
+        ],
     );
     let client = reqwest::Client::new();
 
@@ -329,7 +362,10 @@ async fn tools_list_is_filtered_by_scope() {
         .map(|t| t["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["knowledge_get", "knowledge_list", "knowledge_search"]);
+    assert_eq!(
+        names,
+        vec!["knowledge_get", "knowledge_list", "knowledge_search"]
+    );
 
     let session2 = initialize(&client, &server.base_url, Some("t2")).await;
     let resp = rpc(
@@ -363,7 +399,10 @@ async fn missing_or_revoked_token_is_401() {
     create_client(&server.store, "c1", Some("secret"), vec![]);
     {
         use task_core::McpClientStore;
-        server.store.mcp_client_revoke("c1", OffsetDateTime::now_utc()).unwrap();
+        server
+            .store
+            .mcp_client_revoke("c1", OffsetDateTime::now_utc())
+            .unwrap();
     }
     let client = reqwest::Client::new();
 
@@ -394,7 +433,12 @@ async fn missing_or_revoked_token_is_401() {
 async fn a_fixed_none_listener_binds_every_request_to_its_named_client() {
     let store = Arc::new(SqliteStore::open_in_memory().expect("open"));
     seed_org(&store);
-    create_client(&store, "chatgpt", None, vec![McpScope::KnowledgeRead, McpScope::KnowledgePropose]);
+    create_client(
+        &store,
+        "chatgpt",
+        None,
+        vec![McpScope::KnowledgeRead, McpScope::KnowledgePropose],
+    );
     let kb_root = tempfile::tempdir().expect("tmp");
     task_ops::knowledge::init(kb_root.path()).expect("kb init");
     let server = spawn_server_with(
@@ -437,7 +481,12 @@ async fn a_fixed_none_listener_binds_every_request_to_its_named_client() {
 #[tokio::test]
 async fn session_is_required_after_initialize() {
     let server = spawn_token_server(60).await;
-    create_client(&server.store, "c1", Some("secret"), McpScope::DEFAULT.to_vec());
+    create_client(
+        &server.store,
+        "c1",
+        Some("secret"),
+        McpScope::DEFAULT.to_vec(),
+    );
     let client = reqwest::Client::new();
     let resp = rpc(
         &client,
@@ -458,7 +507,12 @@ async fn session_is_required_after_initialize() {
 #[tokio::test]
 async fn knowledge_propose_writes_to_inbox_with_the_mcp_source_and_rejects_secrets() {
     let server = spawn_token_server(60).await;
-    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::KnowledgePropose]);
+    create_client(
+        &server.store,
+        "chatgpt",
+        Some("secret"),
+        vec![McpScope::KnowledgePropose],
+    );
     let client = reqwest::Client::new();
     let session = initialize(&client, &server.base_url, Some("secret")).await;
 
@@ -517,7 +571,12 @@ async fn knowledge_propose_writes_to_inbox_with_the_mcp_source_and_rejects_secre
 #[tokio::test]
 async fn console_instruct_records_an_mcp_author_and_console_reply_returns_the_reply_and_actions() {
     let server = spawn_token_server(60).await;
-    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::ConsoleInstruct]);
+    create_client(
+        &server.store,
+        "chatgpt",
+        Some("secret"),
+        vec![McpScope::ConsoleInstruct],
+    );
     let client = reqwest::Client::new();
     let session = initialize(&client, &server.base_url, Some("secret")).await;
 
@@ -535,10 +594,17 @@ async fn console_instruct_records_an_mcp_author_and_console_reply_returns_the_re
     let body: Value = resp.json().await.expect("json");
     let text = body["result"]["content"][0]["text"].as_str().expect("text");
     let parsed: Value = serde_json::from_str(text).expect("inner json");
-    let task_id: task_core::TaskId = parsed["task_id"].as_str().expect("task_id").parse().expect("ulid");
+    let task_id: task_core::TaskId = parsed["task_id"]
+        .as_str()
+        .expect("task_id")
+        .parse()
+        .expect("ulid");
 
     // `author = mcp:chatgpt` の人の発言が入っている。
-    let messages = server.store.message_page(Some("cos"), None, None, 100).unwrap();
+    let messages = server
+        .store
+        .message_page(Some("cos"), None, None, 100)
+        .unwrap();
     let human = messages
         .iter()
         .find(|m| m.role == task_core::MessageRole::User && m.task_id == Some(task_id))
@@ -568,7 +634,10 @@ async fn console_instruct_records_an_mcp_author_and_console_reply_returns_the_re
     // CoS の run が終わって返事する（偽のディスパッチャの代わりに直接ストアへ書く。
     // task-api の対話テストと同じ流儀）。
     let task = server.store.get(task_id).unwrap().unwrap();
-    server.store.apply_transition(task_id, task_core::Trigger::Dispatch, None).unwrap();
+    server
+        .store
+        .apply_transition(task_id, task_core::Trigger::Dispatch, None)
+        .unwrap();
     task_ops::conversation::record_reply(
         server.store.as_ref(),
         &task,
@@ -577,8 +646,14 @@ async fn console_instruct_records_an_mcp_author_and_console_reply_returns_the_re
         OffsetDateTime::now_utc(),
     )
     .unwrap();
-    server.store.apply_transition(task_id, task_core::Trigger::WorkerDone, None).unwrap();
-    server.store.apply_transition(task_id, task_core::Trigger::ReviewPass, None).unwrap();
+    server
+        .store
+        .apply_transition(task_id, task_core::Trigger::WorkerDone, None)
+        .unwrap();
+    server
+        .store
+        .apply_transition(task_id, task_core::Trigger::ReviewPass, None)
+        .unwrap();
 
     let resp = rpc(
         &client,
@@ -607,7 +682,12 @@ async fn console_instruct_records_an_mcp_author_and_console_reply_returns_the_re
 #[tokio::test]
 async fn org_create_node_ignores_tools_and_permissions() {
     let server = spawn_token_server(60).await;
-    create_client(&server.store, "c1", Some("secret"), vec![McpScope::OrgWrite]);
+    create_client(
+        &server.store,
+        "c1",
+        Some("secret"),
+        vec![McpScope::OrgWrite],
+    );
     let client = reqwest::Client::new();
     let session = initialize(&client, &server.base_url, Some("secret")).await;
 
@@ -638,7 +718,10 @@ async fn org_create_node_ignores_tools_and_permissions() {
     let node = server.store.org_get("backend").unwrap().expect("node");
     assert_eq!(node.profile.skills, vec!["rust".to_string()]);
     assert!(node.profile.tools.is_empty(), "tools must be ignored");
-    assert!(node.profile.permissions.approvals.is_empty(), "permissions must be ignored");
+    assert!(
+        node.profile.permissions.approvals.is_empty(),
+        "permissions must be ignored"
+    );
 
     server.stop().await;
 }
@@ -650,7 +733,12 @@ async fn org_create_node_ignores_tools_and_permissions() {
 #[tokio::test]
 async fn rate_limit_returns_an_error_with_retry_after() {
     let server = spawn_token_server(1).await;
-    create_client(&server.store, "c1", Some("secret"), vec![McpScope::KnowledgeRead]);
+    create_client(
+        &server.store,
+        "c1",
+        Some("secret"),
+        vec![McpScope::KnowledgeRead],
+    );
     let client = reqwest::Client::new();
     let session = initialize(&client, &server.base_url, Some("secret")).await;
 
@@ -659,11 +747,25 @@ async fn rate_limit_returns_an_error_with_retry_after() {
             "name": "knowledge_list", "arguments": {}
         }})
     };
-    let resp = rpc(&client, &server.base_url, Some("secret"), Some(&session), call()).await;
+    let resp = rpc(
+        &client,
+        &server.base_url,
+        Some("secret"),
+        Some(&session),
+        call(),
+    )
+    .await;
     let body: Value = resp.json().await.expect("json");
     assert!(body.get("error").is_none(), "{body}");
 
-    let resp = rpc(&client, &server.base_url, Some("secret"), Some(&session), call()).await;
+    let resp = rpc(
+        &client,
+        &server.base_url,
+        Some("secret"),
+        Some(&session),
+        call(),
+    )
+    .await;
     let body: Value = resp.json().await.expect("json");
     assert_eq!(body["error"]["code"], -32000, "{body}");
     assert!(body["error"]["data"]["retry_after"].is_number(), "{body}");
@@ -678,7 +780,12 @@ async fn rate_limit_returns_an_error_with_retry_after() {
 #[tokio::test]
 async fn tools_call_is_recorded_in_mcp_calls() {
     let server = spawn_token_server(60).await;
-    create_client(&server.store, "c1", Some("secret"), vec![McpScope::KnowledgeRead]);
+    create_client(
+        &server.store,
+        "c1",
+        Some("secret"),
+        vec![McpScope::KnowledgeRead],
+    );
     let client = reqwest::Client::new();
     let session = initialize(&client, &server.base_url, Some("secret")).await;
 
@@ -713,7 +820,12 @@ async fn tools_call_is_recorded_in_mcp_calls() {
 async fn task_comment_requires_scope_and_is_authored_by_the_mcp_client() {
     let server = spawn_token_server(60).await;
     create_client(&server.store, "noscope", Some("s0"), vec![]);
-    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksInteract]);
+    create_client(
+        &server.store,
+        "chatgpt",
+        Some("secret"),
+        vec![McpScope::TasksInteract],
+    );
     let task_id = insert_task(&server.store, TaskKind::Execute, Status::Ready);
     let client = reqwest::Client::new();
 
@@ -757,7 +869,12 @@ async fn task_comment_requires_scope_and_is_authored_by_the_mcp_client() {
 async fn task_answer_requires_scope_and_unblocks_the_task() {
     let server = spawn_token_server(60).await;
     create_client(&server.store, "noscope", Some("s0"), vec![]);
-    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksInteract]);
+    create_client(
+        &server.store,
+        "chatgpt",
+        Some("secret"),
+        vec![McpScope::TasksInteract],
+    );
     let task_id = insert_task(&server.store, TaskKind::Execute, Status::Blocked);
     let client = reqwest::Client::new();
 
@@ -772,7 +889,10 @@ async fn task_answer_requires_scope_and_unblocks_the_task() {
     )
     .await;
     assert_eq!(body["error"]["code"], -32601, "{body}");
-    assert_eq!(server.store.get(task_id).unwrap().unwrap().status, Status::Blocked);
+    assert_eq!(
+        server.store.get(task_id).unwrap().unwrap().status,
+        Status::Blocked
+    );
 
     let session = initialize(&client, &server.base_url, Some("secret")).await;
     let body = call_tool(
@@ -786,7 +906,10 @@ async fn task_answer_requires_scope_and_unblocks_the_task() {
     .await;
     let out = structured(&body);
     assert_eq!(out["to"], "ready", "{out}");
-    assert_eq!(server.store.get(task_id).unwrap().unwrap().status, Status::Ready);
+    assert_eq!(
+        server.store.get(task_id).unwrap().unwrap().status,
+        Status::Ready
+    );
 
     server.stop().await;
 }
@@ -795,7 +918,12 @@ async fn task_answer_requires_scope_and_unblocks_the_task() {
 async fn task_retry_requires_scope_and_duplicates_the_failed_task() {
     let server = spawn_token_server(60).await;
     create_client(&server.store, "noscope", Some("s0"), vec![]);
-    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksControl]);
+    create_client(
+        &server.store,
+        "chatgpt",
+        Some("secret"),
+        vec![McpScope::TasksControl],
+    );
     let task_id = insert_task(&server.store, TaskKind::Execute, Status::Failed);
     let client = reqwest::Client::new();
 
@@ -822,10 +950,18 @@ async fn task_retry_requires_scope_and_duplicates_the_failed_task() {
     )
     .await;
     let out = structured(&body);
-    let new_id: task_core::TaskId = out["task_id"].as_str().expect("task_id").parse().expect("ulid");
+    let new_id: task_core::TaskId = out["task_id"]
+        .as_str()
+        .expect("task_id")
+        .parse()
+        .expect("ulid");
     assert_ne!(new_id, task_id);
     let new_task = server.store.get(new_id).unwrap().expect("new task exists");
-    assert_eq!(new_task.status, Status::Draft, "accept=false starts at draft");
+    assert_eq!(
+        new_task.status,
+        Status::Draft,
+        "accept=false starts at draft"
+    );
 
     server.stop().await;
 }
@@ -834,7 +970,12 @@ async fn task_retry_requires_scope_and_duplicates_the_failed_task() {
 async fn task_cancel_requires_scope_and_records_an_optional_reason_comment() {
     let server = spawn_token_server(60).await;
     create_client(&server.store, "noscope", Some("s0"), vec![]);
-    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksControl]);
+    create_client(
+        &server.store,
+        "chatgpt",
+        Some("secret"),
+        vec![McpScope::TasksControl],
+    );
     let task_id = insert_task(&server.store, TaskKind::Execute, Status::Ready);
     let client = reqwest::Client::new();
 
@@ -849,7 +990,10 @@ async fn task_cancel_requires_scope_and_records_an_optional_reason_comment() {
     )
     .await;
     assert_eq!(body["error"]["code"], -32601, "{body}");
-    assert_eq!(server.store.get(task_id).unwrap().unwrap().status, Status::Ready);
+    assert_eq!(
+        server.store.get(task_id).unwrap().unwrap().status,
+        Status::Ready
+    );
 
     let session = initialize(&client, &server.base_url, Some("secret")).await;
     let body = call_tool(
@@ -863,7 +1007,10 @@ async fn task_cancel_requires_scope_and_records_an_optional_reason_comment() {
     .await;
     let out = structured(&body);
     assert_eq!(out["to"], "cancelled", "{out}");
-    assert_eq!(server.store.get(task_id).unwrap().unwrap().status, Status::Cancelled);
+    assert_eq!(
+        server.store.get(task_id).unwrap().unwrap().status,
+        Status::Cancelled
+    );
 
     let comments = server.store.comments_for(task_id).unwrap();
     assert_eq!(comments.len(), 1);
@@ -878,7 +1025,12 @@ async fn task_cancel_requires_scope_and_records_an_optional_reason_comment() {
 async fn task_approve_and_task_reject_require_scope_and_record_the_mcp_actor() {
     let server = spawn_token_server(60).await;
     create_client(&server.store, "noscope", Some("s0"), vec![]);
-    create_client(&server.store, "chatgpt", Some("secret"), vec![McpScope::TasksDecide]);
+    create_client(
+        &server.store,
+        "chatgpt",
+        Some("secret"),
+        vec![McpScope::TasksDecide],
+    );
     let draft_id = insert_task(&server.store, TaskKind::Execute, Status::Draft);
     let approval_id = insert_task(&server.store, TaskKind::Approval, Status::Ready);
     let client = reqwest::Client::new();
@@ -920,7 +1072,10 @@ async fn task_approve_and_task_reject_require_scope_and_record_the_mcp_actor() {
     .await;
     let out = structured(&body);
     assert_eq!(out["to"], "ready", "{out}");
-    assert_eq!(server.store.get(draft_id).unwrap().unwrap().status, Status::Ready);
+    assert_eq!(
+        server.store.get(draft_id).unwrap().unwrap().status,
+        Status::Ready
+    );
 
     // task_reject: reason が空だと invalid_params（-32602）。
     let body = call_tool(
@@ -949,14 +1104,19 @@ async fn task_approve_and_task_reject_require_scope_and_record_the_mcp_actor() {
 
     let events = server.store.events_for(approval_id).unwrap();
     let decided = events.iter().find_map(|(_, e)| match e {
-        task_core::Event::ApprovalDecided { by, approved, note } => Some((by.clone(), *approved, note.clone())),
+        task_core::Event::ApprovalDecided { by, approved, note } => {
+            Some((by.clone(), *approved, note.clone()))
+        }
         _ => None,
     });
     assert_eq!(
         decided,
-        Some(("mcp:chatgpt".to_string(), false, Some("要件が足りない".to_string())))
+        Some((
+            "mcp:chatgpt".to_string(),
+            false,
+            Some("要件が足りない".to_string())
+        ))
     );
 
     server.stop().await;
 }
-

@@ -97,7 +97,8 @@ pub fn schedule(
         {
             continue;
         }
-        let Some(spec) = build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
+        let Some(spec) =
+            build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
         else {
             continue;
         };
@@ -147,7 +148,8 @@ pub fn retry_failed(
         let Some(task) = store.get(run.task_id)? else {
             continue; // 元のタスクが消えている（やり直しても依頼文を組めない）。
         };
-        let Some(spec) = build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
+        let Some(spec) =
+            build_run_spec(store, knowledge_root, &task, max_related_pages, memory_dir)?
         else {
             continue;
         };

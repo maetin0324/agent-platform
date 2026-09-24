@@ -1169,7 +1169,9 @@ fn handle_line(line: &str, sink: &dyn EventSink, last_result: &mut Option<Result
                 input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
                 output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
                 cache_read_tokens: u.get("cache_read_input_tokens").and_then(|v| v.as_u64()),
-                cache_creation_tokens: u.get("cache_creation_input_tokens").and_then(|v| v.as_u64()),
+                cache_creation_tokens: u
+                    .get("cache_creation_input_tokens")
+                    .and_then(|v| v.as_u64()),
                 cost_usd: None,
             });
             let result = value
@@ -1444,7 +1446,9 @@ mod tests {
         let other = build_prompt(&task, &other_context, "run-other", "artifacts");
         assert!(!other.contains("artifacts/delegate.json"), "{other}");
         assert!(
-            other.contains("この run は返事だけを書く。仕事は返事の `actions` で作る（ファイルは書けない）。"),
+            other.contains(
+                "この run は返事だけを書く。仕事は返事の `actions` で作る（ファイルは書けない）。"
+            ),
             "{other}"
         );
 
@@ -1522,7 +1526,7 @@ mod tests {
                 path: "artifacts/readme.diff".into(),
                 sha256: "deadbeef".into(),
                 kind: "diff".into(),
-            declared: true,
+                declared: true,
             }],
             ..RunContext::default()
         };
@@ -3086,12 +3090,24 @@ printf '%s\n' '{"type":"turn.completed"}'
             .position(|a| a == "--allowedTools")
             .expect("--allowedTools present");
         let allowed = &args[idx + 1];
-        assert!(allowed.contains("Bash(celerisctl knowledge search:*)"), "{allowed}");
-        assert!(allowed.contains("Bash(celerisctl knowledge get:*)"), "{allowed}");
+        assert!(
+            allowed.contains("Bash(celerisctl knowledge search:*)"),
+            "{allowed}"
+        );
+        assert!(
+            allowed.contains("Bash(celerisctl knowledge get:*)"),
+            "{allowed}"
+        );
         assert!(allowed.contains("Bash(celerisctl ls:*)"), "{allowed}");
         assert!(allowed.contains("Bash(celerisctl show:*)"), "{allowed}");
-        assert!(allowed.contains("Bash(celerisctl projects ls:*)"), "{allowed}");
-        assert!(allowed.contains("Bash(celerisctl projects show:*)"), "{allowed}");
+        assert!(
+            allowed.contains("Bash(celerisctl projects ls:*)"),
+            "{allowed}"
+        );
+        assert!(
+            allowed.contains("Bash(celerisctl projects show:*)"),
+            "{allowed}"
+        );
     }
 
     /// 対話でない run・CoS 以外の対話（`Other`）には `--allowedTools` は付かない。
@@ -3103,7 +3119,12 @@ printf '%s\n' '{"type":"turn.completed"}'
         let req = sample_req(dir.path().to_path_buf());
         assert_eq!(req.context.conversation_addressee, None);
         let _ = adapter
-            .run(req, "run-plain", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-plain",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -3115,7 +3136,12 @@ printf '%s\n' '{"type":"turn.completed"}'
         let mut req2 = sample_req(dir2.path().to_path_buf());
         req2.context.conversation_addressee = Some(crate::protocol::ConversationAddressee::Other);
         let _ = adapter2
-            .run(req2, "run-other", default_limits(), &RecordingSink::default())
+            .run(
+                req2,
+                "run-other",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args2 = captured_args(dir2.path());
@@ -3139,10 +3165,9 @@ printf '%s\n' '{"type":"turn.completed"}'
             .run(req, "run-4", default_limits(), &RecordingSink::default())
             .await
             .unwrap();
-        let request_json = std::fs::read_to_string(
-            dir.path().join("runs").join("run-4").join("request.json"),
-        )
-        .unwrap();
+        let request_json =
+            std::fs::read_to_string(dir.path().join("runs").join("run-4").join("request.json"))
+                .unwrap();
         let value: serde_json::Value = serde_json::from_str(&request_json).unwrap();
         assert_eq!(value["context"]["session"]["resume"], true);
         assert_eq!(
@@ -3199,7 +3224,13 @@ printf '%s\n' '{"type":"turn.completed"}'
         let outcome = adapter.run(req, "run-6", default_limits(), &sink).await;
         // 供給側失敗としては分類されない文面なので run 自体は retryable な通常のエラーで返る。
         match outcome {
-            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Ok(o) => assert!(matches!(
+                o.terminal,
+                Terminal::Error {
+                    retryable: true,
+                    ..
+                }
+            )),
             Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
         }
         let failed = sink.session_resume_failed.lock().unwrap();
@@ -3248,11 +3279,15 @@ printf '%s\n' '{"type":"turn.completed"}'
             resume: true,
         });
         let sink = RecordingSink::default();
-        let outcome = adapter
-            .run(req, "run-113a", default_limits(), &sink)
-            .await;
+        let outcome = adapter.run(req, "run-113a", default_limits(), &sink).await;
         match outcome {
-            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Ok(o) => assert!(matches!(
+                o.terminal,
+                Terminal::Error {
+                    retryable: true,
+                    ..
+                }
+            )),
             Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
         }
         let failed = sink.session_resume_failed.lock().unwrap();

@@ -43,7 +43,9 @@ pub fn lint(store: &dyn TaskStore) -> Result<Vec<Violation>, CliError> {
 pub fn run(store: &dyn TaskStore) -> Result<ExitCode, CliError> {
     let violations = lint(store)?;
     if violations.is_empty() {
-        outln!("違反はありません（draft/ready のタスクの human チェックには全て artifacts か知識ベースの参照が付いています）。");
+        outln!(
+            "違反はありません（draft/ready のタスクの human チェックには全て artifacts か知識ベースの参照が付いています）。"
+        );
         return Ok(ExitCode::SUCCESS);
     }
     for v in &violations {

@@ -208,7 +208,12 @@ async fn new_conversation(
     state
         .blocking(move |store| {
             let retired = store
-                .node_session_retire(COS_ID, SessionKind::Conversation, None, OffsetDateTime::now_utc())
+                .node_session_retire(
+                    COS_ID,
+                    SessionKind::Conversation,
+                    None,
+                    OffsetDateTime::now_utc(),
+                )
                 .map_err(store_problem)?;
             tracing::info!(
                 who = "admin",

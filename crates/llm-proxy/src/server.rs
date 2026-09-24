@@ -9,20 +9,22 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::{Json, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use futures_util::{Stream, StreamExt};
 use serde_json::{Value, json};
 use task_core::AccountAdapter;
 use task_core::SharedRole;
-use task_dispatch::accounts::{AccountBook, AccountCooldownReason, AccountDir, cooldown_for_failure, scan_accounts};
+use task_dispatch::accounts::{
+    AccountBook, AccountCooldownReason, AccountDir, cooldown_for_failure, scan_accounts,
+};
 use ulid::Ulid;
 
 use crate::config::{LlmProxyConfig, OpenAiCompatibleConfig};
@@ -83,7 +85,12 @@ impl ProxyState {
     }
 
     fn in_use_count(&self, key: &str) -> usize {
-        self.in_use.lock().unwrap_or_else(|e| e.into_inner()).get(key).copied().unwrap_or(0)
+        self.in_use
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .copied()
+            .unwrap_or(0)
     }
 
     fn in_use_start(&self, key: &str) {
@@ -101,13 +108,21 @@ impl ProxyState {
     /// `GET <base_url>/models` の到達性を probe し、`probe_cache_secs` の間はキャッシュする。
     pub(crate) async fn reachable(&self, cfg: &OpenAiCompatibleConfig) -> bool {
         let ttl = Duration::from_secs(self.config.probe_cache_secs);
-        if let Some((at, ok)) = self.probe_cache.lock().unwrap_or_else(|e| e.into_inner()).get(&cfg.id).copied()
+        if let Some((at, ok)) = self
+            .probe_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&cfg.id)
+            .copied()
             && at.elapsed() < ttl
         {
             return ok;
         }
         let ok = relay::probe(&self.client, cfg).await;
-        self.probe_cache.lock().unwrap_or_else(|e| e.into_inner()).insert(cfg.id.clone(), (Instant::now(), ok));
+        self.probe_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(cfg.id.clone(), (Instant::now(), ok));
         ok
     }
 
@@ -132,7 +147,9 @@ impl ProxyState {
     }
 
     fn rank_claude(&self, dirs: &[AccountDir], now: i64) -> Vec<SelectedAccount> {
-        let Some(book) = &self.claude_book else { return vec![] };
+        let Some(book) = &self.claude_book else {
+            return vec![];
+        };
         let guard = book.lock().unwrap_or_else(|e| e.into_inner());
         let input = PoolInput {
             dirs,
@@ -144,7 +161,9 @@ impl ProxyState {
     }
 
     fn rank_codex(&self, dirs: &[AccountDir], now: i64) -> Vec<SelectedAccount> {
-        let Some(book) = &self.codex_book else { return vec![] };
+        let Some(book) = &self.codex_book else {
+            return vec![];
+        };
         let guard = book.lock().unwrap_or_else(|e| e.into_inner());
         let input = PoolInput {
             dirs,
@@ -155,9 +174,20 @@ impl ProxyState {
         selection::rank_pool(SourceKind::Gpt, &input, now)
     }
 
-    fn rank_cross(&self, claude_dirs: &[AccountDir], codex_dirs: &[AccountDir], now: i64) -> Vec<SelectedAccount> {
-        let claude_guard = self.claude_book.as_ref().map(|b| b.lock().unwrap_or_else(|e| e.into_inner()));
-        let codex_guard = self.codex_book.as_ref().map(|b| b.lock().unwrap_or_else(|e| e.into_inner()));
+    fn rank_cross(
+        &self,
+        claude_dirs: &[AccountDir],
+        codex_dirs: &[AccountDir],
+        now: i64,
+    ) -> Vec<SelectedAccount> {
+        let claude_guard = self
+            .claude_book
+            .as_ref()
+            .map(|b| b.lock().unwrap_or_else(|e| e.into_inner()));
+        let codex_guard = self
+            .codex_book
+            .as_ref()
+            .map(|b| b.lock().unwrap_or_else(|e| e.into_inner()));
         let claude_in_use = |id: &str| self.in_use_count(&format!("claude-oauth:{id}"));
         let codex_in_use = |id: &str| self.in_use_count(&format!("codex-oauth:{id}"));
         let claude_input = claude_guard.as_ref().map(|g| PoolInput {
@@ -200,7 +230,12 @@ impl ProxyState {
         };
         let Some(book) = book else { return };
         let mut guard = book.lock().unwrap_or_else(|e| e.into_inner());
-        let cooldown = cooldown_for_failure(guard.state(account_id), reason, now, self.config.cooldown_fallback_secs);
+        let cooldown = cooldown_for_failure(
+            guard.state(account_id),
+            reason,
+            now,
+            self.config.cooldown_fallback_secs,
+        );
         guard.set_cooldown(account_id, cooldown, now);
         if let Err(e) = guard.save() {
             tracing::warn!(error = %e, "llm-proxy: could not persist the account cooldown");
@@ -261,15 +296,27 @@ impl ProxyState {
             },
             ModelRequest::Tiered { scope, tier } => match scope {
                 SourceScope::Only(SourceKind::Claude) => {
-                    let Some(model) = tier_model(&self.config.models.claude, *tier) else { return vec![] };
-                    self.rank_claude(&self.claude_dirs(), now).into_iter().map(|a| (Attempt::Claude(a), model.clone())).collect()
+                    let Some(model) = tier_model(&self.config.models.claude, *tier) else {
+                        return vec![];
+                    };
+                    self.rank_claude(&self.claude_dirs(), now)
+                        .into_iter()
+                        .map(|a| (Attempt::Claude(a), model.clone()))
+                        .collect()
                 }
                 SourceScope::Only(SourceKind::Gpt) => {
-                    let Some(model) = tier_model(&self.config.models.gpt, *tier) else { return vec![] };
-                    self.rank_codex(&self.codex_dirs(), now).into_iter().map(|a| (Attempt::Codex(a), model.clone())).collect()
+                    let Some(model) = tier_model(&self.config.models.gpt, *tier) else {
+                        return vec![];
+                    };
+                    self.rank_codex(&self.codex_dirs(), now)
+                        .into_iter()
+                        .map(|a| (Attempt::Codex(a), model.clone()))
+                        .collect()
                 }
                 SourceScope::Only(SourceKind::Qwen) => {
-                    let Some(model) = tier_model(&self.config.models.qwen, *tier) else { return vec![] };
+                    let Some(model) = tier_model(&self.config.models.qwen, *tier) else {
+                        return vec![];
+                    };
                     self.rank_relays(&self.config.sources.openai_compatible)
                         .await
                         .into_iter()
@@ -280,9 +327,14 @@ impl ProxyState {
                     if self.config.prefer_free {
                         let qwen_model = tier_model(&self.config.models.qwen, *tier);
                         if let Some(model) = qwen_model {
-                            let relays = self.rank_relays(&self.config.sources.openai_compatible).await;
+                            let relays = self
+                                .rank_relays(&self.config.sources.openai_compatible)
+                                .await;
                             if !relays.is_empty() {
-                                return relays.into_iter().map(|cfg| (Attempt::Relay(cfg), model.clone())).collect();
+                                return relays
+                                    .into_iter()
+                                    .map(|cfg| (Attempt::Relay(cfg), model.clone()))
+                                    .collect();
                             }
                         }
                     }
@@ -291,8 +343,10 @@ impl ProxyState {
                     self.rank_cross(&claude_dirs, &codex_dirs, now)
                         .into_iter()
                         .filter_map(|a| match a.source {
-                            SourceKind::Claude => tier_model(&self.config.models.claude, *tier).map(|m| (Attempt::Claude(a), m)),
-                            SourceKind::Gpt => tier_model(&self.config.models.gpt, *tier).map(|m| (Attempt::Codex(a), m)),
+                            SourceKind::Claude => tier_model(&self.config.models.claude, *tier)
+                                .map(|m| (Attempt::Claude(a), m)),
+                            SourceKind::Gpt => tier_model(&self.config.models.gpt, *tier)
+                                .map(|m| (Attempt::Codex(a), m)),
                             SourceKind::Qwen => None,
                         })
                         .collect()
@@ -335,7 +389,12 @@ struct LogHandle {
 }
 
 impl LogHandle {
-    fn write(&self, status: &'static str, usage: (Option<u64>, Option<u64>), error_kind: Option<String>) {
+    fn write(
+        &self,
+        status: &'static str,
+        usage: (Option<u64>, Option<u64>),
+        error_kind: Option<String>,
+    ) {
         let Some(db_path) = &self.db_path else { return };
         let row = RequestLogRow {
             id: self.id.clone(),
@@ -374,8 +433,12 @@ fn error_kind(e: &SourceError) -> &'static str {
 
 fn usage_from_value(v: &Value) -> (Option<u64>, Option<u64>) {
     let usage = v.get("usage");
-    let prompt = usage.and_then(|u| u.get("prompt_tokens")).and_then(|x| x.as_u64());
-    let completion = usage.and_then(|u| u.get("completion_tokens")).and_then(|x| x.as_u64());
+    let prompt = usage
+        .and_then(|u| u.get("prompt_tokens"))
+        .and_then(|x| x.as_u64());
+    let completion = usage
+        .and_then(|u| u.get("completion_tokens"))
+        .and_then(|x| x.as_u64());
     (prompt, completion)
 }
 
@@ -410,7 +473,10 @@ async fn run_attempt(
                     }
                     Ok(AttemptOutcome::NonStreamJson(value))
                 }
-                SendOutcome::Stream(s) => Ok(AttemptOutcome::Stream(encode_chunk_stream(s, req.model.clone()))),
+                SendOutcome::Stream(s) => Ok(AttemptOutcome::Stream(encode_chunk_stream(
+                    s,
+                    req.model.clone(),
+                ))),
             }
         }
         Attempt::Codex(a) => {
@@ -428,7 +494,10 @@ async fn run_attempt(
                     }
                     Ok(AttemptOutcome::NonStreamJson(value))
                 }
-                SendOutcome::Stream(s) => Ok(AttemptOutcome::Stream(encode_chunk_stream(s, req.model.clone()))),
+                SendOutcome::Stream(s) => Ok(AttemptOutcome::Stream(encode_chunk_stream(
+                    s,
+                    req.model.clone(),
+                ))),
             }
         }
         Attempt::Relay(cfg) => {
@@ -440,13 +509,19 @@ async fn run_attempt(
             classify_relay_status(raw.status, raw.retry_after)?;
             if req.stream {
                 let requested_model = req.model.clone();
-                let byte_stream = raw
-                    .body
-                    .bytes_stream()
-                    .map(move |r| r.map_err(|e| SourceError::Network(crate::neterr::safe_reqwest_error(&e))));
-                Ok(AttemptOutcome::Stream(rewrite_relay_stream_model(byte_stream, requested_model)))
+                let byte_stream = raw.body.bytes_stream().map(move |r| {
+                    r.map_err(|e| SourceError::Network(crate::neterr::safe_reqwest_error(&e)))
+                });
+                Ok(AttemptOutcome::Stream(rewrite_relay_stream_model(
+                    byte_stream,
+                    requested_model,
+                )))
             } else {
-                let mut value: Value = raw.body.json().await.map_err(|e| SourceError::Network(crate::neterr::safe_reqwest_error(&e)))?;
+                let mut value: Value = raw
+                    .body
+                    .json()
+                    .await
+                    .map_err(|e| SourceError::Network(crate::neterr::safe_reqwest_error(&e)))?;
                 if let Some(obj) = value.as_object_mut() {
                     obj.insert("model".to_string(), json!(req.model));
                 }
@@ -508,33 +583,37 @@ fn rewrite_relay_stream_model(
     let mut inner = Box::pin(inner);
     let mut decoder = crate::sse::SseDecoder::new();
     let mut pending: std::collections::VecDeque<Bytes> = std::collections::VecDeque::new();
-    Box::pin(futures_util::stream::poll_fn(move |cx| loop {
-        if let Some(b) = pending.pop_front() {
-            return std::task::Poll::Ready(Some(Ok(b)));
-        }
-        match inner.as_mut().poll_next(cx) {
-            std::task::Poll::Ready(Some(Ok(bytes))) => {
-                for ev in decoder.push(&bytes) {
-                    if ev.data.trim() == "[DONE]" {
-                        pending.push_back(Bytes::from(crate::sse::DONE));
-                        continue;
-                    }
-                    let rewritten = match serde_json::from_str::<Value>(&ev.data) {
-                        Ok(mut v) => {
-                            if let Some(obj) = v.as_object_mut() {
-                                obj.insert("model".to_string(), json!(requested_model));
-                            }
-                            serde_json::to_string(&v).unwrap_or(ev.data.clone())
-                        }
-                        Err(_) => ev.data.clone(),
-                    };
-                    pending.push_back(Bytes::from(crate::sse::encode_data(&rewritten)));
-                }
-                continue;
+    Box::pin(futures_util::stream::poll_fn(move |cx| {
+        loop {
+            if let Some(b) = pending.pop_front() {
+                return std::task::Poll::Ready(Some(Ok(b)));
             }
-            std::task::Poll::Ready(Some(Err(e))) => return std::task::Poll::Ready(Some(Err(e))),
-            std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
-            std::task::Poll::Pending => return std::task::Poll::Pending,
+            match inner.as_mut().poll_next(cx) {
+                std::task::Poll::Ready(Some(Ok(bytes))) => {
+                    for ev in decoder.push(&bytes) {
+                        if ev.data.trim() == "[DONE]" {
+                            pending.push_back(Bytes::from(crate::sse::DONE));
+                            continue;
+                        }
+                        let rewritten = match serde_json::from_str::<Value>(&ev.data) {
+                            Ok(mut v) => {
+                                if let Some(obj) = v.as_object_mut() {
+                                    obj.insert("model".to_string(), json!(requested_model));
+                                }
+                                serde_json::to_string(&v).unwrap_or(ev.data.clone())
+                            }
+                            Err(_) => ev.data.clone(),
+                        };
+                        pending.push_back(Bytes::from(crate::sse::encode_data(&rewritten)));
+                    }
+                    continue;
+                }
+                std::task::Poll::Ready(Some(Err(e))) => {
+                    return std::task::Poll::Ready(Some(Err(e)));
+                }
+                std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
+            }
         }
     }))
 }
@@ -556,7 +635,10 @@ fn finalize_stream(
                     log.write("error", (None, None), Some(error_kind(&e).to_string()));
                 }
             }
-            tracing::warn!(kind = error_kind(&e), "llm-proxy: stream terminated after bytes were sent");
+            tracing::warn!(
+                kind = error_kind(&e),
+                "llm-proxy: stream terminated after bytes were sent"
+            );
             std::task::Poll::Ready(None)
         }
         std::task::Poll::Ready(None) => {
@@ -577,7 +659,11 @@ fn finalize_stream(
 // ---------------------------------------------------------------------------
 
 fn problem(status: StatusCode, code: &str, detail: &str) -> Response {
-    (status, Json(json!({"error": {"type": code, "message": detail}}))).into_response()
+    (
+        status,
+        Json(json!({"error": {"type": code, "message": detail}})),
+    )
+        .into_response()
 }
 
 async fn healthz() -> Response {
@@ -585,7 +671,11 @@ async fn healthz() -> Response {
 }
 
 async fn embeddings_not_implemented() -> Response {
-    problem(StatusCode::NOT_IMPLEMENTED, "not_implemented", "POST /v1/embeddings is not implemented by this proxy")
+    problem(
+        StatusCode::NOT_IMPLEMENTED,
+        "not_implemented",
+        "POST /v1/embeddings is not implemented by this proxy",
+    )
 }
 
 async fn list_models(State(state): State<Arc<ProxyState>>) -> Response {
@@ -599,7 +689,13 @@ async fn list_models(State(state): State<Arc<ProxyState>>) -> Response {
             owned_by: "celeris".to_string(),
         });
     }
-    if state.config.sources.claude_oauth.as_ref().is_some_and(|c| c.enabled) {
+    if state
+        .config
+        .sources
+        .claude_oauth
+        .as_ref()
+        .is_some_and(|c| c.enabled)
+    {
         for tier in ["frontier", "standard", "cheap"] {
             data.push(crate::openai::ModelInfo {
                 id: format!("claude/{tier}"),
@@ -609,7 +705,13 @@ async fn list_models(State(state): State<Arc<ProxyState>>) -> Response {
             });
         }
     }
-    if state.config.sources.codex_oauth.as_ref().is_some_and(|c| c.enabled) {
+    if state
+        .config
+        .sources
+        .codex_oauth
+        .as_ref()
+        .is_some_and(|c| c.enabled)
+    {
         for tier in ["frontier", "standard", "cheap"] {
             data.push(crate::openai::ModelInfo {
                 id: format!("gpt/{tier}"),
@@ -619,7 +721,13 @@ async fn list_models(State(state): State<Arc<ProxyState>>) -> Response {
             });
         }
     }
-    if state.config.sources.openai_compatible.iter().any(|c| c.enabled) {
+    if state
+        .config
+        .sources
+        .openai_compatible
+        .iter()
+        .any(|c| c.enabled)
+    {
         for tier in ["frontier", "standard", "cheap"] {
             data.push(crate::openai::ModelInfo {
                 id: format!("qwen/{tier}"),
@@ -629,7 +737,14 @@ async fn list_models(State(state): State<Arc<ProxyState>>) -> Response {
             });
         }
     }
-    (StatusCode::OK, Json(crate::openai::ModelsResponse { object: "list".to_string(), data })).into_response()
+    (
+        StatusCode::OK,
+        Json(crate::openai::ModelsResponse {
+            object: "list".to_string(),
+            data,
+        }),
+    )
+        .into_response()
 }
 
 fn attach_source_headers(headers: &mut HeaderMap, source: &str, account: Option<&str>) {
@@ -645,9 +760,17 @@ fn attach_source_headers(headers: &mut HeaderMap, source: &str, account: Option<
 
 fn error_response(e: &SourceError) -> Response {
     match e {
-        SourceError::Unauthorized => problem(StatusCode::BAD_GATEWAY, "unauthorized", "upstream rejected the credentials"),
+        SourceError::Unauthorized => problem(
+            StatusCode::BAD_GATEWAY,
+            "unauthorized",
+            "upstream rejected the credentials",
+        ),
         SourceError::RateLimited { retry_after } => {
-            let mut resp = problem(StatusCode::TOO_MANY_REQUESTS, "rate_limited", "upstream rate-limited the request");
+            let mut resp = problem(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "upstream rate-limited the request",
+            );
             if let Some(secs) = retry_after
                 && let Ok(v) = HeaderValue::from_str(&secs.to_string())
             {
@@ -657,16 +780,33 @@ fn error_response(e: &SourceError) -> Response {
         }
         SourceError::Upstream { status, summary } => {
             let code = StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY);
-            let code = if code.is_client_error() || code.is_server_error() { code } else { StatusCode::BAD_GATEWAY };
+            let code = if code.is_client_error() || code.is_server_error() {
+                code
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
             problem(code, "upstream_error", summary)
         }
-        SourceError::Network(_) => problem(StatusCode::SERVICE_UNAVAILABLE, "network_error", "could not reach the upstream"),
-        SourceError::Credentials(msg) => problem(StatusCode::INTERNAL_SERVER_ERROR, "credentials_error", msg),
-        SourceError::Unavailable(id) => problem(StatusCode::SERVICE_UNAVAILABLE, "source_unavailable", &format!("source unavailable: {id}")),
+        SourceError::Network(_) => problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "network_error",
+            "could not reach the upstream",
+        ),
+        SourceError::Credentials(msg) => {
+            problem(StatusCode::INTERNAL_SERVER_ERROR, "credentials_error", msg)
+        }
+        SourceError::Unavailable(id) => problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "source_unavailable",
+            &format!("source unavailable: {id}"),
+        ),
     }
 }
 
-async fn chat_completions(State(state): State<Arc<ProxyState>>, Json(req): Json<ChatCompletionRequest>) -> Response {
+async fn chat_completions(
+    State(state): State<Arc<ProxyState>>,
+    Json(req): Json<ChatCompletionRequest>,
+) -> Response {
     let started = Instant::now();
     let request_id = Ulid::new().to_string();
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -686,7 +826,11 @@ async fn chat_completions(State(state): State<Arc<ProxyState>>, Json(req): Json<
                 busy_timeout: state.busy_timeout,
             }
             .write("error", (None, None), Some("invalid_model".to_string()));
-            return problem(StatusCode::UNPROCESSABLE_ENTITY, "invalid_model", &e.to_string());
+            return problem(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_model",
+                &e.to_string(),
+            );
         }
     };
 
@@ -714,8 +858,16 @@ async fn chat_completions(State(state): State<Arc<ProxyState>>, Json(req): Json<
             db_path: state.db_path.clone(),
             busy_timeout: state.busy_timeout,
         }
-        .write("unavailable", (None, None), Some("no_source_available".to_string()));
-        let mut resp = problem(StatusCode::SERVICE_UNAVAILABLE, "no_source_available", "no reachable llm source is configured for this model");
+        .write(
+            "unavailable",
+            (None, None),
+            Some("no_source_available".to_string()),
+        );
+        let mut resp = problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no_source_available",
+            "no reachable llm source is configured for this model",
+        );
         if let Ok(v) = HeaderValue::from_str("5") {
             resp.headers_mut().insert(header::RETRY_AFTER, v);
         }
@@ -726,7 +878,9 @@ async fn chat_completions(State(state): State<Arc<ProxyState>>, Json(req): Json<
     for (attempt, upstream_model) in &attempts {
         let source_label = attempt.source_label();
         let account_label = attempt.account_label();
-        let in_use_key = account_label.as_ref().map(|a| format!("{source_label}:{a}"));
+        let in_use_key = account_label
+            .as_ref()
+            .map(|a| format!("{source_label}:{a}"));
         if let Some(k) = &in_use_key {
             state.in_use_start(k);
         }
@@ -767,15 +921,22 @@ async fn chat_completions(State(state): State<Arc<ProxyState>>, Json(req): Json<
                 };
                 let body = Body::from_stream(finalize_stream(stream, log));
                 let mut resp = Response::new(body);
-                resp.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
-                resp.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+                resp.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("text/event-stream"),
+                );
+                resp.headers_mut()
+                    .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
                 attach_source_headers(resp.headers_mut(), &source_label, account_label.as_deref());
                 return resp;
             }
             Err(e) => {
                 if let (Some(account), true) = (
                     &account_label,
-                    matches!(e, SourceError::Unauthorized | SourceError::RateLimited { .. }),
+                    matches!(
+                        e,
+                        SourceError::Unauthorized | SourceError::RateLimited { .. }
+                    ),
                 ) {
                     let source_kind = match attempt {
                         Attempt::Claude(_) => SourceKind::Claude,
@@ -820,12 +981,20 @@ async fn guard(State(state): State<Arc<ProxyState>>, req: Request, next: Next) -
         return next.run(req).await;
     }
     if !state.role.accepts_admin() {
-        return problem(StatusCode::SERVICE_UNAVAILABLE, "standby", "this instance is not active");
+        return problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "standby",
+            "this instance is not active",
+        );
     }
     if let Some(token) = &state.token {
         let digest = crate::auth::token_digest(token);
         if !crate::auth::check_bearer(req.headers(), &digest) {
-            return problem(StatusCode::UNAUTHORIZED, "unauthorized", "missing or invalid bearer token");
+            return problem(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "missing or invalid bearer token",
+            );
         }
     }
     next.run(req).await
@@ -848,5 +1017,7 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let app = router(state);
-    axum::serve(listener, app).with_graceful_shutdown(shutdown).await
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
 }

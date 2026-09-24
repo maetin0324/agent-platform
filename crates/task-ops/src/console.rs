@@ -625,7 +625,11 @@ mod tests {
             text: "した。".into(),
         };
         merge_conversation_reply(&mut acc, &next);
-        assert_eq!(acc.thinking.as_deref(), Some("考え中…"), "空なら置き換えない");
+        assert_eq!(
+            acc.thinking.as_deref(),
+            Some("考え中…"),
+            "空なら置き換えない"
+        );
         assert_eq!(acc.text, "承知しました。");
         assert_eq!(acc.steps.len(), 2);
         assert_eq!(acc.updated_at, "2026-09-21T01:00:05Z");

@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use task_core::{EffectiveProfile, McpScope, NodeSessionStore, OrgKind, OrgNode, Profile, SessionKind, TaskStore};
+use task_core::{
+    EffectiveProfile, McpScope, NodeSessionStore, OrgKind, OrgNode, Profile, SessionKind, TaskStore,
+};
 use time::OffsetDateTime;
 
 use super::{ToolDef, ToolError, ToolOutput, schema};
@@ -45,7 +47,9 @@ async fn list_impl(
 ) -> Result<ToolOutput, ToolError> {
     let items = state
         .blocking(move |store| -> Result<Vec<OrgNodeSummary>, ToolError> {
-            let nodes = store.org_list().map_err(|e| ToolError::internal(e.to_string()))?;
+            let nodes = store
+                .org_list()
+                .map_err(|e| ToolError::internal(e.to_string()))?;
             let mut out = Vec::with_capacity(nodes.len());
             for node in &nodes {
                 let effective = task_core::resolve_profile(&nodes, &node.id);
@@ -107,15 +111,20 @@ async fn get_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: GetArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: GetArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let profile = state
-        .blocking(move |store| -> Result<Option<EffectiveProfile>, ToolError> {
-            let nodes = store.org_list().map_err(|e| ToolError::internal(e.to_string()))?;
-            if !nodes.iter().any(|n| n.id == args.node_id) {
-                return Ok(None);
-            }
-            Ok(Some(task_core::resolve_profile(&nodes, &args.node_id)))
-        })
+        .blocking(
+            move |store| -> Result<Option<EffectiveProfile>, ToolError> {
+                let nodes = store
+                    .org_list()
+                    .map_err(|e| ToolError::internal(e.to_string()))?;
+                if !nodes.iter().any(|n| n.id == args.node_id) {
+                    return Ok(None);
+                }
+                Ok(Some(task_core::resolve_profile(&nodes, &args.node_id)))
+            },
+        )
         .await?;
     match profile {
         Some(p) => ToolOutput::from_serialize(&p),
@@ -208,11 +217,17 @@ async fn create_node_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: CreateNodeArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
-    let profile = args.profile.map(ProfileInput::into_profile).unwrap_or_default();
+    let args: CreateNodeArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let profile = args
+        .profile
+        .map(ProfileInput::into_profile)
+        .unwrap_or_default();
     let node = state
         .blocking(move |store| -> Result<OrgNode, ToolError> {
-            let nodes = store.org_list().map_err(|e| ToolError::internal(e.to_string()))?;
+            let nodes = store
+                .org_list()
+                .map_err(|e| ToolError::internal(e.to_string()))?;
             let Some(parent) = nodes.iter().find(|n| n.id == args.parent_id) else {
                 return Err(ToolError::invalid_params(format!(
                     "parent {:?} does not exist",
@@ -229,7 +244,10 @@ async fn create_node_impl(
                 }
             };
             if nodes.iter().any(|n| n.id == args.id) {
-                return Err(ToolError::invalid_params(format!("org node {:?} already exists", args.id)));
+                return Err(ToolError::invalid_params(format!(
+                    "org node {:?} already exists",
+                    args.id
+                )));
             }
             let now = OffsetDateTime::now_utc();
             let node = OrgNode {
@@ -244,9 +262,13 @@ async fn create_node_impl(
                 created_at: now,
                 updated_at: now,
             };
-            task_core::validate_upsert(&nodes, &node).map_err(|e| ToolError::invalid_params(e.to_string()))?;
-            task_core::validate_profile(&node.profile, &[]).map_err(|e| ToolError::invalid_params(e.to_string()))?;
-            store.org_upsert(&node).map_err(|e| ToolError::internal(e.to_string()))
+            task_core::validate_upsert(&nodes, &node)
+                .map_err(|e| ToolError::invalid_params(e.to_string()))?;
+            task_core::validate_profile(&node.profile, &[])
+                .map_err(|e| ToolError::invalid_params(e.to_string()))?;
+            store
+                .org_upsert(&node)
+                .map_err(|e| ToolError::internal(e.to_string()))
         })
         .await?;
     ToolOutput::from_serialize(&node)
@@ -284,7 +306,8 @@ async fn mount_common(
     args: serde_json::Value,
     mount: bool,
 ) -> Result<ToolOutput, ToolError> {
-    let args: MountArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: MountArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     if !task_core::knowledge::is_valid_skill_name(&args.skill) {
         return Err(ToolError::invalid_params(format!(
             "{:?} must match [a-z0-9-] (1..=64 chars)",
@@ -293,16 +316,28 @@ async fn mount_common(
     }
     let node = state
         .blocking(move |store| -> Result<OrgNode, ToolError> {
-            let Some(mut node) = store.org_get(&args.node_id).map_err(|e| ToolError::internal(e.to_string()))? else {
-                return Err(ToolError::not_found(format!("org node {:?} was not found", args.node_id)));
+            let Some(mut node) = store
+                .org_get(&args.node_id)
+                .map_err(|e| ToolError::internal(e.to_string()))?
+            else {
+                return Err(ToolError::not_found(format!(
+                    "org node {:?} was not found",
+                    args.node_id
+                )));
             };
             // Phase 82（ADR-0056 D3 続き）: task-api の `POST/DELETE /org/{id}/skills…` と**同じ**
             // task-ops 関数を呼ぶ（挙動が食い違わないようにするため）。名前は呼び出し元で検証済みなので
             // ここで失敗することは無いが、`?` で素直に伝える。
-            task_ops::knowledge::set_skill_mount(&mut node.profile.skills_mounts, &args.skill, mount)
-                .map_err(|e| ToolError::invalid_params(e.to_string()))?;
+            task_ops::knowledge::set_skill_mount(
+                &mut node.profile.skills_mounts,
+                &args.skill,
+                mount,
+            )
+            .map_err(|e| ToolError::invalid_params(e.to_string()))?;
             node.updated_at = OffsetDateTime::now_utc();
-            store.org_upsert(&node).map_err(|e| ToolError::internal(e.to_string()))
+            store
+                .org_upsert(&node)
+                .map_err(|e| ToolError::internal(e.to_string()))
         })
         .await?;
     ToolOutput::from_serialize(&node)
@@ -343,4 +378,3 @@ pub fn unmount_skill_def() -> ToolDef {
         call: unmount_skill_impl,
     }
 }
-

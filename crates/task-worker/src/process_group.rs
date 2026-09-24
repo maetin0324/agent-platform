@@ -216,7 +216,10 @@ mod tests {
             "a dead process should not be reported as alive even while still registered"
         );
         drop(guard);
-        assert!(!group_alive(&run_id), "dropping the guard also unregisters it");
+        assert!(
+            !group_alive(&run_id),
+            "dropping the guard also unregisters it"
+        );
     }
 
     #[test]

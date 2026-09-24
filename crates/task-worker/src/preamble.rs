@@ -472,7 +472,11 @@ fn clusters_section(context: &RunContext) -> String {
     }
     let mut out = String::from("## クラスタ (clusters)\n");
     for cluster in &context.clusters {
-        let connected = if cluster.connected { "接続中" } else { "未接続" };
+        let connected = if cluster.connected {
+            "接続中"
+        } else {
+            "未接続"
+        };
         match &cluster.work_dir {
             Some(work_dir) => {
                 out.push_str(&format!(
@@ -1249,7 +1253,10 @@ mod tests {
         };
         let out = render(&secretary, "artifacts");
         assert!(out.contains("自分で実行しないでください"), "{out}");
-        assert!(out.contains("『ssh が禁止されている』『read-only』を理由に断らないで"), "{out}");
+        assert!(
+            out.contains("『ssh が禁止されている』『read-only』を理由に断らないで"),
+            "{out}"
+        );
         assert!(out.contains("cluster:<id>"), "{out}");
         assert!(
             out.contains(
@@ -1323,7 +1330,10 @@ mod tests {
             "{out}"
         );
         // 道具が無いノードは「道具:」を出さない（従来どおり）。
-        assert!(out.contains("- `cos` Chief of Staff / harnesses: conversation\n"), "{out}");
+        assert!(
+            out.contains("- `cos` Chief of Staff / harnesses: conversation\n"),
+            "{out}"
+        );
     }
 
     /// ADR-0059 D6（Phase 99）: CoS 宛てに「クラスタ」の節が付き、実効 work_dir の有無で文面が変わる
@@ -1395,7 +1405,10 @@ mod tests {
             out.contains("- `pegasus`（接続中） 作業ディレクトリ: `/work/NBB/rmaeda`"),
             "{out}"
         );
-        assert!(!out.contains("## 組織"), "継続中は組織の一覧を流し直さない: {out}");
+        assert!(
+            !out.contains("## 組織"),
+            "継続中は組織の一覧を流し直さない: {out}"
+        );
     }
 
     /// ADR-0048 D3（Phase 60b）: CoS の対話にだけ「進行中の案件」の節と `actions` の説明が付く。

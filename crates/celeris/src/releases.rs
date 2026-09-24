@@ -469,7 +469,10 @@ fn promoting_pid(dir: &Path) -> Option<u32> {
 /// `promote.log` の最後の（空でない）行。無ければ `None`。
 fn promote_last_line(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("promote.log")).ok()?;
-    text.lines().rev().find(|l| !l.trim().is_empty()).map(str::to_string)
+    text.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .map(str::to_string)
 }
 
 /// Phase 105: 昇格が「途中で止まったまま」に見えるか。
@@ -954,9 +957,8 @@ mod tests {
 
         // `Inline` を明示して、この開発環境に `systemd-run`/`XDG_RUNTIME_DIR` があっても
         // 本物の systemd-run を呼ばないようにする（実行は禁止。テストは常に偽物か `Inline`）。
-        let accepted =
-            start_promote_with_launcher(&root, "abcdef123456", &DetachLauncher::Inline)
-                .expect("202");
+        let accepted = start_promote_with_launcher(&root, "abcdef123456", &DetachLauncher::Inline)
+            .expect("202");
         assert_eq!(accepted.sha12, "abcdef123456");
         assert!(
             accepted.log.ends_with("abcdef123456/promote.log"),
@@ -1030,9 +1032,8 @@ mod tests {
         // (2) 昇格先にだけある（current は Phase 48 以前）→ 昇格先のものを使う。
         // `Inline` を明示（本物の systemd-run を呼ばない）。
         fake_script(&root, "bbbbbbbbbbbb", "target-script");
-        let accepted =
-            start_promote_with_launcher(&root, "bbbbbbbbbbbb", &DetachLauncher::Inline)
-                .expect("202");
+        let accepted = start_promote_with_launcher(&root, "bbbbbbbbbbbb", &DetachLauncher::Inline)
+            .expect("202");
         assert_eq!(accepted.script_from, "target");
         let log = root.join("bbbbbbbbbbbb").join("promote.log");
         let mut logged = String::new();
@@ -1050,9 +1051,8 @@ mod tests {
         std::fs::remove_file(root.join("bbbbbbbbbbbb").join("promote.lock")).expect("rm lock");
         std::fs::remove_file(&log).expect("rm log");
         fake_script(&root, "aaaaaaaaaaaa", "current-script");
-        let accepted =
-            start_promote_with_launcher(&root, "bbbbbbbbbbbb", &DetachLauncher::Inline)
-                .expect("202");
+        let accepted = start_promote_with_launcher(&root, "bbbbbbbbbbbb", &DetachLauncher::Inline)
+            .expect("202");
         assert_eq!(accepted.script_from, "current");
         // ログは**昇格先**の promote.log（人が見る場所は変わらない）。
         assert!(
@@ -1354,7 +1354,10 @@ mod tests {
         let broken = by("bbbbbbbbbbbb");
         assert!(!broken.gate_ok, "壊れた gate.json は gate_ok=false のまま");
         assert!(broken.gate.is_none(), "壊れた gate.json は gate も None");
-        assert!(broken.verify.is_none(), "verify.json が無ければ verify は None");
+        assert!(
+            broken.verify.is_none(),
+            "verify.json が無ければ verify は None"
+        );
     }
 
     /// P-94-1: `release.sh` はゲート成功時に `gate.json` に `failed_step: ""` を書く
@@ -1514,7 +1517,11 @@ mod tests {
         assert_eq!(program, "systemd-run");
         assert_eq!(
             &args[..3],
-            &["--user".to_string(), "--scope".to_string(), "--quiet".to_string()]
+            &[
+                "--user".to_string(),
+                "--scope".to_string(),
+                "--quiet".to_string()
+            ]
         );
         assert_eq!(args[3], "--unit");
         assert!(
@@ -1687,8 +1694,11 @@ mod tests {
             Some(r#"{"ok":true,"live_ok":true}"#),
         );
         let rdir = root.join("abcdef123456");
-        std::fs::write(rdir.join("promote.lock"), format!("{}\n", std::process::id()))
-            .expect("lock");
+        std::fs::write(
+            rdir.join("promote.lock"),
+            format!("{}\n", std::process::id()),
+        )
+        .expect("lock");
 
         let scanned = scan(&root, None);
         let item = scanned

@@ -221,7 +221,9 @@ pub fn classify_task_failure(events: &[(u64, Event)]) -> (FailureClass, String) 
     }
     for (_, e) in events.iter().rev() {
         if let Event::WorkerFinished {
-            outcome, role: None, ..
+            outcome,
+            role: None,
+            ..
         } = e
         {
             if outcome.starts_with(INFRA_FAILURE_MARKER) || outcome.contains(REQUEUE_LIMIT_MARKER) {
@@ -266,7 +268,10 @@ pub fn artifacts_for_run_with_idx(
     events
         .iter()
         .filter_map(|(_, ev)| match ev {
-            Event::ArtifactProduced { run_id: r, artifact } => Some((r, artifact)),
+            Event::ArtifactProduced {
+                run_id: r,
+                artifact,
+            } => Some((r, artifact)),
             _ => None,
         })
         .enumerate()
@@ -535,7 +540,10 @@ mod tests {
         ];
         assert_eq!(consecutive_infra_requeues(&events), 2);
         // 供給側失敗の `requeue` は別カウンタ（混ざらない）。
-        let mixed: Vec<(u64, Event)> = vec![(0, transitioned("infra_requeue")), (1, transitioned("requeue"))];
+        let mixed: Vec<(u64, Event)> = vec![
+            (0, transitioned("infra_requeue")),
+            (1, transitioned("requeue")),
+        ];
         assert_eq!(consecutive_infra_requeues(&mixed), 0);
         assert_eq!(consecutive_requeues(&mixed), 1);
     }
@@ -552,7 +560,10 @@ mod tests {
     #[test]
     fn classify_task_failure_marks_infra_exhaustion_as_infra() {
         let events: Vec<(u64, Event)> = vec![
-            (0, worker_finished("infra_requeue: lease expired (run_id=run-1)")),
+            (
+                0,
+                worker_finished("infra_requeue: lease expired (run_id=run-1)"),
+            ),
             (1, transitioned("infra_requeue")),
             (
                 2,
@@ -579,7 +590,9 @@ mod tests {
     fn classify_task_failure_forces_disk_full_errors_to_infra() {
         let events: Vec<(u64, Event)> = vec![(
             0,
-            worker_finished("error(retryable=false): adapter: io error: No space left on device (os error 28)"),
+            worker_finished(
+                "error(retryable=false): adapter: io error: No space left on device (os error 28)",
+            ),
         )];
         let (class, reason) = classify_task_failure(&events);
         assert_eq!(class, FailureClass::Infra);

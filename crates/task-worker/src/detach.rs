@@ -229,10 +229,7 @@ mod tests {
     #[test]
     fn scope_unit_name_sanitizes_the_id() {
         let unit = scope_unit_name("celeris-promote", "weird id/../x");
-        assert!(
-            unit.starts_with("celeris-promote-weird_id____x-"),
-            "{unit}"
-        );
+        assert!(unit.starts_with("celeris-promote-weird_id____x-"), "{unit}");
     }
 
     #[test]

@@ -4029,7 +4029,10 @@ impl Dispatcher {
             let (trigger, outcome_text) = if infra_n <= self.config.max_infra_retries {
                 (
                     Trigger::InfraRequeue,
-                    format!("infra_requeue: lease expired (run_id={})", lease.worker_run_id),
+                    format!(
+                        "infra_requeue: lease expired (run_id={})",
+                        lease.worker_run_id
+                    ),
                 )
             } else {
                 (
@@ -9995,12 +9998,22 @@ mod tests {
         // lease が確実に切れるまで待つ（max_wall_secs(0) + lease_grace(20ms)）。
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(
-            store.get(task.id).unwrap().unwrap().lease.unwrap().expires_at < OffsetDateTime::now_utc(),
+            store
+                .get(task.id)
+                .unwrap()
+                .unwrap()
+                .lease
+                .unwrap()
+                .expires_at
+                < OffsetDateTime::now_utc(),
             "the lease must actually be expired before reclaim runs"
         );
 
         let reclaimed = d.reclaim_expired_leases().unwrap();
-        assert_eq!(reclaimed, 0, "a still-alive process is extended, not reclaimed");
+        assert_eq!(
+            reclaimed, 0,
+            "a still-alive process is extended, not reclaimed"
+        );
         let t = store.get(task.id).unwrap().unwrap();
         assert_eq!((t.status, t.attempts), (Status::Running, 0));
         assert!(
@@ -10018,7 +10031,11 @@ mod tests {
         let reclaimed = d.reclaim_expired_leases().unwrap();
         assert_eq!(reclaimed, 1, "a dead process is reclaimed as usual");
         let t = store.get(task.id).unwrap().unwrap();
-        assert_eq!((t.status, t.attempts), (Status::Ready, 0), "InfraRequeue does not consume attempts");
+        assert_eq!(
+            (t.status, t.attempts),
+            (Status::Ready, 0),
+            "InfraRequeue does not consume attempts"
+        );
         let events = store.events_for(task.id).unwrap();
         assert!(events.iter().any(|(_, e)| matches!(
             e,
@@ -10477,7 +10494,14 @@ mod tests {
         assert_eq!(adapter.calls.load(Ordering::SeqCst), 3);
         assert_eq!(
             transition_reasons(&store, task.id),
-            vec!["dispatch", "infra_requeue", "dispatch", "infra_requeue", "dispatch", "worker_error"]
+            vec![
+                "dispatch",
+                "infra_requeue",
+                "dispatch",
+                "infra_requeue",
+                "dispatch",
+                "worker_error"
+            ]
         );
         let events = store.events_for(task.id).unwrap();
         assert!(events.iter().any(|(_, e)| matches!(

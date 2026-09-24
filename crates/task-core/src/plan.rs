@@ -495,7 +495,16 @@ pub fn materialize(
     workspace: WorkspaceContext<'_>,
     now: OffsetDateTime,
 ) -> Vec<Task> {
-    materialize_logging(parent, plan, org, roles, genres, workspace, now, &mut |_, _| {})
+    materialize_logging(
+        parent,
+        plan,
+        org,
+        roles,
+        genres,
+        workspace,
+        now,
+        &mut |_, _| {},
+    )
 }
 
 /// [`materialize`] と同じだが、ADR-0062 B2 の「Remote → Local への降格」が起きるたびに
@@ -1316,13 +1325,15 @@ mod tests {
     /// 逃げ道（受け入れ条件の一文、または `partial_ok: true`）があれば警告しない。coding のような
     /// 調査系でない分野は対象外。
     #[test]
-    fn warn_missing_partial_ok_is_quiet_when_the_escape_hatch_is_present_or_the_genre_is_not_research() {
+    fn warn_missing_partial_ok_is_quiet_when_the_escape_hatch_is_present_or_the_genre_is_not_research()
+     {
         let (org, roles, genres) = harness_setup();
 
         let mut with_marker = new_task("CHFS の関連研究", vec![]);
         with_marker.assignee = Some("research-literature".into());
         with_marker.acceptance = vec![Criterion {
-            text: "一次情報で確認できなかった項目は「未確認」と明記されていれば不合格にしない".into(),
+            text: "一次情報で確認できなかった項目は「未確認」と明記されていれば不合格にしない"
+                .into(),
             check: Check::Reviewer,
         }];
 

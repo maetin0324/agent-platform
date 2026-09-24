@@ -66,7 +66,9 @@ impl LlmProxyConfig {
 }
 
 fn default_listen() -> SocketAddr {
-    "127.0.0.1:18100".parse().unwrap_or_else(|e| unreachable!("hardcoded address: {e}"))
+    "127.0.0.1:18100"
+        .parse()
+        .unwrap_or_else(|e| unreachable!("hardcoded address: {e}"))
 }
 fn default_prefer_free() -> bool {
     true

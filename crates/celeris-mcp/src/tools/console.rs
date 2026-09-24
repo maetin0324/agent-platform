@@ -34,7 +34,8 @@ async fn instruct_impl(
     client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: InstructArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: InstructArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     if args.text.trim().is_empty() {
         return Err(ToolError::invalid_params("text must not be blank"));
     }
@@ -136,7 +137,8 @@ async fn reply_impl(
     _client: &AuthedClient,
     args: serde_json::Value,
 ) -> Result<ToolOutput, ToolError> {
-    let args: ReplyArgs = serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
+    let args: ReplyArgs =
+        serde_json::from_value(args).map_err(|e| ToolError::invalid_params(e.to_string()))?;
     let task_id: TaskId = args
         .task_id
         .parse()
@@ -146,8 +148,13 @@ async fn reply_impl(
         .blocking(move |store| -> Result<ReplyOutput, ToolError> {
             let deadline = Instant::now() + wait;
             loop {
-                let Some(task) = store.get(task_id).map_err(|e| ToolError::internal(e.to_string()))? else {
-                    return Err(ToolError::not_found(format!("task {task_id} was not found")));
+                let Some(task) = store
+                    .get(task_id)
+                    .map_err(|e| ToolError::internal(e.to_string()))?
+                else {
+                    return Err(ToolError::not_found(format!(
+                        "task {task_id} was not found"
+                    )));
                 };
                 if task.status.is_terminal() {
                     return terminal_reply(store, &task);
@@ -155,7 +162,11 @@ async fn reply_impl(
                 if Instant::now() >= deadline {
                     return Ok(ReplyOutput::Pending);
                 }
-                std::thread::sleep(POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())).max(Duration::from_millis(1)));
+                std::thread::sleep(
+                    POLL_INTERVAL
+                        .min(deadline.saturating_duration_since(Instant::now()))
+                        .max(Duration::from_millis(1)),
+                );
             }
         })
         .await?;

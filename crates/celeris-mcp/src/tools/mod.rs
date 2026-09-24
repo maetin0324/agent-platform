@@ -90,7 +90,8 @@ impl ToolError {
 /// 道具の呼び出し関数の型（`fn(&state, &client, args) -> 結果の future`）。
 pub type ToolCallFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolOutput, ToolError>> + Send + 'a>>;
-pub type ToolCallFn = for<'a> fn(&'a Arc<McpState>, &'a AuthedClient, serde_json::Value) -> ToolCallFuture<'a>;
+pub type ToolCallFn =
+    for<'a> fn(&'a Arc<McpState>, &'a AuthedClient, serde_json::Value) -> ToolCallFuture<'a>;
 
 /// 道具 1 つの定義（`tools/list` に出す形と、呼び出す関数）。
 pub struct ToolDef {

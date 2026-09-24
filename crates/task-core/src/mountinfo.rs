@@ -7,7 +7,17 @@ use std::path::Path;
 
 /// ADR-0013 D5 の前提（DB はローカルディスク）を破っている場合に警告するための、ネットワーク FS の一覧。
 pub const NETWORK_FILESYSTEMS: &[&str] = &[
-    "nfs", "nfs4", "cifs", "smb3", "9p", "afs", "ceph", "lustre", "gpfs", "beegfs", "glusterfs",
+    "nfs",
+    "nfs4",
+    "cifs",
+    "smb3",
+    "9p",
+    "afs",
+    "ceph",
+    "lustre",
+    "gpfs",
+    "beegfs",
+    "glusterfs",
 ];
 
 /// マウント点のファイルシステム種別とマウントソース（`/proc/self/mountinfo` の `-` の後の

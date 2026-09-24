@@ -718,7 +718,8 @@ async fn create_task_validation_errors_insert_nothing() {
     env.seed(&cancelled);
     let missing = TaskId::new();
     // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
-    let human = json!([{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}]);
+    let human =
+        json!([{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}]);
 
     let cases: Vec<(Value, u16, &str, Option<Value>)> = vec![
         (

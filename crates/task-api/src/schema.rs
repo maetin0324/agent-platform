@@ -25,13 +25,12 @@ use crate::project_plan::{ProjectPlanAccepted, ProjectPlanBody};
 use crate::types::{
     AccountCheckResponse, AccountList, AccountLoginResult, AccountLoginStart, AccountView,
     AnswerBody, ArtifactList, CancelBody, ClusterConnectResult, ClusterConnectStart,
-    ClusterSettingsPutBody, ClusterSettingsView, Clusters,
-    CommentBody, CommentList, ConfigView, DaemonView, DecisionBody, EventsPage, Health,
-    MilestoneCreateBody, MilestonePatchBody, OrgCreateBody, OrgList, OrgPatchBody, Problem,
-    ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody, ProviderCheckResponse,
-    ProviderConfigView, Providers, ReleasePromoteAccepted, Releases, ReloadResult, ReopenBody,
-    RetryBody, RunList, SecretList, SecretPutResult, StreamHeartbeat, StreamHello, StreamReset,
-    Timeline,
+    ClusterSettingsPutBody, ClusterSettingsView, Clusters, CommentBody, CommentList, ConfigView,
+    DaemonView, DecisionBody, EventsPage, Health, MilestoneCreateBody, MilestonePatchBody,
+    OrgCreateBody, OrgList, OrgPatchBody, Problem, ProjectCreateBody, ProjectDetail, ProjectList,
+    ProjectPatchBody, ProviderCheckResponse, ProviderConfigView, Providers, ReleasePromoteAccepted,
+    Releases, ReloadResult, ReopenBody, RetryBody, RunList, SecretList, SecretPutResult,
+    StreamHeartbeat, StreamHello, StreamReset, Timeline,
 };
 
 /// コミット済みのスキーマ（`GET /schema` の本体）。

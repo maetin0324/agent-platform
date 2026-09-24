@@ -326,9 +326,10 @@ pub async fn review_task(
             }
             // ADR-0067 D2: 知識ベースのページ参照。実在の検証は組み立て時にはしない（`ArtifactExists`
             // と違い、人が確認する時点で GUI がリンクを 404 で示せば気付ける。ADR-0067 §2 却下した案）。
-            Check::KnowledgePage { path } => {
-                (true, format!("knowledge base page: {path} (existence not checked automatically)"))
-            }
+            Check::KnowledgePage { path } => (
+                true,
+                format!("knowledge base page: {path} (existence not checked automatically)"),
+            ),
             Check::Reviewer => {
                 // 決定的条件の結果を見てから判定する（後段）。
                 reviewer_criteria.push(idx);

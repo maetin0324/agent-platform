@@ -40,11 +40,17 @@ mod tests {
     fn accepts_the_right_bearer_token_only() {
         let expected = token_digest("s3cr3t");
         let mut headers = HeaderMap::new();
-        headers.insert(axum::http::header::AUTHORIZATION, HeaderValue::from_static("Bearer s3cr3t"));
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer s3cr3t"),
+        );
         assert!(check_bearer(&headers, &expected));
 
         let mut wrong = HeaderMap::new();
-        wrong.insert(axum::http::header::AUTHORIZATION, HeaderValue::from_static("Bearer nope"));
+        wrong.insert(
+            axum::http::header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer nope"),
+        );
         assert!(!check_bearer(&wrong, &expected));
 
         assert!(!check_bearer(&HeaderMap::new(), &expected));

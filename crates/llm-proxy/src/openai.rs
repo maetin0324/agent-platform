@@ -150,7 +150,14 @@ pub struct ChatCompletionResponse {
 }
 
 impl ChatCompletionResponse {
-    pub fn new(id: String, model: String, message: ChatMessage, finish_reason: Option<String>, usage: Option<Usage>, created: i64) -> Self {
+    pub fn new(
+        id: String,
+        model: String,
+        message: ChatMessage,
+        finish_reason: Option<String>,
+        usage: Option<Usage>,
+        created: i64,
+    ) -> Self {
         Self {
             id,
             object: "chat.completion".to_string(),
@@ -216,7 +223,13 @@ pub struct ChatCompletionChunk {
 }
 
 impl ChatCompletionChunk {
-    pub fn new(id: &str, model: &str, created: i64, delta: Delta, finish_reason: Option<String>) -> Self {
+    pub fn new(
+        id: &str,
+        model: &str,
+        created: i64,
+        delta: Delta,
+        finish_reason: Option<String>,
+    ) -> Self {
         Self {
             id: id.to_string(),
             object: "chat.completion.chunk".to_string(),

@@ -87,7 +87,8 @@ fn split_http_url(base_url: &str) -> Result<(String, u16, String), String> {
     let port: u16 = if port.is_empty() {
         80
     } else {
-        port.parse().map_err(|_| format!("ポートが数でない: {port}"))?
+        port.parse()
+            .map_err(|_| format!("ポートが数でない: {port}"))?
     };
     if host.is_empty() {
         return Err("ホストが空".to_string());
@@ -154,7 +155,9 @@ pub fn probe_models(base_url: &str, timeout: Duration, bearer_token: Option<&str
         Some(token) => format!(
             "GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: */*\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
         ),
-        None => format!("GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: */*\r\nConnection: close\r\n\r\n"),
+        None => format!(
+            "GET {target} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        ),
     };
     if let Err(e) = stream.write_all(request.as_bytes()) {
         return Reachability::Unreachable {
@@ -322,7 +325,10 @@ mod tests {
             "http://host:notaport/v1",
         ] {
             assert!(
-                matches!(probe_models(base, PROBE_TIMEOUT, None), Reachability::Unknown { .. }),
+                matches!(
+                    probe_models(base, PROBE_TIMEOUT, None),
+                    Reachability::Unknown { .. }
+                ),
                 "{base}"
             );
         }
@@ -348,9 +354,15 @@ mod tests {
             }
         });
         let base = format!("http://127.0.0.1:{}/v1", addr.port());
-        assert_eq!(probe_models(&base, PROBE_TIMEOUT, Some("secret-proxy-token")), Reachability::Ok);
+        assert_eq!(
+            probe_models(&base, PROBE_TIMEOUT, Some("secret-proxy-token")),
+            Reachability::Ok
+        );
         let request = rx.recv().expect("request");
-        assert!(request.contains("Authorization: Bearer secret-proxy-token"), "{request}");
+        assert!(
+            request.contains("Authorization: Bearer secret-proxy-token"),
+            "{request}"
+        );
         handle.join().expect("join");
     }
 
@@ -368,7 +380,10 @@ mod tests {
         });
         let base = format!("http://127.0.0.1:{}/v1", addr.port());
         let outcome = probe_models(&base, PROBE_TIMEOUT, None);
-        assert!(matches!(outcome, Reachability::Unknown { .. }), "{outcome:?}");
+        assert!(
+            matches!(outcome, Reachability::Unknown { .. }),
+            "{outcome:?}"
+        );
         handle.join().expect("join");
     }
 
@@ -388,8 +403,14 @@ mod tests {
             });
             let base = format!("http://127.0.0.1:{}/v1", addr.port());
             let outcome = probe_models(&base, PROBE_TIMEOUT, None);
-            assert!(matches!(outcome, Reachability::Unknown { .. }), "{status}: {outcome:?}");
-            assert!(outcome.should_fall_back().is_none(), "{status}: フォールバックしない");
+            assert!(
+                matches!(outcome, Reachability::Unknown { .. }),
+                "{status}: {outcome:?}"
+            );
+            assert!(
+                outcome.should_fall_back().is_none(),
+                "{status}: フォールバックしない"
+            );
             handle.join().expect("join");
         }
     }

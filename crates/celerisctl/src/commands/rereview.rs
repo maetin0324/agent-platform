@@ -36,12 +36,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open store");
         let missing_id = TaskId::new().to_string();
 
-        let result = run(
-            &store,
-            RereviewArgs {
-                id: missing_id,
-            },
-        );
+        let result = run(&store, RereviewArgs { id: missing_id });
         assert!(matches!(result, Err(CliError::Message(_))));
     }
 
