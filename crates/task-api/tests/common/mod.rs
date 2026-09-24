@@ -209,7 +209,7 @@ pub fn config_view() -> ConfigView {
         plan_auto_accept: false,
         reviewer: ReviewerConfigView {
             adapter: Some("claude-code".into()),
-            tier: Tier::Standard,
+            tier: Some(Tier::Standard),
         },
         providers: vec![
             ProviderConfigView {

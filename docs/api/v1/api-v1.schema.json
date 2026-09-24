@@ -6718,7 +6718,7 @@
           "type": "string"
         },
         "reasoning_effort": {
-          "description": "ADR-0069 D4（Phase 114）: この lane で使う reasoning effort（例 `\"medium\"`）。Phase 1 では\n監査記録（`LaneResolution`）に残すだけで、CLI には渡さない。無ければ `None`。",
+          "description": "ADR-0069 D4（Phase 114）/ Phase 118 D1: この lane で使う reasoning effort（例 `\"medium\"`）。\n対応するアダプタ（codex: `-c model_reasoning_effort=\"<値>\"`）には実際に渡す。対応しない\nアダプタ（claude-code。相当する CLI 引数・環境変数が無い）では設定しても渡らず、監査記録\n（`LaneResolution.reasoning_effort`）にも `None` として残る。無ければ `None`。",
           "type": [
             "string",
             "null"
@@ -9779,12 +9779,17 @@
           ]
         },
         "tier": {
-          "$ref": "#/$defs/Tier"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0069 Phase 118 D4: `[reviewer] tier` を明示していれば `Some`。`None` なら worker run の\nlane に一致させ組織の天井で丸める（`Dispatcher::pick_reviewer` が動的に決める）。"
         }
       },
-      "required": [
-        "tier"
-      ],
       "type": "object"
     },
     "RoleConfigView": {

@@ -16,9 +16,11 @@ celeris は `[llm_proxy]` を有効にすると、`127.0.0.1:18100`（既定）�
 - `<source>:<具体モデル名>`（例 `claude:claude-sonnet-5`）: 素通り。tier 写像を経由しない。
   供給元の接頭辞（`claude` / `gpt` / `qwen`）を明示したときだけ許す。
 
-tier → 具体モデルの写像は `[llm_proxy.models]`。**既定値は未確認**（`config/celeris.model-tiers.example.toml`
-が同種のモデル ID を「実行モデルID未確認」と明記しているのと同じ理由。既存のリポジトリの規約に
-沿った命名の一例を既定にしているだけで、実際に存在するモデル ID かどうかは運用前に確認・上書きすること）。
+tier → 具体モデルの写像は `[llm_proxy.models]`。既定値は 2026-09-24 に CLI を実際に実行して確認した
+ID（ADR-0069 Phase 118 D2。`docs/adr/0069-routing-four-layers.md` Phase 118 追記に実測の経緯がある）:
+claude は frontier=`claude-fable-5-1` / standard=`claude-opus-5-5` / cheap=`claude-sonnet-5`、
+gpt は frontier=`gpt-6-astra` / standard=`gpt-6-sol` / cheap=`gpt-6-luna`。運用側の実際のプラン・
+契約で使えるモデルが違えば `[llm_proxy.models]` で上書きすること。
 Qwen は tier に関わらず `qwen3.8-27b`（ADR-0053 D1 で明記）。
 
 ## 2. 供給元（source）

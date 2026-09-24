@@ -27,6 +27,9 @@ pub mod rereview;
 /// ADR-0070 D2（Phase 116）: `celerisctl retry <task_id>`。`failed`/`cancelled` を複製してやり直す
 /// （attempts は常に 0 から。`POST /tasks/{id}/retry` と同じ `task_ops::retry::retry_task`）。
 pub mod retry;
+/// ADR-0069 Phase 118 D3: `celerisctl routing show`。設定ファイルだけを読む読み取り専用コマンド
+/// （DB は開かない。`config to-harnesses` と同じ扱い）。
+pub mod routing;
 pub mod worker;
 /// ADR-0066 D2（Phase 110b）: `celerisctl workspace prune`。
 pub mod workspace;

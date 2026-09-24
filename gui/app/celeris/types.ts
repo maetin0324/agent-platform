@@ -1673,15 +1673,21 @@ export interface ModelBinding {
   model_id?: string | null;
   name: string;
   /**
-   * ADR-0069 D4（Phase 114）: この lane で使う reasoning effort（例 `"medium"`）。Phase 1 では
-   * 監査記録（`LaneResolution`）に残すだけで、CLI には渡さない。無ければ `None`。
+   * ADR-0069 D4（Phase 114）/ Phase 118 D1: この lane で使う reasoning effort（例 `"medium"`）。
+   * 対応するアダプタ（codex: `-c model_reasoning_effort="<値>"`）には実際に渡す。対応しない
+   * アダプタ（claude-code。相当する CLI 引数・環境変数が無い）では設定しても渡らず、監査記録
+   * （`LaneResolution.reasoning_effort`）にも `None` として残る。無ければ `None`。
    */
   reasoning_effort?: string | null;
   unavailable_reason?: string | null;
 }
 export interface ReviewerConfigView {
   adapter?: string | null;
-  tier: Tier;
+  /**
+   * ADR-0069 Phase 118 D4: `[reviewer] tier` を明示していれば `Some`。`None` なら worker run の
+   * lane に一致させ組織の天井で丸める（`Dispatcher::pick_reviewer` が動的に決める）。
+   */
+  tier?: Tier | null;
 }
 /**
  * `[[roles]]` 1 行の要約（ADR-0016 D1）。`instructions` は**本文を出さない**（プロンプトの中身は設定ファイルにだけ置く）。

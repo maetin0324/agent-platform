@@ -214,22 +214,26 @@ impl Default for ModelsConfig {
     }
 }
 
-/// **未確認**（`docs/llm-source.md` 参照。既存の設定例と同じ命名慣習に沿った既定値で、運用前に
-/// `[llm_proxy.models]` で確認・上書きすること。`config/celeris.model-tiers.example.toml` が
-/// 同種のモデル ID を「実行モデルID未確認」と明記しているのと同じ注意)。
+/// ADR-0069 Phase 118 D2: 2026-09-24 に実機（`claude --model <id>`）で実行して確認した ID
+/// （`docs/adr/0069-routing-four-layers.md` Phase 118 追記）。運用側の実際のプラン・契約で
+/// 使えるモデルが変わったら `[llm_proxy.models]` で上書きすること。
 fn default_claude_models() -> HashMap<Tier, String> {
     HashMap::from([
-        (Tier::Frontier, "claude-opus-4-5".to_string()),
-        (Tier::Standard, "claude-sonnet-5".to_string()),
-        (Tier::Cheap, "claude-haiku-4-5".to_string()),
+        (Tier::Frontier, "claude-fable-5-1".to_string()),
+        (Tier::Standard, "claude-opus-5-5".to_string()),
+        (Tier::Cheap, "claude-sonnet-5".to_string()),
     ])
 }
 
+/// ADR-0069 Phase 118 D2: 2026-09-24 に実機（`codex exec -m <id>`、ChatGPT アカウント）で実行して
+/// 確認した ID。`gpt-5-codex` / `gpt-5` / `gpt-5-mini` はこのアカウント種別では
+/// 「model is not supported when using Codex with a ChatGPT account」で拒否されることを確認済み
+/// （旧既定値だった）。
 fn default_gpt_models() -> HashMap<Tier, String> {
     HashMap::from([
-        (Tier::Frontier, "gpt-5-codex".to_string()),
-        (Tier::Standard, "gpt-5".to_string()),
-        (Tier::Cheap, "gpt-5-mini".to_string()),
+        (Tier::Frontier, "gpt-6-astra".to_string()),
+        (Tier::Standard, "gpt-6-sol".to_string()),
+        (Tier::Cheap, "gpt-6-luna".to_string()),
     ])
 }
 

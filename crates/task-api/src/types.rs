@@ -427,7 +427,10 @@ pub struct GenreConfigView {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ReviewerConfigView {
     pub adapter: Option<String>,
-    pub tier: Tier,
+    /// ADR-0069 Phase 118 D4: `[reviewer] tier` を明示していれば `Some`。`None` なら worker run の
+    /// lane に一致させ組織の天井で丸める（`Dispatcher::pick_reviewer` が動的に決める）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]

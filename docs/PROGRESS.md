@@ -17595,3 +17595,103 @@ drain timeout で run を abort → lease 失効の reclaim が 3 回 attempts �
 ### 提案
 - P-116-6: `attention` の failed 項目は、retry 複製が done になったものを「置き換え済み（→ <id>）」として畳むか出さない（`rewired` / retry 元の関係を使う）。
 - P-116-7: 実装エージェント（Fable 配下・Celeris 配下とも）は commit 前に `cargo fmt --all -- --check` を通す規約をプリアンブルに書く（release ゲートに追加済み、reviewer も見る）。
+
+## Phase 118「tier を実際に効かせる」（2026-09-24）
+
+ADR-0069 に Phase 118 追記を書いてから実装した（`docs/adr/0069-routing-four-layers.md`）。本番の
+`[[providers]]` に `tier_models` が無く、lane に関わらず claude-pool/codex-pool が固定モデルのまま
+だった不具合の是正。実測 ID は人の指示で 3 回訂正され、最終表は claude: frontier=`claude-fable-5-1` /
+standard=`claude-opus-5-5` / cheap=`claude-sonnet-5`（effort なし）、codex:
+frontier=`gpt-6-astra`(high) / standard=`gpt-6-sol`(medium) / cheap=`gpt-6-luna`(low)。
+
+### D1: reasoning effort を CLI に渡す
+
+- `trait WorkerAdapter`（`crates/task-worker/src/adapter.rs`）に `supports_reasoning_effort()`
+  （既定 `false`）と `with_reasoning_effort()`（既定 `None`）を追加。
+- `crates/task-worker/src/codex.rs`: `CodexConfig.reasoning_effort`、`CodexAdapter` が override。
+  `run_codex_once` は `config.model` の直後に `-c model_reasoning_effort="<値>"` を足す（fresh・
+  `exec resume` の両方。resume のホワイトリストは `-c key=value` を任意個数許すため）。
+- `crates/task-worker/src/claude_code.rs`: 対応する CLI 引数・環境変数が無いため override しない
+  （デフォルト `false`/`None` のまま。ADR に判断根拠を記載）。
+- `crates/task-worker/src/tiered.rs`: `TieredAdapter::run` が `with_reasoning_effort` を実際に呼ぶ。
+  `supports_reasoning_effort` は基盤アダプタへ委譲。
+- `crates/task-dispatch/src/dispatcher.rs`: `RoutingRecord.resolution.reasoning_effort` は
+  「設定した」値ではなく「実際に CLI へ渡った」値（`adapter.supports_reasoning_effort()` で filter）。
+- `crates/task-core/src/model_routing.rs`: `ModelBinding.reasoning_effort` の doc コメントを更新
+  （スキーマの description が変わるため `UPDATE_SCHEMA=1` で再生成した）。
+
+### D2: プロキシ既定表・example・docs
+
+- `crates/llm-proxy/src/config.rs`: `default_claude_models`/`default_gpt_models` を実測 ID に更新。
+- `config/celeris.model-tiers.example.toml`: `unavailable_reason` を外し `model_id`/`reasoning_effort`
+  を実測 ID で埋めた。
+- `docs/llm-source.md` §1 を実測 ID の表に更新。
+
+### D3: 起動時の検証と可視化
+
+- `model_routing::resolve` の現状（コード変更なし）: lane に対応する束縛が無い/`unavailable_reason`
+  付きなら `Err` → `dispatch_ready` は `Trigger::Unroutable`（`blocked`、人に聞く経路）。隣接 tier
+  への自動フォールバックは無い。ADR に明記。
+- `celerisctl routing show [--config <path>]`（新規。DB を開かない。`config to-harnesses` と同じ扱い）:
+  provider ごとの `tier → name/model_id（またはunavailable）/effort` と、`[llm_proxy.models]` の
+  `tier → claude/gpt/qwen` の 2 表を出す。
+- GUI `/accounts`: 新しい API は不要だった（`GET /providers` の `ProviderView.tier_models` に
+  Phase 114 から `reasoning_effort` を含む `ModelBinding` があった）。loader が `/providers` も読み、
+  「モデル階層」節（読み取り専用の要約。編集は従来どおり `/providers`）を追加。
+
+### D4: reviewer の lane
+
+- `[reviewer] tier` を `Option<Tier>`（既定 `None`）に変更。`DispatchConfig.reviewer_tier_override`
+  を新設。優先順位（`Dispatcher::pick_reviewer`）: 1. 部署の `profile.review_tier`（既存 ADR-0069
+  D2、最優先）、2. `[reviewer] tier` の明示、3. 既定 = worker run の lane に一致させ組織の天井
+  （`lane_ceiling().clamp()`）で丸める。1./2. は丸めない。
+- reviewer run にも `Event::RoutingDecided` を新設（Phase 114 は worker run にしか出していなかった）。
+  `rule_id` は `reviewer/department-review-tier` / `reviewer/explicit-config` /
+  `reviewer/matches-worker-lane` の 3 種、`source = System`、`features` は `TaskFeatures::infer(task)`
+  を監査の一貫性のため流用。
+- `Config::validate` の reviewer 検査: `tier` 明示なら従来どおり単一 tier、未設定なら「（adapter
+  制約を満たす）プロバイダが 1 つ以上の tier を提供しているか」に緩めた。
+
+### D5: テスト（条件・実行したコマンド・出力の要点）
+
+| 条件 | 実行したコマンド | 出力の要点 |
+| --- | --- | --- |
+| (a) codex argv（fresh）に tier ごとの `-m`/`--model` と `-c model_reasoning_effort=…` | `cargo test -p task-worker --lib codex::tests::tier_reasoning_effort_reaches_cli_as_a_dash_c_config_override` | exit 0。1 passed（3 tier とも確認） |
+| (a) codex argv（`exec resume`）に同じ `-c` が乗る | `cargo test -p task-worker --lib codex::tests::resume_run_also_carries_the_reasoning_effort_config_override` | exit 0。1 passed |
+| (a) effort 未設定なら `-c model_reasoning_effort` が現れない | `cargo test -p task-worker --lib codex::tests::without_reasoning_effort_no_config_override_is_added` | exit 0。1 passed |
+| (b) claude-code argv に tier ごとの `--model` が乗る（既存） | `cargo test -p task-worker --lib claude_code::tests::tier_binding_reaches_cli_model_argument_and_preserves_account_env` | exit 0。1 passed |
+| (b) claude-code は effort を設定しても argv に一切現れない | `cargo test -p task-worker --lib claude_code::tests::tier_reasoning_effort_does_not_reach_claude_code_argv` | exit 0。1 passed |
+| (c) `celerisctl routing show` の 2 表（tier_models あり/なし・unavailable・llm_proxy.models） | `cargo test -p celerisctl -- routing::` | exit 0。2 passed |
+| (c) 実機相当の手動確認 | `./target/debug/celerisctl routing show --config config/celeris.model-tiers.example.toml` | 2 表が期待どおりの ID（`claude-fable-5-1` 等）で出力される（本文に貼付済み） |
+| (d) reviewer 既定 = worker lane 一致・天井で丸め | `cargo test -p task-dispatch --lib reviewer_lane_defaults_to_the_worker_lane_capped_by_the_org_ceiling` | exit 0。1 passed |
+| (d) `[reviewer] tier` 明示が既定に勝つ | `cargo test -p task-dispatch --lib -- explicit_reviewer_tier_config_wins_over_the_worker_lane_default` | exit 0。1 passed |
+| (d) 部署の `review.tier` が明示にも勝つ | `cargo test -p task-dispatch --lib -- department_review_tier_wins_over_the_explicit_reviewer_config` | exit 0。1 passed |
+| (d) `[reviewer] tier` 未設定時の検証緩和・明示時は従来どおり | `cargo test -p celeris --lib config::tests::rejects_reviewer_without_matching_provider_and_unknown_reviewer_keys` | exit 0。1 passed |
+| (e) プロキシ既定表の実測 ID | `cargo test -p llm-proxy` | exit 0。58 passed（`claude_non_stream_round_trip` を実測 ID 前提に更新） |
+| ワークスペース全体 | `cargo test --workspace --no-fail-fast` | exit 0。2114 passed / 0 failed（`celeris::accounts_admin::tests::spawn_check_codex_reports_ok_and_records_observation` が並列実行下で 1 回だけ flaky に落ちたが、単体では green。本 Phase の変更とは無関係） |
+| fmt | `cargo fmt --all -- --check` | exit 0 |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| schema | `UPDATE_SCHEMA=1 cargo test -p task-api committed_schema_matches_generated` | exit 0。`api-v1.schema.json` を更新（`ModelBinding.reasoning_effort` の description、`ReviewerConfigView.tier` が `Option<Tier>` に）。`event.schema.json` は無変更（今回の変更が到達する型を含まないため `event_row_schema_matches_committed` は差分なしで green） |
+| GUI typecheck/lint/test | `cd gui && corepack pnpm@11.27.0 typecheck && lint && test` | 3 つとも exit 0。vitest 70 files / 1080 passed |
+| GUI gen:types 差分ゼロ | `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff | 2 回目が 1 回目と bit 単位で一致（IDENTICAL）。反映差分は `ModelBinding.reasoning_effort` の description と `ReviewerConfigView.tier` の `Option` 化のみ |
+| GUI build | `cd gui && corepack pnpm@11.27.0 build` | exit 0 |
+| GUI mobile-audit | `cd gui && corepack pnpm@11.27.0 mobile-audit` | `{"ok":true,"total":0}`。`routes=27 schemes=2 violations=0` |
+
+### 未解決事項
+
+- P-118-1: `crates/task-core/src/pricing.rs` の静的単価表は `claude-opus`/`claude-sonnet` プレフィクス
+  なので `claude-fable-5-1` にはマッチしない（frontier の費用推定が `None` になる）。D2 の実測 ID 更新
+  に追随する単価表の更新は本 Phase のスコープ外（別 Phase で運用側の実際の請求と突き合わせて追加する）。
+- P-118-2: `[llm_proxy.sources.codex_oauth] reasoning_effort` は供給元レベルの単一値のままで、tier
+  ごとの effort（`[llm_proxy.models]` は tier→model のみで effort を持たない）とは別軸。プロキシ経由
+  （opencode/PaperQA/LDR/LangMem）で tier ごとの effort を渡したい場合は別 Phase で検討する。
+- P-118-3: 実機確認（本物の Claude/Codex CLI・ChatGPT アカウント）はこのセッションでは実行していない
+  （認証情報も外向きネットワークも無い環境の制約。ADR-0009 P-34）。D1〜D4 のモデル ID・reasoning
+  effort・`celerisctl routing show` の出力は偽スタブと一時 config での確認に留まる。人（またはこの
+  worktree の外で認証が使える環境のエージェント）が本番相当の設定で 1 タスクずつ確認し、結果を
+  追記すること。
+
+### 提案
+
+- P-118-4: `celerisctl routing show` の出力を JSON でも出せるようにする（人が読む表だけでなく、
+  他のスクリプトが読める形。今回はテキスト表のみ）。

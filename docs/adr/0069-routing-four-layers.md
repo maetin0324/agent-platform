@@ -197,4 +197,125 @@ execute タスクとして同じ 4 層を通るだけ）。
   sidekick を足す想定。
 - **部門リードのセッションを選択的に起こす**: 複数サブタスク・複数 skill / repo / 環境・長時間・部門横断の調整・
   レビュー失敗のエスカレーションのときだけ（それ以外は命令の中継をしない）。
-- reasoning effort の CLI への受け渡し（D4）、`LowQuality` の検出源（reviewer の品質スコア）。
+- `LowQuality` の検出源（reviewer の品質スコア）。
+
+## Phase 118 追記（2026-09-24。「tier を実際に効かせる」。本番の `[[providers]]` に `tier_models` が
+無く、lane に関わらず claude-pool が `claude-sonnet-5`、codex-pool が codex の既定モデルのままだった
+不具合の是正。人の指示「tier を適切に運用できるように」）
+
+実測（2026-09-24、CLI を実際に実行して確認。Claude Code / Codex、ChatGPT アカウント）。この値は
+セッション中に 2 回、人の追加の実測で訂正されている（下の「本番の最終表」が最終値。他は経緯として
+残す）:
+
+- 最初の実測（Codex 0.156.1）: Claude Code は `claude-opus-5-5` / `claude-sonnet-5` /
+  `claude-haiku-4-5-20251001` が成功。Codex は `gpt-5.6-terra` / `gpt-5.6-sol` / `gpt-5.6-luna` /
+  `gpt-5.5` が成功、`gpt-5-codex` / `gpt-5` / `gpt-5-mini` / `gpt-5.5-codex` は
+  「model is not supported when using Codex with a ChatGPT account」、`gpt-5.6-astra` / `gpt-5.6` /
+  `gpt-5.4*` は「Model metadata for … not found」。
+- 訂正 1（`codex exec -m <id>`）: Codex は **gpt-6 系**（`gpt-6-astra` / `gpt-6-sol` / `gpt-6-luna`）
+  の 3 つとも成功。`gpt-5.6-*` は使わない。
+- 訂正 2（`claude --model <id>`）: Claude Code は **claude-fable-5-1**（別名 `fable`）も成功。
+  最終表は haiku を使わず frontier を 1 段引き上げる。
+
+**本番の最終表**（人が `[[providers]]` に設定するのはこちら）: claude-pool は
+frontier=`claude-fable-5-1` / standard=`claude-opus-5-5` / cheap=`claude-sonnet-5`（effort なし）、
+codex-pool は frontier=`gpt-6-astra`(high) / standard=`gpt-6-sol`(medium) / cheap=`gpt-6-luna`(low)。
+
+### D1. reasoning effort を CLI に渡す
+
+- `trait WorkerAdapter`（`task-worker/src/adapter.rs`）に `supports_reasoning_effort() -> bool`
+  （既定 `false`）と `with_reasoning_effort(&self, effort: &str) -> Option<Arc<dyn WorkerAdapter>>`
+  （既定 `None`）を追加した。`with_model` と同じ「複製を返す」形。
+- **codex**: `supports_reasoning_effort() = true`。`CodexConfig.reasoning_effort: Option<String>` を
+  持ち、`run_codex_once` が `config.model` の直後（fresh/`exec resume` のどちらの形でも）に
+  `-c model_reasoning_effort="<value>"` を足す。`exec resume` のホワイトリスト（Phase 68c）は
+  `-c key=value` を任意個数許すので、resume でも同じ形で通る（Phase 112 の `-c` 翻訳と同じ理屈）。
+- **claude-code**: `claude --help` に effort 相当のフラグ・環境変数が無い（このワークツリーは本物の
+  `claude` を実行しないので、これは Phase 114 までの調査と本 Phase の人の実測メモに基づく判断であり、
+  新たに CLI を実行して確認してはいない）。`supports_reasoning_effort()` は既定の `false` のまま
+  （override しない）。設定で `reasoning_effort` を書いても CLI には**渡らない**（監査記録には残る。
+  下記）。本番表は claude-pool に effort を設定しない運用なので、実害はない。
+- **`TieredAdapter::run`**: `model_for_tier` の後、`reasoning_effort_for_tier(tier)` が `Some` かつ
+  `base.with_reasoning_effort(...)` が `Some` を返すときだけ、その複製で実行する（対応しないアダプタ
+  では黙って素通しし、`base` は変わらない）。`TieredAdapter::supports_reasoning_effort()` は
+  `self.base.supports_reasoning_effort()` に委譲する。
+- **監査記録**: `Event::RoutingDecided`（run の `WorkerStarted` の直後）の
+  `RoutingRecord.resolution.reasoning_effort` は、**実際に CLI へ渡った値**を残す
+  （`adapter.reasoning_effort_for_tier(tier).filter(|_| adapter.supports_reasoning_effort())`）。
+  設定はあるが対応しないアダプタ（例: claude-code に effort を設定した場合）では `None` になる —
+  「設定した」ことと「実際に渡した」ことを区別するため（`GET /tasks/{id}/routing` は
+  `routing_audit` 経由でこの値をそのまま見せる。追加の配線は不要だった）。
+- `ModelBinding.reasoning_effort` の doc コメント（Phase 114 の「Phase 1 では記録するだけ」）を
+  「対応するアダプタ（codex）には実際に渡す」に更新した（スキーマの description のみ。型は不変）。
+
+### D2. プロキシ既定表・example・docs を実測 ID に更新
+
+- `llm-proxy::config::default_claude_models` / `default_gpt_models` を上記の実測 ID に変更した
+  （`default_qwen_models` は変更なし。`qwen3.8-27b`）。
+- `config/celeris.model-tiers.example.toml`: `unavailable_reason`（「実行モデルID未確認」）を外し、
+  `model_id` に実測 ID を入れた。codex 側は `reasoning_effort`（high/medium/low）も添えた。
+- `docs/llm-source.md` §1: 「既定値は未確認」の注記を実測済みの表に更新した。
+
+### D3. 起動時の検証と可視化
+
+- `model_routing::resolve` の現状（変更なし。動作を確認しただけ）: lane に対応する `ModelBinding` が
+  無い、または `unavailable_reason` が付いているとき、`resolve` は `Err` を返す。呼び出し側
+  （`dispatch_ready`）はこれを **`Trigger::Unroutable`**（タスクは `blocked` になり、人に聞く経路に
+  乗る。ADR-0021）として扱う。**隣接 tier へ自動で倒すことはしない**（`select_tier` による残量調整は
+  「解決できた lane」をさらに下げるだけの別の層であり、「解決できない lane」を別の tier で代替する
+  機構ではない）。起動時（`Config::validate`）には `tier_models` の中身までは検査しない（`name` と
+  `unavailable_reason`/`model_id` はどちらも自由記述であり、実行できるかは実行してみるまで分からない
+  ため）。この設計は変えない。
+- `celerisctl routing show [--config <path>]`（新規、読み取り専用）。`Config::load` するだけ（DB を
+  開かない。`config to-harnesses` と同じ扱いで `main` がストアを開く前に分岐する）。2 つの表を出す:
+  1. provider ごとの `tier → name / model_id（または unavailable の理由）/ reasoning_effort`
+     （`[[providers]] tier_models`）。
+  2. `[llm_proxy.models]` の `tier → claude/gpt/qwen ごとの model`。`[llm_proxy]` が無効でも表だけは
+     出す（設定ファイル上の値をそのまま見せるだけで、到達性は見ない。到達性・cooldown は既存の
+     `GET /llm/sources` の仕事）。
+- GUI `/accounts`: 新しい API は足さない。`GET /providers` の `ProviderView.tier_models` に
+  `reasoning_effort` を含む `ModelBinding` が既にあった（Phase 114）ので、`/accounts` の loader が
+  `GET /providers` も読み、「プロバイダのモデル階層」節（読み取り専用の表。編集は従来どおり
+  `/providers` 画面で行う）を追加した。
+
+### D4. reviewer の lane
+
+- `[reviewer] tier` を `Option<Tier>`（既定 `None` = 未設定）に変えた。`DispatchConfig` に
+  `reviewer_tier_override: Option<Tier>`（`self.reviewer.tier` をそのまま運ぶ）を追加。既存の
+  `DispatchConfig.reviewer_hint.tier`（`Option` ではない `Tier`。`self.reviewer.tier.unwrap_or(Standard)`）
+  は「他に何も分からないときの既定値」として意味そのままに残した（後方互換。既存のテストが
+  この値に依存している）。
+- `Dispatcher::pick_reviewer` の lane 決定の優先順位（上ほど強い。ADR-0069 D2 の「組織の継承」を
+  尊重しつつ、今回の既定を追加した）:
+  1. **`profile.review_tier`**（部署の `[profile] review.tier`。既存 ADR-0069 D2、最も具体的な
+     指定なのでそのまま最優先を維持）。
+  2. **`[reviewer] tier` が明示されているとき**（`reviewer_tier_override.is_some()`）。
+  3. **既定（Phase 118 で新設）**: そのタスクの worker run の lane（`task.worker_hint.tier`。直近の
+     `decide_lane`/`select_tier` を経た値）と同じにし、部署の `lane_ceiling()`（`allowed_tiers` /
+     `budget.max_lane`）で丸める。
+  - 1./2. のときは丸めない（人・運用が明示した値は組織の既定より強い。D2 の「人の明示 tier は天井で
+    丸めない」と同じ考え方を運用の明示にも適用した）。
+- **監査記録**: reviewer run にも `Event::RoutingDecided`（`run_id` は review run の id）を 1 件足した
+  （Phase 114 は worker run にしか出していなかった）。`RoutingRecord.decision` は規則表を通らない
+  （reviewer は `TaskFeatures` 規則表の対象外）ので、`rule_id` は
+  `reviewer/department-review-tier` / `reviewer/explicit-config` / `reviewer/matches-worker-lane` の
+  いずれか、`source = TierSource::System`、`features` は監査の一貫性のため
+  `TaskFeatures::infer(task)`（既存の純粋関数。LLM は呼ばない）をそのまま使う。`proposed` は
+  worker lane、`clamped_by` は既定（3.）で天井に丸めたときだけ入る。`harness` は `Some("reviewer")`
+  固定（レビュー run はタスクの `genre` を実行しない）。ストア書き込み失敗はレビューそのものを
+  止めない（既存の `warned_unroutable` の通知と同じ「ベストエフォート」の扱い）。
+- `Config::validate` の「reviewer を満たせるプロバイダが無い」チェックは、`[reviewer] tier` が
+  明示されていればそのまま単一 tier で検査し、未設定なら「（`adapter` 制約を満たす）プロバイダが
+  1 つ以上の tier を提供しているか」に緩めた（既定の lane はタスクごとに動的なので、特定の 1 tier に
+  固定した検査は意味を持たない）。
+
+### D5. テスト（ゲートは §末尾の完了報告を参照）
+
+(a) codex argv（fresh・`exec resume` 双方）に tier ごとの `-m`/`--model` と
+`-c model_reasoning_effort="…"` が乗ること。(b) claude-code argv に tier ごとの `--model` が乗り、
+`reasoning_effort` を設定しても CLI 引数・環境変数には現れないこと。(c) `celerisctl routing show`
+が一時 config から 2 つの表を出すこと（`tier_models` あり/なし、`unavailable_reason` あり、
+`[llm_proxy.models]` の既定）。(d) reviewer lane: 既定（worker lane 一致・天井で丸め）、
+`[reviewer] tier` 明示が既定に勝つこと、`profile.review_tier` が明示にも勝つこと、
+`RoutingDecided` が review run にも出ること。(e) `default_claude_models`/`default_gpt_models` の
+実測 ID への更新。

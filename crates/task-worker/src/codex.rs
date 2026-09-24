@@ -64,6 +64,8 @@ pub struct CodexConfig {
     pub extra_args: Vec<String>,
     /// モデル指定（`--model`。省略時は codex の既定モデル）。
     pub model: Option<String>,
+    /// ADR-0069 Phase 118 D1: `-c model_reasoning_effort="<値>"`（例 `"high"`）。省略時は付けない。
+    pub reasoning_effort: Option<String>,
     /// 追加の環境変数。
     pub env: Vec<(String, String)>,
     /// ADR-0043 D3（Phase 56）: `Some` なら `codex` をコンテナの中で起こす（`container::wrap`）。
@@ -80,6 +82,7 @@ impl Default for CodexConfig {
             command: "codex".to_string(),
             extra_args: Vec::new(),
             model: None,
+            reasoning_effort: None,
             env: Vec::new(),
             container: None,
             resume_mode: CodexResumeMode::default(),
@@ -122,6 +125,15 @@ impl WorkerAdapter for CodexAdapter {
     fn with_model(&self, model: &str) -> Option<Arc<dyn WorkerAdapter>> {
         let mut config = self.config.clone();
         config.model = Some(model.to_owned());
+        Some(Arc::new(Self::new(config)))
+    }
+    /// ADR-0069 Phase 118 D1: codex は `-c model_reasoning_effort="<値>"` に対応する。
+    fn supports_reasoning_effort(&self) -> bool {
+        true
+    }
+    fn with_reasoning_effort(&self, effort: &str) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut config = self.config.clone();
+        config.reasoning_effort = Some(effort.to_owned());
         Some(Arc::new(Self::new(config)))
     }
     fn with_env(&self, extra: &[(String, String)]) -> Option<Arc<dyn WorkerAdapter>> {
@@ -350,6 +362,13 @@ async fn run_codex_once(
         } else {
             command.arg("--model").arg(model);
         }
+    }
+    // ADR-0069 Phase 118 D1: `-c key=value` is on the `exec resume` whitelist (Phase 68c) the same
+    // way `sandbox_mode`/`model` are above, so this applies identically to fresh and resume forms.
+    if let Some(effort) = &config.reasoning_effort {
+        command
+            .arg("-c")
+            .arg(format!("model_reasoning_effort=\"{effort}\""));
     }
     // Worktrees and shared workspaces keep results outside cwd. Grant only the
     // dispatcher-selected artifact directory, not its parent or other tasks — but only on the forms
@@ -1852,6 +1871,7 @@ echo '{"type":"turn.completed"}'
             },
             extra_args: vec!["--sandbox".into(), "read-only".into()],
             model: Some("gpt-5-codex".into()),
+            reasoning_effort: None,
             env: Vec::new(),
             container: None,
             resume_mode: CodexResumeMode::default(),
@@ -2034,6 +2054,120 @@ printf '%s\n' '{"type":"turn.completed"}'
                 "account-a"
             );
         }
+    }
+
+    /// ADR-0069 Phase 118 D1: tier ごとの `reasoning_effort` が実際に `-c
+    /// model_reasoning_effort="<値>"` として（fresh 起動で）渡ること。`model_id` と両方を検証する。
+    #[tokio::test]
+    async fn tier_reasoning_effort_reaches_cli_as_a_dash_c_config_override() {
+        use task_core::{Tier, model_routing::ModelBinding};
+        let cases = [
+            (Tier::Frontier, "explicit-frontier", "high"),
+            (Tier::Standard, "explicit-standard", "medium"),
+            (Tier::Cheap, "explicit-cheap", "low"),
+        ];
+        for (tier, model_id, effort) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let config = stub_codex(dir.path(), args_log_script());
+            let adapter = crate::tiered::TieredAdapter {
+                base: Arc::new(CodexAdapter::new(config)),
+                account_id: None,
+                credential_error: None,
+                models: [(
+                    tier,
+                    ModelBinding {
+                        name: "requested-name".into(),
+                        model_id: Some(model_id.into()),
+                        unavailable_reason: None,
+                        reasoning_effort: Some(effort.into()),
+                    },
+                )]
+                .into(),
+            };
+            let mut req = sample_req(dir.path().to_path_buf());
+            req.task.worker_hint.tier = tier;
+            let _ = adapter
+                .run(
+                    req,
+                    "effort-run",
+                    default_limits(),
+                    &RecordingSink::default(),
+                )
+                .await
+                .unwrap();
+            let args = captured_args(dir.path());
+            let model = args.windows(2).find(|pair| pair[0] == "--model").unwrap()[1].clone();
+            assert_eq!(model, model_id);
+            let expected_override = format!("model_reasoning_effort=\"{effort}\"");
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == expected_override),
+                "expected -c {expected_override:?} in {args:?}"
+            );
+        }
+    }
+
+    /// ADR-0069 Phase 118 D1: `exec resume` の形でも同じ `-c model_reasoning_effort=…` が乗る
+    /// （resume のホワイトリストは `-c key=value` を任意個数許す。Phase 68c）。
+    #[tokio::test]
+    async fn resume_run_also_carries_the_reasoning_effort_config_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = stub_codex(dir.path(), args_log_script());
+        config.model = Some("gpt-6-astra".into());
+        config.reasoning_effort = Some("high".into());
+        let adapter = CodexAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: CodexAdapter::ID.to_string(),
+            session_id: "thread-effort".to_string(),
+            resume: true,
+        });
+        let _ = adapter
+            .run(
+                req,
+                "run-resume-effort",
+                default_limits(),
+                &RecordingSink::default(),
+            )
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert_eq!(args[0], "exec");
+        assert_eq!(args[1], "resume");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == "model_reasoning_effort=\"high\""),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair[0] == "-c" && pair[1] == "model=\"gpt-6-astra\""),
+            "{args:?}"
+        );
+    }
+
+    /// ADR-0069 Phase 118 D1: effort が設定されていなければ `-c model_reasoning_effort=…` は現れない
+    /// （既定の後方互換）。
+    #[tokio::test]
+    async fn without_reasoning_effort_no_config_override_is_added() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_codex(dir.path(), args_log_script());
+        let adapter = CodexAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let _ = adapter
+            .run(
+                req,
+                "run-no-effort",
+                default_limits(),
+                &RecordingSink::default(),
+            )
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(
+            !args.iter().any(|a| a.starts_with("model_reasoning_effort")),
+            "{args:?}"
+        );
     }
 
     fn args_log_script() -> &'static str {
