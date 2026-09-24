@@ -2618,9 +2618,9 @@ genre = "conversation"
         let config = Config::load(&path).unwrap();
         let store = SqliteStore::open(&config.db.path).unwrap();
 
-        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 13);
+        assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 14);
         let nodes = store.org_list().unwrap();
-        assert_eq!(nodes.len(), 13);
+        assert_eq!(nodes.len(), 14);
         let cos = nodes.iter().find(|n| n.id == "cos").unwrap();
         assert_eq!(cos.kind, task_core::OrgKind::Secretary);
         assert_eq!(cos.parent_id, None);
@@ -2640,7 +2640,7 @@ genre = "conversation"
         store.org_upsert(&renamed).unwrap();
         assert_eq!(seed_org_if_empty(&store, &config).unwrap(), 0);
         assert_eq!(store.org_get("cos").unwrap().unwrap().name, "本人");
-        assert_eq!(store.org_list().unwrap().len(), 13);
+        assert_eq!(store.org_list().unwrap().len(), 14);
     }
 
     /// 監査 D-4: `org_include` の並びに木としての不整合（種類の順序。`Config::load` は循環・順序までは

@@ -86,8 +86,29 @@ genre = "coding"
 brief = "アプリケーションと API を作る・直す・テストする。"
 
 [org.profile]
-skills = ["software", "rust", "typescript", "react", "sqlite", "api", "frontend"]
+skills = ["software", "rust", "typescript", "react", "sqlite", "api"]
 tools = ["gh"]
+
+[org.profile.harnesses]
+default = "coding"
+
+# ADR-0073: `frontend` はここ（ui-ux）にだけ置く。画面・スマホ表示の仕事は ui-ux に、API や Rust の
+# 仕事は software-engineering に振り分けられる（`typescript` / `react` は両方が持つ）。
+[[org]]
+id = "ui-ux"
+name = "UI/UX"
+kind = "section"
+parent_id = "engineering"
+genre = "coding"
+brief = "画面・操作の流れ・見た目を設計し、作り、確かめる。スマホと PC の両方、アクセシビリティ、使いやすさを見る。"
+
+[org.profile]
+skills = ["ui-design", "ux", "accessibility", "frontend", "react", "typescript", "css", "responsive", "usability"]
+tools = ["gh"]
+policy = [
+  "変更前後のスクリーンショットをスマホ幅（360/390/412px）とデスクトップ幅で artifacts に残す。表示確認には gui/ の Playwright（scripts/check-*.mjs）を使う。",
+  "デザインだけで終わらせず、実装と表示確認まで行う。",
+]
 
 [org.profile.harnesses]
 default = "coding"

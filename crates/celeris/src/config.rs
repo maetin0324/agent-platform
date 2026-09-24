@@ -3396,6 +3396,7 @@ genre = "conversation"
                 "cos",
                 "engineering",
                 "software-engineering",
+                "ui-ux",
                 "systems-performance",
                 "research",
                 "literature-research",
@@ -3409,7 +3410,7 @@ genre = "conversation"
             ]
         );
         let nodes = cfg.org_nodes(time::OffsetDateTime::now_utc());
-        assert_eq!(nodes.len(), 13);
+        assert_eq!(nodes.len(), 14);
         // 親が子より先に来る（cos → 部 → 課）。
         let order: Vec<&str> = nodes.iter().map(|n| n.id.as_str()).collect();
         assert_eq!(order[0], "cos");
@@ -3739,6 +3740,101 @@ tiers = ["cheap", "standard", "frontier"]
                     "{genre} が [[genres]] に無い"
                 );
             }
+        }
+    }
+
+    /// ADR-0073: 例の組織（`org.example.toml`）で matching がどの課を選ぶかの回帰試験。
+    /// `frontend` は `ui-ux` にだけあるので、画面の仕事は `ui-ux`、API / Rust は
+    /// `software-engineering` に行く。
+    #[test]
+    fn example_org_routes_ui_work_to_ui_ux_and_api_work_to_software_engineering() {
+        use task_ops::matching::{Assignment, decide};
+
+        let config_dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config"));
+        let dir = tempfile::tempdir().unwrap();
+        let example = std::fs::read_to_string(config_dir.join("celeris.example.toml")).unwrap();
+        let enabled = example.replace("# org_include = \"org.toml\"", "org_include = \"org.toml\"");
+        std::fs::write(dir.path().join("config.toml"), enabled).unwrap();
+        std::fs::copy(
+            config_dir.join("org.example.toml"),
+            dir.path().join("org.toml"),
+        )
+        .unwrap();
+        let cfg = Config::load(&dir.path().join("config.toml")).unwrap();
+        cfg.validate().unwrap();
+        let nodes = cfg.org_nodes(time::OffsetDateTime::now_utc());
+
+        let route = |skills: &[&str]| -> String {
+            let mut task = routing_sample_task();
+            task.genre = Some("coding".to_string());
+            task.skills = skills.iter().map(|s| s.to_string()).collect();
+            match decide(&nodes, &task) {
+                Assignment::Assigned { node, .. } => node,
+                other => panic!("{skills:?}: expected Assigned, got {other:?}"),
+            }
+        };
+
+        assert_eq!(route(&["ui-design", "frontend"]), "ui-ux");
+        // typescript / react は両方の課にあるが、frontend の 1 点で ui-ux が勝つ。
+        assert_eq!(route(&["typescript", "react", "frontend"]), "ui-ux");
+        assert_eq!(route(&["responsive", "css", "accessibility"]), "ui-ux");
+        assert_eq!(route(&["rust", "api"]), "software-engineering");
+        assert_eq!(
+            route(&["typescript", "api", "sqlite"]),
+            "software-engineering"
+        );
+        // typescript / react だけだと両課とも 2 点・同じ深さで並ぶ。同点は id の辞書順で
+        // "software-engineering" < "ui-ux" となり software-engineering に行く。
+        assert_eq!(route(&["typescript", "react"]), "software-engineering");
+        assert_eq!(route(&["hpc", "perf"]), "systems-performance");
+        // skill なし: coding を許す課（engineering 配下に限らない）はすべて 0 点・同じ深さで並び、
+        // id の辞書順で先頭の cluster-hpc になる（観測値。決定的だが意味のある振り分けではない）。
+        assert_eq!(route(&[]), "cluster-hpc");
+    }
+
+    fn routing_sample_task() -> task_core::Task {
+        use task_core::{
+            Budget, Status, Task, TaskId, TaskKind, TaskMode, Tier, WorkerHint, WorkspaceSpec,
+        };
+        let now = time::OffsetDateTime::now_utc();
+        Task {
+            routing: None,
+            id: TaskId::new(),
+            parent_id: None,
+            kind: TaskKind::Execute,
+            title: "t".into(),
+            objective: "o".into(),
+            acceptance: vec![],
+            inputs: vec![],
+            depends_on: vec![],
+            status: Status::Ready,
+            priority: 10,
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::local("/tmp"),
+            repos: vec![],
+            budget: Budget {
+                max_turns: 1,
+                max_wall_secs: 1,
+                max_retries: 0,
+            },
+            attempts: 0,
+            lease: None,
+            created_at: now,
+            updated_at: now,
+            role: None,
+            genre: None,
+            aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: None,
+            labels: vec![],
+            category: Default::default(),
+            skills: vec![],
+            mode: TaskMode::Production,
+            conversation: None,
         }
     }
 
