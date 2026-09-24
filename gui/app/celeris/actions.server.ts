@@ -31,8 +31,10 @@ export { formString };
  * 400 として拒む。ルート側は `intent === "retry"` を先に見て `runRetryAction` に分ける）。
  * Phase 53（ADR-0044 D1/D2）で加わった `edit`（`PATCH /tasks/{id}`）と `reopen`
  * （`POST /tasks/{id}/reopen`）も同じ理由で除く（`~/celeris/tasks-admin.server.ts` が受け持つ）。
+ * ADR-0070 D2（Phase 116）で加わった `rereview`（`POST /tasks/{id}/rereview`）も同じ理由で除く
+ * （`~/celeris/tasks-admin.server.ts::rereviewTask`。ルート側は `intent === "rereview"` を先に見る）。
  */
-export type GateAction = Exclude<Action, "retry" | "edit" | "reopen">;
+export type GateAction = Exclude<Action, "retry" | "edit" | "reopen" | "rereview">;
 
 export const ACTIONS: readonly GateAction[] = ["approve", "reject", "answer", "cancel"];
 const STATUSES: readonly Status[] = [
@@ -134,7 +136,10 @@ export async function applyRetry(
   form: FormData,
   signal?: AbortSignal,
 ): Promise<RetryOutcome> {
-  const body: RetryBody = { accept: form.get("accept") === "true" };
+  // ADR-0070 D2 追記（Phase 116。本番で確認: 既定で `accept` を送らないと `draft` のまま止まり、
+  // 「やり直したのに動かない」状態になった）: 既定は `ready`（`accept: true`）。`draft` のまま
+  // 始めたいときだけフォームが明示で `draft=true` を送る（celeris 側の既定と揃える）。
+  const body: RetryBody = { accept: form.get("draft") !== "true" };
   try {
     const result = await client.post<RetryResult>(`/tasks/${encodeURIComponent(taskId)}/retry`, body, { signal });
     return { ok: true, taskId, result };

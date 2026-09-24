@@ -130,6 +130,7 @@ fn dispatcher(
             cluster_cooldown: Duration::from_secs(1),
             max_requeues: 5,
             max_reviewer_retries: 3,
+            max_infra_retries: 5,
             roles: Vec::new(),
             genres: Vec::new(),
             delegation: DelegationLimits::default(),

@@ -29,10 +29,12 @@ function form(entries: Record<string, string>): FormData {
 }
 
 describe("runRetryAction", () => {
-  it("posts accept:false by default and returns the new task id + rewired", async () => {
+  // ADR-0070 D2 追記（Phase 116。本番で確認: 既定で `accept` を送らないと `draft` のまま止まり、
+  // 「やり直したのに動かない」状態になった）: 既定は `ready`（`accept: true`）。
+  it("posts accept:true by default and returns the new task id + rewired", async () => {
     const result: RetryResult = { task_id: "T2", rewired: ["T3", "T4"] };
     mock.on("POST", "/api/v1/tasks/T1/retry", (_req, res, body) => {
-      expect(JSON.parse(body)).toEqual({ accept: false });
+      expect(JSON.parse(body)).toEqual({ accept: true });
       sendJson(res, 201, result);
     });
 
@@ -41,14 +43,14 @@ describe("runRetryAction", () => {
     expect(outcome).toEqual({ ok: true, taskId: "T1", result });
   });
 
-  it("posts accept:true when the accept checkbox is checked", async () => {
+  it("posts accept:false when the draft checkbox is checked", async () => {
     const result: RetryResult = { task_id: "T2", rewired: [] };
     mock.on("POST", "/api/v1/tasks/T1/retry", (_req, res, body) => {
-      expect(JSON.parse(body)).toEqual({ accept: true });
+      expect(JSON.parse(body)).toEqual({ accept: false });
       sendJson(res, 201, result);
     });
 
-    const outcome = await runRetryAction(client, "T1", form({ intent: "retry", accept: "true" }));
+    const outcome = await runRetryAction(client, "T1", form({ intent: "retry", draft: "true" }));
 
     expect(outcome).toEqual({ ok: true, taskId: "T1", result });
   });

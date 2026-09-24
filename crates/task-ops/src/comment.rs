@@ -295,6 +295,26 @@ pub fn review_fail_is_the_only_reason_for_failure(events: &[(u64, Event)]) -> bo
 /// 承認済みなら、`attempts` を変えずに再判定することで（`human_approval_title` が `attempts` を含むため）
 /// ディスパッチャの `resolve_human_approvals` が同じ子タスクを見つけて再利用する（人に二度承認させない。
 /// D2 と同じ考え方）。
+/// ADR-0070 D2（Phase 116）: [`rereview`] が検証する条件を、状態を変えずに真偽値として返す
+/// （純粋関数）。一覧・受信箱・タスク詳細が「再レビュー」ボタンを出してよいかを判定するのに使う
+/// （`rereview` 自身の詳細なエラー文言はここでは作らない。二重実装を避けるため、条件は
+/// `rereview` と同じものをここに集約した）。
+pub fn can_rereview(task: &task_core::Task, events: &[(u64, Event)]) -> bool {
+    if !task
+        .acceptance
+        .iter()
+        .any(|c| matches!(c.check, task_core::Check::Reviewer))
+        || task_core::support_kind(task).is_some()
+    {
+        return false;
+    }
+    match task.status {
+        Status::Done => true,
+        Status::Failed => review_fail_is_the_only_reason_for_failure(events),
+        _ => false,
+    }
+}
+
 pub fn rereview(
     store: &dyn TaskStore,
     id: TaskId,

@@ -17335,3 +17335,135 @@ primary リポジトリを暗黙継承して worktree が作られ `work_dir != 
 - P-115-6: 実装エージェント・タスクが `CARGO_TARGET_DIR` を `/tmp`（tmpfs）へ逃がすのは RAM を圧迫する。プリアンブルで禁止し、代わりに `<state_dir>/build-cache` を案内する。dispatch 前にディスク残量（`/home` と `/tmp`）を確認し、閾値未満なら run を始めず通知する（Phase 116 の `infra` 分類「ディスク不足」と組で）。
 - P-115-7: `pnpm-mobile-audit` ゲートは本日 2 回フレーク（perf 予算の LCP、監査サーバの接続拒否）。ゲート内で 1 回だけ自動再試行する。
 - P-115-8: `celerisctl workspace prune --older-than 0` は「無効」の意味になり、0 秒で刈るには `1` を渡す必要がある。ヘルプに書くか `--all` を足す。
+## Phase 116: 失敗を必ず人に見せ、やり直し方を一通りにし、切替と DB 遅延で生きた run を捨てない（2026-09-24）
+
+ADR-0070（`docs/adr/0070-task-failure-visibility-and-handoff-safe-runs.md`）。
+branch: `worktree-agent-a8f4f104dbb0c0fe8`。
+
+背景（本番で確認済み。CLAUDE.md の指示どおり再調査はしていない）: 自己改善タスクの直近 2 件が
+どちらも failed になったのに人に何の通知も無く、リトライ方法も不明瞭だった（タスク A: 昇格の
+drain timeout で run を abort → lease 失効の reclaim が 3 回 attempts を消費して failed。
+タスク B: 成果は配送・本番昇格済みなのに、その後のレビューが 2 回とも result.json 不在で failed）。
+実装中に人から D1 分類の追加（ディスク不足）と D2 の既定値修正（`retry` の `accept`、
+`POST /tasks/{id}/accept` の新設）の追記指示があり、両方を反映した（ADR-0070 §4 追記）。
+
+### D1: 失敗の分類と通知
+
+- `task_ops::derive::classify_task_failure`（純粋関数）: `infra`（lease 失効・切替中断・
+  result.json 不在・セッション再開拒否・レート制限〈requeue 上限到達を含む〉・DB busy・
+  ディスク不足）と `work`（レビュー不合格・max_turns・ワーカーの明示的な error）を分類し、
+  人が読む理由 1 行を作る。ディスク不足（`"No space left on device"`）は分類を無条件に `infra` に
+  し、理由の先頭に「ディスク不足: 」を付ける（`annotate_disk_full`。実機で 09:21Z に `/home` が
+  満杯になった事故の追記指示）。
+- `TaskDetail.failure`（`task_ops::view::FailureSummary`。`class`/`reason`/`delivered_release`）と
+  受信箱 `AttentionItem::Failed` の `class`/`delivered_release` を新設。配送済み
+  （`deliveries` に `release` が付いた記録がある）なら「成果は配送済み（release <sha12>）だが
+  レビューで不合格」を組み立てる。
+- `task_core::notify::NotificationKind::TaskFailed`（`"task_failed"`）を新設し、
+  `celeris::notify::scan_task_failed` で `failed` になった（celeris 起動後の）タスクごとに
+  `(kind, key=transition_key)` の重複排除で 1 件だけ通知を作る（既存 6 種と同じ経路。
+  `docs/adr/0037` の backfill 禁止も踏襲）。
+- CoS の「あなたの直近の仕事」（`Dispatcher::recent_work_outcome`、Phase 33）は既に `failed`
+  タスクの理由を 1 行載せているので、この Phase では変更していない（ADR-0070 §2 D1 参照）。
+
+### D2: やり直しの一本化
+
+- `POST /tasks/{id}/retry`（`task_ops::retry::retry_task`）は既に `Failed | Cancelled` から常に
+  使えた。この Phase で変えたのは `accept` の既定だけ: `false` → **`true`**（本番で確認:
+  `accept` を送らないと複製が `draft` のまま止まり「やり直したのに動かない」状態になった）。
+  GUI の「やり直す」チェックボックス（受信箱・タスク詳細・案件の仕事の木の 3 箇所）は
+  「下書き（draft）のまま始める」に意味を反転（既定チェック無し = ready）。タスク詳細の失敗
+  バナーの「やり直す」はチェックボックスを持たず常に ready。
+- `POST /tasks/{id}/accept`（`task_ops::gate::accept`。新設。`status == Draft` だけを許す、
+  `approve` の薄い別名）と `celerisctl accept <task_id>`（新設）。
+- `celerisctl retry` の `--accept` を `--draft`（既定 ready）に変更。
+- `Action::Rereview`（新設。`task_ops::view::actions_with_events` が `task_ops::comment::
+  can_rereview` の判定を events 付きで反映）。受信箱・タスク詳細の両方でボタンの表示に使う。
+- タスク詳細に赤い失敗バナー（`FailureBanner`。「失敗: <分類> — <理由>」+「やり直す」
+  （常時）+「再レビュー」（`actions` に `rereview` があるときだけ）+「取り下げ」）。「取り下げ」は
+  **状態を変えない**（既存の `POST /tasks/{id}/comments` に定型文を送るだけ。`Trigger::Cancel` の
+  許容状態は変えていない。ADR-0070 §2 D2 の判断）。
+- `docs/gui/help`（`/help#failure`「失敗したタスクの直し方」節、新設）と
+  `celerisctl retry`/`accept`/`rereview`/`cancel` の説明文をこの既定・意味に揃えた。
+
+### D3: インフラ失敗は attempts を消費しない
+
+- `Trigger::InfraRequeue`（新設。`task_core::transition`）: `Running → Ready`、attempts 据え置き、
+  reason `"infra_requeue"`。`task_ops::derive::consecutive_infra_requeues`（`Requeue`/
+  `consecutive_requeues` と対称の別カウンタ）で数える。
+- `Dispatcher::on_worker_finished` の `Err(e) =>` 分岐: `provider_failure_outcome` が分類できない
+  （`None`）失敗（resume 拒否・プロセス I/O・result.json 不在など。Phase 115 が直す経路もここを
+  通る）は、`consecutive_infra_requeues + 1 <= [dispatch] max_infra_retries`（既定 5）なら
+  `Trigger::InfraRequeue` で再試行、超えたら `Trigger::WorkerError{retryable:false}`（`Running`
+  から無条件に `Failed`）で `"infra failure ×N: …"` を付けて打ち切る（D1 の分類がこの接頭辞を見る）。
+- 再試行は `task_ops::derive::infra_backoff_delay`（1 回目 30 秒、2 回目 2 分、3 回目以降 5 分）で
+  バックオフする。`Dispatcher.infra_backoff`（`HashMap<TaskId, OffsetDateTime>`。プロセス内メモリの
+  み）を `dispatch_ready` の候補ループで `retry_backoff` の直後にゲートする。
+- `[dispatch] max_infra_retries`（`celeris::config::DispatchTomlConfig`。既定 5）を新設。
+
+### D4: ライブ切替で生きている run を捨てない
+
+- `[handoff] drain_force_abort`（`celeris::config::HandoffConfig`。既定 `false`）を新設。
+  `drain_timeout_secs` を過ぎても `drain_force_abort = false` なら `Supervisor::step` は
+  `Step::DrainTimedOut`（`abort_all_runs` を呼ぶ）を返さず、1 回だけ WARN ログを出して待ち続ける。
+  `true`（人が明示的に強い昇格を選んだときだけ設定する想定）のときだけ従来どおり強制 abort。
+- 待つ間の上限は各 run 自身の `max_wall_secs`（+ `lease_grace`）に自然に委ねる（draining の
+  インスタンスは自分の run のリース更新を続けるので、run が終われば `in_flight == 0` になり
+  `Step::Drained` で exit する）。
+- lease への `instance_id`/`pid` の永続化によるクロスインスタンスの横取り判定は**採らない**
+  （ADR-0070 §3。D4 の abort 停止 + D5 の renew 頑健化の組み合わせで実効的に防ぐ、という判断）。
+
+### D5: lease 更新は DB busy に耐える
+
+- `task_core::store::is_busy_error`（純粋関数。`SQLITE_BUSY`/`SQLITE_LOCKED` を見分ける）。
+- `StoreSink::heartbeat`（run の途中の `renew_lease`）: busy/locked のときだけ同じ呼び出しの中で
+  最大 3 回（100ms 間隔）リトライし、それでも失敗したら WARN のみ（run は続く）。
+- `task_worker::process_group::group_alive`（新設。登録された pgid に signal 0 で存在確認）。
+- `Dispatcher::reclaim_expired_leases`: 期限切れでも、このインスタンスが持っている run
+  （`self.running` に entry がある）のプロセスが生きていれば reclaim せず `renew_lease` で延長する。
+  死んでいる・管理外なら D3 の分岐（`InfraRequeue`／上限超えで `Failed`）に乗せる
+  （`Trigger::LeaseExpired` はもう `reclaim_expired_leases` からは使わない）。
+
+### D6: テスト（条件・実行したコマンド・出力の要点）
+
+| 条件 | 実行したコマンド | 出力の要点 |
+| --- | --- | --- |
+| (a) `task_failed` 通知・受信箱項目（infra/work/配送済み） | `cargo test -p celeris --test notify task_failed` | exit 0。2 passed（`task_failed_fires_once_and_is_classified_infra_or_work`、`task_failed_notes_when_the_task_was_already_delivered`） |
+| (a) 受信箱の分類・rereview 操作 | `cargo test -p task-ops --lib inbox::` | exit 0。14 passed（`inbox_attention_failed_items_are_classified_and_carry_operations` を含む） |
+| (a) タスク詳細の `failure`/`Action::Rereview` | `cargo test -p task-ops --lib view::` | exit 0。41 passed（`task_detail_failed_task_reports_failure_and_rereview_when_review_fail_is_the_only_reason`、`task_detail_infra_failed_task_reports_infra_class_without_rereview` を含む） |
+| (b) infra 失敗は attempts を消費せずバックオフ、上限で failed | `cargo test -p task-dispatch --lib infra_failure_retry_limit_fails_the_task_without_consuming_attempts_until_then` | exit 0。1 passed |
+| (c) 偽の子プロセスが生きている間は lease 失効で reclaim されない | `cargo test -p task-dispatch --lib a_lease_past_its_expiry_is_extended_instead_of_reclaimed_while_the_process_is_alive` | exit 0。1 passed |
+| (c) `group_alive` 単体 | `cargo test -p task-worker --lib process_group::` | exit 0。7 passed（`group_alive_reflects_whether_the_registered_process_is_still_running` を含む） |
+| (d) drain timeout でも生きている run は abort されない（既定） | `cargo test -p celeris --lib instance:: ` | exit 0。11 passed（`the_drain_timeout_does_not_abort_alive_runs_by_default`、`the_drain_timeout_ends_the_drain_with_runs_left_when_force_abort_is_set` を含む） |
+| e2e: 期限切れリースの reclaim がインフラ分類に統合された | `cargo test -p e2e --test scenarios expired_lease_is_reclaimed_and_task_completes` | exit 0。1 passed（30.4 秒。D3 の 30 秒バックオフを含む実時間） |
+| D1 のディスク不足分類 | `cargo test -p task-ops --lib classify_task_failure` | exit 0。4 passed（`classify_task_failure_forces_disk_full_errors_to_infra` を含む） |
+| D2 の `retry`/`accept` 既定 | `cargo test -p task-api --test operations` | exit 0。20 passed（`retry_defaults_to_ready_when_accept_is_omitted`、`accept_moves_a_draft_task_to_ready_and_rejects_other_statuses` を含む） |
+| (e) GUI 型・lint・vitest | `cd gui && corepack pnpm@11.27.0 typecheck && corepack pnpm@11.27.0 lint && corepack pnpm@11.27.0 test` | 3 つとも exit 0。vitest 69 files / 1072 tests passed（`inbox_attention_failed_items_are_classified_and_carry_operations` 相当の GUI 側 `passes through a failed attention item's class and delivered_release as-is` を含む） |
+| (e) `gen:types` 差分ゼロ | `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff | 2 回目の出力が 1 回目と bit 単位で一致（IDENTICAL）。`git status --short app/celeris/types.ts` は Phase 116 内の 1 度の更新のみ |
+| (e) build | `cd gui && corepack pnpm@11.27.0 build` | exit 0 |
+| (e) mobile-audit 違反 0 | `cd gui && corepack pnpm@11.27.0 mobile-audit` | 1 回目は `task-overview` の draft チェックボックス（`min-h-11` 抜け。既存のバグで、今回 `actions` に `retry` を含む固定データを足して初めて検査対象になった）で tap-target 違反 2 件（light/dark）を検出 → 修正 → 2 回目は `{"ok":true,"total":0}`。`routes=27 schemes=2 violations=0` |
+| ワークスペース全体 | `cargo test --workspace --no-fail-fast` | exit 0。2079 passed（79 個の `test result:` ブロックが全て ok。FAILED 0） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| schema | `UPDATE_SCHEMA=1 cargo test -p task-api committed_schema_matches_generated` | exit 0。`docs/api/v1/api-v1.schema.json` を更新（`Action::Rereview`、`FailureClass`、`FailureSummary`、`AttentionItem::Failed.class`/`delivered_release`、`TaskDetail.failure`、`RetryBody.accept` の既定の説明） |
+
+### 未解決事項
+
+- P-116-1: D4 で「新 active が旧の run の lease を横取りしない」ことの直接的な保証（lease への
+  `instance_id`/`pid` の永続化）は採らなかった。D4（drain 強制 abort の既定オフ）と D5（renew の
+  busy リトライ）の組み合わせで実質的に防げる、という判断（`acquire_lease` のシグネチャ変更の
+  影響範囲が広いため）。実運用で本番事故が再現したら次の Phase で検討する。
+- P-116-2: `Dispatcher.infra_backoff` のバックオフ猶予（30秒/2分/5分の残り時間）は dispatcher の
+  再起動で失われる（プロセス内メモリのみ）。上限判定自体（`consecutive_infra_requeues`）は events
+  から数え直すので安全側だが、再起動直後は本来より早く再試行されうる。
+- P-116-3: 「取り下げ」はコメントのみ（状態は変えない）。`celerisctl` には対応する専用サブコマンドを
+  足していない（`docs/gui/help` に「GUI から行うか、コメントの API を直接叩く」と明記）。
+- P-116-4: `g13.spec.ts`（`e2e:staging`）を `retry` の新しい既定に合わせて更新したが、実機の
+  staging 環境が無かったため実行して確かめてはいない（Rust 側と GUI の unit/mobile-audit は確認済み）。
+
+### 提案
+
+- P-116-5: D1 で「配送済みなのに失敗」の通知本文は `deliveries.release` の有無だけで判定している。
+  複数回配送を試みたタスク（release が更新され続けるケース）で古い release が出ないか、実機で確認
+  したい。
+- P-116-6: ディスク不足の分類（D1 追記）は文言だけで、残量の事前チェックや自動対処は範囲外。
+  `/home` が再び満杯になる事故を防ぐには、別 Phase でチェック・警告の仕組みを検討する。

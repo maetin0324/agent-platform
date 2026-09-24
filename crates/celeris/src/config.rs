@@ -69,6 +69,11 @@ pub struct Config {
     /// やり直す回数の上限。`[reviewer]`（判定 run の adapter/tier）とは別のテーブル。
     #[serde(default)]
     pub review: ReviewConfig,
+    /// ADR-0070 D3（Phase 116）: `[dispatch]`。ワーカー run 自身のインフラ都合の失敗
+    /// （lease 失効・切替中断・result.json 不在・セッション再開拒否・レート制限・DB busy）を
+    /// attempts を消費せず再試行できる回数の上限。
+    #[serde(default)]
+    pub dispatch: DispatchTomlConfig,
     #[serde(default)]
     pub api: ApiConfig,
     #[serde(default)]
@@ -205,12 +210,21 @@ fn default_rollover_tokens() -> u64 {
 pub struct HandoffConfig {
     #[serde(default = "default_drain_timeout_secs")]
     pub drain_timeout_secs: u64,
+    /// ADR-0070 D4（Phase 116）: 既定 `false`。`drain_timeout_secs` を過ぎても、`draining` の
+    /// インスタンスは手元の run が生きている限り待ち続け、`abort_all_runs` を呼ばない（1 回だけ
+    /// WARN を出す）。待つ上限は各 run 自身の `max_wall_secs`（+ `lease_grace`）で、それを超えれば
+    /// 通常のリース失効の経路（D5）に乗る。`true` にすると従来どおり `drain_timeout_secs` で
+    /// 強制的に abort する（人が明示的に強い昇格を選んだときだけ設定する想定。`promote.sh --force`
+    /// 相当）。
+    #[serde(default)]
+    pub drain_force_abort: bool,
 }
 
 impl Default for HandoffConfig {
     fn default() -> Self {
         Self {
             drain_timeout_secs: default_drain_timeout_secs(),
+            drain_force_abort: false,
         }
     }
 }
@@ -1079,6 +1093,28 @@ impl Default for ReviewConfig {
 
 fn default_max_reviewer_retries() -> u32 {
     3
+}
+
+/// `[dispatch]`（ADR-0070 D3, Phase 116）: ワーカー run 自身のインフラ都合の失敗を、attempts を
+/// 消費せず再試行できる連続回数の上限。`[review]`（reviewer run 自身のインフラ失敗）とは別のテーブル
+/// （対象がワーカー run か reviewer run かで役割が違うため）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchTomlConfig {
+    #[serde(default = "default_max_infra_retries")]
+    pub max_infra_retries: u32,
+}
+
+impl Default for DispatchTomlConfig {
+    fn default() -> Self {
+        Self {
+            max_infra_retries: default_max_infra_retries(),
+        }
+    }
+}
+
+fn default_max_infra_retries() -> u32 {
+    5
 }
 fn default_retry_backoff_base_secs() -> u64 {
     10
@@ -2687,6 +2723,7 @@ impl Config {
             retry_backoff_max: Duration::from_secs(self.retry_backoff_max_secs),
             max_requeues: self.max_requeues,
             max_reviewer_retries: self.review.max_reviewer_retries,
+            max_infra_retries: self.dispatch.max_infra_retries,
             reviewer_hint: WorkerHint {
                 tier: self.reviewer.tier,
                 adapter: self.reviewer.adapter.clone(),

@@ -581,10 +581,13 @@ function AttentionRow({ item }: { item: Exclude<AttentionItem, { type: "cluster_
         >
           <input type="hidden" name="intent" value="retry" />
           {/* ADR-0055 D1-2（Phase 88、`/inbox` の fixture 拡張で発見）: `app/routes/projects.$id.tsx`
-              の同じチェックボックスと同じ、タップ領域 44 以上の `min-h-11`。 */}
+              の同じチェックボックスと同じ、タップ領域 44 以上の `min-h-11`。
+              ADR-0070 D2 追記（Phase 116。本番で確認: 既定で accept を送らないと draft のまま止まり
+              「やり直したのに動かない」状態になった）: 既定は ready。draft のまま始めたいときだけ
+              チェックする（既定を逆にした。チェック無し = ready）。 */}
           <label className="flex min-h-11 items-center gap-2 text-fg">
-            <input type="checkbox" name="accept" value="true" className={checkboxClass} />
-            受け入れ済み（ready）で始める
+            <input type="checkbox" name="draft" value="true" className={checkboxClass} />
+            下書き（draft）のまま始める（既定は受け入れ済み = ready）
           </label>
           <Button
             type="submit"

@@ -215,20 +215,26 @@ pub struct Supervisor {
     started_at: OffsetDateTime,
     freshness: Duration,
     drain_timeout: Duration,
+    /// ADR-0070 D4（Phase 116）: `false`（既定）なら drain timeout で abort しない。
+    drain_force_abort: bool,
     /// `draining` になった時刻（drain timeout の基準）。
     drain_started_at: Option<OffsetDateTime>,
+    /// ADR-0070 D4: drain timeout の WARN ログをログスパムにしないための一度きりの印。
+    drain_timeout_warned: bool,
 }
 
 impl Supervisor {
     /// 起動時の判断を行い、`daemon_instances` に自分の行を書く（`standby` なら `active` の行に
     /// `handoff_requested_at` も書く）。同じ `release` の `active` がいれば行を書かずに
     /// `Started::Duplicate` を返す。
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         store: Arc<dyn TaskStore>,
         identity: InstanceIdentity,
         role: SharedRole,
         freshness: Duration,
         drain_timeout: Duration,
+        drain_force_abort: bool,
         now: OffsetDateTime,
     ) -> Result<Started, StoreError> {
         let rows = store.instance_list()?;
@@ -262,7 +268,9 @@ impl Supervisor {
             started_at: now,
             freshness,
             drain_timeout,
+            drain_force_abort,
             drain_started_at: None,
+            drain_timeout_warned: false,
         };
         supervisor
             .store
@@ -376,14 +384,27 @@ impl Supervisor {
                 tracing::info!(instance_id = %self.identity.instance_id, "drained; exiting 0 (ADR-0040 D4)");
                 step = Step::Drained;
             } else if self.drain_timed_out(now) {
-                self.store
-                    .instance_mark_drained(&self.identity.instance_id, now)?;
-                tracing::warn!(
-                    instance_id = %self.identity.instance_id, in_flight,
-                    drain_timeout_secs = self.drain_timeout.as_secs(),
-                    "drain timeout; aborting the remaining runs and exiting 0 (ADR-0040 D4)"
-                );
-                step = Step::DrainTimedOut;
+                if self.drain_force_abort {
+                    self.store
+                        .instance_mark_drained(&self.identity.instance_id, now)?;
+                    tracing::warn!(
+                        instance_id = %self.identity.instance_id, in_flight,
+                        drain_timeout_secs = self.drain_timeout.as_secs(),
+                        "drain timeout; aborting the remaining runs and exiting 0 (ADR-0040 D4, \
+                         drain_force_abort = true)"
+                    );
+                    step = Step::DrainTimedOut;
+                } else if !self.drain_timeout_warned {
+                    // ADR-0070 D4（Phase 116）: run のプロセスが生きている限り待つ。abort しない。
+                    self.drain_timeout_warned = true;
+                    tracing::warn!(
+                        instance_id = %self.identity.instance_id, in_flight,
+                        drain_timeout_secs = self.drain_timeout.as_secs(),
+                        "drain timeout reached but runs are still alive; waiting instead of \
+                         aborting (ADR-0070 D4). set [handoff] drain_force_abort = true to force \
+                         an abort"
+                    );
+                }
             }
         }
         Ok(step)
@@ -585,6 +606,18 @@ mod tests {
         now: OffsetDateTime,
         drain: Duration,
     ) -> Started {
+        supervisor_with(store, release, now, drain, false)
+    }
+
+    /// ADR-0070 D4（Phase 116）: `drain_force_abort` を選べる版。既定の `supervisor()` は常に `false`
+    /// （drain timeout で abort しない、が既定の挙動）。
+    fn supervisor_with(
+        store: &Arc<dyn TaskStore>,
+        release: &str,
+        now: OffsetDateTime,
+        drain: Duration,
+        drain_force_abort: bool,
+    ) -> Started {
         Supervisor::start(
             Arc::clone(store),
             InstanceIdentity {
@@ -595,6 +628,7 @@ mod tests {
             SharedRole::new(InstanceRole::Standby),
             WINDOW,
             drain,
+            drain_force_abort,
             now,
         )
         .expect("start")
@@ -675,15 +709,18 @@ mod tests {
         );
     }
 
-    /// drain timeout を過ぎたら、run が残っていても `DrainTimedOut` になる。
+    /// ADR-0070 D4（Phase 116）: `drain_force_abort = true` のときだけ、drain timeout を過ぎたら
+    /// run が残っていても `DrainTimedOut` になる（従来の挙動、人が明示的に強い昇格を選んだとき）。
     #[test]
-    fn the_drain_timeout_ends_the_drain_even_with_runs_left() {
+    fn the_drain_timeout_ends_the_drain_with_runs_left_when_force_abort_is_set() {
         let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().expect("open"));
-        let Started::Running(mut old) = supervisor(&store, "old", at(0), Duration::from_secs(10))
+        let Started::Running(mut old) =
+            supervisor_with(&store, "old", at(0), Duration::from_secs(10), true)
         else {
             panic!("active");
         };
-        let Started::Running(_new) = supervisor(&store, "new", at(1), Duration::from_secs(10))
+        let Started::Running(_new) =
+            supervisor_with(&store, "new", at(1), Duration::from_secs(10), true)
         else {
             panic!("standby");
         };
@@ -697,6 +734,36 @@ mod tests {
             .find(|r| r.instance_id == "inst-old")
             .expect("row");
         assert_eq!(row.drained_at, Some(at(12)));
+    }
+
+    /// ADR-0070 D4（Phase 116。D6(d)）: 既定（`drain_force_abort = false`）では、drain timeout を
+    /// 過ぎても run が残っている間は `DrainTimedOut` にならない（`Step::Stay` のまま待ち続け、
+    /// `drained_at` も書かない）。手元の run が本当に 0 になったときだけ `Drained` になる。
+    #[test]
+    fn the_drain_timeout_does_not_abort_alive_runs_by_default() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().expect("open"));
+        let Started::Running(mut old) = supervisor(&store, "old", at(0), Duration::from_secs(10))
+        else {
+            panic!("active");
+        };
+        let Started::Running(_new) = supervisor(&store, "new", at(1), Duration::from_secs(10))
+        else {
+            panic!("standby");
+        };
+        assert_eq!(old.step(at(2), 3).expect("step"), Step::Draining);
+        assert_eq!(old.step(at(5), 3).expect("step"), Step::Stay);
+        // drain_timeout_secs (10) を過ぎても、in_flight が 0 でない限り待ち続ける。
+        assert_eq!(old.step(at(12), 3).expect("step"), Step::Stay);
+        assert_eq!(old.step(at(3600), 1).expect("step"), Step::Stay);
+        let row = store
+            .instance_list()
+            .expect("list")
+            .into_iter()
+            .find(|r| r.instance_id == "inst-old")
+            .expect("row");
+        assert!(row.drained_at.is_none(), "abort していないので drained_at は書かれない");
+        // 手元の run が 0 になれば、通常どおり Drained で終わる。
+        assert_eq!(old.step(at(3601), 0).expect("step"), Step::Drained);
     }
 
     /// (e) 旧の heartbeat が止まったら standby は昇格し、旧の行を消す。

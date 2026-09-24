@@ -32,7 +32,7 @@ export type TaskId = string;
  * 永続の規則の識別子（ULID）。
  */
 export type StandingRuleId = string;
-export type Action = ("approve" | "reject" | "answer" | "cancel") | "retry" | "edit" | "reopen";
+export type Action = ("approve" | "reject" | "answer" | "cancel") | "retry" | "edit" | "reopen" | "rereview";
 /**
  * DESIGN §4.1 の `TaskKind`。
  */
@@ -490,6 +490,16 @@ export type RunOutcomeKind = ("done" | "question" | "error" | "requeue" | "lease
 export type AttentionItem =
   | {
       at: string;
+      /**
+       * ADR-0070 D1（Phase 116）: `infra`（lease失効・切替中断・result.json不在・セッション再開
+       * 拒否・レート制限・DB busy）か `work`（レビュー不合格・max_turns・ワーカーの明示的な
+       * error）かの分類（`task_ops::derive::classify_task_failure`）。
+       */
+      class: "infra" | "work";
+      /**
+       * 配送済み（`deliveries` に `release` が付いた記録がある）なら sha12。
+       */
+      delivered_release?: string | null;
       reason: string;
       task: TaskRef;
       type: "failed";
@@ -584,7 +594,8 @@ export type NotificationKind =
   | "bad_news"
   | "secretary_reply"
   | "task_ready"
-  | "cluster_login_needed";
+  | "cluster_login_needed"
+  | "task_failed";
 /**
  * 組織のノードの種類（ADR-0033 D1）。`secretary` は根で 1 つだけ。
  */
@@ -620,6 +631,11 @@ export type InstanceRole = "active" | "standby" | "draining" | "verify";
  * **`container` は ADR-0043 A3 の工事**（この Phase では読むだけで、実行には使わない）。
  */
 export type RepoRun = "auto" | "host" | "container";
+/**
+ * ADR-0070 D1（Phase 116）: `failed` の分類。`infra` はレース・切替・供給側都合、`work` はレビュー
+ * 不合格やワーカー自身の明示的な失敗（人が中身を見て判断すべきもの）。
+ */
+export type FailureClass = "infra" | "work";
 /**
  * タイムラインの 1 件（ADR-0044 D5）。`at` は RFC 3339。
  */
@@ -4610,6 +4626,11 @@ export interface ReportsReadResult {
  * Phase 31（実機の事故、2026-09-18）: `POST /tasks/{id}/retry` の要求本文と応答。
  */
 export interface RetryBody {
+  /**
+   * ADR-0070 D2 追記（Phase 116。本番で確認: `accept` を省略すると `draft` のまま止まり、
+   * 「やり直したのに動かない」状態になった）。既定 `true`（`ready` で始める）。
+   * `draft` のまま始めたいときだけ明示で `false` を送る。
+   */
   accept?: boolean;
   workspace?: WorkspaceSpec | null;
 }
@@ -4826,6 +4847,11 @@ export interface TaskDetail {
   dependencies: TaskRef[];
   dependents: TaskRef[];
   /**
+   * ADR-0070 D1（Phase 116）: `task.status == Failed` のときだけ `Some`（分類・理由・配送済みの release）。
+   * GUI のタスク詳細の赤いバナーの材料。
+   */
+  failure?: FailureSummary | null;
+  /**
    * ADR-0027 D1: `Task.genre`（`role` と同じ理由で最上位にも出す）。
    */
   genre?: string | null;
@@ -4878,6 +4904,20 @@ export interface DelegatedView {
    * イベントの ts（`EventRow.ts`）。
    */
   ts: string;
+}
+/**
+ * ADR-0070 D1（Phase 116）: `TaskDetail.failure` / 受信箱 `AttentionItem::Failed` が共有する形。
+ */
+export interface FailureSummary {
+  class: FailureClass;
+  /**
+   * 配送済み（`deliveries` に `release` が付いた記録がある）なら sha12。
+   */
+  delivered_release?: string | null;
+  /**
+   * 人が読む理由 1 行（`derive::classify_task_failure` が作る）。
+   */
+  reason: string;
 }
 /**
  * `prior_review_from_events` の要素。`task_worker::PriorReview` と同じ形（フィールド名も同じ）。

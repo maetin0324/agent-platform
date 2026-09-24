@@ -1527,6 +1527,7 @@ pub async fn run(config: Config, opts: RunOptions) -> Result<Exit, DaemonError> 
                 role.clone(),
                 freshness,
                 config.drain_timeout(),
+                config.handoff.drain_force_abort,
                 OffsetDateTime::now_utc(),
             )? {
                 instance::Started::Duplicate { instance_id, pid } => {

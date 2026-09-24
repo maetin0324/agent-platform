@@ -123,6 +123,116 @@ pub fn consecutive_reviewer_infra_failures(events: &[(u64, Event)]) -> u32 {
     n
 }
 
+/// ADR-0070 D3（Phase 116）: `Trigger::InfraRequeue`（`Event::Transitioned.reason ==
+/// "infra_requeue"`）による、現在の試行での連続再試行回数。`consecutive_requeues` と対称
+/// （新しい順に `infra_requeue` を数え、`dispatch` は読み飛ばし、それ以外の reason で止まる）。
+/// `[dispatch] max_infra_retries` と組み合わせて使う。
+pub fn consecutive_infra_requeues(events: &[(u64, Event)]) -> u32 {
+    let mut n = 0;
+    for (_, ev) in events.iter().rev() {
+        if let Event::Transitioned { reason, .. } = ev {
+            match reason.as_str() {
+                "infra_requeue" => n += 1,
+                "dispatch" => {}
+                _ => break,
+            }
+        }
+    }
+    n
+}
+
+/// ADR-0070 D3: インフラ都合の再試行のバックオフ（1 回目 30 秒、2 回目 2 分、3 回目以降は 5 分固定）。
+/// `n` は「これから何回目の再試行か」（`consecutive_infra_requeues` の値 + 1）。`n == 0` は 0 秒。
+pub fn infra_backoff_delay(n: u32) -> Duration {
+    match n {
+        0 => Duration::ZERO,
+        1 => Duration::from_secs(30),
+        2 => Duration::from_secs(120),
+        _ => Duration::from_secs(300),
+    }
+}
+
+/// ADR-0070 D1（Phase 116）: `failed` の分類。`infra` はレース・切替・供給側都合、`work` はレビュー
+/// 不合格やワーカー自身の明示的な失敗（人が中身を見て判断すべきもの）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureClass {
+    Infra,
+    Work,
+}
+
+impl FailureClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FailureClass::Infra => "infra",
+            FailureClass::Work => "work",
+        }
+    }
+}
+
+/// ADR-0070 D3 が最終的な失敗（`WorkerError{retryable:false}`）に付ける接頭辞
+/// （ADR-0054 D2 の reviewer 側 `"reviewer infra failure ×N"` と同じ書式）。
+pub const INFRA_FAILURE_MARKER: &str = "infra failure ×";
+/// 供給側失敗の requeue 上限到達（ADR-0011 P-38）の文言。人の目には「レート制限が続いた」ことを
+/// 意味するので、これも `infra` に分類する。
+const REQUEUE_LIMIT_MARKER: &str = "requeue limit (";
+
+/// 文字列の最初の行（前後の空白を落とす）。空なら空文字列のまま。
+fn first_line(s: &str) -> String {
+    s.lines().next().unwrap_or("").trim().to_string()
+}
+
+/// ADR-0070 D1 追記（Phase 116。本番で確認: 2026-09-24 09:21Z、`/home` が満杯になり run が
+/// `adapter: io error: No space left on device (os error 28)` で 2 回失敗した）: OS のディスク
+/// 不足エラー文言。`std::io::Error`（`ENOSPC`）の `Display` がこの文字列を含む。ディスク残量の事前
+/// チェックは別 Phase（今回は分類と文言だけ）。
+const DISK_FULL_MARKER: &str = "No space left on device";
+
+/// ディスク不足なら（`class` に関わらず）`infra` に強制し、人が読む理由の先頭に
+/// 「ディスク不足: 」を足す。それ以外はそのまま返す。
+fn annotate_disk_full(class: FailureClass, reason: String) -> (FailureClass, String) {
+    if reason.contains(DISK_FULL_MARKER) && !reason.starts_with("ディスク不足: ") {
+        (FailureClass::Infra, format!("ディスク不足: {reason}"))
+    } else {
+        (class, reason)
+    }
+}
+
+/// ADR-0070 D1: `failed` に落ちた理由を分類し、人が読む 1 行を作る（純粋関数。`events` は `failed` の
+/// タスクの全イベント、新しい順に走査する）。`Failed` でないタスクに対して呼んでも構わない
+/// （その場合は最後に見つかった `WorkerFinished`/`ReviewVerdict` から意味のない分類を返すだけ）。
+pub fn classify_task_failure(events: &[(u64, Event)]) -> (FailureClass, String) {
+    let last_transition_reason = events.iter().rev().find_map(|(_, e)| match e {
+        Event::Transitioned { reason, .. } => Some(reason.as_str()),
+        _ => None,
+    });
+    if last_transition_reason == Some("review_fail") {
+        if let Some(reason) = events.iter().rev().find_map(|(_, e)| match e {
+            Event::ReviewVerdict {
+                pass: false,
+                reason,
+                ..
+            } => Some(reason.as_str()),
+            _ => None,
+        }) {
+            return annotate_disk_full(FailureClass::Work, first_line(reason));
+        }
+        return (FailureClass::Work, "レビュー不合格".to_string());
+    }
+    for (_, e) in events.iter().rev() {
+        if let Event::WorkerFinished {
+            outcome, role: None, ..
+        } = e
+        {
+            if outcome.starts_with(INFRA_FAILURE_MARKER) || outcome.contains(REQUEUE_LIMIT_MARKER) {
+                return annotate_disk_full(FailureClass::Infra, first_line(outcome));
+            }
+            return annotate_disk_full(FailureClass::Work, first_line(outcome));
+        }
+    }
+    (FailureClass::Work, "原因不明の失敗".to_string())
+}
+
 /// ADR-0010 D6（P-3）: `min(base·2^(attempts-1), max)`。`attempts == 0` または `base == 0` なら 0。
 pub fn retry_backoff(base: Duration, max: Duration, attempts: u32) -> Duration {
     if attempts == 0 || base.is_zero() {
@@ -402,6 +512,123 @@ mod tests {
             (1, Event::worker_progress("r", "unrelated")),
         ];
         assert_eq!(consecutive_reviewer_requeues(&events), 0);
+    }
+
+    fn worker_finished(outcome: &str) -> Event {
+        Event::WorkerFinished {
+            run_id: "run-1".into(),
+            outcome: outcome.into(),
+            usage: None,
+            role: None,
+            metrics: None,
+        }
+    }
+
+    #[test]
+    fn consecutive_infra_requeues_counts_since_last_non_requeue_transition() {
+        let events: Vec<(u64, Event)> = vec![
+            (0, transitioned("worker_error")),
+            (1, transitioned("dispatch")),
+            (2, transitioned("infra_requeue")),
+            (3, transitioned("dispatch")),
+            (4, transitioned("infra_requeue")),
+        ];
+        assert_eq!(consecutive_infra_requeues(&events), 2);
+        // 供給側失敗の `requeue` は別カウンタ（混ざらない）。
+        let mixed: Vec<(u64, Event)> = vec![(0, transitioned("infra_requeue")), (1, transitioned("requeue"))];
+        assert_eq!(consecutive_infra_requeues(&mixed), 0);
+        assert_eq!(consecutive_requeues(&mixed), 1);
+    }
+
+    #[test]
+    fn infra_backoff_delay_escalates_then_caps() {
+        assert_eq!(infra_backoff_delay(0), Duration::ZERO);
+        assert_eq!(infra_backoff_delay(1), Duration::from_secs(30));
+        assert_eq!(infra_backoff_delay(2), Duration::from_secs(120));
+        assert_eq!(infra_backoff_delay(3), Duration::from_secs(300));
+        assert_eq!(infra_backoff_delay(10), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn classify_task_failure_marks_infra_exhaustion_as_infra() {
+        let events: Vec<(u64, Event)> = vec![
+            (0, worker_finished("infra_requeue: lease expired (run_id=run-1)")),
+            (1, transitioned("infra_requeue")),
+            (
+                2,
+                worker_finished("infra failure ×5: adapter: session resume rejected"),
+            ),
+            (
+                3,
+                Event::Transitioned {
+                    from: task_core::Status::Running,
+                    to: task_core::Status::Failed,
+                    reason: "worker_error".into(),
+                },
+            ),
+        ];
+        let (class, reason) = classify_task_failure(&events);
+        assert_eq!(class, FailureClass::Infra);
+        assert_eq!(reason, "infra failure ×5: adapter: session resume rejected");
+    }
+
+    /// ADR-0070 D1 追記（Phase 116。本番: 2026-09-24 09:21Z、`/home` が満杯で run が 2 回失敗）:
+    /// ディスク不足のエラーは（work 経路で拾われても）`infra` に強制され、「ディスク不足」の文言が
+    /// 理由の先頭に付く。
+    #[test]
+    fn classify_task_failure_forces_disk_full_errors_to_infra() {
+        let events: Vec<(u64, Event)> = vec![(
+            0,
+            worker_finished("error(retryable=false): adapter: io error: No space left on device (os error 28)"),
+        )];
+        let (class, reason) = classify_task_failure(&events);
+        assert_eq!(class, FailureClass::Infra);
+        assert!(reason.starts_with("ディスク不足: "), "{reason}");
+        assert!(reason.contains("No space left on device"), "{reason}");
+    }
+
+    #[test]
+    fn classify_task_failure_marks_requeue_limit_reached_as_infra() {
+        let events: Vec<(u64, Event)> = vec![(
+            0,
+            worker_finished("error(retryable=true): requeue limit (3) reached: adapter: 429"),
+        )];
+        let (class, _) = classify_task_failure(&events);
+        assert_eq!(class, FailureClass::Infra);
+    }
+
+    #[test]
+    fn classify_task_failure_marks_review_fail_and_worker_error_as_work() {
+        let review_fail: Vec<(u64, Event)> = vec![
+            (
+                0,
+                Event::ReviewVerdict {
+                    run_id: "rev-1".into(),
+                    criterion_idx: 0,
+                    pass: false,
+                    reason: "テストが落ちている\n詳細は省略".into(),
+                },
+            ),
+            (
+                1,
+                Event::Transitioned {
+                    from: task_core::Status::Reviewing,
+                    to: task_core::Status::Failed,
+                    reason: "review_fail".into(),
+                },
+            ),
+        ];
+        let (class, reason) = classify_task_failure(&review_fail);
+        assert_eq!(class, FailureClass::Work);
+        assert_eq!(reason, "テストが落ちている");
+
+        let worker_error: Vec<(u64, Event)> = vec![(
+            0,
+            worker_finished("error(retryable=false): max_turns exceeded"),
+        )];
+        let (class, reason) = classify_task_failure(&worker_error);
+        assert_eq!(class, FailureClass::Work);
+        assert_eq!(reason, "error(retryable=false): max_turns exceeded");
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use task_core::SqliteStore;
 
+use commands::accept::{self, AcceptArgs};
 use commands::add::{self, AddArgs};
 use commands::cancel::{self, CancelArgs};
 use commands::config::{self as config_cmd, ConfigCommand};
@@ -25,6 +26,7 @@ use commands::projects::{self, ProjectsCommand};
 use commands::query::{self, LogArgs, LsArgs, ShowArgs};
 use commands::replay::{self, ReplayArgs};
 use commands::rereview::{self, RereviewArgs};
+use commands::retry::{self, RetryArgs};
 use commands::worker::{self, WorkerCommand};
 use commands::workspace::{self, WorkspaceCommand};
 use error::CliError;
@@ -59,11 +61,16 @@ enum Command {
     Ls(LsArgs),
     Show(ShowArgs),
     Approve(ApproveArgs),
+    /// ADR-0070 D2 追記（Phase 116）: `draft` を `ready` にする専用の道具（`approve` は
+    /// `Approval` タスクの承認とも兼用でわかりにくいので、こちらは名前で意図を明確にする）。
+    Accept(AcceptArgs),
     Reject(RejectArgs),
     Cancel(CancelArgs),
     /// ADR-0051 / ADR-0054 Phase 113 D3: 既存成果を再判定する（新しい実装runは起こさない）。
     /// `done`、または直前の遷移が `review_fail` だった `failed` からだけ。
     Rereview(RereviewArgs),
+    /// ADR-0070 D2（Phase 116）: `failed`/`cancelled` を複製してやり直す（attempts は常に 0 から）。
+    Retry(RetryArgs),
     Answer(AnswerArgs),
     Log(LogArgs),
     Replay(ReplayArgs),
@@ -131,9 +138,11 @@ fn dispatch(store: &SqliteStore, db_path: &Path, command: Command) -> Result<Exi
         Command::Ls(args) => query::run_ls(store, args),
         Command::Show(args) => query::run_show(store, args),
         Command::Approve(args) => gate::run_approve(store, args),
+        Command::Accept(args) => accept::run(store, args),
         Command::Reject(args) => gate::run_reject(store, args),
         Command::Cancel(args) => cancel::run(store, args),
         Command::Rereview(args) => rereview::run(store, args),
+        Command::Retry(args) => retry::run(store, args),
         Command::Answer(args) => gate::run_answer(store, args),
         Command::Log(args) => query::run_log(store, args),
         Command::Replay(args) => replay::run(store, args),

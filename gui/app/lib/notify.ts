@@ -19,6 +19,7 @@ export const NOTIFY_KIND_LABEL: Record<NotificationKind, string> = {
   secretary_reply: "返事が届いた",
   task_ready: "仕事の成果が届いた",
   cluster_login_needed: "クラスタのログインが必要（TOTP）",
+  task_failed: "タスクが失敗した",
 };
 
 export function notifyKindLabel(kind: NotificationKind): string {

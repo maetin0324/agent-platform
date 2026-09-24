@@ -140,6 +140,20 @@ pub enum StoreError {
     Repo(#[from] RepoError),
 }
 
+/// ADR-0070 D5（Phase 116）: `SQLITE_BUSY` / `SQLITE_LOCKED` かどうか（純粋関数。I/O は無い）。
+/// `renew_lease` のような「失敗しても run を止めたくない」呼び出し側が、一時的な DB busy と
+/// それ以外のエラーを区別してリトライするために使う。
+pub fn is_busy_error(e: &StoreError) -> bool {
+    matches!(
+        e,
+        StoreError::Sqlite(rusqlite::Error::SqliteFailure(inner, _))
+            if matches!(
+                inner.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
 /// ADR-0046 D1（Phase 59）: `org_nodes.profile_json` に書く値。空の profile は NULL
 /// （導入前のノードの行と 1 バイトも変わらない）。
 fn profile_json(profile: &crate::profile::Profile) -> Result<Option<String>, StoreError> {
@@ -5460,6 +5474,39 @@ mod tests {
         let t = sample_task(Status::Ready);
         store.insert(&t).unwrap();
         assert_eq!(store.get(t.id).unwrap().map(|task| task.id), Some(t.id));
+    }
+
+    /// ADR-0070 D5（Phase 116）: `SQLITE_BUSY`/`SQLITE_LOCKED` だけを拾い、他のエラー（`NOTADB` 等）は
+    /// 拾わない。
+    #[test]
+    fn is_busy_error_matches_only_busy_and_locked() {
+        let busy = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseBusy,
+                extended_code: 5,
+            },
+            Some("database is locked".to_string()),
+        ));
+        assert!(is_busy_error(&busy));
+
+        let locked = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DatabaseLocked,
+                extended_code: 6,
+            },
+            None,
+        ));
+        assert!(is_busy_error(&locked));
+
+        let not_a_db = StoreError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::NotADatabase,
+                extended_code: 26,
+            },
+            None,
+        ));
+        assert!(!is_busy_error(&not_a_db));
+        assert!(!is_busy_error(&StoreError::Invalid("x".into())));
     }
 
     /// Phase 9 監査（受け入れ 2）: 2 つの接続（ディスパッチャと celerisctl / API 相当）が、読んでから書くトランザクションを

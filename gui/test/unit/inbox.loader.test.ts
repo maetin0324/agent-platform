@@ -79,4 +79,53 @@ describe("loadInbox", () => {
       expect(e).toBeInstanceOf(Response);
     }
   });
+
+  // ADR-0070 D1（Phase 116）: 受信箱の「注意」区画は `AttentionItem::Failed` に `class`
+  // （`infra`/`work`）と `delivered_release` が足された。GUI は celeris の判定を再計算しないので、
+  // ここでも「そのまま返す」ことだけを確かめる（他のテストと同じ流儀）。
+  it("passes through a failed attention item's class and delivered_release as-is", async () => {
+    const withFailure: Inbox = {
+      ...emptyInbox,
+      attention: [
+        {
+          type: "failed",
+          task: {
+            id: "01M39FAILEDTASK00000000000",
+            title: "自己改善タスク",
+            kind: "execute",
+            status: "failed",
+            actions: ["cancel", "retry"],
+          },
+          reason: "infra failure ×5: adapter: session resume rejected",
+          at: "2026-09-24T03:46:00Z",
+          class: "infra",
+        },
+        {
+          type: "failed",
+          task: {
+            id: "01M39FAILEDTASK00000000001",
+            title: "配送済みタスク",
+            kind: "execute",
+            status: "failed",
+            actions: ["cancel", "retry", "rereview"],
+          },
+          reason: "テストが落ちている",
+          at: "2026-09-24T03:02:00Z",
+          class: "work",
+          delivered_release: "51d24a61c2ba",
+        },
+      ],
+      counts: { ...emptyInbox.counts, attention: 2 },
+    };
+    mock.on("GET", "/api/v1/inbox", (_req, res) => {
+      sendJson(res, 200, withFailure);
+    });
+
+    const result = await loadInbox(client, new Request("http://gui.invalid/"));
+
+    expect(result).toEqual(withFailure);
+    const [infraItem, deliveredItem] = result?.attention ?? [];
+    expect(infraItem).toMatchObject({ class: "infra" });
+    expect(deliveredItem).toMatchObject({ class: "work", delivered_release: "51d24a61c2ba" });
+  });
 });

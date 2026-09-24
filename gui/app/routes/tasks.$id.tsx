@@ -16,6 +16,7 @@ import type {
   TaskCommentOutcome,
   TaskEditOutcome,
   TaskReopenOutcome,
+  TaskRereviewOutcome,
   TransitionOutcome,
 } from "~/celeris/action-types";
 import { retryData, transitionData } from "~/celeris/actions.server";
@@ -26,7 +27,7 @@ import { type CelerisRouteErrorData, celerisErrorResponse, toActionError } from 
 import { runRetryAction, runTaskAction } from "~/celeris/route-actions.server";
 import { loadTaskChanges, readTaskChangesQuery, type TaskChangesData } from "~/celeris/task-changes";
 import { loadTaskFiles, readTaskFilesQuery, type TaskFilesData } from "~/celeris/task-files";
-import { buildTaskEdit, commentOnTask, editTask, reopenTask } from "~/celeris/tasks-admin.server";
+import { buildTaskEdit, commentOnTask, editTask, reopenTask, rereviewTask } from "~/celeris/tasks-admin.server";
 import type {
   Action,
   ApprovalItem,
@@ -56,6 +57,7 @@ import {
   TaskCommentFlash,
   TaskEditFlash,
   TaskReopenFlash,
+  TaskRereviewFlash,
   TransitionFlash,
 } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
@@ -182,6 +184,8 @@ const ACTION_LABELS: Record<Action, string> = {
   // ADR-0044 D1 / D2（Phase 53）。「編集」は概要タブ、「再開」はタイムラインタブに置く。
   edit: "編集",
   reopen: "再開",
+  // ADR-0070 D2（Phase 116）。failed の失敗バナーに置く。
+  rereview: "再レビュー",
 };
 
 /** run の outcome → 色（docs/adr/0011 D4 と同じ考え方。文字列は outcome 名をそのまま出す）。 */
@@ -405,6 +409,12 @@ export async function action({ request, params }: Route.ActionArgs) {
     const outcome = await reopenTask(client, params.id, form, request.signal);
     return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
   }
+  // ADR-0070 D2（Phase 116）: 再レビューは `retry`/`reopen` と同じ理由でここで分ける
+  // （`TransitionInput` とは語彙が違う。`task_ops::comment::rereview` を呼ぶ）。
+  if (intent === "rereview") {
+    const outcome = await rereviewTask(client, params.id, form, request.signal);
+    return data(outcome, { status: outcome.ok ? 200 : outcome.error.status });
+  }
   // ADR-0044 D7（Phase 57 / G20）: 成果物を案件の文書に昇格する（**管理系**。宛先は人が決める）。
   if (intent === "promote") {
     const outcome = await promoteArtifact(client, params.id, readArtifactPromoteBody(form), request.signal);
@@ -447,6 +457,11 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
   // 成功したら新しいタスクへ遷移する（fetcher はナビゲーションを行わないので `useNavigate` で明示的に行う）。
   const retryFetcher = useFetcher<RetryOutcome>();
   const retrying = retryFetcher.state !== "idle";
+  // ADR-0070 D2（Phase 116）: 失敗バナーの「再レビュー」「取り下げ」。retry は上の retryFetcher を共有する。
+  const rereviewFetcher = useFetcher<TaskRereviewOutcome>({ key: `task-rereview-${task.id}` });
+  const rereviewing = rereviewFetcher.state !== "idle";
+  const dismissFetcher = useFetcher<TaskCommentOutcome>({ key: `task-dismiss-${task.id}` });
+  const dismissing = dismissFetcher.state !== "idle";
   const navigate = useNavigate();
   useEffect(() => {
     if (retryFetcher.data?.ok) {
@@ -605,6 +620,22 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
           </div>
         </div>
       </section>
+
+      {/* ADR-0070 D1/D2（Phase 116）: failed のタスクは、原因の分類と「やり直す」「再レビュー」
+          「取り下げ」をどのタブからでも見える位置に出す（受け入れ条件 D6(e)）。 */}
+      {detail.failure && (
+        <FailureBanner
+          taskId={task.id}
+          failure={detail.failure}
+          actions={detail.actions}
+          retryFetcher={retryFetcher}
+          retrying={retrying}
+          rereviewFetcher={rereviewFetcher}
+          rereviewing={rereviewing}
+          dismissFetcher={dismissFetcher}
+          dismissing={dismissing}
+        />
+      )}
 
       {/* ADR-0044 D5: 概要 / タイムライン / 変更 / ファイル / 成果物。`?tab=` が状態なのでリンクできる。 */}
       <TaskTabs
@@ -793,6 +824,96 @@ function TaskTabs({
         className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-bg to-transparent lg:hidden"
       />
     </nav>
+  );
+}
+
+const FAILURE_CLASS_LABEL: Record<"infra" | "work", string> = {
+  infra: "インフラ",
+  work: "作業内容",
+};
+
+/**
+ * ADR-0070 D1/D2（Phase 116）: failed のタスク詳細に出す赤いバナー。「失敗: <分類> — <理由>」に、
+ * 配送済みなら一言添え、「やり直す」（常に。`retry`）「再レビュー」（`actions` に `rereview` が
+ * あるときだけ）「取り下げ」（状態は変えず、対応不要と記録するコメントを残すだけ。ADR-0070 D2）を出す。
+ * `docs/gui/help`（`/help`）の「失敗したタスクの直し方」と同じ言葉づかい。
+ */
+function FailureBanner({
+  taskId,
+  failure,
+  actions,
+  retryFetcher,
+  retrying,
+  rereviewFetcher,
+  rereviewing,
+  dismissFetcher,
+  dismissing,
+}: {
+  taskId: string;
+  failure: NonNullable<TaskDetail["failure"]>;
+  actions: Action[];
+  retryFetcher: ReturnType<typeof useFetcher<RetryOutcome>>;
+  retrying: boolean;
+  rereviewFetcher: ReturnType<typeof useFetcher<TaskRereviewOutcome>>;
+  rereviewing: boolean;
+  dismissFetcher: ReturnType<typeof useFetcher<TaskCommentOutcome>>;
+  dismissing: boolean;
+}) {
+  return (
+    <section aria-labelledby="failure-banner-heading" data-testid="failure-banner">
+      <Alert tone="danger" icon="alert" className="rounded-2xl border-2 p-5 shadow-sm">
+        <p id="failure-banner-heading" className="text-base font-semibold" data-testid="failure-banner-summary">
+          失敗: {FAILURE_CLASS_LABEL[failure.class]} — {failure.reason}
+        </p>
+        {failure.delivered_release && (
+          <p data-testid="failure-banner-delivered">
+            成果は配送済み（release {failure.delivered_release}）だがレビューで不合格。
+          </p>
+        )}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {actions.includes("retry") && (
+            <retryFetcher.Form method="post" action={`/tasks/${taskId}`}>
+              <input type="hidden" name="intent" value="retry" />
+              <Button type="submit" variant="primary" size="sm" disabled={retrying} data-testid="failure-banner-retry">
+                <Icon name="rotate" />
+                やり直す
+              </Button>
+            </retryFetcher.Form>
+          )}
+          {actions.includes("rereview") && (
+            <rereviewFetcher.Form method="post" action={`/tasks/${taskId}`}>
+              <input type="hidden" name="intent" value="rereview" />
+              <Button
+                type="submit"
+                variant="secondary"
+                size="sm"
+                disabled={rereviewing}
+                data-testid="failure-banner-rereview"
+              >
+                <Icon name="check" />
+                再レビュー
+              </Button>
+            </rereviewFetcher.Form>
+          )}
+          <dismissFetcher.Form method="post" action={`/tasks/${taskId}`}>
+            <input type="hidden" name="intent" value="comment" />
+            <input type="hidden" name="body" value="取り下げ: 対応不要と判断しました（状態は failed のまま）。" />
+            <Button type="submit" variant="ghost" size="sm" disabled={dismissing} data-testid="failure-banner-dismiss">
+              <Icon name="x" />
+              取り下げ
+            </Button>
+          </dismissFetcher.Form>
+        </div>
+        <RetryFlash outcome={retryFetcher.data} />
+        <TaskRereviewFlash outcome={rereviewFetcher.data} />
+        {dismissFetcher.data && !dismissFetcher.data.ok && <ErrorFlash error={dismissFetcher.data.error} />}
+        {dismissFetcher.data?.ok && (
+          <p className="mt-1 text-sm text-fg-muted" data-testid="failure-banner-dismissed">
+            取り下げのコメントを記録しました。
+          </p>
+        )}
+      </Alert>
+    </section>
   );
 }
 
@@ -1346,9 +1467,13 @@ function OverviewTab({
                     className="flex w-full flex-col gap-2 rounded-lg border border-border p-3 sm:w-auto sm:max-w-xs"
                   >
                     <input type="hidden" name="intent" value="retry" />
-                    <label className="flex items-center gap-2 text-sm text-fg">
-                      <input type="checkbox" name="accept" value="true" className={checkboxClass} />
-                      受け入れ済み（ready）で始める
+                    {/* ADR-0070 D2 追記（Phase 116）: 既定は ready。draft のまま始めたいときだけ
+                        チェックする（既定を逆にした。チェック無し = ready）。
+                        `min-h-11`: タップ領域 44 以上（mobile-audit で検出。他の同種チェックボックス
+                        〈inbox.tsx / projects.$id.tsx〉と同じ）。 */}
+                    <label className="flex min-h-11 items-center gap-2 text-sm text-fg">
+                      <input type="checkbox" name="draft" value="true" className={checkboxClass} />
+                      下書き（draft）のまま始める（既定は受け入れ済み = ready）
                     </label>
                     <Button
                       type="submit"

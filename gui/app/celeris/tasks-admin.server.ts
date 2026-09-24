@@ -1,4 +1,4 @@
-import type { TaskCommentOutcome, TaskEditOutcome, TaskReopenOutcome } from "./action-types";
+import type { TaskCommentOutcome, TaskEditOutcome, TaskReopenOutcome, TaskRereviewOutcome } from "./action-types";
 import { toActionError } from "./actions.server";
 import type { CelerisClient } from "./client.server";
 import { formString } from "./forms";
@@ -183,5 +183,29 @@ export async function reopenTask(
     return { ok: true, op: "reopen", taskId, result };
   } catch (e) {
     return { ok: false, op: "reopen", taskId, error: toActionError(e) };
+  }
+}
+
+/**
+ * `POST /tasks/{id}/rereview`（ADR-0051 / ADR-0054 Phase 113 D3 / ADR-0070 D2）: 既存成果を
+ * 部署のレビュアーで再判定する（新しい実装 run は起こさない）。`done`、または直前の遷移が
+ * `review_fail` だった `failed` からだけ（celeris 側の判断。GUI は `TaskRef.actions` に
+ * `"rereview"` があるときだけボタンを出す）。
+ */
+export async function rereviewTask(
+  client: CelerisClient,
+  taskId: string,
+  form: FormData,
+  signal?: AbortSignal,
+): Promise<TaskRereviewOutcome> {
+  const expected = formString(form, "expected_status");
+  const body: ReopenBody = expected === null ? {} : { expected_status: expected as Status };
+  try {
+    const result = await client.post<TransitionResult>(`/tasks/${encodeURIComponent(taskId)}/rereview`, body, {
+      signal,
+    });
+    return { ok: true, op: "rereview", taskId, result };
+  } catch (e) {
+    return { ok: false, op: "rereview", taskId, error: toActionError(e) };
   }
 }

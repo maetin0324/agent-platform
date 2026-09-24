@@ -1473,10 +1473,11 @@ function WorkTreeTaskRow({
       {(task.status === "failed" || task.status === "cancelled") && (
         <retryFetcher.Form method="post" action={`/tasks/${task.id}`} className="flex items-center gap-2">
           <input type="hidden" name="intent" value="retry" />
-          {/* ADR-0055 D1-2/D1-4: タップ領域 44 以上、モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。 */}
+          {/* ADR-0055 D1-2/D1-4: タップ領域 44 以上、モバイルは text-sm、デスクトップは lg: で元の text-xs のまま。
+              ADR-0070 D2 追記（Phase 116）: 既定は ready。draft のまま始めたいときだけチェックする。 */}
           <label className="flex min-h-11 items-center gap-1 text-sm text-fg-subtle lg:text-xs">
-            <input type="checkbox" name="accept" value="true" className={checkboxClass} />
-            ready で始める
+            <input type="checkbox" name="draft" value="true" className={checkboxClass} />
+            draft のまま始める
           </label>
           <Button type="submit" variant="primary" size="xs" disabled={retrying} data-testid="work-tree-retry">
             <Icon name="rotate" />

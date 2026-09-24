@@ -152,7 +152,8 @@
                 "actions": []
             },
             "reason": "error(retryable=false): deliberate non-retryable failure",
-            "at": "2026-09-15T23:48:59.272626439Z"
+            "at": "2026-09-15T23:48:59.272626439Z",
+            "class": "work"
         }
     ],
     "counts": {

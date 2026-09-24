@@ -391,9 +391,14 @@ async fn retry_duplicates_a_failed_task_and_rewires_dependents() {
         }],
     );
 
+    // ADR-0070 D2 追記（Phase 116）: `accept` の既定が `true` に変わったので、この試験は
+    // `draft` で始まることを明示的に指定する（依存の張り替えの検証が主眼で、既定値の検証ではない）。
     let resp = send(
         &app,
-        post_admin(&format!("/api/v1/tasks/{}/retry", original.id), &json!({})),
+        post_admin(
+            &format!("/api/v1/tasks/{}/retry", original.id),
+            &json!({"accept": false}),
+        ),
     )
     .await;
     assert_eq!(resp.status, 201, "{}", resp.text());
@@ -517,6 +522,57 @@ async fn retry_with_accept_starts_ready_and_non_terminal_or_done_is_409() {
         );
         assert_eq!(env.status_of(task.id), status);
     }
+}
+
+/// ADR-0070 D2 追記（Phase 116。本番で確認: `accept` を送らずに「やり直す」を押すと `draft` のまま
+/// 止まり、「やり直したのに動かない」状態になった）: 本文を省略、または `accept` を書かなければ
+/// 既定で `ready` になる。
+#[tokio::test]
+async fn retry_defaults_to_ready_when_accept_is_omitted() {
+    let env = admin_env();
+    let app = env.router();
+    let failed = new_task(TaskKind::Execute, Status::Failed);
+    env.seed(&failed);
+
+    let resp = send(
+        &app,
+        post_admin(&format!("/api/v1/tasks/{}/retry", failed.id), &json!({})),
+    )
+    .await;
+    assert_eq!(resp.status, 201, "{}", resp.text());
+    let new_id: TaskId = resp.json()["task_id"]
+        .as_str()
+        .expect("task_id")
+        .parse()
+        .expect("parse");
+    assert_eq!(env.status_of(new_id), Status::Ready);
+}
+
+/// ADR-0070 D2 追記（Phase 116）: `draft` を `ready` にする専用の道具
+/// （`POST /tasks/{id}/accept`）。`draft` 以外は 409。
+#[tokio::test]
+async fn accept_moves_a_draft_task_to_ready_and_rejects_other_statuses() {
+    let env = admin_env();
+    let app = env.router();
+    let draft = new_task(TaskKind::Execute, Status::Draft);
+    env.seed(&draft);
+
+    let resp = send(
+        &app,
+        post_admin(&format!("/api/v1/tasks/{}/accept", draft.id), &json!({})),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    assert_eq!(env.status_of(draft.id), Status::Ready);
+
+    let ready = new_task(TaskKind::Execute, Status::Ready);
+    env.seed(&ready);
+    let resp = send(
+        &app,
+        post_admin(&format!("/api/v1/tasks/{}/accept", ready.id), &json!({})),
+    )
+    .await;
+    assert_problem(&resp, 409, "invalid_transition");
 }
 
 /// ADR-0062 Phase 108（本番の事故、2026-09-23）: `POST /tasks/{id}/retry` の `workspace` で
@@ -885,6 +941,8 @@ async fn every_mutating_endpoint_requires_a_bearer_token() {
     env.seed(&ready);
     let failed = new_task(TaskKind::Execute, Status::Failed);
     env.seed(&failed);
+    let draft = new_task(TaskKind::Execute, Status::Draft);
+    env.seed(&draft);
 
     // ADR-0067 D2: `human` チェックには artifacts か知識ベースの参照が要る。
     let task_body = json!({"title": "t", "objective": "o", "acceptance": [{"type": "human", "text": "ok"}, {"type": "artifact_exists", "name": "result.md"}]});
@@ -898,6 +956,8 @@ async fn every_mutating_endpoint_requires_a_bearer_token() {
         ),
         (format!("/api/v1/tasks/{}/cancel", ready.id), json!({})),
         (format!("/api/v1/tasks/{}/retry", failed.id), json!({})),
+        // ADR-0070 D2 追記（Phase 116）。
+        (format!("/api/v1/tasks/{}/accept", draft.id), json!({})),
         ("/api/v1/plans".to_string(), json!({"goal": "g"})),
         ("/api/v1/replay".to_string(), json!({})),
     ];
@@ -908,7 +968,8 @@ async fn every_mutating_endpoint_requires_a_bearer_token() {
     // 何も起きていない（401 は本文を読む前に返る）。
     assert_eq!(env.status_of(ready.id), Status::Ready);
     assert_eq!(env.status_of(blocked.id), Status::Blocked);
-    assert_eq!(env.store.list(None).expect("list").len(), 3);
+    assert_eq!(env.status_of(draft.id), Status::Draft);
+    assert_eq!(env.store.list(None).expect("list").len(), 4);
 
     // トークンを付ければ 401 ではなくなる（成否はそれぞれの状態機械の話）。
     for (path, body) in &cases {

@@ -126,6 +126,38 @@ pub fn approve_as(
     })
 }
 
+/// ADR-0070 D2 追記（Phase 116。本番で確認: `POST /tasks/{id}/retry` の `accept` を明示しないまま
+/// 「やり直す」だけ押すと `draft` のまま止まり、`draft` を `ready` にする専用の道具が `approve`
+/// （`Approval` タスクの承認と兼用で分かりにくい）しか無かった）: `status == Draft`（kind 不問）だけを
+/// 許す、`accept` と同じ意味だが承認の記録は残さない専用の道具。`approve` は `Draft` でも
+/// `Trigger::Accept` を選ぶので挙動はまったく同じ（こちらは名前で意図を明確にするための薄い別名）。
+pub fn accept(
+    store: &dyn TaskStore,
+    id: TaskId,
+    expected: Option<Status>,
+) -> Result<TransitionResult, OpsError> {
+    let task = store.get(id)?.ok_or(OpsError::NotFound(id))?;
+    check_expected(task.status, expected)?;
+    if task.status != Status::Draft {
+        return Err(OpsError::InvalidState {
+            id,
+            context: format!("status={:?}", task.status),
+            action: "accepted".to_string(),
+        });
+    }
+    let from = task.status;
+    let since_id = store.latest_event_id()?;
+    let outcome = store.apply_transition(id, Trigger::Accept, None)?;
+    let cascaded = collect_cascaded(store, id, since_id)?;
+    Ok(TransitionResult {
+        id,
+        from,
+        to: outcome.next,
+        reason: outcome.reason.to_string(),
+        cascaded,
+    })
+}
+
 /// `kind == Approval && status == Ready` のみ許可する（`draft` への `reject` は
 /// 成功させない。ADR-0004 D2: P-5 は不採用。draft の取り消しは `cancel` を使う）。
 pub fn reject(

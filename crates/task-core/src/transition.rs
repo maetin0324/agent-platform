@@ -57,6 +57,11 @@ pub enum Trigger {
     /// `ready → blocked`、attempts 据え置き。人が組織を直すか担当を指定したら `Answer` で再開する
     /// （ADR-0021 の質問経路と同じ出口）。
     Unroutable,
+    /// ADR-0070 D3（Phase 116）: インフラ都合の失敗（lease 失効・切替中断・result.json 不在・
+    /// セッション再開拒否・レート制限・DB busy）: `running → ready`、attempts 据え置き
+    /// （`Requeue` と同じ形だが、`consecutive_infra_requeues` という別のカウンタで数える。
+    /// `[dispatch] max_infra_retries` に達したら `WorkerError{retryable:false}` で打ち切る）。
+    InfraRequeue,
 }
 
 impl Trigger {
@@ -86,6 +91,7 @@ impl Trigger {
             Trigger::ProjectCancelled => "project_cancelled",
             Trigger::MilestoneCancelled => "milestone_cancelled",
             Trigger::Unroutable => "unroutable",
+            Trigger::InfraRequeue => "infra_requeue",
         }
     }
 
@@ -162,7 +168,8 @@ pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransiti
         }
 
         // ADR-0010 D1（P-21）: 供給側失敗は attempts を消費せず ready に戻す。
-        Trigger::Requeue => {
+        // ADR-0070 D3（Phase 116）: インフラ都合の失敗も同じ形（別のカウンタで数える。dispatcher 側）。
+        Trigger::Requeue | Trigger::InfraRequeue => {
             if s.status == Status::Running {
                 Ok(Outcome {
                     next: Status::Ready,
@@ -459,7 +466,8 @@ mod tests {
                     expect_ok(Status::Cancelled)
                 }
             }
-            Trigger::Requeue => {
+            // ADR-0070 D3（Phase 116）: インフラ都合の失敗も `Requeue` と同じ形。
+            Trigger::Requeue | Trigger::InfraRequeue => {
                 if status == Status::Running {
                     expect_ok(Status::Ready)
                 } else {
@@ -587,6 +595,8 @@ mod tests {
             Trigger::Rereview,
             // ADR-0046 D5（Phase 59）: 担当が決まらない `ready` → `blocked`（attempts 据え置き）。
             Trigger::Unroutable,
+            // ADR-0070 D3（Phase 116）: インフラ都合の失敗（別カウンタで数える。attempts 据え置き）。
+            Trigger::InfraRequeue,
         ];
 
         let mut count = 0usize;
@@ -630,8 +640,9 @@ mod tests {
                 }
             }
         }
-        // 4 kinds * 8 statuses * 15 triggers（Phase 53 で Interrupt / Reopen、Phase 59 で Unroutable を追加）
-        assert_eq!(count, 4 * 8 * 16);
+        // 4 kinds * 8 statuses * 17 triggers（Phase 53 で Interrupt / Reopen、Phase 59 で Unroutable、
+        // Phase 116（ADR-0070 D3）で InfraRequeue を追加）
+        assert_eq!(count, 4 * 8 * 17);
     }
 
     /// ADR-0044 D2（Phase 53）: 割り込みは attempts を消費せず理由は `comment`、再開は attempts を 0 に戻す。

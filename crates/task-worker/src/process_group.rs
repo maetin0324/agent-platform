@@ -87,6 +87,18 @@ pub fn pgid_of(run_id: &str) -> Option<i32> {
     with_registry(|map| map.get(run_id).copied())
 }
 
+/// ADR-0070 D5（Phase 116）: その run のプロセスグループがまだ生きているか。登録が無ければ `false`、
+/// 登録があっても signal 0（`kill(pid, 0)` と同じ。実際には送らず存在確認だけする）で `ESRCH` なら
+/// `false`（ゾンビでも `Ok` を返すので、回収されない限り「生きている」扱いになる）。`Dispatcher::
+/// reclaim_expired_leases` が「lease は切れたが自分が起こした run のプロセスはまだ生きている」を
+/// 見分けるために使う（reclaim せず lease を延長する）。
+pub fn group_alive(run_id: &str) -> bool {
+    match pgid_of(run_id) {
+        Some(pgid) => signal::kill(Pid::from_raw(pgid), None).is_ok(),
+        None => false,
+    }
+}
+
 /// プロセスグループへ signal を送る。もう居なければ（`ESRCH`）`false`。
 pub fn signal_group(pgid: i32, sig: Signal) -> bool {
     match signal::killpg(Pid::from_raw(pgid), sig) {
@@ -177,6 +189,34 @@ mod tests {
             assert_eq!(pgid_of(&run_id), Some(4242));
         }
         assert_eq!(pgid_of(&run_id), None);
+    }
+
+    /// ADR-0070 D5（Phase 116）: 登録された偽の子プロセスが生きている間は `group_alive` が `true`、
+    /// プロセスが死んでも登録がまだ残っていれば（`Dispatcher::reclaim_expired_leases` が
+    /// `self.running` を消す前に見る、まさにこの状況）`false` になる。未登録の run は常に `false`。
+    #[tokio::test]
+    async fn group_alive_reflects_whether_the_registered_process_is_still_running() {
+        assert!(!group_alive("no-such-run"));
+
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("300").kill_on_drop(true);
+        command.process_group(0);
+        let mut child = command.spawn().unwrap_or_else(|e| panic!("spawn: {e}"));
+        let pid = child.id().expect("child pid");
+        let run_id = format!("alive-{}", std::process::id());
+        let guard = ProcessGroup::register(&run_id, Some(pid));
+        assert!(group_alive(&run_id), "just-spawned child should be alive");
+
+        // 登録はそのままに、プロセスだけを直接殺す（`kill_tree` は先に登録を消してしまうので使わない）。
+        signal::kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGKILL)
+            .expect("kill the fake child");
+        let _ = tokio::time::timeout(Duration::from_secs(10), child.wait()).await;
+        assert!(
+            !group_alive(&run_id),
+            "a dead process should not be reported as alive even while still registered"
+        );
+        drop(guard);
+        assert!(!group_alive(&run_id), "dropping the guard also unregisters it");
     }
 
     #[test]
