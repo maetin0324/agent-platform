@@ -223,12 +223,32 @@ pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransiti
             }
         }
 
-        // ADR-0044 D2: 終端のタスクの再開。`done`/`failed` からだけ（`cancelled` は worktree が無い）。
+        // ADR-0044 D2 / ADR-0054 Phase 113 D3 追記: 終端のタスクの再判定。`done` は無条件。`failed` は
+        // 「直前の実装 run 自体は `done` で、review 判定だけが不合格だった」場合に限って許す
+        // （`task_ops::comment::rereview` が、その判別（最後の遷移が `review_fail` かどうか）を event
+        // 履歴で行ってから呼ぶ。この状態機械は純粋関数で event 履歴を持たないので、ここでは
+        // `Status::Failed` からの遷移そのものを許すところまでしか見ない）。attempts は変えない
+        // （やり直すのは判定だけなので、人の承認の `Approval` 子タスクの title（`attempts` を含む）も
+        // 変わらず、既に承認済みの子がそのまま再利用される。ADR-0054 D2 と同じ「人の承認は保持する」
+        // 考え方）。
         Trigger::Rereview => {
-            if s.status == Status::Done && s.kind == TaskKind::Execute {
+            if matches!(s.status, Status::Done | Status::Failed) && s.kind == TaskKind::Execute {
+                // `done` からは attempts をそのまま引き継ぐ（`ReviewPass` は attempts を進めないので、
+                // レビュー中だったときの値と同じ）。`failed` は、その `failed` にした
+                // `Trigger::ReviewFail`（`retry_or_fail`）が attempts を 1 進めた**あと**の値なので、
+                // 1 戻す。こうしないと、その直前の review 中に作られた `Human` 条件の
+                // `Approval` 子タスクの title（`human_approval_title` が `attempts + 1` を含む）と、
+                // 再判定時に探す title がずれて、既に承認済みの子が見つからず人に二度承認させることに
+                // なる（ADR-0054 D2 と同じ「人の承認は保持する」を `failed` からの再判定でも保つ。
+                // Phase 113 D3）。
+                let attempts = if s.status == Status::Failed {
+                    s.attempts.saturating_sub(1)
+                } else {
+                    s.attempts
+                };
                 Ok(Outcome {
                     next: Status::Reviewing,
-                    attempts: s.attempts,
+                    attempts,
                     reason: t.reason(),
                 })
             } else {
@@ -461,9 +481,10 @@ mod tests {
                     expect_err()
                 }
             }
-            // ADR-0044 D2: 再開は `done`/`failed` からだけ（`cancelled` は不可）。
+            // ADR-0044 D2 / ADR-0054 Phase 113 D3 追記: 再判定は `done`/`failed` からだけ（`cancelled`
+            // は不可）。
             Trigger::Rereview => {
-                if status == Status::Done && kind == TaskKind::Execute {
+                if matches!(status, Status::Done | Status::Failed) && kind == TaskKind::Execute {
                     expect_ok(Status::Reviewing)
                 } else {
                     expect_err()
@@ -655,6 +676,70 @@ mod tests {
             let err = transition(&cancelled, &Trigger::Reopen).unwrap_err();
             assert_eq!(err.trigger, "reopen");
             assert_eq!(err.status, Status::Cancelled);
+        }
+    }
+
+    /// ADR-0054 Phase 113 D3: `Trigger::Rereview` は `done`/`failed`（`Execute` kind）から `reviewing`
+    /// に戻す。`done` からは attempts をそのまま引き継ぎ、`failed` からは 1 戻す（その `failed` を
+    /// 作った `ReviewFail` が 1 進めた分を打ち消す。`human_approval_title` の `attempts + 1` と
+    /// 再判定時の探索が一致し、承認済みの `Approval` 子タスクを再利用できるようにするため）。
+    /// `Plan`/`Approval` kind や `cancelled`/`ready` からは拒否する。
+    #[test]
+    fn rereview_keeps_attempts_from_done_and_rolls_back_one_from_failed() {
+        let from_done = StateView {
+            kind: TaskKind::Execute,
+            status: Status::Done,
+            attempts: 3,
+            max_retries: 2,
+        };
+        let outcome = transition(&from_done, &Trigger::Rereview).unwrap();
+        assert_eq!(outcome.next, Status::Reviewing);
+        assert_eq!(outcome.attempts, 3);
+        assert_eq!(outcome.reason, "rereview");
+
+        let from_failed = StateView {
+            kind: TaskKind::Execute,
+            status: Status::Failed,
+            attempts: 3,
+            max_retries: 2,
+        };
+        let outcome = transition(&from_failed, &Trigger::Rereview).unwrap();
+        assert_eq!(outcome.next, Status::Reviewing);
+        assert_eq!(outcome.attempts, 2, "the review_fail that reached failed is undone");
+
+        // 0 を下回らない（`saturating_sub`）。
+        let from_failed_at_zero = StateView {
+            kind: TaskKind::Execute,
+            status: Status::Failed,
+            attempts: 0,
+            max_retries: 2,
+        };
+        let outcome = transition(&from_failed_at_zero, &Trigger::Rereview).unwrap();
+        assert_eq!(outcome.attempts, 0);
+
+        for kind in [TaskKind::Plan, TaskKind::Approval, TaskKind::Review] {
+            let s = StateView {
+                kind,
+                status: Status::Done,
+                attempts: 0,
+                max_retries: 2,
+            };
+            assert!(
+                transition(&s, &Trigger::Rereview).is_err(),
+                "{kind:?} は Rereview の対象外"
+            );
+        }
+        for status in [Status::Ready, Status::Running, Status::Reviewing, Status::Cancelled] {
+            let s = StateView {
+                kind: TaskKind::Execute,
+                status,
+                attempts: 0,
+                max_retries: 2,
+            };
+            assert!(
+                transition(&s, &Trigger::Rereview).is_err(),
+                "{status:?} は Rereview の対象外"
+            );
         }
     }
 

@@ -964,13 +964,32 @@ async fn run_claude_code(
                 )
             }
             (None, Some(meta)) => {
-                terminal_from_result(
+                let outcome = terminal_from_result(
                     &req.artifacts_dir,
                     &artifacts_rel,
                     meta,
                     config.model.as_deref(),
                 )
-                .await
+                .await;
+                // ADR-0054 D1（Phase 113 追記）: `result` メッセージは一度観測できたが、供給側の失敗
+                // （`subtype: error_during_execution` かつ `is_error`）として終わった run は、上の
+                // `(None, None)` のクラッシュ分類（resume 拒否の検出）を一切通らなかった。本番の
+                // タスク 01M35X86XTK84F97QW0CN5PGMR / reviewer run 01M388BENASH3JEBWFS03KEQYT はこの
+                // 穴に落ちた（stderr は `No conversation found with session ID: …` の 1 行だったが、
+                // stdout の `result` の `result` フィールドにはその文言が無かったため、`result` を
+                // 観測できてしまった＝ここに来て、resume 拒否として扱われなかった）。resume を頼んだ
+                // run が `error_during_execution`/`is_error` で終わったときは、stderr の末尾と
+                // `result` メッセージ自身の文面の両方を resume 拒否の文言と照らす。
+                if is_resuming && meta.is_error && meta.subtype == "error_during_execution" {
+                    let tail = read_tail(&stderr_log_path, 4096).await;
+                    let result_text = meta.result.as_deref().unwrap_or("");
+                    if crate::provider::looks_like_resume_rejection(&tail)
+                        || crate::provider::looks_like_resume_rejection(result_text)
+                    {
+                        sink.session_resume_failed(&tail);
+                    }
+                }
+                outcome
             }
         };
 
@@ -3072,6 +3091,87 @@ printf '%s\n' '{"type":"turn.completed"}'
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
         let _ = adapter.run(req, "run-7", default_limits(), &sink).await;
+        assert!(sink.session_resume_failed.lock().unwrap().is_empty());
+    }
+
+    /// Phase 113 D1/D4(a)（ADR-0054 追記。本番のタスク 01M35X86XTK84F97QW0CN5PGMR / reviewer run
+    /// 01M388BENASH3JEBWFS03KEQYT の再現）: `result` メッセージを一度観測できた run（＝上の
+    /// `a_rejected_resume_reports_session_resume_failed` が使う「result を一度も観測できずクラッシュ」
+    /// 経路ではない）でも、`subtype: error_during_execution` かつ `is_error` で、stderr の末尾が
+    /// resume 拒否の文言なら `session_resume_failed` を報告する。Phase 67 時点はこの経路をまったく
+    /// チェックしておらず、本番ではこの形（`error_during_execution` の `result` が出た上で stderr に
+    /// 理由が 1 行だけ）で self-heal が働かなかった。
+    #[tokio::test]
+    async fn phase_113_a_rejected_resume_with_an_observed_result_message_reports_session_resume_failed()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            "echo '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true}'; \
+             echo 'No conversation found with session ID: 01a0d017-e32a-4cad-b10c-0cb63869ae13' 1>&2; \
+             exit 1",
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: ClaudeCodeAdapter::ID.to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            resume: true,
+        });
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-113a", default_limits(), &sink)
+            .await;
+        match outcome {
+            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
+        }
+        let failed = sink.session_resume_failed.lock().unwrap();
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(failed[0].contains("No conversation found"), "{failed:?}");
+    }
+
+    /// Phase 113: 同じ `error_during_execution`/`is_error` でも resume を頼んでいない run では
+    /// `session_resume_failed` を報告しない（resume していない run には関係の無い判断のため）。
+    #[tokio::test]
+    async fn phase_113_an_error_during_execution_without_resuming_does_not_report_session_resume_failed()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            "echo '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true}'; \
+             echo 'No conversation found with session ID: 01a0d017-e32a-4cad-b10c-0cb63869ae13' 1>&2; \
+             exit 1",
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let _ = adapter.run(req, "run-113b", default_limits(), &sink).await;
+        assert!(sink.session_resume_failed.lock().unwrap().is_empty());
+    }
+
+    /// Phase 113: `error_during_execution`/`is_error` の resume run でも、stderr が resume 拒否の
+    /// 文言を含まなければ `session_resume_failed` は報告しない（他のインフラ都合の失敗まで
+    /// resume 拒否として誤検出しない）。
+    #[tokio::test]
+    async fn phase_113_an_error_during_execution_without_resume_wording_does_not_report_session_resume_failed()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(
+            dir.path(),
+            "echo '{\"type\":\"result\",\"subtype\":\"error_during_execution\",\"is_error\":true}'; \
+             echo 'internal error: unexpected panic' 1>&2; \
+             exit 1",
+        );
+        let adapter = ClaudeCodeAdapter::new(config);
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.context.session = Some(crate::protocol::SessionHandle {
+            adapter: ClaudeCodeAdapter::ID.to_string(),
+            session_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            resume: true,
+        });
+        let sink = RecordingSink::default();
+        let _ = adapter.run(req, "run-113c", default_limits(), &sink).await;
         assert!(sink.session_resume_failed.lock().unwrap().is_empty());
     }
 

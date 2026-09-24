@@ -753,3 +753,214 @@ ADR-0049 の既存の救済（対話かつ `Execute` かつ `result.json` 不在
 
 `docs/PROGRESS.md` の Phase 112 節を参照（この ADR は決定の記録に専念し、実行結果は PROGRESS に置く
 という既存の書き分けに従う）。
+
+## Phase 113 追記（reviewer の再開失敗を自己修復し、reviewer のインフラ失敗で条件を不合格にしない。2026-09-24）
+
+### なぜここに追記するか
+
+D1 は ADR-0054 D1（Phase 67）の resume 拒否検出・self-heal（`session_resume_failed` → `node_sessions`
+retire）が対象にしていた「resume 拒否のクラッシュ分類」の**取りこぼし**を直すもので、同じ設計・同じ
+コード（`provider::looks_like_resume_rejection`、`claude_code.rs::run_claude_code`）の続き。D2/D3 は
+reviewer run・review 判定の失敗の扱い（ADR-0007 D5、ADR-0010 D5、ADR-0011 P-38、ADR-0051）を一段
+細かくするもので、これも独立したコンポーネントの新設ではない。したがって新規 ADR は切らず、この ADR に
+追記する。
+
+### 背景（本番で確認済み。再調査はしていない）
+
+タスク 01M35X86XTK84F97QW0CN5PGMR（`scientific-writing`、人の確認付き）で、人が criterion 2（`Human`）を
+承認したのに、criterion 1（`Reviewer`）の reviewer run 01M388BENASH3JEBWFS03KEQYT が
+`claude result: error_during_execution` で失敗し、`review.rs` の `fail_all` により**全条件**が
+不合格 → タスクは `failed` になった。その reviewer run の stderr は 1 行:
+`No conversation found with session ID: 01a0d017-e32a-4cad-b10c-0cb63869ae13`。stdout.jsonl の
+`result` メッセージは `"subtype":"error_during_execution","is_error":true`（`result` フィールド自体には
+resume 拒否の文言が無い）。
+
+**reviewer がどの経路で resume しているか**（D1 の前提の確認）: `Check::Reviewer` の判定 run は、対象
+タスクの部署の根ノード（engineering/research/operations）の**継続セッション**（`kind = lead`。ADR-0054
+D1 Phase 67）を resume する。対象タスクの部署が無い・アダプタが対応しないときは resume しない。
+`crates/task-dispatch/src/review.rs::run_reviewer_inner` が組む `RunContext.session` に
+`ReviewerRun.session`（`Dispatcher::pick_reviewer` が `resolve_node_session` で決める）をそのまま渡し、
+`crates/task-worker/src/claude_code.rs::run_claude_code` が Lead / CoS 対話 run とまったく同じ
+`--resume <id>` の分岐（`is_resuming` 判定）を通る。つまり reviewer 専用の resume 経路は無く、lead と
+完全に同じコード・同じ crash 分類を通る。
+
+**なぜ self-heal が働かなかったか（本当の原因）**: `provider::looks_like_resume_rejection` の既存の
+パターン（`"no conversation found"` など）は、実は `"No conversation found with session ID: …"` を
+部分一致で拾える（`.contains("no conversation found")` が真になる）。壊れていたのはパターンではなく
+**呼び出し側の配線**だった。`run_claude_code` は `result` メッセージを一度も観測できずにクラッシュした
+run（`(None, None)` の分岐）でしか `looks_like_resume_rejection` を呼んでいなかった。今回のように
+`result` メッセージ自体は観測できた（`subtype: error_during_execution`、`is_error: true`）run は
+`(None, Some(meta))` の分岐に入り、`terminal_from_result` が `Terminal::Error` を作るだけで、resume
+拒否の判定を一切していなかった。
+
+### D1: 再開拒否の判定を実機の文言に合わせ、`result` を観測できた run でも self-heal する
+
+**パターン**（`crates/task-worker/src/provider.rs::RESUME_REJECTION_PATTERNS`）: `"could not resume"`
+を追加した。既存の `"no conversation found"` は上記のとおり実機の文言を既に部分一致で拾えているので
+変更していない。加えて、`"session … not found"`（`…` の部分に id が挟まる、固定文字列の部分一致では
+拾えない形）を拾うためのギャップ許容の判定 `contains_gap_pattern`（`"session"` の出現位置から
+80 バイト以内に `"not found"` があるか）を `looks_like_resume_rejection` に足した。
+
+**呼び出し側の配線**（`crates/task-worker/src/claude_code.rs::run_claude_code`）: `(None, Some(meta))`
+の分岐（`result` メッセージは観測できたが `terminal_from_result` が `Terminal::Error` を返す）で、
+`is_resuming && meta.is_error && meta.subtype == "error_during_execution"` のときだけ、stderr の末尾
+（既存の `read_tail`）と `result` メッセージ自身の `result` フィールドの両方を
+`looks_like_resume_rejection` に照らす。どちらかが一致すれば `sink.session_resume_failed(&tail)` を
+呼ぶ。これは `(None, None)` のクラッシュ分岐が既にやっていることと**同じ呼び出し**を、`result` を
+観測できた run にも広げただけで、self-heal の経路自体（`EventSink::session_resume_failed` →
+`Dispatcher`/`ReviewerSink` の `node_session_retire` → 次の run は新規セッション）は Phase 67/67b で
+できている（`ReviewerSink::session_resume_failed` は Phase 67b で lead セッションに配線済み。上記の
+「reviewer がどの経路で resume しているか」のとおり reviewer もこの経路をそのまま使う）ので、新しい
+配線は足していない。
+
+`subtype == "error_during_execution"` をゲートにした理由: 本番の実例がこの subtype だったこと、
+`classify_provider_failure`（Exhausted/Throttled/AuthFailed）で分類できるケースは別の経路
+（`terminal_from_result` が `provider_failure: Some(..)` を返し、`AdapterError::from_provider_failure`
+経由で `Err` になる）で処理されるため、resume 拒否の検出は「分類できなかった `is_error` の結果」に
+絞ってよい、という判断。他の subtype（`success` 以外の何か）で resume 拒否が起きる実例が見つかれば
+条件を緩める。
+
+### D2: reviewer run 自身のインフラ都合の失敗は「判定不能」として `max_reviewer_retries` までやり直す
+
+**`ReviewerProviderFailure.outcome` を `ProviderOutcome` から `Option<ProviderOutcome>` に変更**
+（`crates/task-dispatch/src/review.rs`）。`Some` は従来どおり `classify_provider_failure`/
+`provider_failure_outcome` が分類できた供給側失敗（Throttled/Exhausted/AuthFailed）。`None` を
+新設し、「reviewer run 自身のインフラ都合の失敗」（`is_error` の結果・プロセス失敗・resume 拒否・
+分類できないレート制限文言）を表す。
+
+`run_reviewer_inner`（同ファイル）を変更:
+- `run.adapter.run(...)` が `Err(e)` を返した場合、`provider_failure_outcome(&e)` が `None`
+  （`AdapterError::Io`/`Serde`/`Other`。resume id の UUID 拒否や、spawn 前後の入出力エラーを含む）
+  だったときは、以前は `fail_all` していたが、`ReviewerProviderFailure{outcome: None, ..}` を返す
+  ように変えた。
+- `Terminal::Error { message, retryable }` を受け取ったとき、`retryable == true`
+  （`claude_code.rs`/`codex.rs`/`acp.rs` のほとんどの `Terminal::Error` はここ）なら
+  `ReviewerProviderFailure{outcome: None, ..}` を返す。`retryable == false`
+  （`paperqa`/`subprocess` の「設定不備でやり直しても直らない」エラー）は従来どおり即座に
+  `fail_all` する（やり直しても直らないと分かっているものを 3 回待たせない）。
+- `Terminal::Question` と、`Terminal::Done` 後の `review.json` 欠落・不正 JSON・判定欠落は変更なし
+  （fail_all のまま。これらは「reviewer 自身のインフラ都合」ではなく、reviewer が正常に終わったのに
+  中身がおかしい・仕事を放棄したケース）。
+
+**ディスパッチャ側**（`crates/task-dispatch/src/dispatcher.rs::on_review_finished`）: 既存の
+`ReviewOutcome.provider_failure` の扱い（cooldown 報告 → `consecutive_reviewer_requeues`/
+`max_requeues` で延期し、上限で `fail_all` 相当にする。ADR-0010 D5 / ADR-0011 P-38）を、
+`pf.outcome` が `Some`/`None` で分岐するように書き換えた:
+- `Some(classified)`: 従来どおり `self.policy.report`/`record_account_failure`/
+  `provider_throttled_event` でプロバイダ・アカウントの cooldown に報告し、`max_requeues`/
+  `REVIEWER_REQUEUED_PREFIX`（`task_ops::derive`）で延期回数を数える。
+- `None`: cooldown には報告しない（プロバイダ・アカウントの問題ではないため）。新設した
+  `max_reviewer_retries`/`REVIEWER_INFRA_FAILURE_PREFIX`（`task_ops::derive::
+  consecutive_reviewer_infra_failures`。`consecutive_reviewer_requeues` と同じ数え方だが接頭辞が
+  別なので別カウンタになる）で延期回数を数える。
+
+どちらの枝でも、延期中は `Event::worker_progress`（該当の接頭辞）と `WorkerFinished{role: Reviewer}`
+を記録して `self.reviewing` から外し `pending_subjects` に戻す（`recover_reviews` が次 tick で
+`spawn_review` をやり直す。既存の経路そのまま）。`task.status`/`attempts` は変わらない。上限に達した
+ときだけ、未判定の `Check::Reviewer` criterion に `Verdict{pass:false, reason: "reviewer infra
+failure ×N: …"}`（`N` = `max_reviewer_retries`）を足して、従来どおり `Trigger::ReviewFail` を適用する
+（`retry_or_fail` が attempts を消費し、`max_retries` 次第で `Ready`（再実装）か `Failed` になる）。
+既に決まっている `Check::Human`/`Check::Command`/`Check::ArtifactExists` の verdict は
+`outcome.verdicts` にそのまま残る（reviewer だけをやり直す。人に二度承認させない）。
+
+**設定**: `[review] max_reviewer_retries`（既定 3。`crates/celeris/src/config.rs::ReviewConfig`。
+`task_dispatch::DispatchConfig.max_reviewer_retries` に配線）。既存の `[reviewer]`
+（`adapter`/`tier`。判定 run 自体の設定）とは別のテーブル。名前を分けた理由: `[reviewer]` は
+「どの adapter/tier で判定するか」、`[review]` は「判定の失敗をどう扱うか」で役割が違うため。
+
+### D3: `failed` からの `rereview` を、review 判定だけが原因のときに限って許す
+
+**現状確認**: `POST /api/v1/tasks/{id}/rereview`（`crates/task-api/src/handlers.rs::rereview`）は
+`task_ops::comment::rereview` をそのまま呼ぶだけで API 層に独自の状態制限は無い。`task_ops::comment::
+rereview` は `store.apply_transition(id, Trigger::Rereview, None)` を呼び、`Trigger::Rereview` の
+状態機械（`crates/task-core/src/transition.rs`）は Phase 113 以前は `Status::Done && kind ==
+TaskKind::Execute` からしか許していなかった（コード上のコメントは「`done`/`failed` からだけ」と
+`Reopen` と混同した書き方だったが、実装は `Done` のみだった）。`celerisctl` には rereview 相当の
+サブコマンドが無かった。
+
+**決定**:
+1. `Trigger::Rereview` を `Status::Done | Status::Failed`（`kind == Execute`）から許すよう
+   `transition()` を変更した（純粋関数なので、event 履歴を見ずに「`Failed` からの Rereview そのもの」
+   は許す）。
+2. `Failed` からの attempts は **1 戻す**（`s.attempts.saturating_sub(1)`）。理由:
+   `Trigger::ReviewFail`（`retry_or_fail`）が `Failed` にする直前に attempts を 1 進めているため、
+   そのまま `Rereview` に引き継ぐと、直前の Reviewing 中に作られた `Check::Human` の `Approval`
+   子タスクの title（`task_ops::derive::human_approval_title` が `task.attempts + 1` を含む）と、
+   再判定時に `Dispatcher::resolve_human_approvals` が探す title がずれ、既に承認済みの子が
+   見つからず新しい `Approval` 子タスクが作られてしまう（人に二度承認させることになり、D2 の
+   「人の承認は保持する」と矛盾する）。1 戻すことで、直前の Reviewing 中と同じ attempts に戻り、
+   同じ title で既存の（承認済みの）子を再利用できる。`Done` からの Rereview は元々 attempts が
+   変わらない（`ReviewPass` は attempts を進めない）ので、この補正は不要（変更なし）。
+3. `task_ops::comment::rereview`（`crates/task-ops/src/comment.rs`）に、`task.status ==
+   Status::Failed` のときだけのガードを追加した:
+   `review_fail_is_the_only_reason_for_failure`（純粋関数。最後の `Event::Transitioned` の
+   `reason` が `"review_fail"` かを見る）が `false` なら `OpsError::Validation` で拒否する。
+   `Trigger::ReviewFail` は `task.status == Reviewing` のときにしか発火しない（`transition.rs`）ので、
+   これが `true` なら「直前の実装 run 自体は `done`（`Trigger::WorkerDone` を経て Reviewing に
+   入った）で、review の判定（`Check::Reviewer`/`Command`/`Human` のどれか）だけが不合格だった」
+   ことを意味する。実装 run 自体が供給側失敗の requeue 上限や `max_retries` の枯渇で `failed` に
+   なった場合（`Trigger::Requeue`/`WorkerError` 経由）はこの条件を満たさず、`rereview` は拒否される
+   （そちらは `reopen` で仕切り直すべき、という既存の使い分けのまま）。
+4. `celerisctl rereview <task_id>`（`crates/celerisctl/src/commands/rereview.rs`）を新設した。
+   `cancel.rs` と同じ最小限の形（引数解析・`task_ops::comment::rereview` の呼び出し・出力整形だけ）。
+
+`POST /api/v1/tasks/{id}/rereview` は `task_ops::comment::rereview` をそのまま呼ぶので、上記の変更が
+そのまま API にも効く（ハンドラ自体の変更は不要だった）。
+
+### D4: テスト
+
+- `crates/task-worker/src/provider.rs`:
+  `phase_113_matches_the_production_claude_code_wording`（実機の文言そのもの。D4(a)）、
+  `phase_113_matches_could_not_resume_and_session_id_not_found_with_a_gap`（新パターン・ギャップ判定・
+  遠すぎる語は拾わないことの確認）。
+- `crates/task-worker/src/claude_code.rs`:
+  `phase_113_a_rejected_resume_with_an_observed_result_message_reports_session_resume_failed`
+  （`result` を観測できた resume run でも `session_resume_failed` が報告されることの再現。D4(a)）、
+  `phase_113_an_error_during_execution_without_resuming_does_not_report_session_resume_failed`
+  （resume していない run では報告しない）、
+  `phase_113_an_error_during_execution_without_resume_wording_does_not_report_session_resume_failed`
+  （resume 拒否の文言が無ければ報告しない。誤検出しないことの確認）。
+- `crates/task-dispatch/src/dispatcher.rs`:
+  `a_resume_rejection_that_still_produced_a_result_self_heals_and_the_retry_produces_a_verdict`
+  （D1+D2 の結合テスト。偽 claude スタブが 1 回目に resume 拒否＋`Terminal::Error{retryable:true}`、
+  2 回目（新規セッション）に成功して verdict が出ることを、`Dispatcher` を実際に回して確認する。
+  D4(b)）、
+  `reviewer_infra_failure_retry_limit_fails_reviewer_criteria`（reviewer が
+  `max_reviewer_retries`（テストでは 2）回連続でインフラ都合の失敗をしたときだけ
+  `"reviewer infra failure ×2"` で不合格になること、`consecutive_reviewer_requeues`
+  （プロバイダの供給側失敗のカウンタ）は動かない別軸であることを確認する。D4(c)）、
+  `rereview_from_failed_reuses_the_approved_human_child_and_only_reruns_the_reviewer`（`Human` 条件
+  承認済み・`Reviewer` 条件が本当に不合格（インフラ失敗ではない）で `failed` になったタスクを
+  `task_ops::comment::rereview` で再判定すると、新しい `Approval` 子タスクを作らず既存の承認済みの
+  子を再利用し、`Reviewer` 条件だけがやり直されて 2 回目で `Done` になることを確認する。D4(d)）。
+- `crates/task-core/src/transition.rs`:
+  `rereview_keeps_attempts_from_done_and_rolls_back_one_from_failed`（`Done`/`Failed` からの
+  `Rereview` の attempts の扱い、`Plan`/`Approval`/`Review` kind や `Ready`/`Running`/`Reviewing`/
+  `Cancelled` からは拒否されることを確認する）、既存の `table_simple_triggers_full_cross_product`/
+  `table_retry_triggers_full_cross_product` のオラクルも `Rereview` の許容状態を更新した。
+- `crates/task-ops/src/comment.rs`:
+  `rereview_from_failed_requires_the_last_transition_to_be_review_fail`（`WorkerError` で
+  `failed` になったタスクは拒否され、`ReviewFail` で `failed` になったタスクは許されることを確認する。
+  D4(d) の前段）。
+- `crates/celerisctl/src/commands/rereview.rs`: `cancel.rs` と対になる最小限のテスト（存在しない
+  タスク・不正な id）。
+
+### ゲート
+
+`docs/PROGRESS.md` の Phase 113 節を参照（実行結果は PROGRESS に置くという既存の書き分けに従う）。
+
+### 未解決事項
+
+- P-113-1（実機未確認。ADR-0009 P-34）: D1 の「`result` の `result` フィールド自身にも resume 拒否の
+  文言があり得る」という組み合わせ判定は、本番の実例（stderr にしか無かった）を再現したものであって、
+  `result` フィールド側に文言が乗るケース自体は実機未確認（安全側の追加）。
+- P-113-2: D2 の `max_reviewer_retries` は「この reviewing 試行での連続失敗回数」を数える
+  （`consecutive_reviewer_infra_failures` は最後の `Event::Transitioned` 以降を見る）。1 回の
+  reviewer run が複数の `Check::Reviewer` criterion をまとめて判定するため、実務上は「criterion
+  ごとの回数」と一致するが、将来 criterion ごとに別々の reviewer run を起こす設計になった場合は
+  数え方を再検討する必要がある。
+- P-113-3: D3 の attempts ロールバックは「直前の `Reviewing` 中に作られた `Approval` 子タスクの
+  title と一致させる」という目的に限った補正で、`attempts` フィールドが持つ他の意味（観測用の
+  試行回数の表示など）には影響する（`rereview` 直後は `failed` になる直前より 1 少ない値になる）。
+  実害は無いと判断したが、GUI 等で `attempts` を「これまでに何回試したか」の実数として見せている
+  箇所があれば、rereview を経た履歴で見え方が変わる可能性がある。

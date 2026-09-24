@@ -79,9 +79,18 @@ pub struct PlanCheck {
 }
 
 /// `Reviewer` run が供給側の失敗で判定できなかったこと（ADR-0010 D5, P-29）。
+///
+/// Phase 113（ADR-0054 追記）: `outcome` を `Option` にした。`Some` は `classify_provider_failure`/
+/// `provider_failure_outcome` が分類できた、プロバイダ・アカウントの cooldown に値する失敗
+/// （Throttled/Exhausted/AuthFailed。従来どおりディスパッチャが `self.policy.report`/
+/// `record_account_failure` を呼ぶ）。`None` は分類できなかった「reviewer run 自身のインフラ都合の
+/// 失敗」（`is_error` の結果・プロセス失敗・resume 拒否・分類できなかったレート制限文言など。ADR-0054
+/// Phase 113 D2）で、こちらはプロバイダ/アカウントを cooldown にする理由にはしない（成果物の問題でも
+/// プロバイダの供給側の問題でもなく、たまたまこの run が失敗しただけなので）。どちらも判定は無効で、
+/// ディスパッチャは遷移を適用せず `reviewing` のまま延期する点は変わらない。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewerProviderFailure {
-    pub outcome: ProviderOutcome,
+    pub outcome: Option<ProviderOutcome>,
     pub message: String,
 }
 
@@ -678,16 +687,18 @@ async fn run_reviewer_inner(
     {
         Ok(o) => o,
         Err(e) => {
+            // ADR-0054 D2（Phase 113）: アダプタが分類できた供給側失敗（Throttled/Exhausted/
+            // AuthFailed）はこれまでどおり `Some(outcome)`。分類できなかったもの（`Io`/`Serde`/
+            // `Other`。spawn 前の UUID 拒否や、プロセス起動そのものの失敗を含む）も、もう
+            // `fail_all` しない — 「reviewer run 自身のインフラ都合の失敗」として `None` で返し、
+            // ディスパッチャに `max_reviewer_retries` までのやり直しを任せる。
             run.sink.progress(&format!("adapter error: {e}"));
-            if let Some(outcome) = crate::dispatcher::provider_failure_outcome(&e) {
-                record.outcome = format!("requeue: adapter: {e}");
-                return Err(ReviewerProviderFailure {
-                    outcome,
-                    message: format!("{tag}: {e}"),
-                });
-            }
-            record.outcome = format!("error(retryable=false): adapter error: {e}");
-            return fail_all(format!("{tag}: adapter error: {e}"));
+            let outcome = crate::dispatcher::provider_failure_outcome(&e);
+            record.outcome = format!("requeue: adapter: {e}");
+            return Err(ReviewerProviderFailure {
+                outcome,
+                message: format!("{tag}: {e}"),
+            });
         }
     };
     match outcome.terminal {
@@ -706,7 +717,20 @@ async fn run_reviewer_inner(
         Terminal::Error { message, retryable } => {
             run.sink
                 .progress(&format!("error(retryable={retryable}): {message}"));
-            record.outcome = format!("error(retryable={retryable}): {message}");
+            // ADR-0054 D2（Phase 113。実機障害 2026-09-23、タスク 01M35X86XTK84F97QW0CN5PGMR）:
+            // `is_error` の結果・プロセス失敗・resume 拒否・レート制限文言はここに来る
+            // （`terminal_from_result`/`(None, None)` クラッシュ分類が `Terminal::Error` にする）。
+            // `retryable` なら「判定できなかっただけ」として `fail_all` せず、ディスパッチャに
+            // `max_reviewer_retries` までのやり直しを任せる。`retryable = false`（`paperqa`/
+            // `subprocess` の「やり直しても直らない」設定不備等）は従来どおり即座に不合格。
+            if retryable {
+                record.outcome = format!("requeue: reviewer run failed: {message}");
+                return Err(ReviewerProviderFailure {
+                    outcome: None,
+                    message: format!("{tag}: reviewer run failed: {message}"),
+                });
+            }
+            record.outcome = format!("error(retryable=false): {message}");
             return fail_all(format!("{tag}: reviewer run failed: {message}"));
         }
     }
@@ -1142,9 +1166,9 @@ mod tests {
         let pf = out.provider_failure.expect("provider failure");
         assert_eq!(
             pf.outcome,
-            ProviderOutcome::Throttled {
+            Some(ProviderOutcome::Throttled {
                 retry_after: Duration::from_secs(3)
-            }
+            })
         );
         assert!(pf.message.contains("reviewer(rev-x)"), "{}", pf.message);
         // 決定的条件の判定だけが残り、Reviewer 条件の verdict は作らない。
@@ -1289,7 +1313,10 @@ mod tests {
             out.verdicts[0].reason
         );
 
-        // error 終端。
+        // error 終端（`retryable = true`）: ADR-0054 D2（Phase 113）以降は「reviewer run 自身の
+        // インフラ都合の失敗」として `fail_all` せず、`provider_failure = Some(.., outcome: None)` を
+        // 返して判定を無効にする（ディスパッチャが `max_reviewer_retries` までやり直す。この層は
+        // 回数を知らないので、この関数はやり直しの回数に関わらず常にこの形を返す）。
         let adapter = Arc::new(StubReviewer {
             review_json: Some(r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"x"},{"criterion":1,"pass":true,"reason":"y"}]}"#.into()),
             terminal: Terminal::Error { message: "boom".into(), retryable: true },
@@ -1310,10 +1337,38 @@ mod tests {
             },
         )
         .await;
+        assert!(out.verdicts.is_empty(), "{:?}", out.verdicts);
+        let pf = out.provider_failure.expect("provider failure");
+        assert_eq!(pf.outcome, None);
+        assert!(pf.message.contains("boom"), "{}", pf.message);
+
+        // error 終端（`retryable = false`）: 直り得ないと分かっている失敗は、従来どおりその場で
+        // reviewer 条件を不合格にする（やり直しても直らないので待たせない）。
+        let adapter = Arc::new(StubReviewer {
+            review_json: Some(r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"x"},{"criterion":1,"pass":true,"reason":"y"}]}"#.into()),
+            terminal: Terminal::Error { message: "settings not found".into(), retryable: false },
+            seen: Mutex::new(vec![]),
+        });
+        let out = review_task(
+            &task,
+            &ws,
+            dir.path(),
+            &dir.path().join("artifacts"),
+            &[],
+            Duration::from_secs(5),
+            ReviewExtras {
+                subject: subject.clone(),
+                plan: None,
+                reviewer: Some(reviewer_run(adapter)),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(out.provider_failure.is_none());
         assert!(
             out.verdicts
                 .iter()
-                .all(|v| !v.pass && v.reason.contains("boom"))
+                .all(|v| !v.pass && v.reason.contains("settings not found"))
         );
 
         // 判定の欠落（criterion 1 が無い）。

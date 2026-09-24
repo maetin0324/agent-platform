@@ -17028,3 +17028,126 @@ resume run は codex の既定の（読み取り専用の）承認・サンド�
   「同じ run の中で諦めた」ことのログ以外に、運用側が「この対話は resume できていない」と気付く手段が
   今は tracing warn しか無い。頻発するようなら `node_sessions` に「最後に resume を諦めた理由」を
   残す仕組みを検討してよい（今回のスコープ外）。
+
+## Phase 113 — reviewer の再開失敗を自己修復し、reviewer のインフラ失敗で条件を不合格にしない（2026-09-24）
+
+発端: 本番のタスク 01M35X86XTK84F97QW0CN5PGMR（`scientific-writing`、人の確認付き）で、人が criterion 2
+（`Human`）を承認したのに、criterion 1（`Reviewer`）の reviewer run 01M388BENASH3JEBWFS03KEQYT が
+`claude result: error_during_execution` で失敗し（stderr は `No conversation found with session ID:
+01a0d017-e32a-4cad-b10c-0cb63869ae13` の 1 行）、`review.rs` の `fail_all` により全条件が不合格になって
+タスクが `failed` になった。決定は ADR-0054 に「Phase 113 追記」として書いた（Phase 67/67b/68/98/112 と
+同じ「resume・reviewer run の失敗の扱い」の延長として同じ ADR に追記した。理由は ADR 本文参照）。
+
+### 条件ごとの実施
+
+**D1（再開拒否の判定を実機の文言に合わせ、`result` を観測できた run でも self-heal する）**
+- `crates/task-worker/src/provider.rs`: `RESUME_REJECTION_PATTERNS` に `"could not resume"` を追加。
+  既存の `"no conversation found"` は実機の文言（`"No conversation found with session ID: …"`）を
+  既に部分一致で拾えていたので変更なし。`contains_gap_pattern`（新規・純粋関数）で「`session` の後
+  80 バイト以内に `not found`」を拾うギャップ判定を `looks_like_resume_rejection` に追加。
+- `crates/task-worker/src/claude_code.rs::run_claude_code`: `(None, Some(meta))` の分岐
+  （`terminal_from_result` が `Terminal::Error` を返す。`result` メッセージ自体は観測できた run）で、
+  `is_resuming && meta.is_error && meta.subtype == "error_during_execution"` のときだけ stderr の
+  末尾と `result` フィールドの両方を `looks_like_resume_rejection` に照らし、一致すれば
+  `sink.session_resume_failed(&tail)` を呼ぶよう配線した。self-heal の経路自体（`node_sessions`
+  retire → 次の run は新規セッション）は Phase 67/67b で完成しており、reviewer も lead セッションを
+  resume する同じ経路（`ReviewerSink::session_resume_failed`）を通ることを ADR に書いた。
+
+**D2（reviewer run 自身のインフラ都合の失敗は「判定不能」として `max_reviewer_retries` までやり直す）**
+- `crates/task-dispatch/src/review.rs`: `ReviewerProviderFailure.outcome` を `ProviderOutcome` から
+  `Option<ProviderOutcome>` に変更。`run_reviewer_inner` は、adapter が分類できない `Err`
+  （`Io`/`Serde`/`Other`）と `Terminal::Error{retryable: true}` を `fail_all` せず
+  `ReviewerProviderFailure{outcome: None, ..}` を返すように変更（`retryable: false` は従来どおり
+  即 `fail_all`。`Terminal::Question`・`review.json` 欠落/不正は変更なし）。
+- `crates/task-ops/src/derive.rs`: `REVIEWER_INFRA_FAILURE_PREFIX` / `consecutive_reviewer_infra_failures`
+  を新設（既存の `REVIEWER_REQUEUED_PREFIX`/`consecutive_reviewer_requeues` と同じ形・別カウンタ）。
+- `crates/task-dispatch/src/dispatcher.rs::on_review_finished`: `pf.outcome` が `Some`（分類できた
+  供給側失敗）なら従来どおり cooldown 報告 + `max_requeues`、`None`（reviewer 自身のインフラ失敗）なら
+  cooldown 報告はせず `max_reviewer_retries` + `REVIEWER_INFRA_FAILURE_PREFIX` で延期回数を数える。
+  上限に達したときだけ、未判定の `Reviewer` criterion に「reviewer infra failure ×N」の verdict を
+  足して従来どおり `Trigger::ReviewFail` を適用する（`Human`/`Command`/`ArtifactExists` の verdict は
+  そのまま残る）。
+- `crates/celeris/src/config.rs`: `[review] max_reviewer_retries`（既定 3。`ReviewConfig`）を新設し
+  `DispatchConfig.max_reviewer_retries` に配線（既存の `[reviewer]` adapter/tier とは別テーブル）。
+- `DispatchConfig` の全リテラル（`crates/task-dispatch/src/dispatcher.rs` 5 箇所、
+  `crates/task-dispatch/tests/unified_kill.rs` 1 箇所、`crates/celerisctl/src/commands/worker.rs` の
+  `celeris::Config` リテラル 1 箇所）に新フィールドを追加。
+
+**D3（`failed` からの `rereview` を、review 判定だけが原因のときに限って許す）**
+- 確認: `POST /api/v1/tasks/{id}/rereview` は `task_ops::comment::rereview` を素通しするだけで API 層に
+  独自の状態制限は無い。`Trigger::Rereview`（`crates/task-core/src/transition.rs`）は Phase 113 以前は
+  `Status::Done` からしか許していなかった。`celerisctl` に rereview 相当のサブコマンドは無かった。
+- `crates/task-core/src/transition.rs`: `Trigger::Rereview` を `Done | Failed`（`kind == Execute`）から
+  許すよう変更。`Failed` からは attempts を 1 戻す（`s.attempts.saturating_sub(1)`。直前の
+  `Trigger::ReviewFail` が 1 進めた分を打ち消し、`Approval` 子タスクの title と再判定時の探索が
+  一致するようにするため。ADR 本文参照）。`Done` からは変更なし（attempts はそのまま）。
+- `crates/task-ops/src/comment.rs::rereview`: `task.status == Failed` のときだけ
+  `review_fail_is_the_only_reason_for_failure`（新規・純粋関数。最後の `Event::Transitioned.reason`
+  が `"review_fail"` か）で絞り込み、`false` なら `OpsError::Validation` で拒否する。
+- `crates/celerisctl/src/commands/rereview.rs`（新規）: `celerisctl rereview <task_id>`。`cancel.rs`
+  と同じ最小限の形。`main.rs`/`commands/mod.rs` に配線。
+
+**D4（テスト）**
+- `crates/task-worker/src/provider.rs`（新規 2 件）:
+  `phase_113_matches_the_production_claude_code_wording`、
+  `phase_113_matches_could_not_resume_and_session_id_not_found_with_a_gap`。
+- `crates/task-worker/src/claude_code.rs`（新規 3 件）:
+  `phase_113_a_rejected_resume_with_an_observed_result_message_reports_session_resume_failed`
+  （D4(a)）、
+  `phase_113_an_error_during_execution_without_resuming_does_not_report_session_resume_failed`、
+  `phase_113_an_error_during_execution_without_resume_wording_does_not_report_session_resume_failed`。
+- `crates/task-dispatch/src/dispatcher.rs`（新規 3 件）:
+  `a_resume_rejection_that_still_produced_a_result_self_heals_and_the_retry_produces_a_verdict`
+  （D1+D2 結合。D4(b)）、`reviewer_infra_failure_retry_limit_fails_reviewer_criteria`（D4(c)）、
+  `rereview_from_failed_reuses_the_approved_human_child_and_only_reruns_the_reviewer`（D4(d)）。
+- `crates/task-core/src/transition.rs`（新規 1 件。既存 2 件のオラクルも更新）:
+  `rereview_keeps_attempts_from_done_and_rolls_back_one_from_failed`。
+- `crates/task-ops/src/comment.rs`（新規 1 件）:
+  `rereview_from_failed_requires_the_last_transition_to_be_review_fail`。
+- `crates/celerisctl/src/commands/rereview.rs`（新規、テスト 2 件）: `cancel.rs` と対の最小限のテスト。
+
+### ゲート
+
+| 条件 | 実行したコマンド | 出力の要点 |
+| --- | --- | --- |
+| D1 単体（provider） | `cargo test -p task-worker --lib provider::` | exit 0。**15 passed; 0 failed**（既存 13 + 新規 2） |
+| D1 単体（claude_code、`phase_113` のみ） | `cargo test -p task-worker --lib claude_code::tests::phase_113` | exit 0。**3 passed; 0 failed** |
+| D2 単体（review） | `cargo test -p task-dispatch --lib review::` | exit 0。**9 passed; 0 failed**（既存の `reviewer_run_failure_or_missing_verdict_fails_reviewer_criteria` を新しい分岐に合わせて更新） |
+| D1+D2 結合 / D4(b) | `cargo test -p task-dispatch --lib a_resume_rejection_that_still_produced_a_result` | exit 0。**1 passed; 0 failed** |
+| D2 上限 / D4(c) | `cargo test -p task-dispatch --lib reviewer_infra_failure_retry_limit_fails_reviewer_criteria` | exit 0。**1 passed; 0 failed** |
+| D3 状態機械 | `cargo test -p task-core --lib transition::` | exit 0。**8 passed; 0 failed**（既存 7 + 新規 1） |
+| D3 ops 層 | `cargo test -p task-ops --lib comment::` | exit 0。**7 passed; 0 failed**（既存 6 + 新規 1） |
+| D3+D4(d) 結合 | `cargo test -p task-dispatch --lib rereview_from_failed_reuses_the_approved_human_child` | exit 0。**1 passed; 0 failed** |
+| D3 celerisctl | `cargo test -p celerisctl --bin celerisctl rereview` | exit 0。**2 passed; 0 failed** |
+| task-dispatch 全体 | `cargo test -p task-dispatch --lib` | exit 0。**242 passed; 0 failed**（review.rs 変更に伴う挙動変化と新規テストを含め回帰なし） |
+| ワークスペース全体のビルド | `cargo build --workspace --all-targets` | exit 0（全クレート・全テストターゲットがコンパイルできることを確認。`DispatchConfig`/`celeris::Config` リテラルへのフィールド追加漏れを 2 か所（`unified_kill.rs`、`celerisctl/commands/worker.rs`）で E0063/E0308 として検出 → 修正して解消） |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（79 個の `test result:` ブロックが全て `ok`。主な内訳: task-worker 492〈+1 ignored〉、task-ops 281、task-dispatch 242+4（`unified_kill.rs`）、task-api 系合わせて多数、celeris 系合わせて多数、celerisctl 62+α） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| スキーマ再生成 | 実施していない（`Event`/`Task`/API のスキーマ型は変更していない。`ReviewerProviderFailure`/`ReviewOutcome`/`DispatchConfig`/`Config` はいずれもディスパッチャ内部・設定ファイルの型で、`schemars`/API スキーマの対象外） | `cargo test --workspace --lib committed_schema_matches_generated` と `event_row_schema_matches_committed` を個別に実行し green を確認。`git status --short docs/api docs/protocol` は空 |
+| GUI | 実施していない（`gui/` に差分が無いため。CLAUDE.md の「スキーマを変えたら」の条件に該当しない） | `git status --short gui/` は空 |
+| unwrap() | `git diff` で追加行の `unwrap()` を目視確認 | 追加した非テストコードに `unwrap()` は無い（`?`/`match`/`if let`/`saturating_sub` のみ）。`unwrap()` は全て `#[test]`/`#[tokio::test]` 内 |
+| ディスパッチャ・ストアに LLM 呼び出しを追加していない | `git status --short` で変更ファイルを確認 | `crates/task-worker/src/{provider.rs,claude_code.rs}`、`crates/task-dispatch/src/{review.rs,dispatcher.rs}`、`crates/task-ops/src/{derive.rs,comment.rs}`、`crates/task-core/src/transition.rs`、`crates/celeris/src/config.rs`、`crates/celerisctl/src/{main.rs,commands/mod.rs,commands/rereview.rs,commands/worker.rs}`、`docs/adr/0054-...md`。いずれも決定的な分類・状態機械・配線の変更とテストのみ、LLM 呼び出しなし |
+
+### 未解決事項
+
+- P-113-1（実機未確認。ADR-0009 P-34）: D1 の「`result` メッセージ自身の `result` フィールドにも
+  resume 拒否の文言があり得る」という組み合わせ判定は安全側の追加で、そのケース自体は実機未確認
+  （本番の実例は stderr 側にしか文言が無かった）。
+- P-113-2: D2 の `max_reviewer_retries` は「この reviewing 試行での連続失敗回数」を数える。1 回の
+  reviewer run が複数の `Check::Reviewer` criterion をまとめて判定する現在の設計では実質的に
+  criterion ごとの回数と一致するが、将来 criterion ごとに別々の reviewer run を起こす設計になった
+  場合は数え方を再検討する必要がある。
+- P-113-3: D3 の attempts ロールバック（`Failed` からの `rereview` で 1 戻す）は「`Approval` 子タスクの
+  title を一致させる」という目的に限った補正。`attempts` を「これまでに何回試したか」の実数として
+  GUI 等で見せている箇所があれば、rereview を経た履歴で見え方が変わる可能性がある（実害は無いと
+  判断したが未確認）。
+- P-113-4: 本番タスク 01M35X86XTK84F97QW0CN5PGMR 自体への適用（`celerisctl rereview` を実際に打つか、
+  デプロイ後に自然に再発しないことを確認するか）は人の判断待ち（このタスクは既に `failed` のまま
+  残っている可能性がある。本番 DB を直接操作していないので現状は変えていない）。
+
+### 提案
+
+- P-113-5: D2 で「reviewer infra failure ×N」に達して不合格になったタスクは、D3 の `rereview` で
+  人が明示的に再判定を指示できるようになったが、GUI 側で「reviewer のインフラ失敗が繰り返された」と
+  「reviewer が本当に不合格と判定した」を見分けられるようにする（`ReviewVerdict.reason` の文面で
+  区別はできるが、承認画面での強調表示は今回のスコープ外）。

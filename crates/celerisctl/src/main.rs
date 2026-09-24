@@ -24,6 +24,7 @@ use commands::plan_lint;
 use commands::projects::{self, ProjectsCommand};
 use commands::query::{self, LogArgs, LsArgs, ShowArgs};
 use commands::replay::{self, ReplayArgs};
+use commands::rereview::{self, RereviewArgs};
 use commands::worker::{self, WorkerCommand};
 use commands::workspace::{self, WorkspaceCommand};
 use error::CliError;
@@ -55,6 +56,9 @@ enum Command {
     Approve(ApproveArgs),
     Reject(RejectArgs),
     Cancel(CancelArgs),
+    /// ADR-0051 / ADR-0054 Phase 113 D3: 既存成果を再判定する（新しい実装runは起こさない）。
+    /// `done`、または直前の遷移が `review_fail` だった `failed` からだけ。
+    Rereview(RereviewArgs),
     Answer(AnswerArgs),
     Log(LogArgs),
     Replay(ReplayArgs),
@@ -123,6 +127,7 @@ fn dispatch(store: &SqliteStore, db_path: &Path, command: Command) -> Result<Exi
         Command::Approve(args) => gate::run_approve(store, args),
         Command::Reject(args) => gate::run_reject(store, args),
         Command::Cancel(args) => cancel::run(store, args),
+        Command::Rereview(args) => rereview::run(store, args),
         Command::Answer(args) => gate::run_answer(store, args),
         Command::Log(args) => query::run_log(store, args),
         Command::Replay(args) => replay::run(store, args),
