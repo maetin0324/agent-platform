@@ -169,7 +169,34 @@ fn prompt_header(task: &Task, context: &RunContext, run_id: &str, artifacts: &st
             genre.id, genre.description
         ));
     }
-    out.push_str(&format!("## Objective\n{}\n\n", task.objective));
+    // ADR-0072 D9/D21（Phase E2）: 計画のある Task の WU の run では、Task 全体の objective では
+    // なく WU の objective を出す（`context.work_unit` が無い run は E1 までと 1 バイトも変わらない）。
+    match &context.work_unit {
+        Some(wu) => {
+            out.push_str(&format!("## Objective\n{}\n\n", wu.objective));
+            out.push_str(&format!(
+                "## このタスク全体の目的（参考）\n{}\n\n",
+                wu.task_objective_excerpt
+            ));
+            if !wu.plan_overview.is_empty() {
+                out.push_str("## 計画の中のこの WorkUnit\n");
+                for line in &wu.plan_overview {
+                    out.push_str(&format!("- {line}\n"));
+                }
+                out.push('\n');
+            }
+            if !wu.dependency_summaries.is_empty() {
+                out.push_str("## 依存する WorkUnit の完了状況\n");
+                for line in &wu.dependency_summaries {
+                    out.push_str(&format!("- {line}\n"));
+                }
+                out.push('\n');
+            }
+        }
+        None => {
+            out.push_str(&format!("## Objective\n{}\n\n", task.objective));
+        }
+    }
     out
 }
 
@@ -528,24 +555,45 @@ fn build_execute_prompt(
     if context.conversation_addressee.is_none() {
         out.push_str(&budget_preamble(task, artifacts));
     }
-    out.push_str("## Acceptance criteria\n");
-    for (i, c) in task.acceptance.iter().enumerate() {
-        let detail = match &c.check {
-            Check::Command { cmd, expect_exit } => format!(
-                " (a reviewer will independently re-run `{cmd}` in this directory afterwards and \
-                 requires exit code {expect_exit}; your own claim of success is not trusted)"
-            ),
-            Check::ArtifactExists { name } => {
-                format!(" (a reviewer will check that the file `{artifacts}/{name}` exists)")
-            }
-            Check::KnowledgePage { path } => {
-                format!(" (a human will check the knowledge base page `{path}`)")
-            }
-            Check::Reviewer | Check::Human => String::new(),
-        };
-        out.push_str(&format!("{}. {}{}\n", i, c.text, detail));
+    // ADR-0072 D9（Phase E2）: 計画のある Task の WU の run では、`## Acceptance criteria` は
+    // この WU の `done_when` にし、Task の受け入れ条件は「最終レビューで確かめる」参考として別に出す
+    // （`context.work_unit` が無い run は E1 までと 1 バイトも変わらない）。
+    if let Some(wu) = &context.work_unit {
+        out.push_str("## Acceptance criteria (this WorkUnit)\n");
+        if wu.done_when.is_empty() {
+            out.push_str(
+                "(no explicit done_when was given for this WorkUnit; use the objective above)\n",
+            );
+        }
+        for (i, c) in wu.done_when.iter().enumerate() {
+            out.push_str(&format!("{i}. {c}\n"));
+        }
+        out.push('\n');
+        out.push_str("## 最終レビューで確かめる Task の受け入れ条件（参考）\n");
+        for (i, c) in task.acceptance.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", i, c.text));
+        }
+        out.push('\n');
+    } else {
+        out.push_str("## Acceptance criteria\n");
+        for (i, c) in task.acceptance.iter().enumerate() {
+            let detail = match &c.check {
+                Check::Command { cmd, expect_exit } => format!(
+                    " (a reviewer will independently re-run `{cmd}` in this directory afterwards and \
+                     requires exit code {expect_exit}; your own claim of success is not trusted)"
+                ),
+                Check::ArtifactExists { name } => {
+                    format!(" (a reviewer will check that the file `{artifacts}/{name}` exists)")
+                }
+                Check::KnowledgePage { path } => {
+                    format!(" (a human will check the knowledge base page `{path}`)")
+                }
+                Check::Reviewer | Check::Human => String::new(),
+            };
+            out.push_str(&format!("{}. {}{}\n", i, c.text, detail));
+        }
+        out.push('\n');
     }
-    out.push('\n');
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
     out.push_str(&children_section(context, artifacts));
@@ -1090,6 +1138,15 @@ async fn run_claude_code(
     if let (Terminal::Error { message, .. }, Some(pf)) = (&terminal, provider_failure) {
         return Err(AdapterError::from_provider_failure(pf, message));
     }
+    // ADR-0072 E2（P-E0-2 の修正）: `result.json` そのものが無かった run（`RESULT_JSON_MISSING_MARKER`）
+    // は `ProviderFailure` を持たない `Err(AdapterError)` にする。`provider_failure_outcome` は
+    // これを分類できない失敗として扱い、ディスパッチャは ADR-0070 D3 の `InfraRequeue`
+    // （attempts を消費しない。上限に達したときだけ `WorkerError{retryable:false}`）に倒す。
+    if let Terminal::Error { message, .. } = &terminal
+        && message.starts_with(RESULT_JSON_MISSING_MARKER)
+    {
+        return Err(AdapterError::Other(message.clone()));
+    }
 
     Ok(RunOutcome {
         terminal,
@@ -1283,6 +1340,11 @@ fn usage_with_cost(usage: Option<Usage>, model: Option<&str>) -> Option<Usage> {
     })
 }
 
+/// ADR-0072 E2（P-E0-2 の修正）: `result` メッセージは観測できたのに `result.json` 自体が無いときの
+/// `Terminal::Error.message` の接頭辞。`run` がこの接頭辞を見て `Err(AdapterError)`（InfraRequeue）に
+/// 倒す（他の `result.json` の失敗〈壊れた JSON・必須欄の欠落〉は worker 自身の誤りのまま）。
+const RESULT_JSON_MISSING_MARKER: &str = "claude exited without ";
+
 async fn terminal_from_result(
     artifacts_dir: &Path,
     artifacts_rel: &str,
@@ -1341,9 +1403,17 @@ async fn terminal_from_result(
     let text = match tokio::fs::read_to_string(&result_path).await {
         Ok(t) => t,
         Err(_) => {
+            // ADR-0072 E2（P-E0-2 の修正）: `result` メッセージは観測できた（= claude 自身は正常に
+            // 終わったと申告した）のに `result.json` そのものが無い（Phase 112 D3 / 115 D2 の
+            // work_dir 側の回収を試みた後もなお無い）。これは worker 自身の判断の誤りというより、
+            // 書き込みが間に合わなかった・消えたという供給側/インフラ側の事情に近い。呼び出し元
+            // （`run`）はこの文言（`RESULT_JSON_MISSING_MARKER`）を見て `Err(AdapterError)`
+            // （`ProviderFailure` は無し）に倒し、ADR-0070 D3 どおり attempts を消費しない
+            // `InfraRequeue` の経路に乗せる（従来は `Ok(Terminal::Error{retryable:true})` になり、
+            // `WorkerError{true}` として attempts を消費していた）。
             return (
                 Terminal::Error {
-                    message: format!("claude exited without {artifacts_rel}/result.json"),
+                    message: format!("{RESULT_JSON_MISSING_MARKER}{artifacts_rel}/result.json"),
                     retryable: true,
                 },
                 None,
@@ -1493,6 +1563,34 @@ mod tests {
         assert!(prompt.contains("reviewer will independently re-run"));
         assert!(prompt.contains("run-xyz"));
         assert!(prompt.contains("attempt 1 of"));
+    }
+
+    /// ADR-0072 D9/D21（Phase E2）: `context.work_unit` があれば `## Objective` は WU の objective に
+    /// 差し替わり、Task 全体の目的は参考として、受け入れ条件は WU の `done_when` になる。
+    /// `context.work_unit` が無い run は前のテストのとおり 1 バイトも変わらない。
+    #[test]
+    fn build_prompt_replaces_the_objective_and_acceptance_with_the_work_unit_when_present() {
+        let task = crate::protocol::tests::sample_task();
+        let context = RunContext {
+            work_unit: Some(crate::protocol::WorkUnitPromptContext {
+                key: "core-model".into(),
+                title: "core model".into(),
+                objective: "add the WorkUnit data model".into(),
+                done_when: vec!["cargo test -p task-core passes".into()],
+                task_objective_excerpt: task.objective.clone(),
+                dependency_summaries: vec!["survey: 完了".into()],
+                plan_overview: vec!["survey done, core-model running, tests pending".into()],
+            }),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-wu", "artifacts");
+        assert!(prompt.contains("add the WorkUnit data model"));
+        assert!(prompt.contains("## このタスク全体の目的（参考）"));
+        assert!(prompt.contains(&task.objective));
+        assert!(prompt.contains("cargo test -p task-core passes"));
+        assert!(prompt.contains("## 最終レビューで確かめる Task の受け入れ条件（参考）"));
+        assert!(prompt.contains("survey: 完了"));
+        assert!(prompt.contains("survey done, core-model running, tests pending"));
     }
 
     /// ADR-0072 D10（Phase E1）: 予算の予告と rolling checkpoint の指示は execute run（対話を除く）
@@ -2017,8 +2115,13 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         );
     }
 
+    /// ADR-0072 E2（P-E0-2 の修正）: `result` メッセージは観測できたのに `result.json` が無いのは
+    /// `Err(AdapterError::Other)`（`ProviderFailure` 無し）になる。従来は `Ok(Terminal::Error{retryable:
+    /// true})` になり、`WorkerError{true}` として attempts を消費していた（ADR-0070 D3 の想定と
+    /// 食い違っていた）。この `Err` はディスパッチャの `provider_failure_outcome` が分類できない
+    /// 失敗として扱い、`InfraRequeue`（attempts を消費しない）に倒す。
     #[tokio::test]
-    async fn success_without_result_file_is_retryable_error() {
+    async fn success_without_result_file_is_an_infra_failure_not_a_retryable_worker_error() {
         let dir = tempfile::tempdir().unwrap();
         let config = stub_claude(
             dir.path(),
@@ -2027,17 +2130,19 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter
+        let err = adapter
             .run(req, "run-2", default_limits(), &sink)
             .await
-            .unwrap();
-        match outcome.terminal {
-            Terminal::Error { retryable, message } => {
-                assert!(retryable);
+            .unwrap_err();
+        match err {
+            AdapterError::Other(message) => {
                 assert!(message.contains("artifacts/result.json"), "{message}");
             }
-            other => panic!("expected error, got {other:?}"),
+            other => panic!("expected AdapterError::Other, got {other:?}"),
         }
+        // `provider_failure_reason`/`provider_failure_outcome`（task-dispatch）はこれを分類できない
+        // 失敗として扱う（`None`）。task-worker からは直接呼べないので、`AdapterError::Other` である
+        // ことの確認をもって代える（`dispatcher.rs` 側の網羅テストが `None` → `InfraRequeue` を見る）。
     }
 
     #[tokio::test]
@@ -2336,13 +2441,15 @@ exit 9
         let adapter = ClaudeCodeAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let sink = RecordingSink::default();
-        let outcome = adapter
+        // ADR-0072 E2（P-E0-2 の修正）: `result` は観測できたが `result.json` が無い（= 消された
+        // stale file が再利用されていない証拠）ので、いまは `Err(AdapterError::Other)` になる
+        // （InfraRequeue。attempts を消費しない）。
+        let err = adapter
             .run(req, "run-10", default_limits(), &sink)
             .await
-            .unwrap();
-        match outcome.terminal {
-            Terminal::Error { retryable, message } => {
-                assert!(retryable);
+            .unwrap_err();
+        match err {
+            AdapterError::Other(message) => {
                 assert!(message.contains("artifacts/result.json"), "{message}");
             }
             other => {

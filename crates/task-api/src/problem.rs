@@ -326,6 +326,11 @@ impl ApiProblem {
         Self::new(StatusCode::CONFLICT, "repo_in_use", detail)
     }
 
+    /// ADR-0072 D14（Phase E2）: そのタスクに既に `active` な計画がある（E2 は新規のみ。replan は E4）。
+    pub(crate) fn execution_plan_in_use(detail: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "execution_plan_in_use", detail)
+    }
+
     pub(crate) fn project_not_found(id: &str) -> Self {
         Self::new(
             StatusCode::NOT_FOUND,
@@ -585,6 +590,10 @@ pub(crate) fn store_problem(err: StoreError) -> ApiProblem {
             kind: "project repo",
             ..
         } => ApiProblem::repo_in_use(err.to_string()),
+        StoreError::InUse {
+            kind: "execution_plan",
+            ..
+        } => ApiProblem::execution_plan_in_use(err.to_string()),
         StoreError::InUse { .. } => ApiProblem::org_node_in_use(err.to_string()),
         StoreError::Org(_) | StoreError::Repo(_) => ApiProblem::validation(vec![ValidationError {
             field: None,

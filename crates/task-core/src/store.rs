@@ -21,6 +21,10 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::comment::{CommentAuthorKind, TaskComment};
+use crate::execution_plan::{
+    ExecutionPlanRow, ExecutionPlanSpec, PlanOrigin, PlanStatus, RunIndexRole, RunIndexStatus,
+    RunRow, WorkUnitBlockedReason, WorkUnitKind, WorkUnitRow, WorkUnitSpec, WorkUnitStatus,
+};
 use crate::instance::{DaemonInstance, InstanceRole, SELECT_INSTANCE, row_to_instance};
 use crate::integrations::{IntegrationId, IntegrationMethod, IntegrationState, TaskIntegration};
 use crate::message::{Message, MessageId, MessageRole, is_conversation};
@@ -70,10 +74,13 @@ const MIGRATION_0023: &str = include_str!("../migrations/0023_node_sessions.sql"
 const MIGRATION_0024: &str = include_str!("../migrations/0024_mcp.sql");
 /// ADR-0059 D6（Phase 99）: `cluster_settings`（クラスタの作業ディレクトリの DB 上書き）。
 const MIGRATION_0025: &str = include_str!("../migrations/0025_cluster_settings.sql");
+/// ADR-0072 D5/D23（Phase E2）: `execution_plans` / `work_units` / `runs`（Task 下の内部実行層の
+/// 派生索引。正本は events。`CREATE TABLE IF NOT EXISTS` だけで既存の表には触れない）。
+const MIGRATION_0026: &str = include_str!("../migrations/0026_execution.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 25;
+pub const SCHEMA_VERSION: u32 = 26;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5、ADR-0064 D1/D4/D5）。
 #[derive(Debug, Clone, Copy)]
@@ -902,6 +909,67 @@ pub trait TaskStore:
         work_dir: Option<&str>,
         now: OffsetDateTime,
     ) -> Result<(), StoreError>;
+
+    // ---- ADR-0072 D5（Phase E2）: 実行層の派生索引（execution_plans / work_units / runs）----
+    //
+    // 正本は `events`（`Event::ExecutionPlanned` / `WorkUnitTransitioned` / `WorkerStarted` /
+    // `WorkerFinished` / `CheckpointSaved`）。この 3 表は対応する Event と同じトランザクションで
+    // 書く。`task_ops::execution::rebuild_from_events` で events から作り直して一致を確かめられる。
+
+    /// D14: 新しい計画を採用する（`Event::ExecutionPlanned` と `execution_plans` / `work_units` の
+    /// 行を同じトランザクションで書く）。E2 は新規のみ: そのタスクに既に `active` な計画があれば
+    /// `StoreError::InUse`（replan は E4。`PlanOrigin::Repair` 等で明示的に旧版を `superseded` にした
+    /// 上で採用する経路は別に用意する）。
+    fn execution_plan_adopt(
+        &self,
+        task_id: TaskId,
+        plan: ExecutionPlanRow,
+        work_units: Vec<WorkUnitRow>,
+        event: Event,
+    ) -> Result<(), StoreError>;
+
+    /// そのタスクの `active` な計画（無ければ `None`）。
+    fn execution_plan_active(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Option<ExecutionPlanRow>, StoreError>;
+    /// そのタスクの計画（`version` 昇順。履歴を含む）。
+    fn execution_plan_list(&self, task_id: TaskId) -> Result<Vec<ExecutionPlanRow>, StoreError>;
+
+    /// そのタスクの WorkUnit（`seq` 昇順）。
+    fn work_units_for(&self, task_id: TaskId) -> Result<Vec<WorkUnitRow>, StoreError>;
+    /// 1 件。無ければ `None`。
+    fn work_unit_get(&self, id: &str) -> Result<Option<WorkUnitRow>, StoreError>;
+
+    /// D6: WorkUnit の行を書き換え、`Event::WorkUnitTransitioned`（`event`）を同じトランザクションで
+    /// 追記する。`updated.id` の行を丸ごと差し替える（呼び出し側が新しい状態・カウンタを計算済み）。
+    fn work_unit_transition(
+        &self,
+        task_id: TaskId,
+        updated: WorkUnitRow,
+        event: Event,
+    ) -> Result<(), StoreError>;
+
+    /// D5: run 開始時に `runs` の行を 1 件作る（`status = running`）。`Event::WorkerStarted` と同じ
+    /// トランザクションでは**ない**（既存コードの慣習に合わせ、`append_event` の直後に呼ぶ。監査上の
+    /// 実害は無い: 再起動時の照合は `work_units.status` を正とする）。
+    fn run_index_start(&self, row: RunRow) -> Result<(), StoreError>;
+    /// D5: run 終了時に `runs` の行を更新する。無ければ `Ok(false)`。
+    #[allow(clippy::too_many_arguments)]
+    fn run_index_finish(
+        &self,
+        run_id: &str,
+        status: RunIndexStatus,
+        checkpoint: Option<crate::execution::Checkpoint>,
+        usage: Option<crate::model::Usage>,
+        metrics: Option<crate::model::RunMetrics>,
+        finished_at: OffsetDateTime,
+    ) -> Result<bool, StoreError>;
+    fn run_index_get(&self, run_id: &str) -> Result<Option<RunRow>, StoreError>;
+    /// そのタスクの run（`started_at` 昇順）。
+    fn runs_for_task(&self, task_id: TaskId) -> Result<Vec<RunRow>, StoreError>;
+    /// その WorkUnit の run（`started_at` 昇順）。
+    fn runs_for_work_unit(&self, work_unit_id: &str) -> Result<Vec<RunRow>, StoreError>;
 }
 
 /// ADR-0059 D6（Phase 99）: `cluster_settings` の 1 行。`work_dir` は絶対パスか `~`/`~/…`
@@ -1324,6 +1392,7 @@ impl SqliteStore {
             23 => Ok(MIGRATION_0023),
             24 => Ok(MIGRATION_0024),
             25 => Ok(MIGRATION_0025),
+            26 => Ok(MIGRATION_0026),
             other => Err(StoreError::Invalid(format!(
                 "unknown migration version: {other}"
             ))),
@@ -2319,6 +2388,211 @@ impl SqliteStore {
                 body,
                 run_id,
                 created_at: parse_rfc3339(&created_at)?,
+            })
+        })())
+    }
+
+    // ---- ADR-0072 D5（Phase E2）: execution_plans / work_units / runs の行の変換・書き込み ----
+
+    fn insert_work_unit_tx(tx: &Connection, wu: &WorkUnitRow) -> Result<(), StoreError> {
+        tx.execute(
+            "INSERT INTO work_units (id, task_id, plan_id, key, seq, kind, status, \
+             blocked_reason, depends_on_json, runs, continuations, retries, last_run_id, \
+             last_checkpoint_run_id, json, created_at, updated_at) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            params![
+                wu.id,
+                wu.task_id,
+                wu.plan_id,
+                wu.key,
+                wu.seq,
+                wu.kind.as_str(),
+                wu.status.as_str(),
+                wu.blocked_reason.map(|r| r.as_str()),
+                serde_json::to_string(&wu.depends_on)?,
+                wu.runs,
+                wu.continuations,
+                wu.retries,
+                wu.last_run_id,
+                wu.last_checkpoint_run_id,
+                serde_json::to_string(&wu.spec)?,
+                wu.created_at,
+                wu.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn update_work_unit_tx(tx: &Connection, wu: &WorkUnitRow) -> Result<(), StoreError> {
+        tx.execute(
+            "UPDATE work_units SET plan_id = ?1, status = ?2, blocked_reason = ?3, \
+             depends_on_json = ?4, runs = ?5, continuations = ?6, retries = ?7, \
+             last_run_id = ?8, last_checkpoint_run_id = ?9, json = ?10, updated_at = ?11 \
+             WHERE id = ?12",
+            params![
+                wu.plan_id,
+                wu.status.as_str(),
+                wu.blocked_reason.map(|r| r.as_str()),
+                serde_json::to_string(&wu.depends_on)?,
+                wu.runs,
+                wu.continuations,
+                wu.retries,
+                wu.last_run_id,
+                wu.last_checkpoint_run_id,
+                serde_json::to_string(&wu.spec)?,
+                wu.updated_at,
+                wu.id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn row_to_execution_plan(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<Result<ExecutionPlanRow, StoreError>> {
+        let id: String = row.get(0)?;
+        let task_id: String = row.get(1)?;
+        let version: u32 = row.get(2)?;
+        let origin_s: String = row.get(3)?;
+        let planner_run_id: Option<String> = row.get(4)?;
+        let status_s: String = row.get(5)?;
+        let json: String = row.get(6)?;
+        let created_at: String = row.get(7)?;
+        let superseded_at: Option<String> = row.get(8)?;
+        Ok((|| -> Result<ExecutionPlanRow, StoreError> {
+            let Some(origin) = PlanOrigin::parse(&origin_s) else {
+                return Err(StoreError::Invalid(format!(
+                    "invalid execution_plans.origin: {origin_s}"
+                )));
+            };
+            let Some(status) = PlanStatus::parse(&status_s) else {
+                return Err(StoreError::Invalid(format!(
+                    "invalid execution_plans.status: {status_s}"
+                )));
+            };
+            let spec: ExecutionPlanSpec = serde_json::from_str(&json)?;
+            Ok(ExecutionPlanRow {
+                id,
+                task_id,
+                version,
+                origin,
+                planner_run_id,
+                status,
+                spec,
+                created_at,
+                superseded_at,
+            })
+        })())
+    }
+
+    fn row_to_work_unit(
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<Result<WorkUnitRow, StoreError>> {
+        let id: String = row.get(0)?;
+        let task_id: String = row.get(1)?;
+        let plan_id: String = row.get(2)?;
+        let key: String = row.get(3)?;
+        let seq: u32 = row.get(4)?;
+        let kind_s: String = row.get(5)?;
+        let status_s: String = row.get(6)?;
+        let blocked_reason_s: Option<String> = row.get(7)?;
+        let depends_on_json: String = row.get(8)?;
+        let runs: u32 = row.get(9)?;
+        let continuations: u32 = row.get(10)?;
+        let retries: u32 = row.get(11)?;
+        let last_run_id: Option<String> = row.get(12)?;
+        let last_checkpoint_run_id: Option<String> = row.get(13)?;
+        let json: String = row.get(14)?;
+        let created_at: String = row.get(15)?;
+        let updated_at: String = row.get(16)?;
+        Ok((|| -> Result<WorkUnitRow, StoreError> {
+            let Some(kind) = WorkUnitKind::parse(&kind_s) else {
+                return Err(StoreError::Invalid(format!(
+                    "invalid work_units.kind: {kind_s}"
+                )));
+            };
+            let Some(status) = WorkUnitStatus::parse(&status_s) else {
+                return Err(StoreError::Invalid(format!(
+                    "invalid work_units.status: {status_s}"
+                )));
+            };
+            let blocked_reason = blocked_reason_s
+                .map(|s| {
+                    WorkUnitBlockedReason::parse(&s).ok_or_else(|| {
+                        StoreError::Invalid(format!("invalid work_units.blocked_reason: {s}"))
+                    })
+                })
+                .transpose()?;
+            let depends_on: Vec<String> = serde_json::from_str(&depends_on_json)?;
+            let spec: WorkUnitSpec = serde_json::from_str(&json)?;
+            Ok(WorkUnitRow {
+                id,
+                task_id,
+                plan_id,
+                key,
+                seq,
+                kind,
+                status,
+                blocked_reason,
+                depends_on,
+                runs,
+                continuations,
+                retries,
+                last_run_id,
+                last_checkpoint_run_id,
+                spec,
+                created_at,
+                updated_at,
+            })
+        })())
+    }
+
+    fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<RunRow, StoreError>> {
+        let run_id: String = row.get(0)?;
+        let task_id: String = row.get(1)?;
+        let work_unit_id: Option<String> = row.get(2)?;
+        let role_s: String = row.get(3)?;
+        let seq: u32 = row.get(4)?;
+        let status_s: String = row.get(5)?;
+        let adapter: Option<String> = row.get(6)?;
+        let model: Option<String> = row.get(7)?;
+        let account: Option<String> = row.get(8)?;
+        let session_id: Option<String> = row.get(9)?;
+        let checkpoint_json: Option<String> = row.get(10)?;
+        let usage_json: Option<String> = row.get(11)?;
+        let metrics_json: Option<String> = row.get(12)?;
+        let started_at: String = row.get(13)?;
+        let finished_at: Option<String> = row.get(14)?;
+        Ok((|| -> Result<RunRow, StoreError> {
+            let Some(role) = RunIndexRole::parse(&role_s) else {
+                return Err(StoreError::Invalid(format!("invalid runs.role: {role_s}")));
+            };
+            let Some(status) = RunIndexStatus::parse(&status_s) else {
+                return Err(StoreError::Invalid(format!(
+                    "invalid runs.status: {status_s}"
+                )));
+            };
+            let checkpoint = checkpoint_json
+                .map(|j| serde_json::from_str(&j))
+                .transpose()?;
+            let usage = usage_json.map(|j| serde_json::from_str(&j)).transpose()?;
+            let metrics = metrics_json.map(|j| serde_json::from_str(&j)).transpose()?;
+            Ok(RunRow {
+                run_id,
+                task_id,
+                work_unit_id,
+                role,
+                seq,
+                status,
+                adapter,
+                model,
+                account,
+                session_id,
+                checkpoint,
+                usage,
+                metrics,
+                started_at,
+                finished_at,
             })
         })())
     }
@@ -4108,6 +4382,233 @@ impl TaskStore for SqliteStore {
             }
         }
         Ok(())
+    }
+
+    // ---- ADR-0072 D5（Phase E2）: execution_plans / work_units / runs ----
+
+    fn execution_plan_adopt(
+        &self,
+        task_id: TaskId,
+        plan: ExecutionPlanRow,
+        work_units: Vec<WorkUnitRow>,
+        event: Event,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM execution_plans WHERE task_id = ?1 AND status = 'active'",
+            params![task_id.to_string()],
+            |r| r.get(0),
+        )?;
+        if existing > 0 {
+            return Err(StoreError::InUse {
+                kind: "execution_plan",
+                id: task_id.to_string(),
+                detail: "task already has an active execution plan (replan is Phase E4)"
+                    .to_string(),
+            });
+        }
+        tx.execute(
+            "INSERT INTO execution_plans (id, task_id, version, origin, planner_run_id, status, \
+             json, created_at, superseded_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                plan.id,
+                plan.task_id,
+                plan.version,
+                plan.origin.as_str(),
+                plan.planner_run_id,
+                plan.status.as_str(),
+                serde_json::to_string(&plan.spec)?,
+                plan.created_at,
+                plan.superseded_at,
+            ],
+        )?;
+        for wu in &work_units {
+            Self::insert_work_unit_tx(&tx, wu)?;
+        }
+        Self::append_event_tx(&tx, task_id, &event)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn execution_plan_active(
+        &self,
+        task_id: TaskId,
+    ) -> Result<Option<ExecutionPlanRow>, StoreError> {
+        self.with_read_conn(|conn| {
+            conn.query_row(
+                "SELECT id, task_id, version, origin, planner_run_id, status, json, created_at, \
+                 superseded_at FROM execution_plans WHERE task_id = ?1 AND status = 'active'",
+                params![task_id.to_string()],
+                Self::row_to_execution_plan,
+            )
+            .optional()?
+            .transpose()
+        })
+    }
+
+    fn execution_plan_list(&self, task_id: TaskId) -> Result<Vec<ExecutionPlanRow>, StoreError> {
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, task_id, version, origin, planner_run_id, status, json, created_at, \
+                 superseded_at FROM execution_plans WHERE task_id = ?1 ORDER BY version ASC",
+            )?;
+            let rows = stmt.query_map(params![task_id.to_string()], Self::row_to_execution_plan)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            Ok(out)
+        })
+    }
+
+    fn work_units_for(&self, task_id: TaskId) -> Result<Vec<WorkUnitRow>, StoreError> {
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, task_id, plan_id, key, seq, kind, status, blocked_reason, \
+                 depends_on_json, runs, continuations, retries, last_run_id, \
+                 last_checkpoint_run_id, json, created_at, updated_at FROM work_units \
+                 WHERE task_id = ?1 ORDER BY seq ASC",
+            )?;
+            let rows = stmt.query_map(params![task_id.to_string()], Self::row_to_work_unit)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            Ok(out)
+        })
+    }
+
+    fn work_unit_get(&self, id: &str) -> Result<Option<WorkUnitRow>, StoreError> {
+        self.with_read_conn(|conn| {
+            conn.query_row(
+                "SELECT id, task_id, plan_id, key, seq, kind, status, blocked_reason, \
+                 depends_on_json, runs, continuations, retries, last_run_id, \
+                 last_checkpoint_run_id, json, created_at, updated_at FROM work_units WHERE id = ?1",
+                params![id],
+                Self::row_to_work_unit,
+            )
+            .optional()?
+            .transpose()
+        })
+    }
+
+    fn work_unit_transition(
+        &self,
+        task_id: TaskId,
+        updated: WorkUnitRow,
+        event: Event,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::update_work_unit_tx(&tx, &updated)?;
+        Self::append_event_tx(&tx, task_id, &event)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn run_index_start(&self, row: RunRow) -> Result<(), StoreError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO runs (run_id, task_id, work_unit_id, role, seq, status, adapter, \
+             model, account, session_id, checkpoint_json, usage_json, metrics_json, \
+             started_at, finished_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            params![
+                row.run_id,
+                row.task_id,
+                row.work_unit_id,
+                row.role.as_str(),
+                row.seq,
+                row.status.as_str(),
+                row.adapter,
+                row.model,
+                row.account,
+                row.session_id,
+                row.checkpoint
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                row.usage.as_ref().map(serde_json::to_string).transpose()?,
+                row.metrics
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                row.started_at,
+                row.finished_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn run_index_finish(
+        &self,
+        run_id: &str,
+        status: RunIndexStatus,
+        checkpoint: Option<crate::execution::Checkpoint>,
+        usage: Option<crate::model::Usage>,
+        metrics: Option<crate::model::RunMetrics>,
+        finished_at: OffsetDateTime,
+    ) -> Result<bool, StoreError> {
+        let conn = self.lock()?;
+        let n = conn.execute(
+            "UPDATE runs SET status = ?1, checkpoint_json = ?2, usage_json = ?3, \
+             metrics_json = ?4, finished_at = ?5 WHERE run_id = ?6",
+            params![
+                status.as_str(),
+                checkpoint.as_ref().map(serde_json::to_string).transpose()?,
+                usage.as_ref().map(serde_json::to_string).transpose()?,
+                metrics.as_ref().map(serde_json::to_string).transpose()?,
+                format_rfc3339(finished_at)?,
+                run_id,
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
+    fn run_index_get(&self, run_id: &str) -> Result<Option<RunRow>, StoreError> {
+        self.with_read_conn(|conn| {
+            conn.query_row(
+                "SELECT run_id, task_id, work_unit_id, role, seq, status, adapter, model, \
+                 account, session_id, checkpoint_json, usage_json, metrics_json, started_at, \
+                 finished_at FROM runs WHERE run_id = ?1",
+                params![run_id],
+                Self::row_to_run,
+            )
+            .optional()?
+            .transpose()
+        })
+    }
+
+    fn runs_for_task(&self, task_id: TaskId) -> Result<Vec<RunRow>, StoreError> {
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT run_id, task_id, work_unit_id, role, seq, status, adapter, model, \
+                 account, session_id, checkpoint_json, usage_json, metrics_json, started_at, \
+                 finished_at FROM runs WHERE task_id = ?1 ORDER BY started_at ASC",
+            )?;
+            let rows = stmt.query_map(params![task_id.to_string()], Self::row_to_run)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            Ok(out)
+        })
+    }
+
+    fn runs_for_work_unit(&self, work_unit_id: &str) -> Result<Vec<RunRow>, StoreError> {
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT run_id, task_id, work_unit_id, role, seq, status, adapter, model, \
+                 account, session_id, checkpoint_json, usage_json, metrics_json, started_at, \
+                 finished_at FROM runs WHERE work_unit_id = ?1 ORDER BY started_at ASC",
+            )?;
+            let rows = stmt.query_map(params![work_unit_id], Self::row_to_run)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row??);
+            }
+            Ok(out)
+        })
     }
 }
 
@@ -6281,7 +6782,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -6822,7 +7323,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -7313,7 +7814,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
 
         let project = store.project_get(project_id).unwrap().expect("project");
         assert_eq!(project.status, ProjectStatus::Active);
@@ -7379,7 +7880,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
 
         // 導入前の行は `metadata = None` として読める。
         let messages = store.message_list("secretary", None, 10).unwrap();
@@ -7472,7 +7973,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 25);
+        assert_eq!(SCHEMA_VERSION, 26);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn
@@ -7838,6 +8339,319 @@ mod tests {
         assert!(
             store
                 .knowledge_run_retry(task_id, TaskId::new(), OffsetDateTime::now_utc())
+                .unwrap()
+        );
+    }
+
+    // ---- ADR-0072 D5/D23（Phase E2）: migration 0026 と execution_plans/work_units/runs ----
+
+    fn sample_plan_spec() -> ExecutionPlanSpec {
+        ExecutionPlanSpec {
+            schema: crate::execution_plan::EXECUTION_PLAN_SCHEMA.to_string(),
+            rationale: "3 段階の直列計画".to_string(),
+            work_units: vec![
+                WorkUnitSpec {
+                    key: "a".into(),
+                    kind: WorkUnitKind::Implement,
+                    title: "A".into(),
+                    objective: "do A".into(),
+                    depends_on: vec![],
+                    done_when: vec![],
+                    checks: vec![],
+                    context: Default::default(),
+                    harness: None,
+                    features: None,
+                    budget: None,
+                    outputs: vec![],
+                },
+                WorkUnitSpec {
+                    key: "b".into(),
+                    kind: WorkUnitKind::Implement,
+                    title: "B".into(),
+                    objective: "do B".into(),
+                    depends_on: vec!["a".into()],
+                    done_when: vec![],
+                    checks: vec![],
+                    context: Default::default(),
+                    harness: None,
+                    features: None,
+                    budget: None,
+                    outputs: vec![],
+                },
+            ],
+        }
+    }
+
+    fn sample_work_units(task_id: TaskId, plan_id: &str) -> Vec<WorkUnitRow> {
+        let now = "2026-09-24T00:00:00Z".to_string();
+        let spec = sample_plan_spec();
+        vec![
+            WorkUnitRow::new(
+                "wu-a".into(),
+                task_id.to_string(),
+                plan_id.to_string(),
+                0,
+                spec.work_units[0].clone(),
+                WorkUnitStatus::Ready,
+                now.clone(),
+            ),
+            WorkUnitRow::new(
+                "wu-b".into(),
+                task_id.to_string(),
+                plan_id.to_string(),
+                1,
+                spec.work_units[1].clone(),
+                WorkUnitStatus::Pending,
+                now,
+            ),
+        ]
+    }
+
+    /// ADR-0072 D23（Phase E2）: 版数 25 の DB（migration 0026 の前）を開くと、`execution_plans` /
+    /// `work_units` / `runs` が作られる（`CREATE TABLE IF NOT EXISTS` のみ。既存の表には触れない）。
+    #[test]
+    fn migration_0026_adds_the_execution_tables_to_a_schema_25_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("schema25.sqlite3");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+            )
+            .unwrap();
+            for version in 1..=25 {
+                SqliteStore::apply_migration_version(&mut conn, version).unwrap();
+            }
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 26);
+
+        // 新しい表が使える（round trip）。
+        let task = sample_task(Status::Draft);
+        store.insert(&task).unwrap();
+        store
+            .append_event(
+                task.id,
+                &Event::Created {
+                    task: Box::new(task.clone()),
+                },
+            )
+            .unwrap();
+        let validated =
+            crate::execution_plan::validate(&sample_plan_spec(), Default::default(), &[]).unwrap();
+        let plan_id = "01PLAN".to_string();
+        let plan = ExecutionPlanRow {
+            id: plan_id.clone(),
+            task_id: task.id.to_string(),
+            version: 1,
+            origin: PlanOrigin::Human,
+            planner_run_id: None,
+            status: PlanStatus::Active,
+            spec: validated.spec,
+            created_at: "2026-09-24T00:00:00Z".to_string(),
+            superseded_at: None,
+        };
+        let event = Event::ExecutionPlanned {
+            plan_id: plan_id.clone(),
+            version: 1,
+            origin: PlanOrigin::Human,
+            supersedes: None,
+            reason: None,
+            plan: Box::new(plan.spec.clone()),
+        };
+        store
+            .execution_plan_adopt(
+                task.id,
+                plan.clone(),
+                sample_work_units(task.id, &plan_id),
+                event,
+            )
+            .unwrap();
+
+        let active = store.execution_plan_active(task.id).unwrap().unwrap();
+        assert_eq!(active.id, plan_id);
+        let units = store.work_units_for(task.id).unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].key, "a");
+        assert_eq!(units[1].key, "b");
+    }
+
+    /// D14: 既に active な計画がある Task へ 2 個目を採用しようとすると拒否される（E2 は新規のみ、
+    /// replan は E4）。
+    #[test]
+    fn execution_plan_adopt_rejects_a_second_active_plan() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task(Status::Draft);
+        store.insert(&task).unwrap();
+        let validated =
+            crate::execution_plan::validate(&sample_plan_spec(), Default::default(), &[]).unwrap();
+        let plan = |id: &str, version: u32| ExecutionPlanRow {
+            id: id.to_string(),
+            task_id: task.id.to_string(),
+            version,
+            origin: PlanOrigin::Human,
+            planner_run_id: None,
+            status: PlanStatus::Active,
+            spec: validated.spec.clone(),
+            created_at: "2026-09-24T00:00:00Z".to_string(),
+            superseded_at: None,
+        };
+        let event = |plan_id: &str, version: u32| Event::ExecutionPlanned {
+            plan_id: plan_id.to_string(),
+            version,
+            origin: PlanOrigin::Human,
+            supersedes: None,
+            reason: None,
+            plan: Box::new(validated.spec.clone()),
+        };
+        store
+            .execution_plan_adopt(
+                task.id,
+                plan("p1", 1),
+                sample_work_units(task.id, "p1"),
+                event("p1", 1),
+            )
+            .unwrap();
+        let err = store
+            .execution_plan_adopt(
+                task.id,
+                plan("p2", 2),
+                sample_work_units(task.id, "p2"),
+                event("p2", 2),
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::InUse { .. }), "{err:?}");
+    }
+
+    /// D6/D5: `work_unit_transition` は行の更新と `WorkUnitTransitioned` を同じトランザクションで書く。
+    #[test]
+    fn work_unit_transition_updates_the_row_and_appends_the_event() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task(Status::Draft);
+        store.insert(&task).unwrap();
+        let validated =
+            crate::execution_plan::validate(&sample_plan_spec(), Default::default(), &[]).unwrap();
+        let plan = ExecutionPlanRow {
+            id: "p1".into(),
+            task_id: task.id.to_string(),
+            version: 1,
+            origin: PlanOrigin::Human,
+            planner_run_id: None,
+            status: PlanStatus::Active,
+            spec: validated.spec.clone(),
+            created_at: "2026-09-24T00:00:00Z".into(),
+            superseded_at: None,
+        };
+        store
+            .execution_plan_adopt(
+                task.id,
+                plan,
+                sample_work_units(task.id, "p1"),
+                Event::ExecutionPlanned {
+                    plan_id: "p1".into(),
+                    version: 1,
+                    origin: PlanOrigin::Human,
+                    supersedes: None,
+                    reason: None,
+                    plan: Box::new(validated.spec),
+                },
+            )
+            .unwrap();
+
+        let mut wu = store.work_unit_get("wu-a").unwrap().unwrap();
+        assert_eq!(wu.status, WorkUnitStatus::Ready);
+        wu.status = WorkUnitStatus::Running;
+        wu.runs = 1;
+        wu.last_run_id = Some("run-1".into());
+        store
+            .work_unit_transition(
+                task.id,
+                wu.clone(),
+                Event::WorkUnitTransitioned {
+                    work_unit_id: "wu-a".into(),
+                    key: "a".into(),
+                    from: WorkUnitStatus::Ready,
+                    to: WorkUnitStatus::Running,
+                    reason: "dispatch".into(),
+                    run_id: Some("run-1".into()),
+                },
+            )
+            .unwrap();
+
+        let reloaded = store.work_unit_get("wu-a").unwrap().unwrap();
+        assert_eq!(reloaded.status, WorkUnitStatus::Running);
+        assert_eq!(reloaded.runs, 1);
+        assert_eq!(reloaded.last_run_id.as_deref(), Some("run-1"));
+
+        let events = store.events_for(task.id).unwrap();
+        assert!(events.iter().any(|(_, e)| matches!(
+            e,
+            Event::WorkUnitTransitioned {
+                to: WorkUnitStatus::Running,
+                ..
+            }
+        )));
+    }
+
+    /// (g): `runs` の索引が読み書きできる（start → finish → get/list）。
+    #[test]
+    fn run_index_round_trips_start_and_finish() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task(Status::Draft);
+        store.insert(&task).unwrap();
+        let started_at = "2026-09-24T00:00:00Z".to_string();
+        store
+            .run_index_start(RunRow {
+                run_id: "run-1".into(),
+                task_id: task.id.to_string(),
+                work_unit_id: None,
+                role: RunIndexRole::Worker,
+                seq: 1,
+                status: RunIndexStatus::Running,
+                adapter: Some("claude-code".into()),
+                model: Some("m".into()),
+                account: None,
+                session_id: None,
+                checkpoint: None,
+                usage: None,
+                metrics: None,
+                started_at: started_at.clone(),
+                finished_at: None,
+            })
+            .unwrap();
+        let got = store.run_index_get("run-1").unwrap().unwrap();
+        assert_eq!(got.status, RunIndexStatus::Running);
+        assert_eq!(got.finished_at, None);
+
+        let finished = OffsetDateTime::parse("2026-09-24T00:05:00Z", &Rfc3339).unwrap();
+        let ok = store
+            .run_index_finish(
+                "run-1",
+                RunIndexStatus::Completed,
+                None,
+                None,
+                None,
+                finished,
+            )
+            .unwrap();
+        assert!(ok);
+        let got = store.run_index_get("run-1").unwrap().unwrap();
+        assert_eq!(got.status, RunIndexStatus::Completed);
+        assert!(got.finished_at.is_some());
+
+        let for_task = store.runs_for_task(task.id).unwrap();
+        assert_eq!(for_task.len(), 1);
+        assert!(
+            !store
+                .run_index_finish(
+                    "no-such-run",
+                    RunIndexStatus::Completed,
+                    None,
+                    None,
+                    None,
+                    finished
+                )
                 .unwrap()
         );
     }

@@ -198,6 +198,7 @@ mod tests {
                 reasoning_effort: Some("medium".into()),
             },
             quota_reason: None,
+            work_unit_id: None,
         };
         let events = vec![
             Event::WorkerStarted {

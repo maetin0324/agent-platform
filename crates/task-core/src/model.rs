@@ -1041,6 +1041,31 @@ pub enum Event {
         work_unit_id: Option<String>,
         checkpoint: Box<crate::execution::Checkpoint>,
     },
+    /// ADR-0072 D5/D14/D17（Phase E2）: 計画の採用（新規または replan）。`supersedes` は replan
+    /// のときの旧 `execution_plans.id`（E2 では常に `None`。replan は E4）。状態は変えない
+    /// （`replay` の attempts 計算は無視する）。
+    ExecutionPlanned {
+        plan_id: String,
+        version: u32,
+        origin: crate::execution_plan::PlanOrigin,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        supersedes: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        plan: Box<crate::execution_plan::ExecutionPlanSpec>,
+    },
+    /// ADR-0072 D5/D6（Phase E2）: WorkUnit の状態遷移。`run_id` はこの遷移のきっかけになった run
+    /// （無ければ `None`。例: 依存先の失敗による `dependency_failed`）。状態は変えない
+    /// （`replay` の attempts 計算は無視する）。
+    WorkUnitTransitioned {
+        work_unit_id: String,
+        key: String,
+        from: crate::execution_plan::WorkUnitStatus,
+        to: crate::execution_plan::WorkUnitStatus,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+    },
 }
 
 impl Event {

@@ -193,6 +193,9 @@ pub struct ApiV1Schema {
     pub skill_put: crate::skills::SkillPutBody,
     pub skill_put_result: crate::skills::SkillPutResult,
     pub org_skill_mount: crate::skills::OrgSkillMountBody,
+    /// ADR-0072 D14（Phase E2）: `POST`/`GET /tasks/{id}/execution-plan`。
+    pub execution_plan: crate::types::ExecutionPlanView,
+    pub execution_plan_create: task_core::ExecutionPlanSpec,
 }
 
 /// 生成したスキーマ（`serde_json::Value`）。

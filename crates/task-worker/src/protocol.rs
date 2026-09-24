@@ -502,6 +502,35 @@ pub struct RunContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ContinuationContext>,
     // ---- ADR-0072 D9（Phase E1）: ここまで ----
+    // ---- ADR-0072 D9/D21（Phase E2）: 計画のある Task の WorkUnit の run。ここから ----
+    /// ADR-0072 D9/D21: 計画のある Task の WorkUnit の run のときだけ `Some`。`## Objective` は
+    /// Task 全体の目的ではなく、この WorkUnit の `objective` に差し替わる（`preamble`/`claude_code`
+    /// が読む）。暗黙の WorkUnit（計画の無い Task）の run では常に `None`
+    /// （プロンプトは E1 までと 1 バイトも変わらない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_unit: Option<WorkUnitPromptContext>,
+    // ---- ADR-0072 D9/D21（Phase E2）: ここまで ----
+}
+
+/// `context.work_unit`（ADR-0072 D9/D21。Phase E2）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct WorkUnitPromptContext {
+    /// 計画の中の slug。
+    pub key: String,
+    pub title: String,
+    pub objective: String,
+    /// D14 の `done_when`（この WU の完了の目安。`## Acceptance criteria` に載る）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub done_when: Vec<String>,
+    /// D9: Task 全体の目的の先頭 1,500 文字（参考として渡す）。
+    pub task_objective_excerpt: String,
+    /// D9: 依存する WU の最終 checkpoint の要約（`"<title>: <completed の最後の1件、または「完了」>"`
+    /// の形。依存が無ければ空）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependency_summaries: Vec<String>,
+    /// D9: 計画の中の WU 一覧（key・title・status を 1 行ずつ）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plan_overview: Vec<String>,
 }
 
 /// ADR-0072 D9（Phase E1）: 続きの実行に渡す最小限の文脈。前の run の会話・出力の全文は載せない

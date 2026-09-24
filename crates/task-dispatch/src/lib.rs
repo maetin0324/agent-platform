@@ -8,6 +8,8 @@ pub(crate) mod approvals;
 /// ADR-0072 D8（Phase E1）: daemon が決定的に集める mechanical checkpoint（git の読み取りだけ）。
 pub mod checkpoint;
 pub mod dispatcher;
+/// ADR-0072 D6/D11/D12/D15（Phase E2）: WorkUnit の状態遷移の決定（純粋関数）。
+pub mod execution_scheduler;
 pub mod policy;
 /// ADR-0033 D3（Phase 25）: run の終端から決定的に作る報告。
 pub(crate) mod reports;

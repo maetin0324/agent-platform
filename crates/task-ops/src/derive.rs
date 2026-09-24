@@ -170,24 +170,29 @@ pub fn consecutive_continuations(events: &[(u64, Event)]) -> u32 {
     n
 }
 
-/// ADR-0072 D5/D8（Phase E1）: 直近の `Event::CheckpointSaved` の checkpoint（無ければ `None`）。
-/// 暗黙の WorkUnit（`work_unit_id: None`）を対象にする。
-pub fn latest_checkpoint(events: &[(u64, Event)]) -> Option<task_core::Checkpoint> {
+/// ADR-0072 D5/D8（Phase E1/E2）: 直近の `Event::CheckpointSaved` の checkpoint（無ければ `None`）。
+/// `work_unit_id = None` は暗黙の WorkUnit（E1 と同じ）、`Some(id)` はその WorkUnit の run だけを対象に
+/// する（E2 の申し送り: WU 単位に拡張）。
+pub fn latest_checkpoint(
+    events: &[(u64, Event)],
+    work_unit_id: Option<&str>,
+) -> Option<task_core::Checkpoint> {
     events.iter().rev().find_map(|(_, ev)| match ev {
         Event::CheckpointSaved {
-            work_unit_id: None,
+            work_unit_id: wu,
             checkpoint,
             ..
-        } => Some((**checkpoint).clone()),
+        } if wu.as_deref() == work_unit_id => Some((**checkpoint).clone()),
         _ => None,
     })
 }
 
-/// ADR-0072 D18（Phase E1）: 「最後の `answer` 以降」の窓の中で、連続して進捗のなかった
+/// ADR-0072 D18（Phase E1/E2）: 「最後の `answer` 以降」の窓の中で、連続して進捗のなかった
 /// checkpoint の数（`task_core::checkpoint_shows_progress` で判定）。「回答の時点から数え直す」
 /// （D18）ので、窓に入って最初の checkpoint は**窓の外の checkpoint とは比べない**（`prev = None`
 /// と同じ扱い＝常に「進捗あり」からやり直す）。`no_progress_limit` と組み合わせて使う。
-pub fn no_progress_streak(events: &[(u64, Event)]) -> u32 {
+/// `work_unit_id` は [`latest_checkpoint`] と同じ（`None` = 暗黙の WorkUnit、`Some(id)` = その WU だけ）。
+pub fn no_progress_streak(events: &[(u64, Event)], work_unit_id: Option<&str>) -> u32 {
     let mut window_start_seq: u64 = 0;
     for (seq, ev) in events {
         if let Event::Transitioned { reason, .. } = ev
@@ -201,10 +206,11 @@ pub fn no_progress_streak(events: &[(u64, Event)]) -> u32 {
     let mut baseline_reset = false;
     for (seq, ev) in events {
         if let Event::CheckpointSaved {
-            work_unit_id: None,
+            work_unit_id: wu,
             checkpoint,
             ..
         } = ev
+            && wu.as_deref() == work_unit_id
         {
             let in_window = *seq >= window_start_seq;
             if in_window && !baseline_reset {
@@ -989,9 +995,9 @@ mod tests {
             (0, checkpoint_saved("r1", 1, 3, "h1")),
             (1, checkpoint_saved("r2", 2, 2, "h2")),
         ];
-        let cp = latest_checkpoint(&events).expect("some checkpoint");
+        let cp = latest_checkpoint(&events, None).expect("some checkpoint");
         assert_eq!(cp.run_id, "r2");
-        assert!(latest_checkpoint(&[]).is_none());
+        assert!(latest_checkpoint(&[], None).is_none());
     }
 
     /// ADR-0072 D18（Phase E1）: 進捗の無い checkpoint が連続すると streak が伸び、進捗があれば
@@ -1004,12 +1010,12 @@ mod tests {
             (1, checkpoint_saved("r2", 1, 3, "h1")),
             (2, checkpoint_saved("r3", 1, 3, "h1")),
         ];
-        assert_eq!(no_progress_streak(&events), 2, "r2, r3 が無進捗");
+        assert_eq!(no_progress_streak(&events, None), 2, "r2, r3 が無進捗");
 
         let mut progressed = events.clone();
         progressed.push((3, checkpoint_saved("r4", 2, 3, "h1")));
         assert_eq!(
-            no_progress_streak(&progressed),
+            no_progress_streak(&progressed, None),
             0,
             "completed が増えれば進捗あり"
         );
@@ -1018,7 +1024,7 @@ mod tests {
         answered.push((3, transitioned("answer")));
         answered.push((4, checkpoint_saved("r4", 1, 3, "h1")));
         assert_eq!(
-            no_progress_streak(&answered),
+            no_progress_streak(&answered, None),
             0,
             "answer 直後の最初の checkpoint は窓の外の r3 と比べて進捗なしだが、streak は答え以降だけを数える"
         );
