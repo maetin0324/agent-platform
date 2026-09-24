@@ -565,7 +565,8 @@ function ClusterWorkDirSection({
 /**
  * 1 本の port forward（ADR-0053 D3、Phase 66。listener/target の分離は Phase 85）。状態バッジと
  * `listen → target` を出す。`unreachable`（転送はあるが先方が応答しない）のときは、バッジの下に
- * 「転送あり・先方応答なし」の理由を添える（celeris はこの状態では転送を再発行しない）。
+ * 「転送あり・先方応答なし」と `last_error`（時間切れ・接続拒否などの理由）を添える（celeris はこの状態では
+ * 転送を再発行しない）。
  * モバイル幅でも折り返せるよう `flex-wrap` にし、長い host:port は `break-all` にする。
  */
 function TunnelForwardRow({ forward }: { forward: ClusterForwardView }) {
@@ -586,8 +587,9 @@ function TunnelForwardRow({ forward }: { forward: ClusterForwardView }) {
         </Badge>
       </div>
       {word === "unreachable" && (
-        <p className="text-fg-muted" data-testid="cluster-tunnel-forward-reason">
+        <p className="break-all text-fg-muted" data-testid="cluster-tunnel-forward-reason">
           転送あり・先方応答なし
+          {forward.last_error ? `（${forward.last_error}）` : ""}
         </p>
       )}
     </div>

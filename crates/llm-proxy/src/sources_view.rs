@@ -61,6 +61,8 @@ pub struct SourceView {
     pub enabled: bool,
     /// `openai-compatible` だけ probe する。oauth のプールは `null`（到達性ではなくアカウントの残量で見る）。
     pub reachable: Option<bool>,
+    /// `reachable == Some(false)` のときだけ: 届かなかった理由（時間切れ・接続失敗・HTTP ステータス）。
+    pub unreachable_reason: Option<String>,
     pub accounts: Vec<AccountSourceView>,
     pub last_hour_requests: u64,
     pub last_hour_prompt_tokens: u64,
@@ -98,6 +100,7 @@ impl ProxyState {
                 kind: "claude-oauth".to_string(),
                 enabled: cfg.enabled,
                 reachable: None,
+                unreachable_reason: None,
                 accounts,
                 last_hour_requests: counts.requests,
                 last_hour_prompt_tokens: counts.prompt_tokens,
@@ -116,6 +119,7 @@ impl ProxyState {
                 kind: "codex-oauth".to_string(),
                 enabled: cfg.enabled,
                 reachable: None,
+                unreachable_reason: None,
                 accounts,
                 last_hour_requests: counts.requests,
                 last_hour_prompt_tokens: counts.prompt_tokens,
@@ -123,14 +127,15 @@ impl ProxyState {
             });
         }
         for relay_cfg in &self.config.sources.openai_compatible {
-            let reachable = self.reachable(relay_cfg).await;
+            let probe = self.probe_relay(relay_cfg).await;
             let id = format!("openai-compatible:{}", relay_cfg.id);
             let counts = hourly.get(&id).cloned().unwrap_or_default();
             sources.push(SourceView {
                 id,
                 kind: "openai-compatible".to_string(),
                 enabled: relay_cfg.enabled,
-                reachable: Some(reachable),
+                reachable: Some(probe.is_ok()),
+                unreachable_reason: probe.err(),
                 accounts: Vec::new(),
                 last_hour_requests: counts.requests,
                 last_hour_prompt_tokens: counts.prompt_tokens,

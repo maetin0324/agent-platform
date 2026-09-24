@@ -645,6 +645,11 @@ function LlmSourceCard({ source, nowSec }: { source: LlmSourceView; nowSec: numb
         }
       />
       <CardBody className="space-y-4">
+        {statusWord === "unreachable" && source.unreachable_reason && (
+          <p className="break-all text-sm text-fg-muted" data-testid="llm-source-unreachable-reason">
+            {source.unreachable_reason}
+          </p>
+        )}
         <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3">
           <DataItem label="直近1時間 要求">
             <span data-testid="llm-source-requests">{source.last_hour_requests}</span>

@@ -3322,6 +3322,11 @@ export interface LlmSourceView {
    * `openai-compatible` だけ probe した結果。oauth のプールは `null`。
    */
   reachable?: boolean | null;
+  /**
+   * `reachable == false` のときだけ: 届かなかった理由（時間切れ・接続失敗・HTTP ステータス）。
+   * 古いスナップショットには無い。
+   */
+  unreachable_reason?: string | null;
 }
 /**
  * `GET /llm/sources` の 1 アカウント（`llm-proxy` の `claude-oauth`/`codex-oauth` のプール）。

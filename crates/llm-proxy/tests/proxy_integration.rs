@@ -1446,6 +1446,174 @@ async fn sources_view_reports_cooldown_and_hourly_counts() {
     assert_eq!(claude.last_hour_requests, 0);
 }
 
+/// 2026-09-24（qwen が unreachable のまま）の回帰: 上流が 2xx 以外を返す間は `reachable: false` と
+/// 理由（HTTP ステータス）を出し、上流が戻れば probe のキャッシュが切れた時点で `reachable: true` に
+/// 戻る（一度落ちた判定が固定されない）。戻った後は `celeris/<tier>` が relay を選ぶ。
+#[tokio::test]
+async fn relay_probe_reports_the_reason_and_recovers_after_the_cache_expires() {
+    let healthy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let healthy_hook = healthy.clone();
+    let upstream = Router::new()
+        .route(
+            "/v1/models",
+            get(move || {
+                let healthy = healthy_hook.clone();
+                async move {
+                    if healthy.load(Ordering::SeqCst) {
+                        (StatusCode::OK, Json(json!({"object": "list", "data": []})))
+                            .into_response()
+                    } else {
+                        StatusCode::SERVICE_UNAVAILABLE.into_response()
+                    }
+                }
+            }),
+        )
+        .route("/v1/chat/completions", post(relay_chat));
+    let (upstream_addr, _h1) = spawn(upstream).await;
+
+    let mut config = LlmProxyConfig {
+        prefer_free: true,
+        probe_cache_secs: 1,
+        ..LlmProxyConfig::default()
+    };
+    config
+        .sources
+        .openai_compatible
+        .push(OpenAiCompatibleConfig {
+            id: "qwen".into(),
+            base_url: format!("http://{upstream_addr}/v1"),
+            api_key: None,
+            enabled: true,
+        });
+    let state = ProxyState::new(
+        config,
+        reqwest::Client::new(),
+        None,
+        None,
+        None,
+        SharedRole::default(),
+        None,
+        std::time::Duration::from_secs(5),
+    );
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+
+    let view = state.sources_view(now).await;
+    let qwen = view
+        .sources
+        .iter()
+        .find(|s| s.id == "openai-compatible:qwen")
+        .expect("qwen source");
+    assert_eq!(qwen.reachable, Some(false));
+    assert_eq!(
+        qwen.unreachable_reason.as_deref(),
+        Some("GET /models answered HTTP 503")
+    );
+
+    // 上流が戻っても、キャッシュの寿命（1 秒）の間は前の判定のまま。
+    healthy.store(true, Ordering::SeqCst);
+    let cached = state.sources_view(now).await;
+    assert_eq!(
+        cached
+            .sources
+            .iter()
+            .find(|s| s.id == "openai-compatible:qwen")
+            .and_then(|s| s.reachable),
+        Some(false)
+    );
+
+    // 寿命が過ぎたら probe し直して回復する。
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let view = state.sources_view(now).await;
+    let qwen = view
+        .sources
+        .iter()
+        .find(|s| s.id == "openai-compatible:qwen")
+        .expect("qwen source");
+    assert_eq!(qwen.reachable, Some(true));
+    assert_eq!(qwen.unreachable_reason, None);
+    let cheap = view
+        .celeris_tiers
+        .iter()
+        .find(|t| t.tier == "cheap")
+        .expect("cheap tier");
+    assert_eq!(cheap.resolves_to.as_deref(), Some("openai-compatible:qwen"));
+
+    let (addr, _h2) = spawn(router(state)).await;
+    let client = reqwest::Client::new();
+    let resp = post_chat(&client, addr, &chat_request("celeris/cheap", false), None).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-celeris-source")
+            .and_then(|v| v.to_str().ok()),
+        Some("openai-compatible:qwen")
+    );
+}
+
+/// 2026-09-24 の本番の形: トンネルの listener は接続を受けるが、先方（転送先）が応答しない。
+/// `reachable: false` だけでなく「時間切れ」と分かる理由を出す（接続拒否＝listener 無しと区別する）。
+#[tokio::test]
+async fn relay_probe_distinguishes_a_silent_listener_from_a_refused_connection() {
+    // accept はするが何も返さない listener（ssh -L の先が時間切れのときと同じ見え方）。
+    let silent = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let silent_addr = silent.local_addr().expect("addr");
+    let _h = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = silent.accept().await {
+            held.push(sock);
+        }
+    });
+
+    let mut config = base_config();
+    config
+        .sources
+        .openai_compatible
+        .push(OpenAiCompatibleConfig {
+            id: "silent".into(),
+            base_url: format!("http://{silent_addr}/v1"),
+            api_key: None,
+            enabled: true,
+        });
+    config
+        .sources
+        .openai_compatible
+        .push(OpenAiCompatibleConfig {
+            id: "refused".into(),
+            base_url: "http://127.0.0.1:1/v1".into(),
+            api_key: None,
+            enabled: true,
+        });
+    let state = ProxyState::new(
+        config,
+        reqwest::Client::new(),
+        None,
+        None,
+        None,
+        SharedRole::default(),
+        None,
+        std::time::Duration::from_secs(5),
+    );
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let view = state.sources_view(now).await;
+    let reason = |id: &str| {
+        view.sources
+            .iter()
+            .find(|s| s.id == id)
+            .and_then(|s| s.unreachable_reason.clone())
+            .unwrap_or_default()
+    };
+    assert!(
+        reason("openai-compatible:silent").contains("timed out"),
+        "{}",
+        reason("openai-compatible:silent")
+    );
+    assert!(
+        reason("openai-compatible:refused").contains("could not connect"),
+        "{}",
+        reason("openai-compatible:refused")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 秘密の値がログに出ない
 // ---------------------------------------------------------------------------

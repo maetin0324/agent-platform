@@ -169,7 +169,11 @@ pub type TunnelForwardEnsurer = Arc<dyn Fn(&str, &str, &str) -> Result<(), Strin
 /// とは別物**: これは `refresh_one_forward` がリスナーの存在を確認した後、かつ `probe_interval_secs` の
 /// 間隔でしか呼ばない（Phase 85 のバックオフ。本番で `-O forward` は張れているのに先方の vLLM が
 /// 落ちている観測から、tick を毎回 3 秒級の HTTP で遅くしないため）。
-pub type TunnelProbe = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+///
+/// 届かないときは人が読む 1 行の理由（時間切れ・接続拒否・HTTP ステータス）を `Err` で返す。
+/// `last_error` にそのまま載る（2026-09-24: 転送先が master のホストから時間切れなのか、先方の
+/// vLLM が落ちているのかが `target_unreachable` だけでは見分けられなかった）。
+pub type TunnelProbe = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
 /// ADR-0053 Phase 85: forward の**リスナー**（`-O forward`/`ssh -N -L` が実際に手元の `listen` で待ち受けて
 /// いるか）を見るフック。軽い確認（`listen` への TCP connect 等。ssh を起こさない）を想定。`None`
@@ -335,9 +339,11 @@ fn next_probe_interval_secs(current_secs: u64, min_secs: u64, healthy: bool) -> 
 
 /// ADR-0066 D3: forward 1 本の target probe の直近の結果（`Dispatcher::tunnel_probe_state` に積む。
 /// 専用スレッドが書き、tick は読むだけ）。
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct TargetProbeState {
     healthy: bool,
+    /// `healthy == false` のときの理由（[`TunnelProbe`] の `Err`）。
+    error: Option<String>,
     checked_at: Instant,
     /// 次に probe するまでの間隔（バックオフ済み）。
     interval_secs: u64,
@@ -1438,7 +1444,8 @@ fn tunnel_prober_loop(
             if !due {
                 continue;
             }
-            let healthy = probe(listen);
+            let result = probe(listen);
+            let healthy = result.is_ok();
             let Ok(mut guard) = state.lock() else {
                 continue;
             };
@@ -1450,6 +1457,7 @@ fn tunnel_prober_loop(
                 key,
                 TargetProbeState {
                     healthy,
+                    error: result.err(),
                     checked_at: Instant::now(),
                     interval_secs: next_probe_interval_secs(prev_interval, *min_secs, healthy),
                 },
@@ -2449,7 +2457,7 @@ impl Dispatcher {
             .tunnel_probe_state
             .lock()
             .ok()
-            .and_then(|guard| guard.get(&key).copied());
+            .and_then(|guard| guard.get(&key).cloned());
         let observed = match existing {
             Some(state) => state,
             // まだ一度も probe していない（この forward の listener が今このプロセスで初めて有りに
@@ -2457,9 +2465,11 @@ impl Dispatcher {
             // probe して種を蒔く（Phase 85 までの「listener が有ればまず 1 回は確かめる」を保つ）。
             None => {
                 let now = Instant::now();
-                let healthy = self.probe_forward(&fwd.listen);
+                let result = self.probe_forward(&fwd.listen);
+                let healthy = result.is_ok();
                 let state = TargetProbeState {
                     healthy,
+                    error: result.err(),
                     checked_at: now,
                     interval_secs: next_probe_interval_secs(
                         fwd.probe_interval_secs.max(1),
@@ -2468,7 +2478,7 @@ impl Dispatcher {
                     ),
                 };
                 if let Ok(mut guard) = self.tunnel_probe_state.lock() {
-                    guard.insert(key, state);
+                    guard.insert(key, state.clone());
                 }
                 state
             }
@@ -2477,10 +2487,16 @@ impl Dispatcher {
         let error = if observed.healthy {
             None
         } else {
-            Some(format!(
-                "target {} did not answer /v1/models through the forward",
-                fwd.target
-            ))
+            Some(match &observed.error {
+                Some(reason) => format!(
+                    "target {} (as seen from {}) did not answer /v1/models through the forward: {reason}",
+                    fwd.target, spec.host
+                ),
+                None => format!(
+                    "target {} did not answer /v1/models through the forward",
+                    fwd.target
+                ),
+            })
         };
         self.observe_tunnel(&spec.id, &fwd.listen, true, observed.healthy, error);
     }
@@ -2535,11 +2551,11 @@ impl Dispatcher {
 
     /// forward の target（先方）が健全か（`/v1/models` が応答するか）。`refresh_one_forward` の
     /// 初回の種蒔きと、専用スレッドの両方から呼ぶ。
-    fn probe_forward(&self, listen: &str) -> bool {
+    fn probe_forward(&self, listen: &str) -> Result<(), String> {
         self.tunnel_probe
             .as_ref()
             .map(|p| p(listen))
-            .unwrap_or(false)
+            .unwrap_or_else(|| Err("no tunnel probe is configured".to_string()))
     }
 
     /// 状態遷移を記録する（`tunnel_state` を更新し、フェーズ（Up/Down/TargetUnreachable）が変わったときだけ
@@ -12027,7 +12043,11 @@ mod tests {
         }));
         let forward_present_probe = forward_present.clone();
         d.set_tunnel_probe(Arc::new(move |_listen: &str| {
-            forward_present_probe.load(std::sync::atomic::Ordering::SeqCst)
+            if forward_present_probe.load(std::sync::atomic::Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err("GET /models failed: could not connect".to_string())
+            }
         }));
 
         d.refresh_cluster_tunnels();
@@ -12142,7 +12162,7 @@ mod tests {
             listener_present_probe.load(std::sync::atomic::Ordering::SeqCst)
         }));
         // listener が有る間は target も健全（この試験は listener の有無だけを見たいので単純化する）。
-        d.set_tunnel_probe(Arc::new(|_listen: &str| true));
+        d.set_tunnel_probe(Arc::new(|_listen: &str| Ok(())));
 
         // 1 回目: 最初から listener が有る。ensure は呼ばれない。
         d.refresh_cluster_tunnels();
@@ -12202,7 +12222,9 @@ mod tests {
                 Ok(())
             },
         ));
-        d.set_tunnel_probe(Arc::new(|_listen: &str| false));
+        d.set_tunnel_probe(Arc::new(|_listen: &str| {
+            Err("GET /models timed out after 2s".to_string())
+        }));
 
         d.refresh_cluster_tunnels();
 
@@ -12216,7 +12238,11 @@ mod tests {
         assert!(!d.tunnel_target_healthy("pegasus", "127.0.0.1:19004"));
         assert_eq!(
             d.tunnel_last_error("pegasus", "127.0.0.1:19004"),
-            Some("target bnode150:19004 did not answer /v1/models through the forward".to_string())
+            Some(
+                "target bnode150:19004 (as seen from pegasus) did not answer /v1/models through \
+                 the forward: GET /models timed out after 2s"
+                    .to_string()
+            )
         );
         let events = d.take_tunnel_events();
         assert!(
@@ -12263,7 +12289,7 @@ mod tests {
             probe_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             // 本番観測（無応答の Qwen 先方への `/v1/models`）の遅さを模す。
             std::thread::sleep(Duration::from_millis(150));
-            true
+            Ok(())
         }));
 
         let first_started = Instant::now();
@@ -12342,7 +12368,9 @@ mod tests {
         d.cluster_connected.insert("pegasus".into(), true);
         d.set_tunnel_listener_probe(Arc::new(|_listen: &str| true));
         d.set_tunnel_forward_ensurer(Arc::new(|_host: &str, _listen: &str, _target: &str| Ok(())));
-        d.set_tunnel_probe(Arc::new(|_listen: &str| false));
+        d.set_tunnel_probe(Arc::new(|_listen: &str| {
+            Err("GET /models timed out after 2s".to_string())
+        }));
 
         for _ in 0..5 {
             // `CLUSTER_LIVENESS_INTERVAL` の間引きを毎回越えさせる。ADR-0066 D3: target probe 自体は
@@ -12415,7 +12443,7 @@ mod tests {
         let probe_calls_hook = probe_calls.clone();
         d.set_tunnel_probe(Arc::new(move |_listen: &str| {
             probe_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            true
+            Ok(())
         }));
         let listener_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener_calls_hook = listener_calls.clone();

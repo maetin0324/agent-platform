@@ -28,6 +28,7 @@ impl LlmSourcesReader for FakeReader {
                 kind: "openai-compatible".to_string(),
                 enabled: true,
                 reachable: Some(true),
+                unreachable_reason: None,
                 accounts: vec![],
                 last_hour_requests: 3,
                 last_hour_prompt_tokens: 40,

@@ -539,3 +539,28 @@ ssh ControlMaster を張った後、celeris は毎 tick `tunnel: forward added v
   こちらにも間引きを足す。
 - 実機再確認は未実施（このセッションには本物の pegasus/bnode150 が無い）。`docs/PROGRESS.md`「Phase 85」
   節に配備後の確認手順を書いた。
+
+## 2026-09-24 追記（qwen が unreachable のままだった原因と、理由の可視化）
+
+**原因**: `[[clusters.forwards]] target = "bnode150:18000"` は master のホスト（pegasus03）から解決され、
+`bnode150` = eno1（10.120.0.150）になる。pegasus03 からこの 18000 番への TCP 接続は**時間切れ**になる
+（同じアドレスの 18001 番や ssh 22 番は届く。bnode150 側のフィルタ。vLLM 自体は bnode150 上で
+`0.0.0.0:18000` を待ち受け、`localhost:18000/v1/models` は 200）。IB 側 `10.110.0.150:18000` は pegasus03
+から 200。Phase 66 以来の「forward は有るが先方が応答しない」（Phase 85 追記）はこれだった。人の手元では
+`ssh -J pegasus -L 18000:localhost:18000 bnode150`（bnode150 に入ってから localhost へ）なので届いていた。
+
+### 決めたこと
+
+1. **設定で直す**: 本番の転送先を `target = "10.110.0.150:18000"` にする（コードの転送経路は変えない。
+   bnode150 に入ってから localhost へ転送する 2 段の経路は、今の master 1 本の設計に子 ssh を足すことに
+   なるので、IB 側が届く間は入れない）。
+2. **理由を見せる**: `reachable: false`・`target_unreachable` だけでは「転送先が master から届かない」のか
+   「先方の vLLM が落ちている」のか区別できず、原因の特定が 3 日遅れた。
+   - `llm-proxy` の relay probe は `Result<(), String>` を返し、`GET /llm/sources` の供給元に
+     `unreachable_reason`（`GET /models timed out after 3s …` / `failed: could not connect` /
+     `answered HTTP 503`）を出す。URL・鍵は含めない。
+   - dispatcher の `TunnelProbe` も `Result<(), String>` にし、`last_error` を
+     `target <t> (as seen from <host>) did not answer /v1/models through the forward: <理由>` にする。
+   - GUI はアカウント画面の LLM 供給元カードと、クラスタ画面の forward 行にこの理由を添える。
+3. probe のキャッシュ（`probe_cache_secs`、既定 60 秒）は成功・失敗とも寿命で切れる（一度 unreachable に
+   なっても固定されない）ことを回帰テストで固定する。

@@ -5936,6 +5936,13 @@
             "boolean",
             "null"
           ]
+        },
+        "unreachable_reason": {
+          "description": "`reachable == false` のときだけ: 届かなかった理由（時間切れ・接続失敗・HTTP ステータス）。\n古いスナップショットには無い。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [

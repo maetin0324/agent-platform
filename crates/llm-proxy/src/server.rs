@@ -42,6 +42,9 @@ const X_ACCOUNT: &str = "x-celeris-account";
 const NO_SOURCE_MAX_RESCANS: u32 = 2;
 const NO_SOURCE_RESCAN_DELAY: Duration = Duration::from_secs(1);
 
+/// relay の probe 結果のキャッシュ 1 件: (probe した時刻, 結果)。`Err` は人が読む理由。
+type ProbeCacheEntry = (Instant, Result<(), String>);
+
 /// プロキシが動くのに要るもの一式。`Arc` で共有する。
 pub struct ProxyState {
     pub config: LlmProxyConfig,
@@ -54,7 +57,8 @@ pub struct ProxyState {
     pub role: SharedRole,
     pub db_path: Option<PathBuf>,
     pub busy_timeout: Duration,
-    probe_cache: StdMutex<HashMap<String, (Instant, bool)>>,
+    /// 供給元 id → (probe した時刻, 結果)。`Err` は人が読む理由（`relay::probe`）。
+    probe_cache: StdMutex<HashMap<String, ProbeCacheEntry>>,
     in_use: StdMutex<HashMap<String, usize>>,
 }
 
@@ -107,23 +111,32 @@ impl ProxyState {
 
     /// `GET <base_url>/models` の到達性を probe し、`probe_cache_secs` の間はキャッシュする。
     pub(crate) async fn reachable(&self, cfg: &OpenAiCompatibleConfig) -> bool {
+        self.probe_relay(cfg).await.is_ok()
+    }
+
+    /// [`Self::reachable`] と同じだが、届かないときの理由も返す。キャッシュは成功・失敗とも
+    /// `probe_cache_secs` で切れる（一度落ちた供給元も、寿命が過ぎれば次の要求・表示で probe し直す）。
+    pub(crate) async fn probe_relay(&self, cfg: &OpenAiCompatibleConfig) -> Result<(), String> {
         let ttl = Duration::from_secs(self.config.probe_cache_secs);
-        if let Some((at, ok)) = self
+        if let Some((at, result)) = self
             .probe_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&cfg.id)
-            .copied()
+            .cloned()
             && at.elapsed() < ttl
         {
-            return ok;
+            return result;
         }
-        let ok = relay::probe(&self.client, cfg).await;
+        let result = relay::probe(&self.client, cfg).await;
+        if let Err(reason) = &result {
+            tracing::debug!(source = %cfg.id, reason, "llm-proxy: relay probe failed");
+        }
         self.probe_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(cfg.id.clone(), (Instant::now(), ok));
-        ok
+            .insert(cfg.id.clone(), (Instant::now(), result.clone()));
+        result
     }
 
     fn claude_dirs(&self) -> Vec<AccountDir> {

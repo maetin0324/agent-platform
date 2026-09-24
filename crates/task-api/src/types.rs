@@ -1629,6 +1629,10 @@ pub struct LlmSourceView {
     /// `openai-compatible` だけ probe した結果。oauth のプールは `null`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reachable: Option<bool>,
+    /// `reachable == false` のときだけ: 届かなかった理由（時間切れ・接続失敗・HTTP ステータス）。
+    /// 古いスナップショットには無い。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreachable_reason: Option<String>,
     pub accounts: Vec<LlmSourceAccountView>,
     pub last_hour_requests: u64,
     pub last_hour_prompt_tokens: u64,

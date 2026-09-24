@@ -941,10 +941,11 @@ fn tunnel_probe() -> task_dispatch::dispatcher::TunnelProbe {
         let base = format!("http://{listen}/v1");
         // Qwen 側の中継はトンネルの向こう（bnode150）そのものであり、celeris の llm-proxy を経由しない
         // ので bearer は要らない（ADR-0052 の knowledge probe と同じ Qwen エンドポイントに対する既定）。
-        matches!(
-            task_worker::probe_models(&base, TUNNEL_TARGET_PROBE_TIMEOUT, None),
-            task_worker::Reachability::Ok
-        )
+        match task_worker::probe_models(&base, TUNNEL_TARGET_PROBE_TIMEOUT, None) {
+            task_worker::Reachability::Ok => Ok(()),
+            task_worker::Reachability::Unreachable { reason }
+            | task_worker::Reachability::Unknown { reason } => Err(reason),
+        }
     })
 }
 
@@ -1104,6 +1105,7 @@ impl task_api::LlmSourcesReader for LlmSourcesAdapter {
                     kind: s.kind,
                     enabled: s.enabled,
                     reachable: s.reachable,
+                    unreachable_reason: s.unreachable_reason,
                     accounts: s
                         .accounts
                         .into_iter()
@@ -3546,7 +3548,9 @@ target = "bnode150:18000"
         dispatcher.set_tunnel_forward_ensurer(Arc::new(
             |_host: &str, _listen: &str, _target: &str| Ok(()),
         ));
-        dispatcher.set_tunnel_probe(Arc::new(|_listen: &str| false));
+        dispatcher.set_tunnel_probe(Arc::new(|_listen: &str| {
+            Err("unreachable in test".to_string())
+        }));
         dispatcher.set_accepting_new_work(true);
 
         // celeris の tick ループ（`tick_loop`）がしているのと同じこと: マルチスレッド tokio ランタイムの
@@ -3763,7 +3767,9 @@ target = "bnode150:18000"
                 Ok(())
             },
         ));
-        dispatcher.set_tunnel_probe(Arc::new(|_listen: &str| false));
+        dispatcher.set_tunnel_probe(Arc::new(|_listen: &str| {
+            Err("unreachable in test".to_string())
+        }));
         dispatcher.set_accepting_new_work(true);
 
         let report = dispatcher.tick();

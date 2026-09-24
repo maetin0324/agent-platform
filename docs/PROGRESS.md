@@ -17723,3 +17723,22 @@ frontier=`gpt-6-astra`(high) / standard=`gpt-6-sol`(medium) / cheap=`gpt-6-luna`
 - 統合 6566ad4（PROGRESS.md 衝突のみ）。ゲート: fmt 0、cargo test FAILED 0、clippy 0、GUI typecheck / lint / test 1080 件 / gen:types 差分ゼロ。release `6566ad486acd`。verify は 1 回目の check 6（smoke）が `POST /tasks timed out`（load 6〜10 の中）、再実行で全 true（live_ok）。in-flight 0 でライブ切替（from 0e20e1b2a058）。
 - 実機: 昇格後の `celerisctl routing show --config`（読み取り）と `GET /providers` が同じ表を返す: claude-pool / claude-code-local = fable → claude-fable-5-1 / opus → claude-opus-5-5 / sonnet → claude-sonnet-5、codex-pool = astra → gpt-6-astra [high] / sol → gpt-6-sol [medium] / luna → gpt-6-luna [low]。`[llm_proxy.models]` も同じ。以後のタスクは lane ごとにこれらが選ばれる（Routing パネルの `resolution.model_id` / `reasoning_effort` で run ごとに確認できる）。
 - 未解決（Phase 118 から）: P-118-1 `pricing.rs` が `claude-fable` の単価を知らず frontier の費用推定が None。P-118-2 プロキシ経由の tier 別 effort は未対応。
+
+## qwen source が unreachable のままだった件の修正（2026-09-24、task 01M3A0A0XKW5VYG8TB2RD0J57A）
+
+- 原因（ADR-0053「2026-09-24 追記」）: forward の転送先 `bnode150:18000` は pegasus03 から見て eno1（10.120.0.150）。
+  ここへの 18000 番は接続時間切れ（18001・22 は届く）。bnode150 上の `localhost:18000/v1/models` と、
+  pegasus03 からの IB 側 `10.110.0.150:18000/v1/models` は 200。手元の `127.0.0.1:18000` は ssh が受けるが
+  3〜5 秒で時間切れ → llm-proxy の probe（`GET <base_url>/models`、3 秒）が false → `celeris/<tier>` は Claude に倒れていた。
+- 本番設定: `~/.config/celeris/config.toml` の forward を `target = "10.110.0.150:18000"` に変更（退避 `config.toml.bak-20260924-qwen-forward`）。
+  稼働中の master の転送は `ssh -O cancel`/`-O forward` で同じ先に張り替えた（デーモンは再起動していない。
+  デーモンはメモリ上で旧 target を持つので、**次の昇格・再起動までに master が落ちて張り直されると旧 target に戻る**）。
+- 張り替え後の実機: `GET /llm/sources` qwen `reachable: true`、`celeris_tiers` 3 段とも `openai-compatible:qwen`、
+  `POST 127.0.0.1:18100/v1/chat/completions model=celeris/cheap` → 200、`x-celeris-source: openai-compatible:qwen`、
+  応答 `PONG`（`llm_proxy_requests`: qwen3.8-27b、58/30 token、425 ms、ok）。`GET /daemon` の forward は `up: true`。
+- コード: 到達できない理由を `GET /llm/sources` の `unreachable_reason` と forward の `last_error` に出し、GUI に表示。
+  回帰テスト: `relay_probe_reports_the_reason_and_recovers_after_the_cache_expires`（503 → 回復 → `celeris/cheap` が qwen）、
+  `relay_probe_distinguishes_a_silent_listener_from_a_refused_connection`、dispatcher の `last_error` 期待値を更新。
+- ゲート: `cargo fmt --all -- --check` 0、`cargo clippy --workspace -- -D warnings` 0、`cargo test --workspace` 2116 成功 / 0 失敗 / 4 ignore、
+  GUI typecheck・lint・test（71 files / 1086 件）成功、`UPDATE_SCHEMA=1` と `gen:types` で API 型を同期。
+- 未解決: 提案 — bnode150 に入ってから localhost へ転送する 2 段 forward（`via`）は、IB 側が塞がれたら要る。
