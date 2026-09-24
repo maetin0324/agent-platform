@@ -17198,3 +17198,11 @@ Phase 114 release gateで、文書メンテナンスの新規入口Linkに44px�
 新画面を共通mobile/e2e fixtureにも追加した。固定SHAのrelease/verify成功まで本番には反映しない。
 初回Rust release gateの既存SSE/replay並行実行不一致は単独再確認・全体再実行とも成功し、
 2回目のRust gateは2057成功/0失敗/4ignoreだった。
+
+## DB 移設の完了と、自己改善タスク 2 件の失敗の記録（2026-09-24 08:1xZ）
+
+- 人が `relocate-db.sh /var/lib/celeris/celeris.sqlite3` を実行。`GET /health` の `db` は `filesystem=ext4 device=/dev/mapper/pve-vm--100--disk--0`、`GET /config` の `db` は `/var/lib/celeris/celeris.sqlite3`（30.8 MB、WAL 137 KB）。旧ファイルは `~/.local/celeris/celeris.sqlite3.moved-<ts>` に残る。
+- 本番は release `51d24a61c2ba`（Celeris 自身の配送「phase 114: Knowledge GC と文書管理」、02:11Z に GUI から昇格）。main は同一。以後の Fable 側の Phase は 115 から採番（result.json のパス）、116（失敗の可視化・やり直し・切替で run を捨てない）。
+- 失敗 A 01M38J4X53P1Y684FS42Z6R0VZ（ルーティング再設計）: 02:11Z の切替で旧インスタンスが「drain timeout; aborting the run」→ 03:27Z「lease expired; reclaimed」（89 分の run を破棄）→ 再 run 2 回はいずれも done → reviewing → 03:46Z failed（attempts 3 > max_retries 2）。通知なし。
+- 失敗 B 01M38FXZZVDNY2VQS2R2ZDWYX0（Knowledge GC）: 配送・昇格済みなのにレビューの `cargo test --workspace` が exit 101 → 再 run 2 回が「claude exited without <ws>/artifacts/result.json」（cwd が worktree、Phase 115 の原因）→ failed。通知なし。
+- 同時間帯（DB 移設前）: 「failed to renew lease」×5、「could not update the instance role this tick」×26、「delivery tick failed: database is locked」×1。
