@@ -633,8 +633,7 @@ exit 0
             Duration::from_secs(5),
         )
         .await
-        .err()
-        .expect("must fail");
+        .expect_err("must fail");
         assert!(matches!(err, LoginError::ProcessExited), "{err}");
     }
 
