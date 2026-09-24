@@ -146,6 +146,8 @@ pub fn start(
         skills: Vec::new(),
         mode: None,
         status: None,
+        features: None,
+        provenance: add::SpecProvenance::system(),
     };
     let task = add::create_support_task(store, spec, roles, genres, now)?;
 

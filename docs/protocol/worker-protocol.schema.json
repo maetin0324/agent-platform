@@ -518,6 +518,26 @@
           },
           "type": "array"
         },
+        "max_attempts": {
+          "description": "ADR-0068 D2: 継いだ試行回数の上限（根→葉の最小）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_lane": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0068 D2: 継いだ lane の上限（根→葉の最小）。"
+        },
         "node_id": {
           "description": "対象のノード（知らない id なら空文字列）。",
           "type": "string"
@@ -527,6 +547,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "review_escalate_on_fail": {
+          "description": "ADR-0068 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "review_harness": {
           "type": [
@@ -818,6 +845,15 @@
         "expires_at"
       ],
       "type": "object"
+    },
+    "Level": {
+      "description": "各軸の段階（小さな順序尺度）。",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
     },
     "MemoryContext": {
       "description": "`context.memory`（ADR-0033 D6 / Phase 24）: 案件をまたぐ記憶と、この案件の引き出し。\nどちらも `<memory_dir>/<node_id>/…` のファイルの中身（字数で切ったもの）。",
@@ -1750,6 +1786,17 @@
             "null"
           ]
         },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskRouting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0068（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。\n**これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。\n導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。"
+        },
         "skills": {
           "description": "ADR-0046 D2: このタスクに必要な能力タグ（`org_nodes` の実効 `skills` と突き合わせて担当を決める。\nADR-0046 D5 の matching）。導入前のタスクには無いので既定は空。",
           "items": {
@@ -1804,6 +1851,102 @@
       ],
       "type": "string"
     },
+    "TaskFeatureHints": {
+      "description": "ADR-0068 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の\n`create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。",
+      "properties": {
+        "ambiguity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "consequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context_size": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cross_cutting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_length": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "judgment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reversibility": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_intensity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verifiability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "TaskId": {
       "description": "タスクの一意識別子（ULID）。DESIGN §4.1。",
       "type": "string"
@@ -1838,6 +1981,38 @@
         }
       ]
     },
+    "TaskRouting": {
+      "description": "ADR-0068 D1 / D3: タスクの routing の出自（`Task.routing`）。",
+      "properties": {
+        "assignee_explicit": {
+          "description": "担当（`assignee`）を人が明示したか（false なら matching が決めた／これから決める）。",
+          "type": "boolean"
+        },
+        "dropped_assignee": {
+          "description": "LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0068 D1）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "features": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskFeatureHints"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "TaskFeatures の明示の上書き（ADR-0068 D3）。"
+        },
+        "tier_source": {
+          "$ref": "#/$defs/TierSource",
+          "default": "default"
+        }
+      },
+      "type": "object"
+    },
     "Tier": {
       "description": "DESIGN §5.4 の `WorkerHint`。",
       "enum": [
@@ -1846,6 +2021,31 @@
         "cheap"
       ],
       "type": "string"
+    },
+    "TierSource": {
+      "description": "ADR-0068 D1: `worker_hint.tier` を誰が決めたか。",
+      "oneOf": [
+        {
+          "const": "human",
+          "description": "人が明示した（API / CLI、または Console で人の発言に `tier:<lane>` があった）。policy より強い。",
+          "type": "string"
+        },
+        {
+          "const": "system",
+          "description": "celeris のコードが固定した（計画 run の frontier など）。policy は触らない。",
+          "type": "string"
+        },
+        {
+          "const": "hint",
+          "description": "LLM（CoS・計画・委譲）が書いた。**ヒントとして記録するだけ**で、lane は policy が決める。",
+          "type": "string"
+        },
+        {
+          "const": "default",
+          "description": "誰も明示していない（役割・分野・親・全体の既定）。lane は policy が決める。",
+          "type": "string"
+        }
+      ]
     },
     "Usage": {
       "description": "DESIGN §5.3 の `usage`。取れない項目は省略可。\n\nADR-0061（Phase 104）: harness routing 基盤で `cache_read_tokens` / `cache_creation_tokens` /\n`cost_usd` を追加した（追加のみ。既存の `input_tokens` / `output_tokens` の意味は変えない）。\n`Eq` は落とした（`cost_usd: Option<f64>` は `Eq` を持てない）。",

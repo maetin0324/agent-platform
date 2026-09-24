@@ -5,8 +5,7 @@ use std::collections::{HashMap, HashSet};
 use schemars::JsonSchema;
 use serde::Serialize;
 use task_core::{
-    ArtifactRef, Check, Event, Status, Task, TaskId, TaskKind, TaskStore, WorkerHint,
-    WorkspaceSpec,
+    ArtifactRef, Check, Event, Status, Task, TaskId, TaskKind, TaskStore, WorkerHint, WorkspaceSpec,
 };
 use time::OffsetDateTime;
 
@@ -619,6 +618,7 @@ mod tests {
     fn sample_task(kind: TaskKind, status: Status) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),

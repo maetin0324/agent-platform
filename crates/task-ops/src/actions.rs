@@ -110,6 +110,9 @@ pub fn execute(
     now: OffsetDateTime,
 ) -> Result<Option<ActionsOutcome>, OpsError> {
     let source = source_request_context(store, task)?;
+    // ADR-0068 D1: 人の明示（`@<node>` / `tier:<lane>`）を確かめる材料は、この対話タスクのきっかけに
+    // なった**人の発言そのもの**（`task.objective`）。CoS の自己申告は信じない。
+    let human_text = task.objective.clone();
     if !store.console_action_run_claim(run_id, task.id, now)? {
         return Ok(None);
     }
@@ -134,7 +137,16 @@ pub fn execute(
                 acceptance.push("元の依頼と成果の範囲が整合していること。修正・実装を依頼された場合、調査報告や提案だけでは合格にせず、実際の変更と検証の証拠を確認する。人が明示的に調査だけを求めた場合はその範囲を守る。分割した中間成果を依頼全体の完了として扱わない。".into());
             }
         }
-        match execute_one(store, org, roles, genres, known_clusters, &action, now) {
+        match execute_one(
+            store,
+            org,
+            roles,
+            genres,
+            known_clusters,
+            &action,
+            &human_text,
+            now,
+        ) {
             Ok(executed) => outcome.executed.push(executed),
             Err(reason) => outcome.failed.push(FailedAction {
                 kind: action.kind().to_string(),
@@ -167,6 +179,7 @@ fn source_request_context(store: &dyn TaskStore, task: &Task) -> Result<String, 
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_one(
     store: &dyn TaskStore,
     org: &[OrgNode],
@@ -174,10 +187,12 @@ fn execute_one(
     genres: &[task_core::GenreSpec],
     known_clusters: &[String],
     action: &ConsoleAction,
+    human_text: &str,
     now: OffsetDateTime,
 ) -> Result<ExecutedAction, String> {
     match action {
         ConsoleAction::CreateTask {
+            features,
             tier,
             title,
             objective,
@@ -208,6 +223,8 @@ fn execute_one(
             assignee,
             workspace,
             *tier,
+            *features,
+            human_text,
             now,
         ),
         ConsoleAction::ProposeProject {
@@ -248,8 +265,21 @@ fn create_task_action(
     assignee: &Option<String>,
     workspace: &Option<Box<WorkspaceSpec>>,
     tier: Option<task_core::Tier>,
+    features: Option<task_core::TaskFeatureHints>,
+    human_text: &str,
     now: OffsetDateTime,
 ) -> Result<ExecutedAction, String> {
+    // ADR-0068 D1: CoS（LLM）が書いた担当は、人の発言に `@<node>` があるときだけ採る。
+    // それ以外は捨てて `routing.dropped_assignee` に残し、担当は matching（ADR-0046 D5）が決める。
+    let (assignee, dropped_assignee) =
+        match assignee.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            Some(a) if human_mentions_node(human_text, a) => (Some(a.to_string()), None),
+            Some(a) => (None, Some(a.to_string())),
+            None => (None, None),
+        };
+    let assignee = &assignee;
+    // ADR-0068 D1: tier も同じ。人の発言に `tier:<lane>` があるときだけ人の明示、他はヒント。
+    let human_explicit_tier = tier.is_some_and(|t| human_mentions_tier(human_text, t));
     if acceptance.is_empty() {
         return Err(
             "create_task には acceptance が 1 つ以上要る（人が読める受け入れ条件を書くこと）"
@@ -356,16 +386,56 @@ fn create_task_action(
         category: None,
         // ADR-0048 D3: Console から（CoS の actions 経由で）作るタスクは人が Go 済みとして ready。
         status: Some(Status::Ready),
+        features,
+        provenance: crate::add::SpecProvenance {
+            origin: crate::add::SpecOrigin::Agent,
+            human_explicit_tier,
+            dropped_assignee: dropped_assignee.clone(),
+        },
     };
     let task = crate::add::create_task_with_roles(store, spec, roles, genres, now)
         .map_err(|e| e.to_string())?;
+    let note = match &dropped_assignee {
+        Some(a) => format!(
+            "（担当の指定 {a} は人の明示ではないので使わず、celeris が skills と harness から決定的に選びます）"
+        ),
+        None => String::new(),
+    };
     Ok(ExecutedAction {
         kind: "create_task",
-        summary: format!("→ タスクを作りました: {}", task.title),
+        summary: format!("→ タスクを作りました: {}{note}", task.title),
         task_id: Some(task.id),
         project_id: task.project_id,
         milestone_id: task.milestone_id,
     })
+}
+
+/// ADR-0068 D1: 人の発言が `@<node>` でそのノードを名指ししているか（決定的な字句判定。
+/// `@engineering` は `@engineering-x` にはマッチしない）。
+pub fn human_mentions_node(text: &str, node: &str) -> bool {
+    if node.is_empty() {
+        return false;
+    }
+    let needle = format!("@{node}");
+    text.match_indices(&needle).any(|(i, _)| {
+        text[i + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    })
+}
+
+/// ADR-0068 D1: 人の発言が `tier:<lane>` / `tier=<lane>` でその lane を明示しているか。
+pub fn human_mentions_tier(text: &str, tier: task_core::Tier) -> bool {
+    let name = match tier {
+        task_core::Tier::Frontier => "frontier",
+        task_core::Tier::Standard => "standard",
+        task_core::Tier::Cheap => "cheap",
+    };
+    let lower = text.to_lowercase();
+    [":", "=", ": ", " = ", "："]
+        .iter()
+        .any(|sep| lower.contains(&format!("tier{sep}{name}")))
 }
 
 fn parse_mode(raw: &str) -> Option<task_core::TaskMode> {
@@ -520,6 +590,7 @@ mod tests {
         use task_core::{Budget, TaskId, TaskKind, Tier, WorkerHint, WorkspaceSpec};
         let t = now();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),
@@ -644,6 +715,11 @@ mod tests {
         let created = outcome.executed[0].task_id.expect("task id");
         let stored = store.get(created).unwrap().expect("task exists");
         assert_eq!(stored.worker_hint.tier, task_core::Tier::Frontier);
+        // ADR-0068 D1: CoS の tier はヒントとして記録するだけ（lane はディスパッチ時に policy が決める）。
+        assert_eq!(
+            stored.routing.as_ref().map(|r| r.tier_source),
+            Some(task_core::TierSource::Hint)
+        );
         assert_eq!(stored.title, "直す");
         assert_eq!(stored.status, Status::Ready);
         assert_eq!(stored.genre.as_deref(), Some("coding"));
@@ -758,7 +834,11 @@ mod tests {
         .unwrap();
         assert!(outcome.executed.is_empty());
         assert_eq!(outcome.failed.len(), 1);
-        assert!(outcome.failed[0].reason.contains("unknown cluster"), "{:?}", outcome.failed);
+        assert!(
+            outcome.failed[0].reason.contains("unknown cluster"),
+            "{:?}",
+            outcome.failed
+        );
         assert!(store.list(None).unwrap().is_empty(), "何も作らない");
     }
 
@@ -813,7 +893,9 @@ mod tests {
                 updated_at: now_t,
             },
         ];
-        let task = cos_task();
+        // ADR-0068 D1: 担当の指定が効くのは人が `@<node>` で名指ししたときだけ。
+        let mut task = cos_task();
+        task.objective = "sirius で計測して。@web-research に頼んで".into();
         let parsed = parse(
             r#"{"actions":[{"type":"create_task","title":"sirius で計測","objective":"計測して",
                "acceptance":["結果が分かる"],"assignee":"web-research",
@@ -847,6 +929,104 @@ mod tests {
             outcome.failed
         );
         assert!(store.list(None).unwrap().is_empty(), "何も作らない");
+    }
+
+    /// ADR-0068 D1（Phase 114）: CoS（LLM）が書いた `assignee` は、人の発言に `@<node>` が無ければ
+    /// 捨てられ（`routing.dropped_assignee` と返事の要約に残る）、担当は matching に任される。
+    #[test]
+    fn cos_supplied_assignee_is_dropped_unless_the_human_named_it() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        seed_engineering(&store);
+        let json = r#"{"actions":[{"type":"create_task","title":"直す","objective":"直して",
+               "acceptance":["直った"],"assignee":"engineering","tier":"frontier",
+               "features":{"judgment":"low","verifiability":"high"}}]}"#;
+        let parsed = parse(json);
+        let task = cos_task(); // 人の発言は "o"（名指し無し）
+        let outcome = execute(
+            &store,
+            &[],
+            &[],
+            &[],
+            &[],
+            &task,
+            "run-drop",
+            &parsed.0,
+            &parsed.1,
+            now(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert!(
+            outcome.executed[0]
+                .summary
+                .contains("担当の指定 engineering は人の明示ではない"),
+            "{}",
+            outcome.executed[0].summary
+        );
+        let stored = store
+            .get(outcome.executed[0].task_id.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.assignee, None, "matching に任せる");
+        let routing = stored.routing.expect("routing");
+        assert_eq!(routing.dropped_assignee.as_deref(), Some("engineering"));
+        assert!(!routing.assignee_explicit);
+        assert_eq!(routing.tier_source, task_core::TierSource::Hint);
+        let features = routing.features.expect("features hints");
+        assert_eq!(features.judgment, Some(task_core::Level::Low));
+
+        // 人が `@engineering` と `tier:frontier` を書いていれば、その指定に従う。
+        let mut task = cos_task();
+        task.objective = "@engineering に tier:frontier で頼んで".into();
+        let outcome = execute(
+            &store,
+            &[],
+            &[],
+            &[],
+            &[],
+            &task,
+            "run-keep",
+            &parsed.0,
+            &parsed.1,
+            now(),
+        )
+        .unwrap()
+        .unwrap();
+        let stored = store
+            .get(outcome.executed[0].task_id.unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.assignee.as_deref(), Some("engineering"));
+        let routing = stored.routing.expect("routing");
+        assert_eq!(routing.dropped_assignee, None);
+        assert!(routing.assignee_explicit);
+        assert_eq!(routing.tier_source, task_core::TierSource::Human);
+        assert!(!outcome.executed[0].summary.contains("担当の指定"));
+    }
+
+    #[test]
+    fn human_mentions_are_matched_on_word_boundaries() {
+        assert!(human_mentions_node("@engineering にお願い", "engineering"));
+        assert!(human_mentions_node("担当は @engineering", "engineering"));
+        assert!(!human_mentions_node(
+            "@engineering-x にお願い",
+            "engineering"
+        ));
+        assert!(!human_mentions_node("engineering にお願い", "engineering"));
+        assert!(!human_mentions_node("@x", ""));
+        assert!(human_mentions_tier(
+            "tier:cheap でいい",
+            task_core::Tier::Cheap
+        ));
+        assert!(human_mentions_tier(
+            "Tier=Frontier",
+            task_core::Tier::Frontier
+        ));
+        assert!(!human_mentions_tier(
+            "frontier で",
+            task_core::Tier::Frontier
+        ));
     }
 
     /// 実機 2026-09-21: CoS が tier と mode の両方に `standard` を書き、正しい create_task
@@ -1048,9 +1228,20 @@ mod tests {
         let bad = parse(
             r#"{"actions":[{"type":"add_milestone","project":"01ZZZZZZZZZZZZZZZZZZZZZZZZ","title":"t"}]}"#,
         );
-        let outcome = execute(&store, &[], &[], &[], &[], &task, "run-2", &bad.0, &bad.1, now())
-            .unwrap()
-            .unwrap();
+        let outcome = execute(
+            &store,
+            &[],
+            &[],
+            &[],
+            &[],
+            &task,
+            "run-2",
+            &bad.0,
+            &bad.1,
+            now(),
+        )
+        .unwrap()
+        .unwrap();
         assert!(outcome.executed.is_empty());
         assert!(outcome.failed[0].reason.contains("does not exist"));
     }

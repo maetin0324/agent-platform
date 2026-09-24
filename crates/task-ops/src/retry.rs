@@ -69,6 +69,8 @@ pub fn retry_task(
     };
 
     let new_task = Task {
+        // ADR-0068: やり直しは元のタスクの routing の出自を引き継ぐ。
+        routing: original.routing.clone(),
         // ADR-0043 D2: やり直しは元のタスクと同じリポジトリで作業する。
         repos: original.repos.clone(),
         id: TaskId::new(),
@@ -163,6 +165,8 @@ mod tests {
             labels: Vec::new(),
             category: None,
             status: None,
+            features: None,
+            provenance: crate::add::SpecProvenance::default(),
         }
     }
 
@@ -191,6 +195,7 @@ mod tests {
     fn raw_task(status: Status, depends_on: Vec<TaskId>, conversation: Option<MessageId>) -> Task {
         let t = now();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),
@@ -211,7 +216,7 @@ mod tests {
                 path: "spec.md".to_string(),
                 sha256: "abc".to_string(),
                 kind: "doc".to_string(),
-            declared: true,
+                declared: true,
             }],
             depends_on,
             status,

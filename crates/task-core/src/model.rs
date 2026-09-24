@@ -209,12 +209,19 @@ pub struct Lease {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Check {
-    Command { cmd: String, expect_exit: i32 },
-    ArtifactExists { name: String },
+    Command {
+        cmd: String,
+        expect_exit: i32,
+    },
+    ArtifactExists {
+        name: String,
+    },
     /// ADR-0067 D2: 知識ベースのページ参照（`task_core::knowledge::page_path` と同じ形。KB の根からの
     /// 相対、`.md`、`..` 不可。実在の検証は組み立て時には行わない — `Check::ArtifactExists` と同様、
     /// 人が確認するときに知識ベース側で気付く）。
-    KnowledgePage { path: String },
+    KnowledgePage {
+        path: String,
+    },
     Reviewer,
     Human,
 }
@@ -261,10 +268,7 @@ pub fn validate_human_checks_have_deliverable(acceptance: &[Criterion]) -> Resul
     if has_deliverable {
         Ok(())
     } else {
-        Err(
-            "人が確認する成果物が GUI から見える場所（artifacts か知識ベース）に無い"
-                .to_string(),
-        )
+        Err("人が確認する成果物が GUI から見える場所（artifacts か知識ベース）に無い".to_string())
     }
 }
 
@@ -515,6 +519,49 @@ pub struct Task {
     /// **DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<crate::message::MessageId>,
+    /// ADR-0068（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。
+    /// **これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。
+    /// 導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<TaskRouting>,
+}
+
+/// ADR-0068 D1: `worker_hint.tier` を誰が決めたか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TierSource {
+    /// 人が明示した（API / CLI、または Console で人の発言に `tier:<lane>` があった）。policy より強い。
+    Human,
+    /// celeris のコードが固定した（計画 run の frontier など）。policy は触らない。
+    System,
+    /// LLM（CoS・計画・委譲）が書いた。**ヒントとして記録するだけ**で、lane は policy が決める。
+    Hint,
+    /// 誰も明示していない（役割・分野・親・全体の既定）。lane は policy が決める。
+    #[default]
+    Default,
+}
+
+impl TierSource {
+    /// lane を policy が決めるか（人の明示・System は決めない）。
+    pub fn policy_decides(self) -> bool {
+        matches!(self, TierSource::Hint | TierSource::Default)
+    }
+}
+
+/// ADR-0068 D1 / D3: タスクの routing の出自（`Task.routing`）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TaskRouting {
+    #[serde(default)]
+    pub tier_source: TierSource,
+    /// 担当（`assignee`）を人が明示したか（false なら matching が決めた／これから決める）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub assignee_explicit: bool,
+    /// LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0068 D1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_assignee: Option<String>,
+    /// TaskFeatures の明示の上書き（ADR-0068 D3）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<crate::model_policy::TaskFeatureHints>,
 }
 
 /// ADR-0016 D1: `[[roles]]` の 1 行。役割ごとの既定（タスクの値 > 役割の既定 > 全体の既定）とプロンプトに前置きする指示文。
@@ -966,6 +1013,13 @@ pub enum Event {
         /// 消したパス（作業場所〈`<workspace_root>/<task_id>`〉からの相対。例: `repos/benchfs/target`）。
         removed: Vec<String>,
     },
+    /// ADR-0068 D5（Phase 114）: この run の routing の監査記録（担当・harness・lane・model・features・
+    /// 当たった規則・policy の版・エスカレーション）。同じ `run_id` の `WorkerStarted` の直後に 1 件。
+    /// 状態は変えない（`replay` は無視する）。
+    RoutingDecided {
+        run_id: String,
+        record: Box<crate::model_policy::RoutingRecord>,
+    },
 }
 
 impl Event {
@@ -1176,10 +1230,9 @@ mod tests {
     /// Phase 98 までの JSON と 1 バイトも変わらない。
     #[test]
     fn the_remote_workspace_mode_defaults_to_worktree_and_stays_out_of_the_json_when_omitted() {
-        let plain: WorkspaceSpec = serde_json::from_str(
-            r#"{"kind":"remote","cluster":"pegasus","path":"/work/x"}"#,
-        )
-        .expect("parse");
+        let plain: WorkspaceSpec =
+            serde_json::from_str(r#"{"kind":"remote","cluster":"pegasus","path":"/work/x"}"#)
+                .expect("parse");
         assert_eq!(
             plain,
             WorkspaceSpec::Remote {
@@ -1188,7 +1241,11 @@ mod tests {
                 mode: None,
             }
         );
-        assert_eq!(plain.remote_mode(), WorkspaceMode::Worktree, "既定は worktree");
+        assert_eq!(
+            plain.remote_mode(),
+            WorkspaceMode::Worktree,
+            "既定は worktree"
+        );
         assert_eq!(
             serde_json::to_string(&plain).expect("json"),
             r#"{"kind":"remote","cluster":"pegasus","path":"/work/x"}"#
@@ -1207,7 +1264,11 @@ mod tests {
             }
         );
         assert_eq!(shared.remote_mode(), WorkspaceMode::Shared);
-        assert!(serde_json::to_string(&shared).expect("json").contains(r#""mode":"shared""#));
+        assert!(
+            serde_json::to_string(&shared)
+                .expect("json")
+                .contains(r#""mode":"shared""#)
+        );
 
         // ADR-0059 D6: `path` は省略可（省略すると空文字列。celeris が実効 `work_dir` から解決する）。
         let no_path: WorkspaceSpec =

@@ -41,6 +41,7 @@ fn main() {
 
     let now = time::OffsetDateTime::now_utc();
     let task = Task {
+        routing: None,
         mode: Default::default(),
         skills: Vec::new(),
         repos: Vec::new(),

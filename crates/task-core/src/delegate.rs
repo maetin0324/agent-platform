@@ -337,8 +337,13 @@ impl WorkspaceContext<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedChildDefaults {
     pub genre: Option<String>,
-    /// ADR-0033 D4: 子に記録する担当（渡した `assignee` が組織にあればその id、無ければ `None`）。
+    /// 子に記録する担当。ADR-0068 D1（Phase 114）で**常に `None`**（LLM が書いた担当は捨て、
+    /// ADR-0046 D5 の matching が決める）。
     pub assignee: Option<String>,
+    /// ADR-0068 D1: LLM（計画・委譲）が書いたが捨てた担当（監査用。`Task.routing.dropped_assignee`）。
+    pub dropped_assignee: Option<String>,
+    /// ADR-0068 D1: `tier` の出自（計画・委譲が書いた tier はヒント）。
+    pub tier_source: crate::model::TierSource,
     pub tier: Tier,
     pub adapter: Option<String>,
     pub max_turns: u32,
@@ -365,22 +370,25 @@ pub fn resolve_child_defaults(
         assignee,
     } = child;
     let role = role_id.and_then(|r| RoleSpec::find(roles, r));
-    // ADR-0033 D4: 担当は組織にある id だけ記録する（知らない id は「誰の仕事か」を表さない）。
-    let assignee = assignee
-        .filter(|a| org.iter().any(|n| &n.id == a))
+    // ADR-0068 D1（Phase 114）: 計画・委譲（LLM）が書いた担当は**捨てる**（ADR-0046 D5 の「LLM が
+    // 人選する経路は無くす」を実装で強制する。以前は組織にある id ならそのまま子に記録していた）。
+    // 捨てた値は監査のために `dropped_assignee` に残す。担当はディスパッチャの matching が決める。
+    let _ = org;
+    let dropped_assignee = assignee
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
         .map(str::to_string);
-    // 分野: 明示 > `role` が一意に属する分野 > 担当の分野 > 親の分野。`role` を書いたときは
-    // その役割の既定が勝つので、担当の分野は「role が無いとき」にだけ効く（ADR-0016 D1 の優先順）。
+    let assignee: Option<String> = None;
+    // 分野: 明示 > `role` が一意に属する分野 > 親の分野。
     let genre = explicit_genre
         .map(str::to_string)
         .or_else(|| role_id.and_then(|r| GenreSpec::unique_for_role(genres, r)))
-        .or_else(|| {
-            assignee
-                .as_deref()
-                .and_then(|a| org.iter().find(|n| n.id == a))
-                .and_then(|n| n.genre.clone())
-        })
         .or_else(|| parent.genre.clone());
+    let tier_source = if task_tier.is_some() {
+        crate::model::TierSource::Hint
+    } else {
+        crate::model::TierSource::Default
+    };
     let genre_role = genre
         .as_deref()
         .and_then(|g| GenreSpec::find(genres, g))
@@ -405,6 +413,8 @@ pub fn resolve_child_defaults(
             .unwrap_or(parent.budget.max_wall_secs),
         genre,
         assignee,
+        dropped_assignee,
+        tier_source,
     }
 }
 
@@ -530,6 +540,12 @@ pub fn materialize_delegated_logging(
                 depends_on,
                 status: Status::Draft,
                 priority: parent.priority,
+                // ADR-0068 D1: 委譲の子は lane policy の対象（tier はヒント、捨てた担当を記録）。
+                routing: Some(crate::model::TaskRouting {
+                    tier_source: defaults.tier_source,
+                    dropped_assignee: defaults.dropped_assignee.clone(),
+                    ..Default::default()
+                }),
                 worker_hint: WorkerHint {
                     tier: defaults.tier,
                     adapter: defaults.adapter,
@@ -606,6 +622,7 @@ mod tests {
     fn parent() -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),
@@ -1010,10 +1027,10 @@ mod tests {
         assert_eq!(out[0].budget.max_turns, 20);
     }
 
-    /// ADR-0033 D4（Phase 24）: `assignee` は「誰の仕事か」として記録され、**`role` が無いときだけ**
-    /// そのノードの分野が既定（tier / adapter / 予算）の解決に効く（ADR-0016 D1 の優先順に合わせる）。
+    /// ADR-0033 D4（Phase 24）→ ADR-0068 D1（Phase 114）: 委譲（LLM）が書いた `assignee` は**捨て**、
+    /// `routing.dropped_assignee` に残す。担当の分野も既定の解決に使わない（担当は matching が決める）。
     #[test]
-    fn materialize_records_the_assignee_and_uses_its_genre_only_when_no_role_is_given() {
+    fn materialize_drops_the_delegated_assignee_and_records_it() {
         use crate::org::{OrgKind, OrgNode};
         let now = OffsetDateTime::now_utc();
         let node = |id: &str, genre_id: Option<&str>| OrgNode {
@@ -1067,11 +1084,22 @@ mod tests {
             WorkspaceContext::default(),
             now,
         );
-        assert_eq!(out[0].assignee.as_deref(), Some("research-survey"));
-        assert_eq!(out[0].genre.as_deref(), Some("literature"));
-        assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("paperqa"));
-        assert_eq!(out[0].worker_hint.tier, Tier::Cheap);
-        assert_eq!(out[0].budget.max_turns, 5);
+        assert_eq!(out[0].assignee, None);
+        assert_eq!(
+            out[0]
+                .routing
+                .as_ref()
+                .and_then(|r| r.dropped_assignee.as_deref()),
+            Some("research-survey")
+        );
+        assert_eq!(
+            out[0].genre, p.genre,
+            "the dropped assignee's genre is not used"
+        );
+        assert_eq!(
+            out[0].routing.as_ref().map(|r| r.tier_source),
+            Some(crate::model::TierSource::Default)
+        );
 
         // 2. assignee + role: tier / adapter / 予算は role が勝ち、assignee は担当としてだけ残る。
         let mut t = dt("survey", vec![]);
@@ -1087,7 +1115,7 @@ mod tests {
             WorkspaceContext::default(),
             now,
         );
-        assert_eq!(out[0].assignee.as_deref(), Some("research-survey"));
+        assert_eq!(out[0].assignee, None);
         assert_eq!(out[0].worker_hint.adapter.as_deref(), Some("claude-code"));
         assert_eq!(out[0].worker_hint.tier, Tier::Standard);
 
@@ -1104,7 +1132,7 @@ mod tests {
             WorkspaceContext::default(),
             now,
         );
-        assert_eq!(out[0].assignee.as_deref(), Some("research-data"));
+        assert_eq!(out[0].assignee, None);
         assert_eq!(out[0].genre, p.genre);
         let mut t = dt("ghost", vec![]);
         t.assignee = Some("nobody".into());
@@ -1193,11 +1221,11 @@ mod tests {
         }
     }
 
-    /// ADR-0062 B2（Phase 107）: 案件から継いだ（明示していない）Remote workspace は、担当が
-    /// `cluster:<id>` を持たなければタスク専用の Local（`workspace_root/<task_id>`）に落ちる。
-    /// 道具を持つ担当なら Remote のまま。明示した子（`t.workspace = Some(..)`）は落とさない。
+    /// ADR-0062 B2（Phase 107）→ ADR-0068 D1（Phase 114）: 委譲が書いた担当は捨てるので、案件から継いだ
+    /// Remote workspace は担当未定のまま Remote に残る（matching が `cluster:<id>` を持つノードだけを
+    /// 候補にする）。明示した子（`t.workspace = Some(..)`）も従来どおり落とさない。
     #[test]
-    fn inherited_remote_workspace_downgrades_to_local_when_the_assignee_lacks_the_cluster_tool() {
+    fn inherited_remote_workspace_stays_remote_because_the_delegated_assignee_is_dropped() {
         let p = parent();
         let now = OffsetDateTime::now_utc();
         let project = WorkspaceSpec::Remote {
@@ -1215,7 +1243,7 @@ mod tests {
             org_node_with_tools("cluster-hpc", &["cluster:sirius"]),
         ];
 
-        // 担当が cluster:sirius を持たない → Local(<task_id>) に落ちる。ログ用の reason も出る。
+        // 以前は Local(<task_id>) に落ちた。今は担当を捨てるので Remote のまま、reason も出ない。
         let mut without_tool = dt("survey", vec![]);
         without_tool.assignee = Some("web-research".into());
         let mut reasons: Vec<(TaskId, String)> = Vec::new();
@@ -1230,16 +1258,8 @@ mod tests {
             now,
             &mut |id, reason| reasons.push((id, reason.to_string())),
         );
-        assert_eq!(
-            out[0].workspace,
-            WorkspaceSpec::Local {
-                path: PathBuf::from(out[0].id.to_string()),
-                mode: None,
-            }
-        );
-        assert_eq!(reasons.len(), 1);
-        assert_eq!(reasons[0].0, out[0].id);
-        assert!(reasons[0].1.contains("cluster:sirius"), "{}", reasons[0].1);
+        assert_eq!(out[0].workspace, project);
+        assert!(reasons.is_empty(), "{reasons:?}");
 
         // 担当が cluster:sirius を持つ → Remote のまま、reason は出ない。
         let mut with_tool = dt("compute", vec![]);
@@ -1263,9 +1283,44 @@ mod tests {
         let mut explicit_child = dt("explicit", vec![]);
         explicit_child.assignee = Some("web-research".into());
         explicit_child.workspace = Some(project.clone());
-        let out3 =
-            materialize_delegated(&p, &[explicit_child], &[0], &org, &[], &[], ws, now);
+        let out3 = materialize_delegated(&p, &[explicit_child], &[0], &org, &[], &[], ws, now);
         assert_eq!(out3[0].workspace, project);
+    }
+
+    /// ADR-0062 B2 の降格そのもの（担当が決まっている経路のための関数。ADR-0068 以降、計画・委譲は
+    /// 担当を渡さないのでここには `None` が来るが、規則自体は保つ）。
+    #[test]
+    fn downgrade_rule_still_applies_when_an_assignee_is_known() {
+        let project = WorkspaceSpec::Remote {
+            cluster: "sirius".into(),
+            path: PathBuf::from("/work/x"),
+            mode: None,
+        };
+        let org = vec![
+            org_node_with_tools("web-research", &["tavily"]),
+            org_node_with_tools("cluster-hpc", &["cluster:sirius"]),
+        ];
+        let id = TaskId::new();
+        let (ws, reason) = downgrade_inherited_remote_if_needed(
+            project.clone(),
+            false,
+            Some("web-research"),
+            &org,
+            id,
+        );
+        assert!(matches!(ws, WorkspaceSpec::Local { .. }));
+        assert!(reason.is_some_and(|r| r.contains("cluster:sirius")));
+        let (ws, reason) = downgrade_inherited_remote_if_needed(
+            project.clone(),
+            false,
+            Some("cluster-hpc"),
+            &org,
+            id,
+        );
+        assert_eq!(ws, project);
+        assert!(reason.is_none());
+        let (ws, _) = downgrade_inherited_remote_if_needed(project.clone(), false, None, &org, id);
+        assert_eq!(ws, project);
     }
 
     /// ADR-0039 D5: `~` は `$HOME` で展開する。`Remote` の `~` はクラスタ側の home なので触らない。

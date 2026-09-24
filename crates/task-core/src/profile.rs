@@ -10,6 +10,7 @@
 //! | `run` / `model.tier` / `harnesses.default` / `review.*` | **子が勝つ** |
 //! | `model.allowed_tiers` | **交わり**（空の親は制限なし） |
 //! | `policy` | 根→葉の順に**連結**（そのまま並べる） |
+//! | `budget.max_lane` / `budget.max_attempts` | **最小**（最も厳しい値が勝つ。ADR-0068 D2） |
 //!
 //! 最後に**タスクの上書き**（`EffectiveProfile::with_task`）。ADR-0033 D2 の
 //! 「task > role > assignee > genre」はこれに置き換わる。
@@ -98,11 +99,34 @@ pub struct ReviewPrefs {
     pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
+    /// ADR-0068 D2 / D6（Phase 114）: レビュー不合格のやり直しで lane を 1 段上げてよいか
+    /// （`false` なら上げない。省略時は上げてよい）。子が勝つ。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate_on_fail: Option<bool>,
 }
 
 impl ReviewPrefs {
     pub fn is_empty(&self) -> bool {
-        self.harness.is_none() && self.tier.is_none()
+        self.harness.is_none() && self.tier.is_none() && self.escalate_on_fail.is_none()
+    }
+}
+
+/// ADR-0068 D2（Phase 114）: そのノード以下の予算の天井。どちらも**最も厳しい値が勝つ**
+/// （根→葉の最小。子は緩められない）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetPrefs {
+    /// 使ってよい最も高い lane（`allowed_tiers` と合わせて天井になる）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lane: Option<Tier>,
+    /// 1 タスクあたりの試行回数の上限（エスカレーション込み。タスクの `max_retries + 1` も超えない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+}
+
+impl BudgetPrefs {
+    pub fn is_empty(&self) -> bool {
+        self.max_lane.is_none() && self.max_attempts.is_none()
     }
 }
 
@@ -155,6 +179,9 @@ pub struct Profile {
     pub review: ReviewPrefs,
     #[serde(default, skip_serializing_if = "Permissions::is_empty")]
     pub permissions: Permissions,
+    /// ADR-0068 D2（Phase 114）: 予算の天井（最も厳しい値が勝つ）。
+    #[serde(default, skip_serializing_if = "BudgetPrefs::is_empty")]
+    pub budget: BudgetPrefs,
 }
 
 impl Profile {
@@ -171,6 +198,7 @@ impl Profile {
             && self.policy.is_empty()
             && self.review.is_empty()
             && self.permissions.is_empty()
+            && self.budget.is_empty()
     }
 }
 
@@ -212,9 +240,26 @@ pub struct EffectiveProfile {
     pub review_tier: Option<Tier>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvals: Vec<String>,
+    /// ADR-0068 D2: 継いだ lane の上限（根→葉の最小）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lane: Option<Tier>,
+    /// ADR-0068 D2: 継いだ試行回数の上限（根→葉の最小）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<u32>,
+    /// ADR-0068 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_escalate_on_fail: Option<bool>,
 }
 
 impl EffectiveProfile {
+    /// ADR-0068 D2: このノードの lane の天井（`allowed_tiers` と `budget.max_lane`）。
+    pub fn lane_ceiling(&self) -> crate::model_policy::LaneCeiling {
+        crate::model_policy::LaneCeiling {
+            allowed: self.allowed_tiers.clone(),
+            max_lane: self.max_lane,
+        }
+    }
+
     /// 継承した結果が「何も無い」か（`chain` と `node_id` 以外が空）。Phase 59 より前の組織
     /// （profile を 1 つも書いていない）では真になり、前置きに profile の節を出さない。
     pub fn is_trivial(&self) -> bool {
@@ -232,6 +277,9 @@ impl EffectiveProfile {
             && self.review_harness.is_none()
             && self.review_tier.is_none()
             && self.approvals.is_empty()
+            && self.max_lane.is_none()
+            && self.max_attempts.is_none()
+            && self.review_escalate_on_fail.is_none()
     }
 
     /// そのハーネスをこのノードが受けられるか（ADR-0046 D3 / D5）。`harnesses_allowed` が空なら
@@ -344,6 +392,24 @@ pub fn resolve(nodes: &[OrgNode], node_id: &str) -> EffectiveProfile {
         }
         if p.review.tier.is_some() {
             out.review_tier = p.review.tier;
+        }
+        if p.review.escalate_on_fail.is_some() {
+            out.review_escalate_on_fail = p.review.escalate_on_fail;
+        }
+        // ADR-0068 D2: 予算の天井は最も厳しい値が勝つ（子は緩められない）。
+        if let Some(max) = p.budget.max_lane {
+            out.max_lane = Some(match out.max_lane {
+                Some(cur)
+                    if crate::model_policy::lane_rank(cur)
+                        <= crate::model_policy::lane_rank(max) =>
+                {
+                    cur
+                }
+                _ => max,
+            });
+        }
+        if let Some(max) = p.budget.max_attempts {
+            out.max_attempts = Some(out.max_attempts.map_or(max, |cur| cur.min(max)));
         }
         // 交わり（空は制限なし）。
         if !p.model.allowed_tiers.is_empty() {
@@ -541,6 +607,7 @@ mod tests {
                     },
                     run: Some(ProfileRun::Container),
                     review: ReviewPrefs {
+                        escalate_on_fail: None,
                         harness: Some("reviewer".into()),
                         tier: Some(Tier::Cheap),
                     },
@@ -606,7 +673,10 @@ mod tests {
                 },
             ),
         ];
-        assert_eq!(resolve(&org, "cos").skills_mounts, vec!["writing".to_string()]);
+        assert_eq!(
+            resolve(&org, "cos").skills_mounts,
+            vec!["writing".to_string()]
+        );
         assert_eq!(
             resolve(&org, "engineering").skills_mounts,
             vec!["writing".to_string(), "rust-review".to_string()]
@@ -707,6 +777,7 @@ mod tests {
         use crate::model::{Budget, Status, TaskKind, WorkerHint, WorkspaceSpec};
         let now = OffsetDateTime::now_utc();
         crate::model::Task {
+            routing: None,
             id: crate::model::TaskId::new(),
             parent_id: None,
             kind: TaskKind::Execute,
@@ -757,6 +828,7 @@ mod tests {
                 default: Some("coding".into()),
             },
             review: ReviewPrefs {
+                escalate_on_fail: None,
                 harness: Some("conversation".into()),
                 tier: None,
             },
@@ -794,6 +866,7 @@ mod tests {
         ));
         let bad_review = Profile {
             review: ReviewPrefs {
+                escalate_on_fail: None,
                 harness: Some("ghost".into()),
                 tier: None,
             },
@@ -849,5 +922,43 @@ mod tests {
         assert!(serde_json::from_str::<Profile>(r#"{"run":"bogus"}"#).is_err());
         assert!(serde_json::from_str::<Profile>(r#"{"run":"container"}"#).is_ok());
         assert!(serde_json::from_str::<Profile>(r#"{"model":{"tier":"bogus"}}"#).is_err());
+    }
+
+    /// ADR-0068 D2（Phase 114）: 予算の天井は最も厳しい値が勝ち、`allowed_tiers` と合わせて
+    /// lane の天井になる。導入前の profile（`budget` / `escalate_on_fail` 無し）はそのまま読める。
+    #[test]
+    fn budget_ceiling_takes_the_strictest_value_and_old_profiles_parse() {
+        let mut nodes = tree();
+        nodes[0].profile.budget = BudgetPrefs {
+            max_lane: Some(Tier::Standard),
+            max_attempts: Some(3),
+        };
+        // 子が緩めようとしても効かない
+        nodes[1].profile.budget = BudgetPrefs {
+            max_lane: Some(Tier::Frontier),
+            max_attempts: Some(5),
+        };
+        nodes[1].profile.review.escalate_on_fail = Some(false);
+        let eff = resolve(&nodes, "engineering");
+        assert_eq!(eff.max_lane, Some(Tier::Standard));
+        assert_eq!(eff.max_attempts, Some(3));
+        assert_eq!(eff.review_escalate_on_fail, Some(false));
+        let ceiling = eff.lane_ceiling();
+        assert!(!ceiling.permits(Tier::Frontier));
+        assert_eq!(ceiling.clamp(Tier::Frontier).0, Tier::Standard);
+        // 子がさらに厳しくするのは効く
+        nodes[1].profile.budget.max_lane = Some(Tier::Cheap);
+        assert_eq!(resolve(&nodes, "engineering").max_lane, Some(Tier::Cheap));
+
+        let old: Profile =
+            serde_json::from_str(r#"{"model":{"tier":"cheap"},"review":{"tier":"cheap"}}"#)
+                .unwrap();
+        assert!(old.budget.is_empty());
+        assert_eq!(old.review.escalate_on_fail, None);
+        // 空の budget は JSON に出ない（導入前と 1 バイトも変わらない）
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"model":{"tier":"cheap"},"review":{"tier":"cheap"}}"#
+        );
     }
 }

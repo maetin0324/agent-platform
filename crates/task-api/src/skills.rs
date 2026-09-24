@@ -40,7 +40,10 @@ pub(crate) fn routes() -> axum::Router<ApiState> {
             get(get_skill).put(put_skill).delete(delete_skill),
         )
         .route("/api/v1/org/{id}/skills", post(mount_skill))
-        .route("/api/v1/org/{id}/skills/{skill}", axum::routing::delete(unmount_skill))
+        .route(
+            "/api/v1/org/{id}/skills/{skill}",
+            axum::routing::delete(unmount_skill),
+        )
 }
 
 // ---------------------------------------------------------------------------

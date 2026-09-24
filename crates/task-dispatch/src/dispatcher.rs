@@ -42,9 +42,9 @@ use task_worker::{
     ActiveMilestoneContext, ActiveProjectContext, AdapterError, Answer, ChildSummary,
     CommentContext, ConversationAddressee, ConversationTurn, EventSink, GenreContext,
     LocalWorkspace, MemoryContext, MemoryDir, MilestoneBrief, MilestoneReviewContext,
-    MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, RecentWork,
-    RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace,
-    Reachability, SyncMode, Terminal, WorkerAdapter, WorkerMessage, Workspace, WorkspaceError,
+    MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, Reachability,
+    RecentWork, RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings,
+    SshWorkspace, SyncMode, Terminal, WorkerAdapter, WorkerMessage, Workspace, WorkspaceError,
     control_master_alive_blocking, remote_dir_is_resolved, remote_exec_instructions,
     resolve_remote_dir,
 };
@@ -922,6 +922,22 @@ impl StoreSink {
         // `standing_rules` の前方一致だけを見る決定的なもので、LLM は使わない（DESIGN 原則 1）。
         // Phase 27（監査 H-2）: **バッチは分ける** — 同じ部宛ての提案はその場で子にする。
         let org = self.store.org_list().map_err(|e| format!("store: {e}"))?;
+        // ADR-0068 D1（Phase 114）: 委譲（LLM）が書いた担当は使わない。担当は matching が決めるので、
+        // 部をまたぐ認可（下の split）も担当を名指しした提案には起きなくなる。捨てた事実は進行に残す。
+        let stripped: Vec<DelegateTask> = tasks
+            .iter()
+            .map(|t| {
+                let mut t = t.clone();
+                if let Some(a) = t.assignee.take().filter(|a| !a.trim().is_empty()) {
+                    self.note(format!(
+                        "delegate: 担当の指定 {a} は使わない（「{}」の担当は celeris が skills と harness から決定的に選ぶ。ADR-0068 D1）",
+                        t.title
+                    ));
+                }
+                t
+            })
+            .collect();
+        let tasks: &[DelegateTask] = &stripped;
         let split =
             task_ops::conversation::split_delegation(self.store.as_ref(), &org, &parent, tasks)
                 .map_err(|e| format!("authorization: {e}"))?;
@@ -1374,15 +1390,22 @@ fn tunnel_prober_loop(
                 let Ok(guard) = state.lock() else { continue };
                 guard
                     .get(&key)
-                    .map(|s| now.duration_since(s.checked_at) >= Duration::from_secs(s.interval_secs))
+                    .map(|s| {
+                        now.duration_since(s.checked_at) >= Duration::from_secs(s.interval_secs)
+                    })
                     .unwrap_or(true)
             };
             if !due {
                 continue;
             }
             let healthy = probe(listen);
-            let Ok(mut guard) = state.lock() else { continue };
-            let prev_interval = guard.get(&key).map(|s| s.interval_secs).unwrap_or(*min_secs);
+            let Ok(mut guard) = state.lock() else {
+                continue;
+            };
+            let prev_interval = guard
+                .get(&key)
+                .map(|s| s.interval_secs)
+                .unwrap_or(*min_secs);
             guard.insert(
                 key,
                 TargetProbeState {
@@ -2033,9 +2056,8 @@ impl Dispatcher {
         }
         // ADR-0062 A: TOTP のクラスタは人の入力が要るので、その場での自動復旧を待たせない。
         if spec.auth == "totp" {
-            reason = format!(
-                "{reason}\nGUI の「クラスタ」画面から TOTP を入力して再接続してください。"
-            );
+            reason =
+                format!("{reason}\nGUI の「クラスタ」画面から TOTP を入力して再接続してください。");
         }
         let first = self
             .cluster_cooldown
@@ -2153,10 +2175,9 @@ impl Dispatcher {
                 && liveness_probe_secs > 0
                 && let Some(probe) = self.cluster_command_probe.clone()
             {
-                let due = self
-                    .last_cluster_command_probe
-                    .get(&id)
-                    .is_none_or(|last| now.duration_since(*last) >= Duration::from_secs(liveness_probe_secs));
+                let due = self.last_cluster_command_probe.get(&id).is_none_or(|last| {
+                    now.duration_since(*last) >= Duration::from_secs(liveness_probe_secs)
+                });
                 if due {
                     self.last_cluster_command_probe.insert(id.clone(), now);
                     let ssh_command = ssh_command.clone();
@@ -2249,7 +2270,12 @@ impl Dispatcher {
         if self.eligible.is_some() {
             return;
         }
-        if !self.config.clusters.values().any(|c| !c.forwards.is_empty()) {
+        if !self
+            .config
+            .clusters
+            .values()
+            .any(|c| !c.forwards.is_empty())
+        {
             return;
         }
         let now_instant = Instant::now();
@@ -2356,9 +2382,7 @@ impl Dispatcher {
     fn refresh_one_forward(&mut self, spec: &ClusterSpec, fwd: &ClusterForwardSpec) {
         let mut listener = self.probe_listener(&fwd.listen);
         let mut ensure_error: Option<String> = None;
-        if !listener
-            && let Some(ensure) = self.tunnel_forward_ensurer.clone()
-        {
+        if !listener && let Some(ensure) = self.tunnel_forward_ensurer.clone() {
             match ensure(&spec.host, &fwd.listen, &fwd.target) {
                 Ok(()) => {
                     listener = self.probe_listener(&fwd.listen);
@@ -2523,7 +2547,12 @@ impl Dispatcher {
         kind: TunnelEventKind,
         at: OffsetDateTime,
     ) {
-        tracing::info!(cluster, listen, kind = kind.as_str(), "tunnel: state transition");
+        tracing::info!(
+            cluster,
+            listen,
+            kind = kind.as_str(),
+            "tunnel: state transition"
+        );
         self.tunnel_events.push_back(TunnelEvent {
             cluster: cluster.to_string(),
             listen: listen.to_string(),
@@ -4268,6 +4297,13 @@ impl Dispatcher {
                 task.budget.max_wall_secs = KNOWLEDGE_FALLBACK_MAX_WALL_SECS;
                 tracing::info!(task_id = %task.id, %reason, ?tier, "knowledge: falling back to a generic harness");
             }
+            // ADR-0068 D3 / D6（Phase 114）: `routing` を持つ execute タスクは、lane を決定的な policy
+            // （TaskFeatures → 規則表 → 組織の天井）とリトライのエスカレーションで決める。人の明示・
+            // System の tier はそのまま（記録だけ）。残量による調整はこの後の `select_tier`（別の層）。
+            let lane_decision = self.decide_lane(&task)?;
+            if let Some(decision) = &lane_decision {
+                task.worker_hint.tier = decision.lane;
+            }
             // ADR-0054 Phase 67c: CoS の対話 run だけ、継続セッションの (adapter, account) に留まれるかを
             // 先に試す（`run_extras` の `is_cos_conversation` と同じ判定を select_provider より前に
             // 軽く行う。継続セッションを見つけてから選ぶのでないと、ADR-0049 ランキングが先に別の
@@ -4356,7 +4392,7 @@ impl Dispatcher {
                 &Event::WorkerStarted {
                     run_id: run_id.clone(),
                     adapter: adapter_id.clone(),
-                    model,
+                    model: model.clone(),
                     provider: Some(provider_id.clone()),
                     // ADR-0024 D4: `account_pool` のプロバイダで選んだアカウント（プールを使わなければ `None`）。
                     account: account.clone(),
@@ -4364,6 +4400,38 @@ impl Dispatcher {
                     task_role: task.role.clone(),
                 },
             )?;
+            // ADR-0068 D5: この run の routing の監査記録（担当・harness・lane・model・features・規則）。
+            if let Some(mut decision) = lane_decision {
+                if task_core::model_policy::lane_rank(task.worker_hint.tier)
+                    < task_core::model_policy::lane_rank(decision.lane)
+                {
+                    decision.reasons.push(format!(
+                        "quota layer lowered lane {:?} -> {:?} (budget guard)",
+                        decision.lane, task.worker_hint.tier
+                    ));
+                }
+                let record = task_core::RoutingRecord {
+                    org_node: task.assignee.clone(),
+                    harness: task.genre.clone(),
+                    resolution: task_core::model_routing::LaneResolution {
+                        lane: Some(task.worker_hint.tier),
+                        adapter: adapter_id.clone(),
+                        provider: Some(provider_id.clone()),
+                        account: account.clone(),
+                        model_id: model,
+                        reasoning_effort: adapter.reasoning_effort_for_tier(task.worker_hint.tier),
+                    },
+                    quota_reason: Some(routing_reason.clone()),
+                    decision,
+                };
+                self.store.append_event(
+                    task.id,
+                    &Event::RoutingDecided {
+                        run_id: run_id.clone(),
+                        record: Box::new(record),
+                    },
+                )?;
+            }
             if matches!(adapter_id.as_str(), "claude-code" | "codex") {
                 self.store.append_event(task.id, &Event::worker_progress(&run_id,
                     format!("model routing: {routing_reason}; execution tier={:?}; provider={provider_id}", task.worker_hint.tier)))?;
@@ -4608,11 +4676,7 @@ impl Dispatcher {
         let continuing = is_cos_conversation && session.as_ref().is_some_and(|s| s.resume);
         let node = if continuing { None } else { node };
         let memory = if continuing { None } else { memory };
-        let conversation = if continuing {
-            Vec::new()
-        } else {
-            conversation
-        };
+        let conversation = if continuing { Vec::new() } else { conversation };
         let organization = if (available_genres.is_empty() && !is_cos_conversation) || continuing {
             Vec::new()
         } else {
@@ -4935,7 +4999,8 @@ impl Dispatcher {
                              retire して新しいセッションを作る（ADR-0054 Phase 67b）"
                         );
                     }
-                    self.store.node_session_retire(node_id, kind, project_id, now)?;
+                    self.store
+                        .node_session_retire(node_id, kind, project_id, now)?;
                 }
                 // claude-code は celeris が id を前もって決める（`--session-id`）。codex / acp は
                 // アダプタが run の途中で初めて確定させるので、確定するまでは空文字（ADR-0054 D1）。
@@ -5336,10 +5401,21 @@ impl Dispatcher {
         }
         // ADR-0063 D3（Phase 109）: 調査系（literature/web-research）の受け入れ条件に部分達成の
         // 逃げ道が無ければ**警告**（拒否はしない。決定的、LLM は使わない）。
-        for note in
-            task_core::warn_missing_partial_ok(plan, task, org, &self.config.roles, &self.config.genres)
-        {
+        for note in task_core::warn_missing_partial_ok(
+            plan,
+            task,
+            org,
+            &self.config.roles,
+            &self.config.genres,
+        ) {
             tracing::warn!(task_id = %task.id, "{note}");
+        }
+        // ADR-0068 D1（Phase 114）: 計画（LLM）が書いた担当は使わない（子の `routing.dropped_assignee`
+        // に残り、担当は matching が決める）。捨てた事実をここで 1 行ずつ残す。
+        for (index, t) in plan.tasks.iter().enumerate() {
+            if let Some(a) = t.assignee.as_deref().filter(|a| !a.trim().is_empty()) {
+                tracing::info!(task_id = %task.id, index, dropped_assignee = %a, "plan-supplied assignee ignored; matching decides (ADR-0068 D1)");
+            }
         }
     }
 
@@ -5757,6 +5833,7 @@ impl Dispatcher {
     ) -> Result<Task, DispatchError> {
         let now = OffsetDateTime::now_utc();
         let approval = Task {
+            routing: None,
             repos: Vec::new(),
             id: TaskId::new(),
             parent_id: Some(task.id),
@@ -6572,6 +6649,51 @@ impl Dispatcher {
     /// ADR-0043 D4: レビュー担当の `Check::Command` の既定になる検査コマンド
     /// （タスクに `acceptance` が明示されていればそれが勝つ。決めるのはここではなく `review.rs` の
     /// 呼び出し側）。**先頭のリポジトリの** `[commands] check` だけを使う。
+    /// ADR-0068 D3 / D6（Phase 114）: このタスクの lane を決める（`routing` を持つ execute タスクだけ。
+    /// それ以外は `None` で従来どおり `worker_hint.tier`）。担当の実効 profile の天井（`allowed_tiers` /
+    /// `budget.max_lane`）で丸め、やり直し（`attempts > 0`）ならイベントの履歴から
+    /// `EscalationPolicy` で 1 段まで上げる。LLM は使わない（DESIGN 原則 1）。
+    fn decide_lane(&self, task: &Task) -> Result<Option<task_core::LaneDecision>, DispatchError> {
+        if task.routing.is_none() || task.kind != TaskKind::Execute {
+            return Ok(None);
+        }
+        let org = self.store.org_list()?;
+        let profile = task
+            .assignee
+            .as_deref()
+            .filter(|_| !org.is_empty())
+            .map(|a| task_core::profile::resolve(&org, a));
+        let ceiling = profile
+            .as_ref()
+            .map(|p| p.lane_ceiling())
+            .unwrap_or_default();
+        let Some(mut decision) = task_core::model_policy::decide_for_task(task, &ceiling) else {
+            return Ok(None);
+        };
+        if task.attempts > 0 && decision.source.policy_decides() {
+            let events: Vec<Event> = self
+                .store
+                .events_for(task.id)?
+                .into_iter()
+                .map(|(_, e)| e)
+                .collect();
+            let history = task_core::retry_policy::attempt_history(task, &events);
+            let policy = task_core::EscalationPolicy::for_task(task, profile.as_ref());
+            let next = policy.decide(&history, decision.lane, task_core::BudgetState::Ok);
+            if next.lane() != decision.lane {
+                decision.reasons.push(format!(
+                    "retry lane {:?} -> {:?}",
+                    decision.lane,
+                    next.lane()
+                ));
+            }
+            decision.lane = next.lane();
+            decision.escalation = Some(next.describe());
+            tracing::info!(task_id = %task.id, attempts = task.attempts, decision = %next.describe(), "retry lane decided (ADR-0068 D6)");
+        }
+        Ok(Some(decision))
+    }
+
     /// ADR-0046 D5（Phase 59）: `assignee` が無い `ready` のタスクの担当を**決定的に**決める。
     ///
     /// - 決まったら `Event::Assigned { node, score, reason }` を残して担当を書き戻し、そのタスクを返す。
@@ -7103,7 +7225,10 @@ async fn run_worker(
                                 &fresh,
                                 Event::WorkspaceModeDowngraded {
                                     cluster: effective_settings.cluster.clone(),
-                                    path: effective_settings.remote_dir.to_string_lossy().into_owned(),
+                                    path: effective_settings
+                                        .remote_dir
+                                        .to_string_lossy()
+                                        .into_owned(),
                                     reason,
                                 },
                             ) {
@@ -7371,11 +7496,13 @@ async fn run_worker(
     // ADR-0054 D1（Phase 67）: `run_worker` を通る run で継続セッションを持てるのは CoS の対話 run
     // だけ（部門長のレビュー run は `review.rs` の別経路。`run_extras` の `is_cos_conversation` と同じ
     // 判定で `extras.session` が埋まるので、ここでは `req.context.session` の有無だけを見ればよい）。
-    let session_key = req
-        .context
-        .session
-        .is_some()
-        .then(|| (task_core::COS_ID.to_string(), task_core::SessionKind::Conversation, None));
+    let session_key = req.context.session.is_some().then(|| {
+        (
+            task_core::COS_ID.to_string(),
+            task_core::SessionKind::Conversation,
+            None,
+        )
+    });
     // ADR-0067 D3: `store` は `sink` に move されるので、後段の未申告成果物の登録用に控えておく。
     let store_for_undeclared_scan = Arc::clone(&store);
     let sink = StoreSink {
@@ -7614,6 +7741,7 @@ mod tests {
     fn new_task(dir: &std::path::Path, check: Check, max_retries: u32) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),
@@ -9090,7 +9218,10 @@ mod tests {
             )
             .unwrap();
         let first = first.unwrap();
-        assert!(!first.resume, "the first run of a session is never a resume");
+        assert!(
+            !first.resume,
+            "the first run of a session is never a resume"
+        );
         assert!(diff0.is_empty(), "a brand-new session has no summary yet");
         assert!(!first.session_id.is_empty());
         let first_id = first.session_id.clone();
@@ -9398,7 +9529,11 @@ mod tests {
             "no new Approval child was created; the human was not asked again"
         );
         assert_eq!(approvals_after[0].id, approval.id);
-        assert_eq!(adapter.calls.load(Ordering::SeqCst), 2, "the reviewer ran exactly twice");
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            2,
+            "the reviewer ran exactly twice"
+        );
     }
 
     /// ADR-0033 D2（監査 D-3）: 承認子タスクは親の `project_id` / `milestone_id` / `assignee` を継ぐ
@@ -10943,7 +11078,13 @@ mod tests {
     /// 間引きを避けたいテストは `d.last_cluster_tunnel_refresh` を過去にずらす（`CLUSTER_LIVENESS_INTERVAL`
     /// の間引きだけがテストから直接いじれる。target probe 側は 1 forward につき最初の 1 回だけ同期に
     /// 種を蒔くので、通常のテストはそれだけで足りる）。
-    fn cluster_spec_with_forward(id: &str, host: &str, auth: &str, listen: &str, target: &str) -> ClusterSpec {
+    fn cluster_spec_with_forward(
+        id: &str,
+        host: &str,
+        auth: &str,
+        listen: &str,
+        target: &str,
+    ) -> ClusterSpec {
         let mut spec = cluster_spec_with_auth(id, host, auth);
         spec.forwards = vec![ClusterForwardSpec {
             listen: listen.into(),
@@ -10961,24 +11102,38 @@ mod tests {
         spec.sync = SyncMode::Worktree;
         let task_id = TaskId::new();
 
-        let worktree_settings =
-            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Worktree);
+        let worktree_settings = spec.ssh_settings(
+            std::path::Path::new("/work/x"),
+            task_id,
+            WorkspaceMode::Worktree,
+        );
         assert_eq!(worktree_settings.sync, SyncMode::Worktree);
 
-        let shared_settings =
-            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Shared);
+        let shared_settings = spec.ssh_settings(
+            std::path::Path::new("/work/x"),
+            task_id,
+            WorkspaceMode::Shared,
+        );
         assert_eq!(shared_settings.sync, SyncMode::None);
 
         // rsync クラスタでも同じ: 省略（既定）は従来どおり、shared は None を強制する。
         spec.sync = SyncMode::Rsync;
         assert_eq!(
-            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Worktree)
-                .sync,
+            spec.ssh_settings(
+                std::path::Path::new("/work/x"),
+                task_id,
+                WorkspaceMode::Worktree
+            )
+            .sync,
             SyncMode::Rsync
         );
         assert_eq!(
-            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Shared)
-                .sync,
+            spec.ssh_settings(
+                std::path::Path::new("/work/x"),
+                task_id,
+                WorkspaceMode::Shared
+            )
+            .sync,
             SyncMode::None
         );
     }
@@ -11022,7 +11177,11 @@ mod tests {
 
         // DB の上書きがあればそちらが勝つ。
         store
-            .cluster_settings_set("pegasus", Some("/work/NBB/db-override"), OffsetDateTime::now_utc())
+            .cluster_settings_set(
+                "pegasus",
+                Some("/work/NBB/db-override"),
+                OffsetDateTime::now_utc(),
+            )
             .unwrap();
         let (_, resolved, _) = d.cluster_of(&task).expect("cluster configured");
         assert_eq!(resolved, PathBuf::from("/work/NBB/db-override/benchfs"));
@@ -11096,7 +11255,11 @@ mod tests {
         script
     }
 
-    fn remote_task(dir: &std::path::Path, mode: Option<WorkspaceMode>, repos: Vec<task_core::RepoRef>) -> Task {
+    fn remote_task(
+        dir: &std::path::Path,
+        mode: Option<WorkspaceMode>,
+        repos: Vec<task_core::RepoRef>,
+    ) -> Task {
         let mut task = new_task(
             dir,
             Check::Command {
@@ -11178,13 +11341,8 @@ mod tests {
         settings.task_id = task.id.to_string();
         settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
 
-        let outcome = run_worker_for_test(
-            store.clone(),
-            task.id,
-            tmp.path().join("mirror"),
-            settings,
-        )
-        .await;
+        let outcome =
+            run_worker_for_test(store.clone(), task.id, tmp.path().join("mirror"), settings).await;
         assert!(outcome.is_ok(), "{:?}", outcome.err());
 
         let events = store.events_for(task.id).unwrap();
@@ -11224,13 +11382,8 @@ mod tests {
         settings.task_id = task.id.to_string();
         settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
 
-        let outcome = run_worker_for_test(
-            store.clone(),
-            task.id,
-            tmp.path().join("mirror"),
-            settings,
-        )
-        .await;
+        let outcome =
+            run_worker_for_test(store.clone(), task.id, tmp.path().join("mirror"), settings).await;
         assert!(outcome.is_err());
         let events = store.events_for(task.id).unwrap();
         assert!(
@@ -11258,13 +11411,8 @@ mod tests {
         settings.task_id = task.id.to_string();
         settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
 
-        let outcome = run_worker_for_test(
-            store.clone(),
-            task.id,
-            tmp.path().join("mirror"),
-            settings,
-        )
-        .await;
+        let outcome =
+            run_worker_for_test(store.clone(), task.id, tmp.path().join("mirror"), settings).await;
         assert!(outcome.is_err());
         let events = store.events_for(task.id).unwrap();
         assert!(
@@ -11307,11 +11455,13 @@ mod tests {
         let forward_present = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ensure_calls_hook = ensure_calls.clone();
         let forward_present_hook = forward_present.clone();
-        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
-            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            forward_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        d.set_tunnel_forward_ensurer(Arc::new(
+            move |_host: &str, _listen: &str, _target: &str| {
+                ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                forward_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
         // Phase 85: listener と target の健康は別のフック。この試験では両方を同じフラグに束ねる
         // （ensure が listener を立て、立った listener はそのまま target も健全とみなす）。
         let forward_present_listener = forward_present.clone();
@@ -11331,9 +11481,9 @@ mod tests {
         assert!(d.tunnel_reachable("pegasus", "127.0.0.1:19001"));
         let events = d.take_tunnel_events();
         assert!(
-            events
-                .iter()
-                .any(|e| e.cluster == "pegasus" && e.listen == "127.0.0.1:19001" && e.kind == TunnelEventKind::Up),
+            events.iter().any(|e| e.cluster == "pegasus"
+                && e.listen == "127.0.0.1:19001"
+                && e.kind == TunnelEventKind::Up),
             "{events:?}"
         );
     }
@@ -11380,7 +11530,8 @@ mod tests {
 
         // 2 回目の tick（間引きを避けるため、間隔を過ぎさせる）。まだ同じ outage の間なので、
         // login_needed の再検出（新しいイベント）は起きない。
-        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.last_cluster_tunnel_refresh =
+            Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
         d.refresh_cluster_tunnels();
         assert_eq!(d.clusters_needing_login(), vec!["pegasus".to_string()]);
         let second_events = d.take_tunnel_events();
@@ -11422,11 +11573,13 @@ mod tests {
         let listener_present = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let ensure_calls_hook = ensure_calls.clone();
         let listener_present_hook = listener_present.clone();
-        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
-            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            listener_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        d.set_tunnel_forward_ensurer(Arc::new(
+            move |_host: &str, _listen: &str, _target: &str| {
+                ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                listener_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
         let listener_present_probe = listener_present.clone();
         d.set_tunnel_listener_probe(Arc::new(move |_listen: &str| {
             listener_present_probe.load(std::sync::atomic::Ordering::SeqCst)
@@ -11441,7 +11594,8 @@ mod tests {
 
         // listener が消える（誰かが master 側を再起動した、等）。
         listener_present.store(false, std::sync::atomic::Ordering::SeqCst);
-        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.last_cluster_tunnel_refresh =
+            Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
         d.refresh_cluster_tunnels();
         assert_eq!(
             ensure_calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -11485,10 +11639,12 @@ mod tests {
         d.set_tunnel_listener_probe(Arc::new(|_listen: &str| true));
         let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let ensure_calls_hook = ensure_calls.clone();
-        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
-            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        d.set_tunnel_forward_ensurer(Arc::new(
+            move |_host: &str, _listen: &str, _target: &str| {
+                ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
         d.set_tunnel_probe(Arc::new(|_listen: &str| false));
 
         d.refresh_cluster_tunnels();
@@ -11503,9 +11659,7 @@ mod tests {
         assert!(!d.tunnel_target_healthy("pegasus", "127.0.0.1:19004"));
         assert_eq!(
             d.tunnel_last_error("pegasus", "127.0.0.1:19004"),
-            Some(
-                "target bnode150:19004 did not answer /v1/models through the forward".to_string()
-            )
+            Some("target bnode150:19004 did not answer /v1/models through the forward".to_string())
         );
         let events = d.take_tunnel_events();
         assert!(
@@ -11585,9 +11739,21 @@ mod tests {
         assert_eq!(next_probe_interval_secs(60, 30, false), 120);
         assert_eq!(next_probe_interval_secs(120, 30, false), 240);
         assert_eq!(next_probe_interval_secs(240, 30, false), 480);
-        assert_eq!(next_probe_interval_secs(480, 30, false), 600, "capped at the max");
-        assert_eq!(next_probe_interval_secs(600, 30, false), 600, "stays at the max");
-        assert_eq!(next_probe_interval_secs(600, 30, true), 30, "one success resets to the minimum");
+        assert_eq!(
+            next_probe_interval_secs(480, 30, false),
+            600,
+            "capped at the max"
+        );
+        assert_eq!(
+            next_probe_interval_secs(600, 30, false),
+            600,
+            "stays at the max"
+        );
+        assert_eq!(
+            next_probe_interval_secs(600, 30, true),
+            30,
+            "one success resets to the minimum"
+        );
         // 設定変更で `probe_interval_secs`（min）が現在値より大きくなっても、min を下限にする。
         assert_eq!(next_probe_interval_secs(10, 30, false), 60);
     }
@@ -11682,10 +11848,12 @@ mod tests {
         }));
         let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let ensure_calls_hook = ensure_calls.clone();
-        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
-            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        d.set_tunnel_forward_ensurer(Arc::new(
+            move |_host: &str, _listen: &str, _target: &str| {
+                ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
         let probe_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let probe_calls_hook = probe_calls.clone();
         d.set_tunnel_probe(Arc::new(move |_listen: &str| {
@@ -12664,7 +12832,9 @@ mod tests {
             ..task_core::GenreSpec::default()
         }];
 
-        let extras = d.run_extras(&plan_parent, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&plan_parent, None, None, "claude-code")
+            .unwrap();
         assert_eq!(
             extras.available_genres[0].harness.as_deref(),
             Some("paperqa")
@@ -14166,7 +14336,9 @@ mod tests {
             usage: None,
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root, None);
-        let extras = d.run_extras(&second.task, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&second.task, None, None, "claude-code")
+            .unwrap();
         let texts: Vec<&str> = extras
             .conversation
             .iter()
@@ -14261,134 +14433,14 @@ mod tests {
         );
     }
 
-    /// ADR-0033 D4 / SPEC §3.1: 別の部の課へ委譲しようとしたら、子は作られず、親は質問して止まる。
+    /// ADR-0033 D4 / SPEC §3.1 → ADR-0068 D1（Phase 114）: 委譲（LLM）が別の部の課を `assignee` に
+    /// 書いても、その担当は使わない（捨てて進行に残す）。担当を名指ししないので部をまたぐ認可の質問も
+    /// 起きず、子はその場で作られ、担当は matching が決める。以前はここで子を作らずに秘書へ質問し、
+    /// 人が `once` / `standing` で認めると次の run で通っていた（その 2 本のテストはこの挙動変更で
+    /// 役目を終えたので、1 本にまとめて新しい規則を確かめる。`split_delegation` 自体の単体テストは
+    /// `task-ops` に残る）。
     #[tokio::test]
-    async fn a_delegation_across_departments_asks_the_secretary_instead_of_creating_children() {
-        let dir = tempfile::tempdir().unwrap();
-        let workspace_root = dir.path().join("workspaces");
-        std::fs::create_dir_all(&workspace_root).unwrap();
-        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-        seed_conversation_org(store.as_ref());
-
-        let task = assigned_task(&workspace_root, "t1", "research-survey");
-        store.create_task(&task, vec![]).unwrap();
-
-        let adapter = Arc::new(PersonAdapter {
-            terminal: Terminal::Done {
-                summary: "delegated".into(),
-                evidence: vec![],
-                usage: None,
-            },
-            seen: Arc::new(StdMutex::new(None)),
-            memory: None,
-            proposals: vec![delegate_to("coding-poc")],
-        });
-        let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
-        run_until_idle(&mut d, 40).await;
-
-        assert!(
-            store.children(task.id).unwrap().is_empty(),
-            "子は作られない"
-        );
-        let after = store.get(task.id).unwrap().unwrap();
-        assert_eq!(after.status, Status::Blocked, "秘書の返事待ちで止まる");
-        // Phase 27（監査 H-1）: 質問は `approvals` の行として構造化された固定の形。
-        let question = task_ops::derive::latest_question(&store.events_for(task.id).unwrap());
-        assert_eq!(
-            question,
-            "cross-department: research-survey -> coding-poc: 任せたい仕事"
-        );
-        let pending = store.approval_list(Some(true), None, None).unwrap();
-        assert_eq!(pending.len(), 1, "{pending:?}");
-        assert_eq!(pending[0].node_id, "research-survey", "委譲元のノード宛て");
-        assert_eq!(pending[0].task_id, Some(task.id), "親タスク");
-        assert_eq!(pending[0].question, question);
-    }
-
-    /// Phase 27（監査 H-1）: 人が `once` で認めたら、**次の run で同じ委譲が通る**（永久ループしない）。
-    /// `standing` なら以後ずっと、`denied` なら通らない。
-    #[tokio::test]
-    async fn an_authorized_cross_department_delegation_goes_through_on_the_next_run() {
-        for (decision, expect_children) in [
-            (Decision::Once, 1usize),
-            (Decision::Standing, 1),
-            (Decision::Denied, 0),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            let workspace_root = dir.path().join("workspaces");
-            std::fs::create_dir_all(&workspace_root).unwrap();
-            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
-            seed_conversation_org(store.as_ref());
-            let task = assigned_task(&workspace_root, "t1", "research-survey");
-            store.create_task(&task, vec![]).unwrap();
-
-            let adapter = Arc::new(PersonAdapter {
-                terminal: Terminal::Done {
-                    summary: "delegated".into(),
-                    evidence: vec![],
-                    usage: None,
-                },
-                seen: Arc::new(StdMutex::new(None)),
-                memory: None,
-                proposals: vec![delegate_to("coding-poc")],
-            });
-            let mut d = person_dispatcher(store.clone(), adapter, workspace_root, None);
-            run_until_idle(&mut d, 40).await;
-            let pending = store.approval_list(Some(true), None, None).unwrap();
-            assert_eq!(pending.len(), 1, "1 回目は認可待ち: {pending:?}");
-
-            // 人が答える（既存の `task_ops::approval::decide` = `answers[]` の経路に相乗り）。
-            task_ops::approval::decide(
-                store.as_ref(),
-                pending[0].clone(),
-                decision,
-                "認める".into(),
-                task_ops::approval::Scope::Node,
-                OffsetDateTime::now_utc(),
-            )
-            .unwrap();
-            assert_eq!(
-                store.get(task.id).unwrap().unwrap().status,
-                Status::Ready,
-                "答えるとタスクが再開する"
-            );
-
-            // 2 回目の run: 同じ提案が上がってくる。
-            run_until_idle(&mut d, 40).await;
-            let children: Vec<Task> = store
-                .children(task.id)
-                .unwrap()
-                .into_iter()
-                .filter(|c| c.kind == TaskKind::Execute)
-                .collect();
-            assert_eq!(
-                children.len(),
-                expect_children,
-                "{decision:?}: {children:?}"
-            );
-            if decision == Decision::Standing {
-                let rules = store.standing_rule_list(Some("research-survey")).unwrap();
-                assert_eq!(
-                    rules.iter().map(|r| r.rule.as_str()).collect::<Vec<_>>(),
-                    vec!["cross-department: research-survey -> coding-poc"],
-                    "standing の規則は質問の鍵（答えの文ではない）"
-                );
-            }
-            if decision == Decision::Denied {
-                // もう聞き直さない（同じ質問の未決の行は増えない）。
-                assert!(
-                    store
-                        .approval_list(Some(true), None, None)
-                        .unwrap()
-                        .is_empty()
-                );
-            }
-        }
-    }
-
-    /// Phase 27（監査 H-2）: バッチは分ける。同じ部宛ての提案はその場で子になり、部またぎだけが質問になる。
-    #[tokio::test]
-    async fn a_batch_with_one_crossing_still_creates_the_same_department_children() {
+    async fn a_delegation_naming_other_departments_creates_children_and_drops_the_assignees() {
         let dir = tempfile::tempdir().unwrap();
         let workspace_root = dir.path().join("workspaces");
         std::fs::create_dir_all(&workspace_root).unwrap();
@@ -14416,20 +14468,19 @@ mod tests {
             .into_iter()
             .filter(|c| c.kind == TaskKind::Execute)
             .collect();
-        assert_eq!(children.len(), 1, "同じ部宛ては止めない: {children:?}");
-        assert_eq!(children[0].assignee.as_deref(), Some("research-data"));
-        assert_eq!(
-            store.get(task.id).unwrap().unwrap().status,
-            Status::Blocked,
-            "部またぎは聞いて止まる"
+        assert_eq!(children.len(), 2, "部をまたいでも止めない: {children:?}");
+        assert!(
+            children.iter().all(|c| c.assignee.is_none()),
+            "{children:?}"
         );
-        let pending = store.approval_list(Some(true), None, None).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(
-            pending[0].question,
-            "cross-department: research-survey -> coding-poc: 任せたい仕事"
+        assert!(
+            store
+                .approval_list(Some(true), None, None)
+                .unwrap()
+                .is_empty(),
+            "担当を名指ししないので部をまたぐ認可は起きない"
         );
-        // ワーカーには「N 件は作った、M 件は秘書の認可待ち」が見える（`progress` として残る）。
+        assert_ne!(store.get(task.id).unwrap().unwrap().status, Status::Blocked);
         let notes: Vec<String> = store
             .events_for(task.id)
             .unwrap()
@@ -14439,15 +14490,18 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(
-            notes
-                .iter()
-                .any(|m| m.contains("delegated 1 child task(s)（1 件は秘書の認可待ち）")),
-            "{notes:?}"
-        );
+        for dropped in ["research-data", "coding-poc"] {
+            assert!(
+                notes
+                    .iter()
+                    .any(|m| m.contains(&format!("担当の指定 {dropped} は使わない"))),
+                "{notes:?}"
+            );
+        }
     }
 
-    /// 同じ部の中の委譲は、これまでどおり子タスクになる（規則が効きすぎないこと）。担当も子に残る。
+    /// 同じ部の中の委譲は、これまでどおり子タスクになる（規則が効きすぎないこと）。ADR-0068 D1 以降、
+    /// 委譲が書いた担当は子に残らない。
     #[tokio::test]
     async fn a_delegation_inside_the_same_department_still_creates_children() {
         let dir = tempfile::tempdir().unwrap();
@@ -14480,7 +14534,8 @@ mod tests {
             .filter(|c| c.kind == TaskKind::Execute)
             .collect();
         assert_eq!(children.len(), 1, "同じ部の中なら子ができる");
-        assert_eq!(children[0].assignee.as_deref(), Some("research-data"));
+        // ADR-0068 D1: 委譲が書いた担当は使わない（matching が決める）。
+        assert_eq!(children[0].assignee, None);
         assert_eq!(children[0].title, "任せたい仕事");
     }
 
@@ -14628,7 +14683,9 @@ mod tests {
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
 
-        let extras = d.run_extras(&to_secretary, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&to_secretary, None, None, "claude-code")
+            .unwrap();
         assert!(
             extras.available_genres.is_empty(),
             "対話 run は委譲できない: {extras:?}"
@@ -14728,7 +14785,9 @@ mod tests {
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
 
-        let extras = d.run_extras(&to_secretary, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&to_secretary, None, None, "claude-code")
+            .unwrap();
         assert_eq!(
             extras.active_projects.len(),
             1,
@@ -14798,9 +14857,15 @@ mod tests {
             .session
             .as_ref()
             .expect("claude-code supports continuous sessions");
-        assert!(!session.resume, "the first run of a session is never a resume");
+        assert!(
+            !session.resume,
+            "the first run of a session is never a resume"
+        );
         assert!(first.node.is_some(), "fresh session: brief を渡す");
-        assert!(!first.organization.is_empty(), "fresh session: 組織の一覧を渡す");
+        assert!(
+            !first.organization.is_empty(),
+            "fresh session: 組織の一覧を渡す"
+        );
         assert_eq!(
             first.active_projects.len(),
             1,
@@ -14970,9 +15035,19 @@ mod tests {
         );
 
         task.project_id = Some(plain.id);
-        assert_eq!(d.run_extras(&task, None, None, "claude-code").unwrap().workspace_note, None);
+        assert_eq!(
+            d.run_extras(&task, None, None, "claude-code")
+                .unwrap()
+                .workspace_note,
+            None
+        );
         task.project_id = None;
-        assert_eq!(d.run_extras(&task, None, None, "claude-code").unwrap().workspace_note, None);
+        assert_eq!(
+            d.run_extras(&task, None, None, "claude-code")
+                .unwrap()
+                .workspace_note,
+            None
+        );
 
         // 対話 run には出さない（会話は編集をしない。ADR-0039 D2）。
         let conversation = task_ops::conversation::start(
@@ -14988,7 +15063,9 @@ mod tests {
         .unwrap()
         .task;
         assert_eq!(
-            d.run_extras(&conversation, None, None, "claude-code").unwrap().workspace_note,
+            d.run_extras(&conversation, None, None, "claude-code")
+                .unwrap()
+                .workspace_note,
             None
         );
     }
@@ -15466,7 +15543,9 @@ mod tests {
         )
         .unwrap();
 
-        let extras = d.run_extras(&started.task, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&started.task, None, None, "claude-code")
+            .unwrap();
         let review = extras
             .milestone_review
             .expect("the review context is filled");
@@ -16022,7 +16101,7 @@ mod tests {
                         path: "artifacts/survey.md".into(),
                         sha256: String::new(),
                         kind: "text".into(),
-            declared: true,
+                        declared: true,
                     },
                 },
             )
@@ -16614,10 +16693,8 @@ mod tests {
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
         let runs = captured.lock().unwrap().clone();
         assert_eq!(runs.len(), 1, "{runs:?}");
-        let expected = task_worker::build_cache::cargo_target_dir_env(
-            cache_dir.path(),
-            repo_dir.path(),
-        );
+        let expected =
+            task_worker::build_cache::cargo_target_dir_env(cache_dir.path(), repo_dir.path());
         assert!(
             runs[0].contains(&expected),
             "expected {expected:?} in {:?}",
@@ -16839,7 +16916,10 @@ mod tests {
 
         d.tick().unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(target_dir.exists(), "prune_after_secs = 0 must disable pruning");
+        assert!(
+            target_dir.exists(),
+            "prune_after_secs = 0 must disable pruning"
+        );
     }
 
     /// ADR-0041 D1: 前置きに作業ツリー・ブランチ・base と「このブランチにコミットせよ」が出る。
@@ -16868,7 +16948,9 @@ mod tests {
             None,
         );
         let worktree = d.task_workspaces_for(&task).expect("worktree plan");
-        let extras = d.run_extras(&task, Some(&worktree), None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&task, Some(&worktree), None, "claude-code")
+            .unwrap();
         let note = extras.workspace_note.expect("workspace_note");
         let tree = root.path().join(task.id.to_string()).join("tree");
         assert!(note.contains(&format!("→ `{}`", tree.display())), "{note}");
@@ -17797,6 +17879,7 @@ mod tests {
                             name: id.into(),
                             model_id: Some(id.into()),
                             unavailable_reason: None,
+                            reasoning_effort: None,
                         },
                     )
                 })
@@ -17844,6 +17927,7 @@ mod tests {
                     name: "fable".into(),
                     model_id: None,
                     unavailable_reason: Some("unverified executable ID".into()),
+                    reasoning_effort: None,
                 },
             )]
             .into(),
@@ -17860,6 +17944,208 @@ mod tests {
                 .any(|(_, e)| matches!(e, Event::WorkerStarted { .. }))
         );
         assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.contains("unverified executable ID"))));
+    }
+
+    /// ADR-0068（Phase 114）テスト用: 3 lane の束縛を持つ TieredAdapter（cheap だけ reasoning effort 付き）。
+    fn three_lane_adapter() -> Arc<dyn WorkerAdapter> {
+        use task_core::model_routing::ModelBinding;
+        Arc::new(task_worker::tiered::TieredAdapter {
+            base: Arc::new(InstantAdapter {
+                terminal: Terminal::Question {
+                    text: "not needed".into(),
+                },
+                delay: Duration::ZERO,
+            }),
+            models: [
+                (Tier::Frontier, "frontier-id", None),
+                (Tier::Standard, "standard-id", None),
+                (Tier::Cheap, "cheap-id", Some("low")),
+            ]
+            .into_iter()
+            .map(|(tier, id, effort)| {
+                (
+                    tier,
+                    ModelBinding {
+                        name: id.into(),
+                        model_id: Some(id.into()),
+                        unavailable_reason: None,
+                        reasoning_effort: effort.map(str::to_string),
+                    },
+                )
+            })
+            .collect(),
+            account_id: None,
+            credential_error: None,
+        })
+    }
+
+    fn routing_record(events: &[(u64, Event)]) -> Option<task_core::RoutingRecord> {
+        events.iter().rev().find_map(|(_, e)| match e {
+            Event::RoutingDecided { record, .. } => Some((**record).clone()),
+            _ => None,
+        })
+    }
+
+    /// ADR-0068 D3 / D5: `routing` を持つ execute タスクは、LLM のヒント（frontier）ではなく
+    /// TaskFeatures の規則表で lane が決まり（機械的・検証可能・戻せる → cheap）、その lane の model が
+    /// 走り、`RoutingDecided` に features・規則・版・reasoning effort が残る。
+    #[tokio::test]
+    async fn lane_policy_decides_the_tier_and_records_the_routing_decision() {
+        let ws = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(
+            ws.path(),
+            Check::Command {
+                cmd: "cargo test".into(),
+                expect_exit: 0,
+            },
+            2,
+        );
+        task.objective = "crates/task-core/src/model.rs の typo を直す".into();
+        task.genre = Some("coding".into());
+        task.worker_hint.tier = Tier::Frontier;
+        task.routing = Some(task_core::TaskRouting {
+            tier_source: task_core::TierSource::Hint,
+            ..Default::default()
+        });
+        store.insert(&task).unwrap();
+        let mut d = dispatcher(store.clone(), three_lane_adapter(), 1);
+        d.tick().unwrap();
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events.iter().any(
+                |(_, e)| matches!(e, Event::WorkerStarted { model, .. } if model == "cheap-id")
+            ),
+            "{events:?}"
+        );
+        let record = routing_record(&events).expect("routing_decided");
+        assert_eq!(record.decision.lane, Tier::Cheap);
+        assert_eq!(record.decision.hint, Some(Tier::Frontier));
+        assert_eq!(
+            record.decision.rule_id,
+            "cheap/mechanical-verifiable-reversible"
+        );
+        assert_eq!(
+            record.decision.policy_version,
+            task_core::LANE_POLICY_VERSION
+        );
+        assert_eq!(record.harness.as_deref(), Some("coding"));
+        assert_eq!(record.resolution.model_id, "cheap-id");
+        assert_eq!(record.resolution.reasoning_effort.as_deref(), Some("low"));
+        // 監査の集計に乗る。
+        let audit = task_ops::routing_audit::task_routing_audit(store.as_ref(), task.id).unwrap();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].lane, Some(Tier::Cheap));
+        assert_eq!(
+            audit[0].rule_id.as_deref(),
+            Some("cheap/mechanical-verifiable-reversible")
+        );
+
+        // 人の明示 tier は policy が触らない。`routing` の無い既存タスクは記録も出さない。
+        let store2: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut human = task.clone();
+        human.id = TaskId::new();
+        human.routing = Some(task_core::TaskRouting {
+            tier_source: task_core::TierSource::Human,
+            ..Default::default()
+        });
+        store2.insert(&human).unwrap();
+        let mut legacy = task.clone();
+        legacy.id = TaskId::new();
+        legacy.routing = None;
+        store2.insert(&legacy).unwrap();
+        let mut d2 = dispatcher(store2.clone(), three_lane_adapter(), 2);
+        d2.tick().unwrap();
+        let h = store2.events_for(human.id).unwrap();
+        assert!(h.iter().any(
+            |(_, e)| matches!(e, Event::WorkerStarted { model, .. } if model == "frontier-id")
+        ));
+        assert_eq!(
+            routing_record(&h).map(|r| r.decision.rule_id),
+            Some("explicit/human".to_string())
+        );
+        let l = store2.events_for(legacy.id).unwrap();
+        assert!(l.iter().any(
+            |(_, e)| matches!(e, Event::WorkerStarted { model, .. } if model == "frontier-id")
+        ));
+        assert!(routing_record(&l).is_none());
+    }
+
+    /// ADR-0068 D6: 同じ lane でレビュー不合格が 2 回続いたタスクのやり直しは 1 段だけ上がり
+    /// （cheap → standard）、理由が `RoutingDecided.decision.escalation` に残る。
+    #[tokio::test]
+    async fn repeated_review_failures_escalate_the_retry_lane_one_step() {
+        let ws = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(
+            ws.path(),
+            Check::Command {
+                cmd: "cargo test".into(),
+                expect_exit: 0,
+            },
+            3,
+        );
+        task.objective = "crates/task-core/src/model.rs の typo を直す".into();
+        task.genre = Some("coding".into());
+        task.routing = Some(task_core::TaskRouting::default());
+        task.attempts = 2;
+        task.updated_at = OffsetDateTime::now_utc() - time::Duration::days(1);
+        store.insert(&task).unwrap();
+        let decision =
+            task_core::model_policy::decide_for_task(&task, &Default::default()).unwrap();
+        assert_eq!(decision.lane, Tier::Cheap);
+        for run in ["r1", "r2"] {
+            let record = task_core::RoutingRecord {
+                org_node: None,
+                harness: Some("coding".into()),
+                decision: decision.clone(),
+                resolution: task_core::model_routing::LaneResolution {
+                    lane: Some(Tier::Cheap),
+                    ..Default::default()
+                },
+                quota_reason: None,
+            };
+            for event in [
+                Event::RoutingDecided {
+                    run_id: run.into(),
+                    record: Box::new(record),
+                },
+                Event::ReviewVerdict {
+                    run_id: format!("{run}-review"),
+                    criterion_idx: 0,
+                    pass: false,
+                    reason: "tests fail".into(),
+                },
+                Event::Transitioned {
+                    from: Status::Reviewing,
+                    to: Status::Ready,
+                    reason: "review_fail".into(),
+                },
+            ] {
+                store.append_event(task.id, &event).unwrap();
+            }
+        }
+        let mut d = dispatcher(store.clone(), three_lane_adapter(), 1);
+        d.tick().unwrap();
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events.iter().any(
+                |(_, e)| matches!(e, Event::WorkerStarted { model, .. } if model == "standard-id")
+            ),
+            "{events:?}"
+        );
+        let record = routing_record(&events).expect("routing_decided");
+        assert_eq!(record.decision.lane, Tier::Standard);
+        assert_eq!(record.decision.proposed, Tier::Cheap);
+        assert!(
+            record
+                .decision
+                .escalation
+                .as_deref()
+                .is_some_and(|e| e.starts_with("escalate Cheap -> Standard")),
+            "{:?}",
+            record.decision.escalation
+        );
     }
 
     // ---- ADR-0056 D3（Phase 79）: mount された skills を run に届ける ----
@@ -17889,14 +18175,17 @@ mod tests {
         d.config.knowledge.root = kb.path().to_path_buf();
         write_kb_skill(kb.path(), "writing", "文章の書き方", "本文");
 
-        let (skills, missing) =
-            d.skills_context(&["writing".to_string(), "ghost".to_string()]);
+        let (skills, missing) = d.skills_context(&["writing".to_string(), "ghost".to_string()]);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "writing");
         assert_eq!(skills[0].description, "文章の書き方");
         assert_eq!(
             skills[0].path,
-            kb.path().join("skills").join("writing").display().to_string()
+            kb.path()
+                .join("skills")
+                .join("writing")
+                .display()
+                .to_string()
         );
         assert_eq!(missing, vec!["ghost".to_string()]);
     }
@@ -18093,6 +18382,7 @@ mod knowledge_fallback_tests {
     fn knowledge_task(dir: &std::path::Path) -> Task {
         let now = OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),
@@ -18325,11 +18615,9 @@ mod knowledge_fallback_tests {
         );
         // 進行に「倒す」の 1 行は出ない。
         assert!(
-            !store
-                .events_for(task.id)
-                .expect("events")
-                .iter()
-                .any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.contains("倒す")))
+            !store.events_for(task.id).expect("events").iter().any(
+                |(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.contains("倒す"))
+            )
         );
     }
 
@@ -18347,11 +18635,17 @@ mod knowledge_fallback_tests {
         let seen_tokens = Arc::new(SyncMutex::new(Vec::new()));
         let capture = seen_tokens.clone();
         d.set_knowledge_probe(Arc::new(move |_, token| {
-            capture.lock().expect("lock").push(token.map(str::to_string));
+            capture
+                .lock()
+                .expect("lock")
+                .push(token.map(str::to_string));
             Reachability::Ok
         }));
         run_until_idle(&mut d, 100).await;
-        assert_eq!(seen_tokens.lock().expect("lock").as_slice(), [Some("secret-proxy-token".to_string())]);
+        assert_eq!(
+            seen_tokens.lock().expect("lock").as_slice(),
+            [Some("secret-proxy-token".to_string())]
+        );
     }
 
     /// ADR-0052 D2: `fallback = false`（＝ `fallback_tier` が無い）なら、届かなくても倒さない

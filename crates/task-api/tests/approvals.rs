@@ -80,6 +80,7 @@ fn blocked_task_with_approval(
     let now = OffsetDateTime::now_utc();
     let id = TaskId::new();
     let task = Task {
+        routing: None,
         mode: Default::default(),
         skills: Vec::new(),
         repos: Vec::new(),

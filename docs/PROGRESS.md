@@ -17164,3 +17164,96 @@ resume run は codex の既定の（読み取り専用の）承認・サンド�
 - 実機確認（そのまま設計どおりに動いた）: `POST /tasks/01M35X86XTK84F97QW0CN5PGMR/rereview` → `failed → reviewing`。journal: 「lead session resume rejected; session retired」→「reviewer run hit a provider/infra failure; review deferred」→ 新規 reviewer run 01M38E9YAA2BESG61MB7XD8Y2D が criterion 1 を合格 → `review_pass` で done（75 秒）。人の承認（approval 01M381GRMXM8MP23BZ1E4RKWP2）は保持され、二度目の承認は求められていない。
 - CoS 経由で作られた GUI 修正の子タスク 01M38AJZ5QD9E88ZD6FDDWG968 は done。
 - DB 移設: in-flight 0 で `relocate-db.sh /var/lib/celeris/celeris.sqlite3 --dry-run` は計画（stop → VACUUM INTO → integrity → config 書き換え → 旧ファイル rename → start → /config 確認）を出して通過。本番実行は auto mode の分類（Production Deploy）で拒否されたため人が実行する（P-113-6: `promote.sh` / `migrate-to-celeris.sh` と同様に許可リストへ）。
+
+## Phase 114 — routing を 4 層に分け、CoS から人選とモデル選択を外す（Model/Org routing 再設計 Phase 1、2026-09-24）
+
+ADR-0068（`docs/adr/0068-routing-four-layers.md`）。Ownership（TaskSpec → OrgNode）/ Harness / Model（lane →
+provider/model）/ Review の 4 層。組織木は継承の名前空間（命令の中継ではない）。`Tier` の直列化名は変えず、
+品質／予算の lane として読む。
+
+### 見つけて塞いだ抜け道（LLM の担当・tier がそのままタスクに入っていた経路）
+
+1. `task_ops::actions::create_task_action`（CoS の Console actions）: `assignee` / `tier` をそのまま `NewTaskSpec` へ。
+   → 人の発言（対話タスクの `objective`）に `@<node>` があるときだけ担当を採り、それ以外は捨てて
+   `Task.routing.dropped_assignee` と返事の要約（「担当の指定 X は人の明示ではないので使わず…」）に残す。tier は
+   `tier:<lane>` が人の発言にあるときだけ人の明示、他は `TierSource::Hint`。
+2. `task_core::plan::materialize`（計画 run）と 3. `task_core::delegate::materialize_delegated`（委譲）: 共通の
+   `resolve_child_defaults` が組織にある `assignee` を子に記録していた → 常に捨てて `dropped_assignee` に残す
+   （計画は `fix_plan_for_harness` で tracing、委譲は run の進行 `note` に 1 行ずつ）。
+- 人の経路（API `POST /tasks`・`celerisctl add --assignee`）は `NewTaskSpec.provenance`（`serde(skip)`、既定
+  `SpecOrigin::Human`）で従う。JSON からは偽装できない（未知フィールドとして 422）。
+- CoS / 計画 / 委譲のプロンプトを「goal / harness / skills / mode / repos / 制約（features）を定義し、担当と
+  モデルは選ばない」に更新（`preamble.rs::actions_instructions`、`claude_code.rs` の計画・委譲の指示と JSON 例）。
+
+### 新しい型・関数
+
+- `task_core::model_policy`: `Level`、`TaskFeatures`（9 軸）+ `TaskFeatures::infer(&Task)`、`TaskFeatureHints`、
+  `ModelPolicy::decide`（規則表 5 本、`LANE_POLICY_VERSION = "lane-policy/1"`）、`decide_for_task`、`LaneCeiling`、
+  `LaneDecision`、`RoutingRecord`、Phase 2 予約の `ShadowClassifier` trait / `ShadowDecision`（実装なし）。
+- `task_core::retry_policy`: `EscalationPolicy`（per-lane 2 / total 4 / escalate_on / never_escalate_on / 天井）、
+  `RetryDecision::{Retry, Escalate, Stop}`、`BudgetState`、`attempt_history(&Task, &[Event])`。
+- `task_core::routing_audit::routing_audit(&Task, &[Event]) -> Vec<RoutingAudit>` と
+  **`task_ops::routing_audit::task_routing_audit(store, task_id)`**（GUI/API の表示は次の Phase）。
+- `task_core::model::{TaskRouting, TierSource}`、`Task.routing`（`serde(default)`、JSON の中だけ）、
+  `Event::RoutingDecided { run_id, record }`（`task-api` のイベント種別 `routing_decided` も追加）。
+- `Profile.budget = BudgetPrefs { max_lane, max_attempts }`（根→葉の最小）、`ReviewPrefs.escalate_on_fail`（子が勝つ）、
+  `EffectiveProfile::lane_ceiling()`（**`allowed_tiers` をここで初めて強制**）。
+- `ModelBinding.reasoning_effort`（任意）、`model_routing::{reasoning_effort, LaneResolution}`、
+  `WorkerAdapter::reasoning_effort_for_tier`（`TieredAdapter` が実装）。CLI への受け渡しはしていない（記録のみ）。
+- `task_ops::add::{SpecOrigin, SpecProvenance}`、`NewTaskSpec.features`、`ConsoleAction::CreateTask.features`。
+- 配線: `Dispatcher::decide_lane`（`routing` を持つ execute タスクだけ。policy → 担当の実効 profile の天井 →
+  `attempts > 0` なら履歴から `EscalationPolicy`）を `select_provider` の前に当て、`WorkerStarted` の直後に
+  `RoutingDecided` を 1 件。残量の `select_tier` は従来どおり後段で下げるだけ（下げたら reasons に budget guard）。
+
+### テスト（新規・更新）
+
+- 新規: `model_policy` 5（表駆動の features→lane、天井、infer、hints / 人の明示 / 対象外、直列化と旧タスクの互換）、
+  `retry_policy` 5（1 段ずつ・上限、天井と供給側失敗、budget stop、`for_task`、イベントからの履歴）、
+  `routing_audit` 2（usage+wall+retries+review の結合、旧イベント）、`profile` 1（最小の継承と旧 profile の互換）、
+  `model_routing` 1（effort の互換）、`delegate` 1（降格の規則そのもの）、`task_ops::actions` 2（CoS の担当を捨てる／
+  人の `@node`・`tier:` に従う、字句判定の境界）、`task_ops::add` 1（人の出自・System・偽装不可）、
+  `task_ops::routing_audit` 1、`task_dispatch` 2（policy が tier を決め `RoutingDecided` を残す＋人の明示・旧タスク、
+  レビュー不合格 2 回で cheap → standard）。
+- 意図した挙動変更で書き換え: 計画・委譲の `assignee` が子に残る 2 本、継いだ Remote の降格 2 本、計画の harness
+  補正・調査系警告 5 本（担当ではなく `genre` で指定）、Console の cluster 道具検証 1 本（人の発言に `@web-research`）、
+  dispatcher の部またぎ委譲 4 本 → 2 本（詳細は ADR-0068 §4）。プロンプトの文言テスト 2 本。
+
+### ゲート
+
+| 条件 | 実行したコマンド | 出力の要点 |
+| --- | --- | --- |
+| 単体（policy・retry・監査） | `cargo test -p task-core --lib -- model_policy retry_policy routing_audit profile::tests::budget model_routing` | exit 0。**16 passed; 0 failed** |
+| CoS の担当・人の明示・監査の読み出し | `cargo test -p task-ops --lib -- actions::tests::cos_supplied actions::tests::human_mentions add::tests::human_spec routing_audit` | exit 0。**4 passed; 0 failed** |
+| dispatcher 配線 | `cargo test -p task-dispatch --lib -- lane_policy_decides repeated_review_failures a_delegation` | exit 0。**4 passed; 0 failed** |
+| スキーマ再生成 | `UPDATE_SCHEMA=1 cargo test -p task-core -p task-api -p task-worker --lib schema` | exit 0。`docs/api/v1/{api-v1,event}.schema.json`・`docs/protocol/worker-protocol.schema.json` を更新（追加のみ） |
+| GUI の生成型 | `cd gui && pnpm install --frozen-lockfile --offline && pnpm gen:types && pnpm typecheck && pnpm lint` | 各 exit 0。`gui/app/celeris/types.ts` +216 行（追加のみ）、biome 257 files 問題なし |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**90 個の `test result:` ブロックが全て ok、合計 2057 passed; 0 failed; 4 ignored**（task-core 257、task-ops 285、task-dispatch 242、task-worker 492（+1 ignored）ほか） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| DB migration | なし | `SCHEMA_VERSION` は 25 のまま（`Task.routing` は `tasks.json` の中、`Profile.budget` は `profile_json` の中） |
+| unwrap / LLM | 追加した非テストコードを目視 | `unwrap()` は `#[test]` 内だけ。dispatcher・store に LLM 呼び出しは無い（規則表・字句判定・イベント集計のみ） |
+
+補足: `CARGO_TARGET_DIR` を共有する別ワークツリーの `cargo test --workspace` が同時に走っており、同じ
+パッケージ名・相対パスの成果物が上書きされて自分の変更が見えないビルドになった（`task_core::TierSource` が
+見つからない等）。正しさのため、この Phase の検証は別ディレクトリ
+（`~/.local/celeris/build-cache/cargo/agent-platform-01M38J4X-routing`）で行った。また `cargo fmt --all` は
+この Phase で触っていない 67 ファイルも整形したが、差分を小さく保つため未変更ファイルの整形は戻した
+（触ったファイルは整形済み）。1 回目の全体テストで `e2e::api_scenarios::api_enforces_token_host_…` が
+401 期待で 200 を返して 1 回だけ落ちたが、単独の再実行では 7 passed（負荷下のフレーク。今回の変更と無関係）。
+
+### 未解決事項
+
+- P-114-1: reasoning effort は記録のみ（`LaneResolution.reasoning_effort`）。codex の
+  `-c model_reasoning_effort` 等への受け渡しは Phase 2。
+- P-114-2: 委譲の「部をまたぐ認可」（ADR-0033 D4）は、委譲が担当を名指ししなくなったので発火しない。matching が
+  別の部を選んだときの扱いは Phase 2（部門横断の調整）で決める。
+- P-114-3: `TaskFeatures::infer` の語彙（設計・typo・本番…）は最初の近似。`RoutingAudit` の実データで規則と語彙を
+  見直す（policy の版を上げる）。`LowQuality` の検出源はまだ無い。
+- P-114-4: エスカレーションの `BudgetState` は dispatcher では `Ok` を渡し、予算の見張りは後段の `select_tier`
+  （下げた事実を reasons に残す）に任せている。アカウント選択前に残量を見て `Defer` を渡す配線は未実装。
+- P-114-5: 実機（本番の CoS 対話で `dropped_assignee` と `RoutingDecided` が残ること）は未確認。
+
+### 提案
+
+- P-114-6: GUI/API に `task_routing_audit` を出す（次の Phase。タスク画面の「なぜこの lane / model か」）。
+- P-114-7: Phase 2 の shadow 分類器（`ShadowClassifier`）・metrics-aware routing・lead+sidekick・部門リードの
+  選択的起動（ADR-0068 §5）。

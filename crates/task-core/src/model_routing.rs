@@ -11,8 +11,40 @@ pub struct ModelBinding {
     pub model_id: Option<String>,
     #[serde(default)]
     pub unavailable_reason: Option<String>,
+    /// ADR-0068 D4（Phase 114）: この lane で使う reasoning effort（例 `"medium"`）。Phase 1 では
+    /// 監査記録（`LaneResolution`）に残すだけで、CLI には渡さない。無ければ `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 pub type TierModels = HashMap<Tier, ModelBinding>;
+
+/// ADR-0068 D4: lane の設定上の reasoning effort（束縛が無い・effort を書いていなければ `None`）。
+pub fn reasoning_effort(bindings: &TierModels, tier: Tier) -> Option<String> {
+    bindings
+        .get(&tier)
+        .and_then(|b| b.reasoning_effort.clone())
+        .filter(|e| !e.trim().is_empty())
+}
+
+/// ADR-0068 D4: lane → provider / account / model / reasoning effort の解決結果（監査記録）。
+/// 解決そのものは従来の `select_provider` → `TieredAdapter::model_for_tier` → `select_tier` のまま。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct LaneResolution {
+    /// 残量による調整の後に実際に走らせる lane（`None` は解決前）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<Tier>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub adapter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+    /// 実行するモデル（アダプタの既定モデルなら空文字列のこともある）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+}
 pub fn resolve(bindings: &TierModels, tier: Tier) -> Result<Option<String>, String> {
     if bindings.is_empty() {
         return Ok(None);
@@ -97,6 +129,7 @@ mod tests {
                     name: name.into(),
                     model_id: Some(id.into()),
                     unavailable_reason: None,
+                    reasoning_effort: None,
                 },
             );
             assert_eq!(resolve(&bindings, tier), Ok(Some(id.into())));
@@ -120,6 +153,20 @@ mod tests {
             bindings.get_mut(&Tier::Cheap).unwrap().model_id = id.map(str::to_owned);
             assert!(resolve(&bindings, Tier::Cheap).is_err());
         }
+    }
+    #[test]
+    fn reasoning_effort_is_optional_and_old_bindings_still_parse() {
+        let old: ModelBinding = serde_json::from_str(r#"{"name":"sol","model_id":"m"}"#).unwrap();
+        assert_eq!(old.reasoning_effort, None);
+        let mut bindings = TierModels::new();
+        bindings.insert(Tier::Standard, old);
+        assert_eq!(reasoning_effort(&bindings, Tier::Standard), None);
+        bindings.get_mut(&Tier::Standard).unwrap().reasoning_effort = Some("high".into());
+        assert_eq!(
+            reasoning_effort(&bindings, Tier::Standard).as_deref(),
+            Some("high")
+        );
+        assert_eq!(reasoning_effort(&bindings, Tier::Cheap), None);
     }
     #[test]
     fn difficulty_and_observed_quota_control_selection() {

@@ -57,6 +57,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         let now = time::OffsetDateTime::now_utc();
         let task = task_core::Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),

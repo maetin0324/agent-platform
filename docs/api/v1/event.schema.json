@@ -714,8 +714,146 @@
             "removed"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0068 D5（Phase 114）: この run の routing の監査記録（担当・harness・lane・model・features・\n当たった規則・policy の版・エスカレーション）。同じ `run_id` の `WorkerStarted` の直後に 1 件。\n状態は変えない（`replay` は無視する）。",
+          "properties": {
+            "record": {
+              "$ref": "#/$defs/RoutingRecord"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "type": {
+              "const": "routing_decided",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "record"
+          ],
+          "type": "object"
         }
       ]
+    },
+    "LaneDecision": {
+      "description": "ADR-0068 D3: lane の決定（監査記録の本体）。",
+      "properties": {
+        "clamped_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "escalation": {
+          "description": "リトライでのエスカレーションの判断（`retry_policy`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "features": {
+          "$ref": "#/$defs/TaskFeatures"
+        },
+        "hint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "LLM が書いた tier（`TierSource::Hint`。記録するだけ）。"
+        },
+        "lane": {
+          "$ref": "#/$defs/Tier",
+          "description": "最終的な lane（天井・エスカレーションの後。残量による調整の前）。"
+        },
+        "policy_version": {
+          "type": "string"
+        },
+        "proposed": {
+          "$ref": "#/$defs/Tier",
+          "description": "規則表が出した lane（天井・エスカレーションの前）。"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "shadow": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShadowDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Phase 2 の予約（shadow 分類器）。Phase 1 では常に `None`。"
+        },
+        "source": {
+          "$ref": "#/$defs/TierSource"
+        }
+      },
+      "required": [
+        "lane",
+        "proposed",
+        "source",
+        "rule_id",
+        "policy_version",
+        "features"
+      ],
+      "type": "object"
+    },
+    "LaneResolution": {
+      "description": "ADR-0068 D4: lane → provider / account / model / reasoning effort の解決結果（監査記録）。\n解決そのものは従来の `select_provider` → `TieredAdapter::model_for_tier` → `select_tier` のまま。",
+      "properties": {
+        "account": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adapter": {
+          "type": "string"
+        },
+        "lane": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "残量による調整の後に実際に走らせる lane（`None` は解決前）。"
+        },
+        "model_id": {
+          "description": "実行するモデル（アダプタの既定モデルなら空文字列のこともある）。",
+          "type": "string"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "Lease": {
       "description": "DESIGN §4.1 の `Lease`。ADR-0002 D7: `expires_at` は\n`budget.max_wall_secs + 猶予` から `acquire_lease` 呼び出し側が計算する。",
@@ -732,6 +870,15 @@
         "expires_at"
       ],
       "type": "object"
+    },
+    "Level": {
+      "description": "各軸の段階（小さな順序尺度）。",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
     },
     "MessageId": {
       "description": "対話の 1 行の識別子（ULID）。",
@@ -795,6 +942,45 @@
       ],
       "type": "object"
     },
+    "RoutingRecord": {
+      "description": "ADR-0068 D5: `Event::RoutingDecided` の中身。",
+      "properties": {
+        "decision": {
+          "$ref": "#/$defs/LaneDecision",
+          "description": "Model 層（lane）。"
+        },
+        "harness": {
+          "description": "Harness 層: ハーネス id（`Task.genre`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "org_node": {
+          "description": "Ownership 層: 担当（`org_nodes.id`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quota_reason": {
+          "description": "残量による調整の理由（`select_tier`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolution": {
+          "$ref": "#/$defs/LaneResolution",
+          "description": "Model 層（lane → provider / model）。"
+        }
+      },
+      "required": [
+        "decision",
+        "resolution"
+      ],
+      "type": "object"
+    },
     "RunMetrics": {
       "description": "ADR-0061（Phase 104）: `Event::WorkerFinished` に添える run 単位のメトリクス。\nharness・model・account は同じ `run_id` の `Event::WorkerStarted` に既にあるのでここには持たない\n（二重管理をしない）。success/failure は `WorkerFinished.outcome` の文字列を\n`task-api::stats::classify_outcome` が分類する既存の仕組みのままにする。",
       "properties": {
@@ -824,6 +1010,28 @@
         "reviewer"
       ],
       "type": "string"
+    },
+    "ShadowDecision": {
+      "description": "ADR-0068 §5（Phase 2 の予約）: shadow mode の分類器（例: Jev）の判断。lane は heuristic のままで、\nこれは並べて記録するだけ。**Phase 1 では作られない**。",
+      "properties": {
+        "classifier": {
+          "type": "string"
+        },
+        "confidence": {
+          "description": "0.0..=1.0。",
+          "format": "double",
+          "type": "number"
+        },
+        "lane": {
+          "$ref": "#/$defs/Tier"
+        }
+      },
+      "required": [
+        "classifier",
+        "lane",
+        "confidence"
+      ],
+      "type": "object"
     },
     "Status": {
       "description": "ADR-0002 D1 の状態集合。終端は `done | failed | cancelled`。",
@@ -984,6 +1192,17 @@
             "null"
           ]
         },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskRouting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0068（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。\n**これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。\n導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。"
+        },
         "skills": {
           "description": "ADR-0046 D2: このタスクに必要な能力タグ（`org_nodes` の実効 `skills` と突き合わせて担当を決める。\nADR-0046 D5 の matching）。導入前のタスクには無いので既定は空。",
           "items": {
@@ -1038,6 +1257,155 @@
       ],
       "type": "string"
     },
+    "TaskFeatureHints": {
+      "description": "ADR-0068 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の\n`create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。",
+      "properties": {
+        "ambiguity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "consequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "context_size": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cross_cutting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_length": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "judgment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reversibility": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tool_intensity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verifiability": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Level"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TaskFeatures": {
+      "description": "ADR-0068 D3: lane を決めるためのタスクの性質（9 軸）。",
+      "properties": {
+        "ambiguity": {
+          "$ref": "#/$defs/Level",
+          "description": "要求の曖昧さ。"
+        },
+        "consequence": {
+          "$ref": "#/$defs/Level",
+          "description": "失敗したときの損失。"
+        },
+        "context_size": {
+          "$ref": "#/$defs/Level",
+          "description": "読むべき文脈の大きさ。"
+        },
+        "cross_cutting": {
+          "$ref": "#/$defs/Level",
+          "description": "複数のリポジトリ・領域をまたぐか。"
+        },
+        "expected_length": {
+          "$ref": "#/$defs/Level",
+          "description": "想定される長さ（budget から）。"
+        },
+        "judgment": {
+          "$ref": "#/$defs/Level",
+          "description": "判断の重さ（設計・方針・調査の結論を出すか）。"
+        },
+        "reversibility": {
+          "$ref": "#/$defs/Level",
+          "description": "やり直しやすさ（worktree の中の変更は高い、クラスタ・本番操作は低い）。"
+        },
+        "tool_intensity": {
+          "$ref": "#/$defs/Level",
+          "description": "道具（コマンド実行・リモート）を使う度合い。"
+        },
+        "verifiability": {
+          "$ref": "#/$defs/Level",
+          "description": "結果を決定的に検証できるか（command の検査があるか）。"
+        }
+      },
+      "required": [
+        "judgment",
+        "ambiguity",
+        "verifiability",
+        "reversibility",
+        "consequence",
+        "context_size",
+        "tool_intensity",
+        "expected_length",
+        "cross_cutting"
+      ],
+      "type": "object"
+    },
     "TaskId": {
       "description": "タスクの一意識別子（ULID）。DESIGN §4.1。",
       "type": "string"
@@ -1072,6 +1440,38 @@
         }
       ]
     },
+    "TaskRouting": {
+      "description": "ADR-0068 D1 / D3: タスクの routing の出自（`Task.routing`）。",
+      "properties": {
+        "assignee_explicit": {
+          "description": "担当（`assignee`）を人が明示したか（false なら matching が決めた／これから決める）。",
+          "type": "boolean"
+        },
+        "dropped_assignee": {
+          "description": "LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0068 D1）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "features": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskFeatureHints"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "TaskFeatures の明示の上書き（ADR-0068 D3）。"
+        },
+        "tier_source": {
+          "$ref": "#/$defs/TierSource",
+          "default": "default"
+        }
+      },
+      "type": "object"
+    },
     "Tier": {
       "description": "DESIGN §5.4 の `WorkerHint`。",
       "enum": [
@@ -1080,6 +1480,31 @@
         "cheap"
       ],
       "type": "string"
+    },
+    "TierSource": {
+      "description": "ADR-0068 D1: `worker_hint.tier` を誰が決めたか。",
+      "oneOf": [
+        {
+          "const": "human",
+          "description": "人が明示した（API / CLI、または Console で人の発言に `tier:<lane>` があった）。policy より強い。",
+          "type": "string"
+        },
+        {
+          "const": "system",
+          "description": "celeris のコードが固定した（計画 run の frontier など）。policy は触らない。",
+          "type": "string"
+        },
+        {
+          "const": "hint",
+          "description": "LLM（CoS・計画・委譲）が書いた。**ヒントとして記録するだけ**で、lane は policy が決める。",
+          "type": "string"
+        },
+        {
+          "const": "default",
+          "description": "誰も明示していない（役割・分野・親・全体の既定）。lane は policy が決める。",
+          "type": "string"
+        }
+      ]
     },
     "Usage": {
       "description": "DESIGN §5.3 の `usage`。取れない項目は省略可。\n\nADR-0061（Phase 104）: harness routing 基盤で `cache_read_tokens` / `cache_creation_tokens` /\n`cost_usd` を追加した（追加のみ。既存の `input_tokens` / `output_tokens` の意味は変えない）。\n`Eq` は落とした（`cost_usd: Option<f64>` は `Eq` を持てない）。",

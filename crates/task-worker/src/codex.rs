@@ -1242,7 +1242,11 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
     #[tokio::test]
     async fn mounted_skills_are_written_into_agents_md() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("AGENTS.md"), "# Notes\n\nBuild with cargo.\n").unwrap();
+        std::fs::write(
+            dir.path().join("AGENTS.md"),
+            "# Notes\n\nBuild with cargo.\n",
+        )
+        .unwrap();
         let kb = tempfile::tempdir().unwrap();
         let skill_dir = kb.path().join("rust-review");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1898,6 +1902,7 @@ printf '%s\n' '{"type":"turn.completed"}'
                         name: "requested-name".into(),
                         model_id: Some(expected.clone()),
                         unavailable_reason: None,
+                        reasoning_effort: None,
                     },
                 )]
                 .into(),
@@ -1986,7 +1991,12 @@ printf '%s\n' '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let _ = adapter
-            .run(req, "run-plain", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-plain",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2031,7 +2041,12 @@ printf '%s\n' '{"type":"turn.completed"}'
         req.context.conversation_addressee =
             Some(crate::protocol::ConversationAddressee::Secretary);
         let _ = adapter
-            .run(req, "run-68b-fresh", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-68b-fresh",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2070,7 +2085,12 @@ printf '%s\n' '{"type":"turn.completed"}'
             resume: true,
         });
         let _ = adapter
-            .run(req, "run-68b-resume", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-68b-resume",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2104,7 +2124,12 @@ printf '%s\n' '{"type":"turn.completed"}'
         let adapter = CodexAdapter::new(config);
         let req = sample_req(dir.path().to_path_buf());
         let _ = adapter
-            .run(req, "run-68b-normal", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-68b-normal",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2161,7 +2186,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     /// 「丸ごと落とす」を「翻訳する」に変えたことの確認）。
     #[tokio::test]
     async fn phase_112_resume_translates_approve_for_me_to_config_overrides_and_drops_the_raw_flag()
-     {
+    {
         let dir = tempfile::tempdir().unwrap();
         let mut config = stub_codex(dir.path(), args_log_script());
         config.model = Some("gpt-5-codex".into());
@@ -2176,7 +2201,12 @@ printf '%s\n' '{"type":"turn.completed"}'
             resume: true,
         });
         let _ = adapter
-            .run(req, "run-112-resume", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-112-resume",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2233,7 +2263,12 @@ printf '%s\n' '{"type":"turn.completed"}'
             Some(crate::protocol::ConversationAddressee::Secretary);
         // No `context.session`: this is a fresh (non-resuming) run.
         let _ = adapter
-            .run(req, "run-112-fresh", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-112-fresh",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2268,7 +2303,12 @@ printf '%s\n' '{"type":"turn.completed"}'
             resume: true,
         });
         let _ = adapter
-            .run(req, "run-112-translate", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-112-translate",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2305,7 +2345,12 @@ printf '%s\n' '{"type":"turn.completed"}'
             resume: true,
         });
         let _ = adapter
-            .run(req, "run-112-skip-resume", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-112-skip-resume",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2313,10 +2358,7 @@ printf '%s\n' '{"type":"turn.completed"}'
             !args.contains(&"resume".to_string()),
             "an untranslatable extra_arg without resume_bypass must not attempt resume: {args:?}"
         );
-        assert!(
-            !args.contains(&"thread-112c".to_string()),
-            "{args:?}"
-        );
+        assert!(!args.contains(&"thread-112c".to_string()), "{args:?}");
         assert!(
             args.contains(&"--unknown-flag".to_string()),
             "the fresh run gets the full, untranslated extra_args: {args:?}"
@@ -2327,7 +2369,7 @@ printf '%s\n' '{"type":"turn.completed"}'
     /// 行われ、落とす代わりに `--dangerously-bypass-approvals-and-sandbox` を 1 回だけ足す。
     #[tokio::test]
     async fn phase_112_resume_bypass_dangerous_uses_the_bypass_flag_for_untranslatable_extra_args()
-     {
+    {
         let dir = tempfile::tempdir().unwrap();
         let mut config = stub_codex(dir.path(), args_log_script());
         config.extra_args = vec!["--unknown-flag".into()];
@@ -2340,7 +2382,12 @@ printf '%s\n' '{"type":"turn.completed"}'
             resume: true,
         });
         let _ = adapter
-            .run(req, "run-112-bypass", default_limits(), &RecordingSink::default())
+            .run(
+                req,
+                "run-112-bypass",
+                default_limits(),
+                &RecordingSink::default(),
+            )
             .await
             .unwrap();
         let args = captured_args(dir.path());
@@ -2382,9 +2429,13 @@ echo '{"type":"turn.completed"}'
             }
             other => panic!("expected done, got {other:?}"),
         }
-        let result_json = std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
+        let result_json =
+            std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&result_json).unwrap();
-        assert!(value.get("actions").is_some_and(|a| a.is_array()), "{value:?}");
+        assert!(
+            value.get("actions").is_some_and(|a| a.is_array()),
+            "{value:?}"
+        );
         let progress = sink.progress.lock().unwrap();
         assert!(
             progress.iter().any(|m| m.contains("result recovered")),
@@ -2582,7 +2633,13 @@ printf '%s\n' '{"type":"turn.completed"}'
         let sink = RecordingSink::default();
         let outcome = adapter.run(req, "run-7", default_limits(), &sink).await;
         match outcome {
-            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Ok(o) => assert!(matches!(
+                o.terminal,
+                Terminal::Error {
+                    retryable: true,
+                    ..
+                }
+            )),
             Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
         }
         let failed = sink.resume_failed.lock().unwrap();
@@ -2683,7 +2740,13 @@ exit 1
             .run(req, "run-no-resume", default_limits(), &sink)
             .await;
         match outcome {
-            Ok(o) => assert!(matches!(o.terminal, Terminal::Error { retryable: true, .. })),
+            Ok(o) => assert!(matches!(
+                o.terminal,
+                Terminal::Error {
+                    retryable: true,
+                    ..
+                }
+            )),
             Err(e) => panic!("expected Ok(Terminal::Error), got {e:?}"),
         }
         assert!(sink.resume_failed.lock().unwrap().is_empty());

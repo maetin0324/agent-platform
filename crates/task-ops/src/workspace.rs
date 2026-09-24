@@ -109,6 +109,7 @@ mod tests {
         use task_core::*;
         let now = time::OffsetDateTime::now_utc();
         Task {
+            routing: None,
             mode: Default::default(),
             skills: Vec::new(),
             repos: Vec::new(),

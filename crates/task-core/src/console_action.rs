@@ -56,6 +56,10 @@ pub enum ConsoleAction {
         /// より大きく膨らむ）を避けるためだけで、意味は変わらない。
         #[serde(default)]
         workspace: Option<Box<crate::model::WorkspaceSpec>>,
+        /// ADR-0068 D3（Phase 114）: 仕事の性質の記述（lane policy の `TaskFeatures` の上書き）。
+        /// モデルの選択ではない。書いた軸だけが効く。
+        #[serde(default)]
+        features: Option<crate::model_policy::TaskFeatureHints>,
     },
     ProposeProject {
         title: String,
