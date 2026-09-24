@@ -17467,3 +17467,11 @@ drain timeout で run を abort → lease 失効の reclaim が 3 回 attempts �
   したい。
 - P-116-6: ディスク不足の分類（D1 追記）は文言だけで、残量の事前チェックや自動対処は範囲外。
   `/home` が再び満杯になる事故を防ぐには、別 Phase でチェック・警告の仕組みを検討する。
+
+## Phase 116 の本番反映（2026-09-24 10:30Z）と main の整形
+
+- 統合 cb230f1（PROGRESS.md 衝突のみ）。ゲート: cargo test 2079 件 FAILED 0、clippy 0、GUI typecheck / lint / test 1072 件 / gen:types 差分ゼロ。release `cb230f1678c3`、verify 全 true、in-flight 0 でライブ切替（from 7191e075832e）。
+- 実機: 受信箱 `GET /inbox` の `attention` に失敗タスク（Knowledge GC の複製 01M39BTSA55SXBG2KN9GPH4XS2）が `type=failed`、理由、操作 `retry / reopen / rereview` 付きで出る。タスク詳細の `failure` は `{class: work, reason: reviewer(...) cargo fmt --check ...}`。
+- その失敗理由は **main が `cargo fmt --check` を通らない**こと（Phase 116 までの未整形 95 ファイル）。Celeris の reviewer は fmt を見るので、自己改善の配送が全部ここで落ちていた。`cargo fmt --all` を 2 回（d195d46、9afcd02）当てて clean にし、release.sh のゲートに `cargo-fmt-check` を追加。
+- 報告のまとめ 2 件は Phase 115 で done。ルーティング再設計は retry（複製 01M39FGDAE9XQA3FGMCP5MCW0B、running）。retry の既定は ready になった（Phase 116 D2）。
+- 人の作業: llama-server 系の system unit（qwen*-server、open-webui、searxng）を停止・削除。Fable 側で OpenClaw の user unit 5 つを停止・削除し、`~/llm/models` を全削除（`/home` 空き 679 GB）。
