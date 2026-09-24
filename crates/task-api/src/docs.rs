@@ -47,6 +47,10 @@ pub(crate) fn routes() -> axum::Router<ApiState> {
         .route("/api/v1/projects/{id}/docs", get(docs_tree))
         .route("/api/v1/projects/{id}/docs/init", post(docs_init))
         .route(
+            "/api/v1/projects/{id}/docs/maintenance",
+            get(maintenance_view).post(maintenance_action),
+        )
+        .route(
             "/api/v1/projects/{id}/docs/page",
             get(docs_page).put(put_page).delete(delete_page),
         )
@@ -656,6 +660,7 @@ async fn promote(
         }]));
     }
     let docs_repo_root = state.inner.docs_repo_root.clone();
+    let documentation_state_dir = state.inner.documentation_state_dir.clone();
     let workspace_root = state.inner.view.workspace_root.clone();
     let result = state
         .blocking(move |store| {
@@ -669,6 +674,16 @@ async fn promote(
             let project = load_project(store, project_id)?;
             let target = docs_target(store, &project, docs_repo_root.as_deref(), true)?;
             let path = page_path(&target.root, &request.path)?;
+            // Promotion is an explicit human publication decision. An adopted policy may
+            // still forbid publishing residue/history/generated/unknown destinations.
+            let policy = task_ops::docs_maintenance::load_policy(
+                &documentation_state_dir, &format!("{project_id}:{}", target.repo),
+            ).map_err(maintenance_problem)?;
+            let category = policy.categories.get(&path).copied()
+                .unwrap_or(task_ops::docs_maintenance::Category::Canonical);
+            if !task_ops::docs_maintenance::may_publish(category, true, true) {
+                return Err(maintenance_problem("policy does not classify this destination as current human-facing documentation"));
+            }
             let content = artifact_text(store, &task, &workspace_root, request.name.trim())?;
             let current = ops_docs::blob_sha(&target.path, &target.default_branch, &path);
             if current.is_some() && !request.overwrite {
@@ -807,4 +822,159 @@ mod tests {
             Some("bad_request")
         );
     }
+}
+
+// Repository documentation lifecycle. Reports and policy live outside the repository.
+async fn maintenance_view(
+    axum::extract::State(state): axum::extract::State<ApiState>,
+    Params(id): Params<String>,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
+) -> ApiResult {
+    no_query(&raw)?;
+    let project_id = parse_project_id(&id)?;
+    let docs_repo_root = state.inner.docs_repo_root.clone();
+    let documentation_state_dir = state.inner.documentation_state_dir.clone();
+    let result = state
+        .blocking(move |store| {
+            let project = load_project(store, project_id)?;
+            let target = docs_target(store, &project, docs_repo_root.as_deref(), false)?;
+
+            let policy = task_ops::docs_maintenance::load_policy(
+                &documentation_state_dir,
+                &format!("{project_id}:{}", target.repo),
+            )
+            .map_err(maintenance_problem)?;
+            let audit = task_ops::docs_maintenance::audit_with_policy(
+                &target.path,
+                &target.default_branch,
+                &policy,
+            )
+            .map_err(maintenance_problem)?;
+            let proposal = task_ops::docs_maintenance::proposal(&audit);
+            let saved_report = std::fs::read(documentation_state_dir.join("repository-docs/reports").join(format!("{project_id}.json")))
+                .ok().and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok());
+            Ok(serde_json::json!({"audit":audit,"proposal":proposal,"policy":policy,"saved_report":saved_report}))
+        })
+        .await?;
+    Ok(json_response(StatusCode::OK, &result))
+}
+
+fn maintenance_problem(detail: impl Into<String>) -> ApiProblem {
+    ApiProblem::new(StatusCode::CONFLICT, "docs_maintenance", detail)
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+enum MaintenanceAction {
+    Audit,
+    Adopt {
+        policy: task_ops::docs_maintenance::Policy,
+    },
+    Approve {
+        plan: task_ops::docs_maintenance::ReconcilePlan,
+    },
+    Apply {
+        plan: task_ops::docs_maintenance::ReconcilePlan,
+    },
+}
+
+async fn maintenance_action(
+    axum::extract::State(state): axum::extract::State<ApiState>,
+    headers: HeaderMap,
+    Params(id): Params<String>,
+    axum::extract::RawQuery(raw): axum::extract::RawQuery,
+    body: Body,
+) -> ApiResult {
+    no_query(&raw)?;
+    require_admin(&state, &headers)?;
+    let project_id = parse_project_id(&id)?;
+    let action: MaintenanceAction = read_json(body, false).await?;
+    let docs_repo_root = state.inner.docs_repo_root.clone();
+    let documentation_state_dir = state.inner.documentation_state_dir.clone();
+    let workspace_root = state.inner.view.workspace_root.clone();
+    let roles = state.inner.roles.clone();
+    let genres = state.inner.genres.clone();
+    let result = state
+        .blocking(move |store| {
+            use task_ops::docs_maintenance as maint;
+            let project = load_project(store, project_id)?;
+            let target = docs_target(store, &project, docs_repo_root.as_deref(), false)?;
+            let state_dir = documentation_state_dir;
+            let key = format!("{project_id}:{}", target.repo);
+            match action {
+                MaintenanceAction::Audit => {
+                    let policy = maint::load_policy(&state_dir, &key).map_err(maintenance_problem)?;
+                    let audit = maint::audit_with_policy(&target.path, &target.default_branch, &policy)
+                        .map_err(maintenance_problem)?;
+                    let result =
+                        serde_json::json!({"audit": audit, "proposal": maint::proposal(&audit)});
+                    let directory = state_dir.join("repository-docs/reports");
+                    std::fs::create_dir_all(&directory)
+                        .map_err(|e| maintenance_problem(e.to_string()))?;
+                    std::fs::write(
+                        directory.join(format!("{project_id}.json")),
+                        serde_json::to_vec_pretty(&result).map_err(|e| maintenance_problem(e.to_string()))?,
+                    )
+                    .map_err(|e| maintenance_problem(e.to_string()))?;
+                    Ok(result)
+                }
+                MaintenanceAction::Adopt { policy } => {
+                    maint::save_policy(&state_dir, &key, &policy).map_err(maintenance_problem)?;
+                    Ok(serde_json::json!({"policy":policy}))
+                }
+                MaintenanceAction::Approve { plan } => {
+                    maint::approve_plan(&state_dir, &key, &plan).map_err(maintenance_problem)?;
+                    Ok(serde_json::json!({"approved":true,"plan":plan}))
+                }
+                MaintenanceAction::Apply { plan } => {
+                    let worktree = state_dir
+                        .join("repository-docs/worktrees")
+                        .join(ulid::Ulid::new().to_string());
+                    let sha = maint::apply_plan(
+                        &target.path,
+                        &target.default_branch,
+                        &worktree,
+                        &plan,
+                        &state_dir,
+                        &key,
+                    )
+                    .map_err(maintenance_problem)?;
+                    // A draft task makes the isolated result visible to the existing changes/review UI.
+                // It cannot race dispatch before the marker and evidence have been written.
+                let spec: task_ops::add::NewTaskSpec = serde_json::from_value(serde_json::json!({
+                    "title": format!("文書整理の検証: {}", target.repo),
+                    "objective": "承認済み文書整理の差分を検証し、既存のレビュー・マージ経路へ引き渡す。対象を広げず、本番/default branchへ直接反映しない。成果物 reconciliation-plan.json と作業ツリーのコミットを確認する。",
+                    "acceptance": [{"type":"reviewer","text":"差分が承認済み reconciliation-plan.json と一致し文書のリンク・内容が妥当"}],
+                    "project_id": project_id, "repos": [target.repo], "status":"draft",
+                    "skills":["software"], "workspace":target.path
+                })).map_err(|e| maintenance_problem(e.to_string()))?;
+                let task = task_ops::add::create_task_with_roles(store, spec, &roles, &genres, OffsetDateTime::now_utc())
+                    .map_err(|e| maintenance_problem(e.to_string()))?;
+                let task_dir = workspace_root.join(task.id.to_string());
+                let attached = task_dir.join("repos").join(&target.repo);
+                std::fs::create_dir_all(task_dir.join("repos")).map_err(|e| maintenance_problem(e.to_string()))?;
+                let moved = ops_changes::git(&target.path, &["worktree", "move", &worktree.to_string_lossy(), &attached.to_string_lossy()], std::time::Duration::from_secs(30))
+                    .is_some_and(|output| output.ok);
+                if !moved { return Err(maintenance_problem("could not attach reconciliation worktree to verification task")); }
+                let worktree = attached;
+                let branch = ops_changes::current_branch(&worktree).ok_or_else(|| maintenance_problem("worktree branch missing"))?;
+                task_ops::workspace::write_marker(&task_dir, &task_ops::workspace::WorktreeMarker {
+                    repo: target.path.display().to_string(), dir: worktree.display().to_string(),
+                    branch: branch.clone(), base: plan.revision.clone(), base_kind: target.default_branch.clone(),
+                    repos: vec![task_ops::workspace::WorktreeMarkerRepo {
+                        name:target.repo, kind:"git".into(), source:target.path.display().to_string(),
+                        dir:worktree.display().to_string(), branch:Some(branch), base:Some(plan.revision.clone()),
+                        base_kind:Some(target.default_branch),
+                    }],
+                }).map_err(|e| maintenance_problem(e.to_string()))?;
+                let artifacts = task_dir.join("artifacts");
+                std::fs::create_dir_all(&artifacts).map_err(|e| maintenance_problem(e.to_string()))?;
+                std::fs::write(artifacts.join("reconciliation-plan.json"),serde_json::to_vec_pretty(&plan).map_err(|e| maintenance_problem(e.to_string()))?)
+                    .map_err(|e| maintenance_problem(e.to_string()))?;
+                Ok(serde_json::json!({"sha":sha,"worktree":worktree,"merged":false,"task_id":task.id}))
+                }
+            }
+        })
+        .await?;
+    Ok(json_response(StatusCode::OK, &result))
 }

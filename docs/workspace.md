@@ -303,3 +303,10 @@ tasks: [01J…]              # 任意。**このページがどのタスクの�
 ```
 文書は `…/repos/benchfs/docs/` に Markdown で書く（題名は 1 行目の `# `。タスクとの紐付けは front matter の `tasks: [<このタスクの id>]`）。既定のブランチに直接コミットせず、上のブランチに置け（人が取り込む）。
 ```
+
+## Repository docs の監査と継続管理
+
+既存 layout を保った read-only audit、具体的 plan の人間承認、隔離 worktree への適用、
+Celeris 側 policy overlay と Doc Gardener は
+[Repository Documentation Maintenance](repository-documentation-maintenance.md) を参照。
+タスク固有の報告・実験・判断材料は artifacts に残し、現在の人間向け仕様だけを明示的に docs へ公開する。

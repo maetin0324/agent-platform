@@ -88,6 +88,7 @@ export function buildRoutes({
     routes.push(
       { route: "project-detail", path: `/projects/${projectId}` },
       { route: "project-docs", path: `/projects/${projectId}/docs` },
+      { route: "project-docs-maintenance", path: `/projects/${projectId}/docs/maintenance` },
     );
   }
   // Phase 84: 作成・編集フォーム（`SkillEditor`）自体も監査対象にする（GET だけなので e2e:staging でも安全。
@@ -489,6 +490,42 @@ export async function setupMockCeleris() {
   mock.on("GET", `/api/v1/projects/${PROJECT_ID}/docs`, (_req, res) =>
     sendJson(res, 200, fx.docsTree({ project_id: PROJECT_ID })),
   );
+  mock.on("GET", `/api/v1/projects/${PROJECT_ID}/docs/maintenance`, (_req, res) => {
+    const audit = {
+      revision: "abcdef0123456789abcdef0123456789abcdef0123",
+      conventions: ["README and docs/ observed; authority requires explicit policy"],
+      documents: [
+        {
+          path: "docs/design.md",
+          title: "Architecture",
+          hash: "sha256-example",
+          category: "architecture",
+          confidence: 0.8,
+          evidence: ["Architecture heading; authority from adopted policy"],
+          findings: ["broken link: ./missing-reference.md"],
+          excerpt: "# Architecture\n[Reference](./missing-reference.md)",
+        },
+      ],
+    };
+    const proposal = {
+      revision: audit.revision,
+      expected: { "docs/design.md": "sha256-example" },
+      actions: [],
+      rationale: ["Review broken links and provide a concrete human-approved action"],
+    };
+    sendJson(res, 200, {
+      audit,
+      proposal,
+      policy: {
+        mode: "observe",
+        categories: { "docs/design.md": "architecture" },
+        authority: {},
+        generated_sources: {},
+        interval_hours: 168,
+      },
+      saved_report: { audit, proposal },
+    });
+  });
   mock.on("GET", `/api/v1/projects/${PROJECT_ID}/docs/page`, (_req, res) =>
     sendJson(res, 200, fx.docPage({ project_id: PROJECT_ID })),
   );

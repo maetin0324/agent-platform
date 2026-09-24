@@ -19,6 +19,7 @@ export default [
   route("projects/:id", "routes/projects.$id.tsx"),
   // 案件の文書（ADR-0044 D7、Phase 57 / G20）。`tasks/:id/files` と同じ兄弟のルート
   route("projects/:id/docs", "routes/projects.$id.docs.tsx"),
+  route("projects/:id/docs/maintenance", "routes/projects.$id.docs-maintenance.tsx"),
   // ボード（ADR-0044 D4、Phase 53）。案件を選んで 6 列で見る。絞り込みは URL がそのまま状態
   route("board", "routes/board.tsx"),
   // 知識ベース（ADR-0047 D5、Phase 61 / G21）。候補（`_inbox`）は兄弟のルートに分ける

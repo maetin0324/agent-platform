@@ -462,3 +462,23 @@ model = "fake"
 # adapter = "langmem"
 # tiers = ["cheap"]
 # concurrency = 1
+
+# タスク完了時とは独立する KB 内部整理。接続先は knowledge.langmem を共用。
+# 全候補は既存の知識 inbox で人間 accept/reject が必要。外部調査・create 禁止。
+[knowledge.gc]
+enabled = false
+interval_hours = 24
+batch_pages = 8
+max_context_chars = 24000
+review_after_hours = 720
+large_page_chars = 12000
+
+# Repository Doc Gardener は Knowledge GC とは別。GUI の docs/maintenance で
+# repo policy を managed に adopt した local Git repository のみ対象。
+[docs_maintenance]
+enabled = false
+interval_hours = 168
+batch_pages = 8
+max_context_chars = 24000
+# assignee = "software-engineering"
+# adapter = "codex"

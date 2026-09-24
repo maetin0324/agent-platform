@@ -109,6 +109,12 @@ export default function ProjectDocsPage({ loaderData }: Route.ComponentProps) {
       >
         <Icon name="arrowLeft" />← 案件詳細
       </Link>
+      <Link
+        className="inline-flex min-h-11 items-center text-sm font-medium text-fg-muted hover:text-fg"
+        to={`/projects/${projectId}/docs/maintenance`}
+      >
+        文書の監査と整理
+      </Link>
       <PageHeader
         icon="book"
         eyebrow={projectTitle}

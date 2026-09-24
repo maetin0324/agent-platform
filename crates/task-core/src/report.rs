@@ -55,6 +55,8 @@ pub fn support_kind(task: &Task) -> Option<&'static str> {
         Some("compaction")
     } else if task.role.as_deref() == Some(KNOWLEDGE_ROLE) {
         Some("knowledge")
+    } else if task.role.as_deref() == Some("doc-gardener") {
+        Some("doc_gardener")
     } else if task.kind == TaskKind::Approval {
         Some("approval")
     } else if task.kind == TaskKind::Review {

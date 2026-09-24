@@ -25,3 +25,5 @@ pub mod rereview;
 pub mod worker;
 /// ADR-0066 D2（Phase 110b）: `celerisctl workspace prune`。
 pub mod workspace;
+
+pub mod docs_maintenance;

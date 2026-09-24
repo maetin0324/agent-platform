@@ -150,6 +150,8 @@ pub struct Config {
     /// ADR-0047 D1: `[knowledge]`。正本の置き場と、実効 profile が何も言わないときの既定のマウント。
     #[serde(default)]
     pub knowledge: KnowledgeConfig,
+    #[serde(default)]
+    pub docs_maintenance: crate::doc_gardener::GardenerConfig,
     // ---- ADR-0047（Phase 61）: ここまで ----
     // ---- ADR-0053 D1/D2（Phase 65）: LLM source のローカル OpenAI 互換プロキシ。ここから ----
     /// `[llm_proxy]`。`claude_oauth`/`codex_oauth` の `accounts_dir` は省略時 `[accounts]` から埋める
@@ -464,6 +466,8 @@ pub struct KnowledgeConfig {
     /// ADR-0047 D4（Phase 62）: LangMem による自動メンテナンス（既定は無効）。
     #[serde(default)]
     pub langmem: LangMemKnowledgeConfig,
+    #[serde(default)]
+    pub gc: crate::knowledge_gc::GcConfig,
 }
 
 impl Default for KnowledgeConfig {
@@ -472,6 +476,7 @@ impl Default for KnowledgeConfig {
             root: default_knowledge_root(),
             default_mounts: default_knowledge_mounts(),
             langmem: LangMemKnowledgeConfig::default(),
+            gc: crate::knowledge_gc::GcConfig::default(),
         }
     }
 }
@@ -1881,7 +1886,11 @@ impl Config {
                 }
             } else {
                 let expanded = task_core::expand_home(&claude.accounts_dir, home.as_deref());
-                claude.accounts_dir = if expanded.is_relative() { base.join(expanded) } else { expanded };
+                claude.accounts_dir = if expanded.is_relative() {
+                    base.join(expanded)
+                } else {
+                    expanded
+                };
             }
         }
         if let Some(codex) = &mut cfg.llm_proxy.sources.codex_oauth {
@@ -1891,7 +1900,11 @@ impl Config {
                 }
             } else {
                 let expanded = task_core::expand_home(&codex.accounts_dir, home.as_deref());
-                codex.accounts_dir = if expanded.is_relative() { base.join(expanded) } else { expanded };
+                codex.accounts_dir = if expanded.is_relative() {
+                    base.join(expanded)
+                } else {
+                    expanded
+                };
             }
         }
         // ADR-0030 D1 / ADR-0045 D2: `[secrets] dir` は `~` を展開し、相対なら設定ファイルのディレクトリ基準。
@@ -2236,7 +2249,10 @@ impl Config {
                 )));
             }
             // ADR-0060（Phase 103）: master の起こし方も 3 つだけ。既定は "auto"。
-            if !matches!(c.master_launcher.as_str(), "auto" | "systemd-run" | "inline") {
+            if !matches!(
+                c.master_launcher.as_str(),
+                "auto" | "systemd-run" | "inline"
+            ) {
                 return Err(ConfigError::Invalid(format!(
                     "[[clusters]] {}: master_launcher must be \"auto\", \"systemd-run\" or \"inline\" (got {:?})",
                     c.id, c.master_launcher
@@ -2705,7 +2721,9 @@ impl Config {
                     .langmem
                     .api_key_secret
                     .as_deref()
-                    .and_then(|id| crate::resolve_secret(self.secrets.as_ref().map(|s| s.dir.as_path()), id)),
+                    .and_then(|id| {
+                        crate::resolve_secret(self.secrets.as_ref().map(|s| s.dir.as_path()), id)
+                    }),
                 // ADR-0052 D2: `knowledge` ハーネスの `fallback`（組み込みの既定は tier `cheap`）。
                 fallback_tier: self
                     .harness_registry()
@@ -3576,14 +3594,12 @@ tiers = ["cheap", "standard", "frontier"]
         assert_eq!(dispatch.knowledge.fallback_tier, Some(Tier::Standard));
 
         // `fallback = false` で無効。
-        let (_d, dispatch) = write(
-            "\n[[harnesses]]\nid = \"knowledge\"\nadapter = \"langmem\"\nfallback = false\n",
-        );
+        let (_d, dispatch) =
+            write("\n[[harnesses]]\nid = \"knowledge\"\nadapter = \"langmem\"\nfallback = false\n");
         assert_eq!(dispatch.knowledge.fallback_tier, None);
 
         // 同じ id を書いても `fallback` を省けば組み込みの既定を継ぐ。
-        let (_d, dispatch) =
-            write("\n[[harnesses]]\nid = \"knowledge\"\nadapter = \"langmem\"\n");
+        let (_d, dispatch) = write("\n[[harnesses]]\nid = \"knowledge\"\nadapter = \"langmem\"\n");
         assert_eq!(dispatch.knowledge.fallback_tier, Some(Tier::Cheap));
     }
 
@@ -3979,7 +3995,10 @@ host = "h"
         assert_eq!(cfg.providers[0].adapter, "aider");
         assert_eq!(cfg.providers[0].model, "anthropic/claude-sonnet-5");
         assert_eq!(
-            cfg.providers[0].env.get("ANTHROPIC_API_KEY").map(String::as_str),
+            cfg.providers[0]
+                .env
+                .get("ANTHROPIC_API_KEY")
+                .map(String::as_str),
             Some("sk-ant-...")
         );
     }
@@ -5422,14 +5441,23 @@ adapter = "fake"
             secrets = secrets_dir.display()
         );
         let cfg: Config = toml::from_str(&text).unwrap();
-        assert_eq!(cfg.dispatch_config().knowledge.langmem_api_key.as_deref(), Some("sk-test-value"));
+        assert_eq!(
+            cfg.dispatch_config().knowledge.langmem_api_key.as_deref(),
+            Some("sk-test-value")
+        );
 
         // `api_key_secret` が無ければ `None`（従来どおり、probe はトークン無しで検査する）。
         let without: Config = toml::from_str(
             "[knowledge.langmem]\nenabled = true\nbase_url = \"http://127.0.0.1:18100/v1\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n",
         )
         .unwrap();
-        assert!(without.dispatch_config().knowledge.langmem_api_key.is_none());
+        assert!(
+            without
+                .dispatch_config()
+                .knowledge
+                .langmem_api_key
+                .is_none()
+        );
     }
 
     /// ADR-0033 D6（Phase 24）: `[memory] dir` は設定ファイル基準で絶対化され、0700 で作られ、
@@ -5632,7 +5660,10 @@ adapter = "fake"
             "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n[memory]\n[secrets]\n[accounts]\n",
         )
         .unwrap();
-        assert_eq!(raw.db.path, PathBuf::from("~/.local/celeris/celeris.sqlite3"));
+        assert_eq!(
+            raw.db.path,
+            PathBuf::from("~/.local/celeris/celeris.sqlite3")
+        );
         assert_eq!(
             raw.workspace_root,
             PathBuf::from("~/.local/celeris/workspaces")

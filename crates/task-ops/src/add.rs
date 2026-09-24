@@ -417,6 +417,15 @@ pub fn create_support_task(
     now: OffsetDateTime,
 ) -> Result<Task, OpsError> {
     let mut task = build_task(store, spec, roles, genres, false, now)?;
+    // Doc Gardener reviews supplied excerpts only. Never inherit a project's primary
+    // repository or a caller workspace into this artifact-only support run.
+    if task.role.as_deref() == Some("doc-gardener") {
+        task.repos.clear();
+        task.workspace = WorkspaceSpec::Local {
+            path: PathBuf::from(task.id.to_string()),
+            mode: None,
+        };
+    }
     task.status = Status::Ready;
     store.create_task(
         &task,

@@ -21,6 +21,7 @@ pub mod delivery;
 pub mod derive;
 /// ADR-0044 D7（Phase 57）: 文書（git が正本）の足回り。
 pub mod docs;
+pub mod docs_maintenance;
 pub mod edit;
 pub mod error;
 pub mod gate;

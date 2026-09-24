@@ -7,8 +7,10 @@ pub mod config;
 /// ADR-0064 D3 / D5（Phase 110a）: 背景チェックポイントと定期バックアップ。
 pub mod db_maintenance;
 pub mod delivery;
+pub mod doc_gardener;
 /// ADR-0040 D4（Phase 47）: インスタンスの役割（active / standby / draining / verify）とライブ引き継ぎ。
 pub mod instance;
+pub mod knowledge_gc;
 /// ADR-0047 D4（Phase 62）: 知識の自動メンテナンス（決定的なトリガと適用。LLM は `langmem` アダプタの中）。
 pub mod knowledge_maint;
 /// ADR-0037（Phase 39）: 人の判断が要るときだけ Discord に知らせる（判定は決定的、送信は spawn）。
@@ -1202,6 +1204,7 @@ pub fn api_settings(
         // ADR-0044 D7（Phase 57）: 案件に git のリポジトリが無いときに文書リポジトリを作る場所
         // （SPEC §5: 成果物は `~/workspace/` に）。`$HOME` が無ければ作れない（409）。
         docs_repo_root: task_core::home_dir().map(|home| home.join("workspace")),
+        documentation_state_dir: None,
         // ADR-0047 D1（Phase 61）: 知識ベースの正本（既定 `~/.local/share/celeris/knowledge`）。**API は作らない**。
         knowledge_root: Some(config.knowledge.root.clone()),
         llm_sources: llm_proxy_state
@@ -1839,6 +1842,29 @@ async fn tick_loop(
                     .memory
                     .as_ref()
                     .map(|m| task_worker::MemoryDir::new(&m.dir));
+                if let Err(e) = doc_gardener::tick(
+                    store.as_ref(),
+                    &config.docs_maintenance,
+                    &config.workspace_root,
+                    &config.role_specs(),
+                    &config.genre_specs(),
+                    now,
+                ) {
+                    tracing::warn!(error = %e, "doc gardener: tick failed; continuing dispatch");
+                }
+                let gc_state = config.db.path.with_extension("knowledge-gc.json");
+                if let Err(e) = knowledge_gc::tick(
+                    store.as_ref(),
+                    &config.knowledge.root,
+                    &gc_state,
+                    &config.workspace_root,
+                    &config.knowledge.gc,
+                    &config.role_specs(),
+                    &config.genre_specs(),
+                    now,
+                ) {
+                    tracing::warn!(error = %e, "knowledge GC: tick failed; continuing dispatch");
+                }
                 match knowledge_maint::schedule(
                     store.as_ref(),
                     &config.knowledge.root,

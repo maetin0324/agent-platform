@@ -6424,6 +6424,34 @@ impl Dispatcher {
             } else {
                 None
             };
+            // A human-approved documentation reconciliation arrives with a committed worktree.
+            // Preserve that exact branch for the subsequent ordinary verification/review task.
+            if task_dir
+                .join("artifacts/reconciliation-plan.json")
+                .is_file()
+                && let Some(marker) = task_ops::workspace::read_marker(&task_dir)
+                && let Some(existing) = marker.repos.iter().find(|r| r.name == row.name)
+                && std::path::Path::new(&existing.source) == source
+                && std::path::Path::new(&existing.dir) == dir
+                && let (Some(branch), Some(sha)) = (&existing.branch, &existing.base)
+                && branch.starts_with("docs-reconcile/")
+                && task_ops::changes::current_branch(&dir).as_ref() == Some(branch)
+            {
+                repos.push(task_worker::TaskRepo::git(
+                    row.name.clone(),
+                    task_worker::LocalWorktree {
+                        dir,
+                        task_dir: task_dir.clone(),
+                        repo: source,
+                        branch: branch.clone(),
+                        base: task_worker::BaseRef {
+                            kind: task_worker::BaseKind::Main,
+                            sha: sha.clone(),
+                        },
+                    },
+                ));
+                continue;
+            }
             match base {
                 Some(base) => repos.push(task_worker::TaskRepo::git(
                     row.name.clone(),
@@ -17242,6 +17270,105 @@ mod tests {
             out.push(store.repo_get(repo.id).unwrap().unwrap());
         }
         (project.id, out)
+    }
+
+    #[tokio::test]
+    async fn approved_docs_reconciliation_reuses_exact_worktree_branch_and_commit() {
+        use task_ops::{
+            docs_maintenance as docs,
+            workspace::{WorktreeMarker, WorktreeMarkerRepo},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let base = init_test_repo(&source);
+        let workspace = root.path().join("workspaces");
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let (project_id, repos) = project_with_repos(
+            &store,
+            &[("code", source.as_path(), task_core::RepoKind::Git)],
+        );
+        let mut task = new_task(
+            &source,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.project_id = Some(project_id);
+        task.repos = repos.iter().map(task_core::RepoRef::of).collect();
+        store.insert(&task).unwrap();
+        let task_dir = workspace.join(task.id.to_string());
+        let attached = task_dir.join("repos/code");
+        let state = root.path().join("state");
+        let mut plan = docs::proposal(&docs::audit(&source, "main").unwrap());
+        plan.actions.push(docs::Action::Rewrite {
+            path: "README.md".into(),
+            body: "# Approved canonical guide\n".into(),
+        });
+        docs::approve_plan(&state, "repo", &plan).unwrap();
+        let approved_sha =
+            docs::apply_plan(&source, "main", &attached, &plan, &state, "repo").unwrap();
+        let branch = git_out(&attached, &["branch", "--show-current"]);
+        let marker = WorktreeMarker {
+            repo: source.display().to_string(),
+            dir: attached.display().to_string(),
+            branch: branch.clone(),
+            base: base.clone(),
+            base_kind: "main".into(),
+            repos: vec![WorktreeMarkerRepo {
+                name: "code".into(),
+                kind: "git".into(),
+                source: source.display().to_string(),
+                dir: attached.display().to_string(),
+                branch: Some(branch.clone()),
+                base: Some(base.clone()),
+                base_kind: Some("main".into()),
+            }],
+        };
+        task_ops::workspace::write_marker(&task_dir, &marker).unwrap();
+        std::fs::create_dir_all(task_dir.join("artifacts")).unwrap();
+        std::fs::write(
+            task_dir.join("artifacts/reconciliation-plan.json"),
+            serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
+        let d = worktree_dispatcher(
+            store,
+            Arc::new(RecordingAdapter {
+                seen: Arc::new(StdMutex::new(Vec::new())),
+                files: vec![],
+            }),
+            &workspace,
+            None,
+        );
+        let planned = d.task_workspaces_for(&task).unwrap();
+        assert_eq!(planned.repos[0].branch(), Some(branch.as_str()));
+        assert_eq!(planned.repos[0].worktree.as_ref().unwrap().base.sha, base);
+        planned.ensure().await.unwrap();
+        assert_eq!(git_out(&attached, &["rev-parse", "HEAD"]), approved_sha);
+        assert_eq!(
+            std::fs::read_to_string(attached.join("README.md")).unwrap(),
+            "# Approved canonical guide\n"
+        );
+        assert_eq!(git_out(&source, &["rev-parse", "main"]), base);
+        std::fs::remove_file(task_dir.join("artifacts/reconciliation-plan.json")).unwrap();
+        assert_ne!(
+            d.task_workspaces_for(&task).unwrap().repos[0].branch(),
+            Some(branch.as_str())
+        );
+        std::fs::write(
+            task_dir.join("artifacts/reconciliation-plan.json"),
+            serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
+        let mut mismatched = marker;
+        mismatched.repos[0].source = root.path().join("other").display().to_string();
+        task_ops::workspace::write_marker(&task_dir, &mismatched).unwrap();
+        assert_ne!(
+            d.task_workspaces_for(&task).unwrap().repos[0].branch(),
+            Some(branch.as_str())
+        );
     }
 
     /// ADR-0043 D2: git 2 つ + `dir` 1 つのタスクは、`repos/<name>/` に worktree 2 つと

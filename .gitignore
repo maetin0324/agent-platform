@@ -25,3 +25,6 @@ config/secrets/
 # 既に除外済みだったが、.gitignore に無かったため各タスクの worktree で「未コミットの変更」として
 # 誤検出されていた（delivery-repair でこの1件が原因の差し戻しが発生）。
 .celeris/
+
+# Celeris が各 worktree に注入する実行時指示。repository の成果物ではない。
+/AGENTS.md

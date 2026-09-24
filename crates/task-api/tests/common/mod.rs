@@ -323,6 +323,7 @@ pub fn settings(
         github: options.github,
         // ADR-0044 D7（Phase 57）: テストは **tempdir の中**に文書リポジトリを作る（`$HOME` は触らない）。
         docs_repo_root: Some(docs_repo_root.to_path_buf()),
+        documentation_state_dir: Some(knowledge_root.join("docs-state")),
         // ADR-0047（Phase 61）: 知識ベースも tempdir の中。
         knowledge_root: Some(knowledge_root.to_path_buf()),
         llm_sources: options.llm_sources,
