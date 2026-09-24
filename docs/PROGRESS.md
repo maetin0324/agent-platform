@@ -17321,3 +17321,17 @@ primary リポジトリを暗黙継承して worktree が作られ `work_dir != 
 
 - P-115-4: デプロイ後、上記 2 件の本番タスクに `celerisctl rereview` を打つか、自然に再発しないことを
   確認するかは人の判断待ち（Phase 113 の P-113-4 と同種の運用判断）。
+
+## Phase 115 の本番反映と、ディスク満杯の障害（2026-09-24 09:0x〜09:3xZ）
+
+- Phase 115 統合 7191e07。ゲート FAILED 0 / clippy 0。release は 1 回目が `pnpm-mobile-audit` の監査用ローカルサーバへの `ERR_CONNECTION_REFUSED`（フレーク、GUI 無変更）で落ち、2 回目で `7191e075832e`。verify は最初「cannot read ~/.local/celeris/celeris.sqlite3」で失敗: `scripts/selfdeploy/lib.sh` がトップレベルの `db = "…"` しか読まず、`[db] path` を見ていなかった（5387a14 で修正）。verify 全 true、in-flight 0 でライブ切替（from 51d24a61c2ba）。
+- 失敗タスクの retry で判明: `POST /tasks/{id}/retry` は `accept: true` を付けないと複製が `draft` になり、draft を ready にする API が無い（GUI の「やり直す」の accept チェックは既定オフ）。Phase 116 D2 に追加指示済み。
+- **ディスク満杯**: 09:21Z に `/home` が 100%（961 GB。前夜 20 時の 731 GB から +230 GB）。Knowledge GC の retry が `adapter: io error: No space left on device` で failed。内訳: `~/llm` 366 GB（人の LLM モデル）、`~/.local/celeris` 355 GB（workspaces 242 / releases 59 / build-cache 39）、`~/workspace` 197 GB（リポジトリの `target` 81 GB、完了済み実装エージェント worktree 5 本 ≈ 120 GB）。`/tmp`（tmpfs 63 GB）も 52 GB: 実装エージェントと Celeris のタスクが ENOSPC を避けて `CARGO_TARGET_DIR` を `/tmp` に逃がしていた（RAM を食う）。
+- 対処（ビルド生成物のみ削除、ソース・ブランチ・成果物は残す）: merge 済みエージェント worktree 6 本の `target` / `gui/node_modules` / `gui/build`、`releases/.build/*` の同、終端タスクの `workspaces/<id>/repos/<repo>/{target,gui/node_modules,gui/build}` 25 ディレクトリ（`celerisctl workspace prune` は `repos/<repo>/` 配下を見ないため手で削除）、`/tmp/tgt-*` の終端タスク分。結果 `/home` 961 → 589 GB（空き 373 GB）、`/tmp` 52 → 36 GB。
+
+### 未解決 / 提案
+- P-115-4: `celerisctl workspace prune` と tick の自動 prune は `repos/<repo>/` 配下の `target` 等も対象にする（worktree タスクの本体はそこにある）。
+- P-115-5: release.sh のゲート失敗時に残す `.build/<sha>` は `target` を残す必要が無い（ログだけ残す）。同じ sha で作り直すときも古い `.build` を消す。
+- P-115-6: 実装エージェント・タスクが `CARGO_TARGET_DIR` を `/tmp`（tmpfs）へ逃がすのは RAM を圧迫する。プリアンブルで禁止し、代わりに `<state_dir>/build-cache` を案内する。dispatch 前にディスク残量（`/home` と `/tmp`）を確認し、閾値未満なら run を始めず通知する（Phase 116 の `infra` 分類「ディスク不足」と組で）。
+- P-115-7: `pnpm-mobile-audit` ゲートは本日 2 回フレーク（perf 予算の LCP、監査サーバの接続拒否）。ゲート内で 1 回だけ自動再試行する。
+- P-115-8: `celerisctl workspace prune --older-than 0` は「無効」の意味になり、0 秒で刈るには `1` を渡す必要がある。ヘルプに書くか `--all` を足す。
