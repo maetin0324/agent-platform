@@ -17595,3 +17595,10 @@ drain timeout で run を abort → lease 失効の reclaim が 3 回 attempts �
 ### 提案
 - P-116-6: `attention` の failed 項目は、retry 複製が done になったものを「置き換え済み（→ <id>）」として畳むか出さない（`rewired` / retry 元の関係を使う）。
 - P-116-7: 実装エージェント（Fable 配下・Celeris 配下とも）は commit 前に `cargo fmt --all -- --check` を通す規約をプリアンブルに書く（release ゲートに追加済み、reviewer も見る）。
+
+## tier の運用開始: 実行モデル ID の実測と本番設定（2026-09-24、Phase 118 の準備）
+
+- 事実: 本番の `[[providers]]` に `tier_models` が無く、lane が frontier / standard / cheap のどれでも claude-pool は `claude-sonnet-5`、codex-pool は codex の既定（人の `~/.codex/config.toml` の gpt-5.6-sol / high）を使っていた。tier が効いていたのは残量による降格と provider の候補順だけ。
+- 実測（各 1 語の prompt を CLI で実行）: Claude Code は `claude-opus-5-5`、`claude-sonnet-5`、`claude-haiku-4-5-20251001`（別名 `claude-opus-5` も可）。Codex（ChatGPT アカウント、0.156.1）は `gpt-5.6-terra`、`gpt-5.6-sol`、`gpt-5.6-luna`、`gpt-5.5` が成功。`gpt-5-codex` / `gpt-5` / `gpt-5-mini` / `gpt-5.5-mini` / `gpt-5.5-codex` は「not supported when using Codex with a ChatGPT account」、`gpt-5.6-astra` / `gpt-5.6` / `gpt-5.4*` は「Model metadata … not found」。
+- 本番設定（`config.toml.bak-20260924a`）: claude-pool / claude-code-local に `[providers.tier_models.*]` frontier = claude-opus-5-5、standard = claude-sonnet-5、cheap = claude-haiku-4-5-20251001。codex-pool に frontier = gpt-5.6-terra（effort high）、standard = gpt-5.6-sol（medium）、cheap = gpt-5.6-luna（low）。`[llm_proxy.models]` の claude frontier を `claude-opus-5-5`、gpt を terra / sol / luna に。次の昇格で有効。
+- Phase 118（Sonnet に委譲）: reasoning effort を codex の `-c model_reasoning_effort` に渡す、プロキシ既定表と example の ID を実測に合わせる、`celerisctl routing show` と `/accounts` に tier → model の表、reviewer の lane は worker と同じ（天井で丸め）。
