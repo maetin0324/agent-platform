@@ -1,0 +1,192 @@
+{
+  "$defs": {
+    "WorkUnitBudget": {
+      "additionalProperties": false,
+      "description": "D14/D18: WU ごとの予算（任意。書かなければ D18 の既定を使う）。",
+      "properties": {
+        "max_turns": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_wall_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WorkUnitCheck": {
+      "additionalProperties": false,
+      "description": "D14: `checks` は決定的な検査だけ（`Command`。E4 で実行する。E2 は schema と検証のみ）。",
+      "properties": {
+        "cmd": {
+          "type": "string"
+        },
+        "expect_exit": {
+          "default": 0,
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cmd"
+      ],
+      "type": "object"
+    },
+    "WorkUnitContext": {
+      "additionalProperties": false,
+      "description": "D14: WU が読むべき context のヒント。",
+      "properties": {
+        "from_work_units": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "knowledge": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "WorkUnitKind": {
+      "description": "D14: WorkUnit の種類。",
+      "enum": [
+        "investigate",
+        "design",
+        "implement",
+        "test",
+        "release",
+        "repair",
+        "other"
+      ],
+      "type": "string"
+    },
+    "WorkUnitSpec": {
+      "additionalProperties": false,
+      "description": "D14: 計画の中の 1 WorkUnit の spec。**`assignee` / `tier` / `model` の欄は持たない**\n（`deny_unknown_fields` により、書かれていれば schema 違反になる。D14）。",
+      "properties": {
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkUnitBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WorkUnitCheck"
+          },
+          "type": "array"
+        },
+        "context": {
+          "$ref": "#/$defs/WorkUnitContext",
+          "default": {
+            "from_work_units": [],
+            "knowledge": [],
+            "paths": []
+          }
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "done_when": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "features": {
+          "description": "D21: `TaskFeatures` の上書きヒント（任意の JSON。E3 以降の routing が読む）。"
+        },
+        "harness": {
+          "description": "`[[genres]]` にある id だけを許す（D14。検証は担当の profile を知る呼び出し側が行う。\nここでは形だけ見る）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "`[a-z0-9-]{1,32}`。計画の中で一意（D14）。",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkUnitKind"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "outputs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "title",
+        "objective"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "D14: Planner の出力（または人が `PUT`/`POST` で書く計画）そのもの。",
+  "properties": {
+    "rationale": {
+      "type": "string"
+    },
+    "schema": {
+      "type": "string"
+    },
+    "work_units": {
+      "items": {
+        "$ref": "#/$defs/WorkUnitSpec"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema",
+    "rationale",
+    "work_units"
+  ],
+  "title": "ExecutionPlanSpec",
+  "type": "object"
+}

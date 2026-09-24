@@ -1033,3 +1033,69 @@ GUI を触る Phase では `pnpm typecheck` / `lint` / `test` / `gen:types` の�
   返りうる。continuation（D9/D11）は worker run だけの仕組みなので、reviewer 側では「判定できなかった」
   として `max_reviewer_retries` の再試行に倒す（既存の `Terminal::Error{retryable:true}` と同じ経路。
   `crates/task-dispatch/src/review.rs`）。checkpoint は作らない（reviewer run に checkpoint の出番は無い）。
+
+## Phase E2 実装時の逸脱・明確化（2026-09-24）
+
+実装しながら見つかった、D5〜D18 の記述とコードの食い違い・簡略化。黙って逸脱せず、ここに記録する。
+
+- **`WorkerStarted`/`WorkerFinished` に `work_unit_id` を足さなかった**（E1 の `run_seq` 省略と同じ理由）。
+  D5 は `WorkerStarted.work_unit_id: Option<String>` を新設イベントフィールドとして挙げているが、
+  `Event::WorkerStarted`/`WorkerFinished` を struct literal で組み立てている箇所（約 140、E1 の時点の
+  カウント）に機械的な変更が要る。代わりに、どの run がどの WorkUnit のものかは **`runs` 索引の
+  `work_unit_id` 列**（`Event::WorkUnitTransitioned{to: Running, run_id: Some(...)}` と同じトランザクションに
+  近い形で書く）と、**`Event::CheckpointSaved.work_unit_id`**（D5 で元から予定されていた欄。E1 で既に
+  存在）だけで賄った。`on_worker_finished` はこの run が「いま `running` の WU で `last_run_id` が一致する
+  もの」を `work_units` テーブルから引いて判定する（`WorkerFinished` 自体の走査ではない）。`replay`/(g) の
+  再構築でも `runs`/`work_units` を `ExecutionPlanned`/`WorkUnitTransitioned`/`CheckpointSaved` から
+  組み立てるので、`WorkerStarted.work_unit_id` が無くても events から派生索引を再現できる（D5 の
+  「events が正本」は保たれる）。
+- **WU の run の continuation は `events` ではなく `runs` 索引から組み立てる**（`work_unit_continuation_context`。
+  `crates/task-dispatch/src/dispatcher.rs`）。E1 の `build_continuation_context`（暗黙の WU 用）は
+  `events` を後ろから走査して `WorkerStarted`/`WorkerFinished` を数えるが、これらのイベントに
+  `work_unit_id` が無い（上記の逸脱）ため、WU をまたいで区別できない。`runs` 索引は最初から
+  `work_unit_id` で引けるので、WU の run ではこちらを正とする（`runs_for_work_unit`）。
+  `no_progress_streak`/`latest_checkpoint`（`task_ops::derive`）は `CheckpointSaved.work_unit_id` で
+  フィルタできるので、これらは予定どおり `work_unit_id: Option<&str>` を取るよう拡張した
+  （E1 の申し送りどおり）。
+- **WU の Completed run では checkpoint を merge・保存しない**（D8 は「yield / done の result.json に
+  任意で添える checkpoint」を挙げているが、E2 では実装していない）。`checkpoint` の合成は
+  `RunEnd::is_continuable()`（`Yielded`/`BudgetExhausted`）のときだけ行う（E1 と同じ条件）。結果として、
+  依存する WU への「完了要約」の引き継ぎ（`WorkUnitPromptContext.dependency_summaries`）は、その WU が
+  continuation を経ていれば実際の `completed` 配列を使うが、1 回の run でそのまま完了した WU では
+  固定文言「完了」にフォールバックする。より詳しい要約が要るなら、E4 以降で done の result.json の
+  任意 `checkpoint` を読む経路を足すこと。
+- **WU の予算（D18「WU の予算の既定」）は Task の budget をそのまま使う**。`WorkUnitSpec.budget`
+  （`max_turns`/`max_wall_secs`）は D14 の検証（丸め）は通すが、E2 の scheduler はまだ実際の run の
+  `RunLimits`/`task.budget` へ反映していない（fixture/human の計画は Task と同程度の粒度を想定していた
+  ため、実害は小さいと判断）。E3 で planner が WU ごとに異なる予算を出すようになったら、
+  `start_work_unit_run` で `task.budget` を `wu.spec.budget`（無ければ D18 の既定式）に差し替えること。
+- **D21（WU ごとの routing）は配線していない**。`RoutingRecord.work_unit_id` フィールドはスキーマに
+  足したが、WU の run でも Task 全体と同じ `TaskFeatures`/`ModelPolicy` で routing を決めており、
+  `work_unit_id` は常に `None` のまま記録される。`WorkUnitSpec.harness`/`features` を実際の routing に
+  反映する「WU の view」（D21）は E3 の範囲として持ち越した。
+- **D15 の依存伝播で `WorkUnitTransitioned.from` を一律 `pending` にしている**（`newly_blocked`/
+  `newly_ready` の対象行）。`newly_ready`（`task_core::execution_plan::newly_ready`）は定義上
+  `pending` の WU だけを対象にするので厳密に正しい。`dependents_to_block` は理論上 `ready`/`blocked` の
+  WU も対象にしうるが、E2 の直列実行では「あるWUに依存するWUは、その依存先が失敗した時点でまだ
+  `pending`（`ready` に上がるには依存が全て `done` である必要があり、1 つでも `failed` なら永久に
+  `done` にならない）」という性質上、実際には `pending` にしかならない（`ready`/`blocked` に到達しない）。
+  そのため一律 `pending` としても監査上の不正確さは生じない。
+- **Task の Cancel は WU の行をカスケードしない**。計画のある Task を中止しても、`work_units` の
+  行は最後に見た状態のまま残る（`superseded`/`cancelled` にはならない）。D6 の状態機械表にある
+  「未完了すべて｜Task の中止｜cancelled」は未実装。E2 の受け入れ条件 (a)〜(i) には含まれないため、
+  持ち越した（次の Phase で `on_cancel` 相当のカスケードを足すこと）。
+- **WU の再起動照合（(h)）は `reclaim_expired_leases`（lease 失効）の経路にだけ配線した**
+  （`reconcile_work_unit_run`）。`abort_stale_runs`（idle timeout・drain）や `Cancel`/`Interrupt` による
+  明示的な停止では、WU の行が `running` のまま残りうる（Task 側は正しく `ready`/`blocked` 等に遷移する
+  ので、次に `dispatch_ready` が回ったとき `next_work_unit` が `Stuck` を返し、その tick は
+  スキップされてしまう可能性がある）。D15 が名指ししている「lease 失効 → `reclaim_expired_leases` →
+  `InfraRequeue`」の経路は塞いだが、他の停止経路の WU 照合は E3 以降で拡張すること。
+- **`WuDispatchGate` の Answer 再開はイベントの種類ではなく状態の形で判定する**
+  （`wu_dispatch_gate`）。「Task が `Ready` で、計画があり、`next_work_unit` が `Stuck`（＝ `ready`/
+  `needs_continuation` の WU が無い）」ときに、`blocked(question|limit)` の WU を機械的に
+  `resume_after_answer` で戻す。`Trigger::Answer` そのものをフックしていないのは、`Answer` の適用箇所
+  （`task-ops::gate`/`task-api` 等）を変えずに済ませるため。E2 の対象では、この形になるのは
+  「WU が `question`/`limit` で `blocked` になった Task に人が `Answer` した直後」だけなので、実害は無い。
+- **checkpoint の `run_seq`（WU 版）は `work_units.runs` 列をそのまま使う**（`CheckpointContext.run_seq:
+  wu.runs`）。`start_work_unit_run` が dispatch 時に `runs` を先に +1 しているので、`on_worker_finished`
+  で読み直した `wu.runs` の値がそのままこの run の番号になる。

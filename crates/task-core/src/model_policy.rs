@@ -535,6 +535,10 @@ pub struct RoutingRecord {
     /// 残量による調整の理由（`select_tier`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quota_reason: Option<String>,
+    /// ADR-0072 D21（Phase E2）: この run が属する WorkUnit（計画のある Task の WU の run だけ。
+    /// 暗黙の WorkUnit・導入前のイベントには無い）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_unit_id: Option<String>,
 }
 
 /// 規則 1 件。`when` が真なら `lane`。

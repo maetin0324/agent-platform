@@ -187,6 +187,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::mcp_admin::routes())
         // ADR-0056 D3 続き（Phase 82）: skills を GUI から見る・作る・mount する。実装は `crate::skills`。
         .merge(crate::skills::routes())
+        // ADR-0072 D14（Phase E2）: ExecutionPlan の採用。実装は `crate::execution`。
+        .merge(crate::execution::routes())
         .route("/api/v1/daemon", get(daemon))
         .route("/api/v1/config", get(config))
         .route("/api/v1/schema", get(schema))

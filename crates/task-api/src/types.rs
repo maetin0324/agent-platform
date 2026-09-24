@@ -1225,6 +1225,90 @@ pub struct RepoList {
     pub items: Vec<task_core::ProjectRepo>,
 }
 
+// ============================================================================
+// ADR-0072（Phase E2）: ExecutionPlan / WorkUnit
+// `POST /tasks/{id}/execution-plan` / `GET /tasks/{id}/execution-plan`。
+// ============================================================================
+
+/// 1 WorkUnit の現在の状態（`work_units` 行の写し）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct WorkUnitView {
+    pub id: String,
+    pub key: String,
+    pub seq: u32,
+    pub kind: task_core::WorkUnitKind,
+    pub status: task_core::WorkUnitStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<task_core::WorkUnitBlockedReason>,
+    pub depends_on: Vec<String>,
+    pub runs: u32,
+    pub continuations: u32,
+    pub retries: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checkpoint_run_id: Option<String>,
+    pub spec: task_core::WorkUnitSpec,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<task_core::WorkUnitRow> for WorkUnitView {
+    fn from(row: task_core::WorkUnitRow) -> Self {
+        WorkUnitView {
+            id: row.id,
+            key: row.key,
+            seq: row.seq,
+            kind: row.kind,
+            status: row.status,
+            blocked_reason: row.blocked_reason,
+            depends_on: row.depends_on,
+            runs: row.runs,
+            continuations: row.continuations,
+            retries: row.retries,
+            last_run_id: row.last_run_id,
+            last_checkpoint_run_id: row.last_checkpoint_run_id,
+            spec: row.spec,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        }
+    }
+}
+
+/// `POST`/`GET /tasks/{id}/execution-plan` の応答。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExecutionPlanView {
+    pub id: String,
+    pub task_id: String,
+    pub version: u32,
+    pub origin: task_core::PlanOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_run_id: Option<String>,
+    pub status: task_core::PlanStatus,
+    pub plan: task_core::ExecutionPlanSpec,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<String>,
+    pub work_units: Vec<WorkUnitView>,
+}
+
+impl ExecutionPlanView {
+    pub fn new(plan: task_core::ExecutionPlanRow, work_units: Vec<task_core::WorkUnitRow>) -> Self {
+        ExecutionPlanView {
+            id: plan.id,
+            task_id: plan.task_id,
+            version: plan.version,
+            origin: plan.origin,
+            planner_run_id: plan.planner_run_id,
+            status: plan.status,
+            plan: plan.spec,
+            created_at: plan.created_at,
+            superseded_at: plan.superseded_at,
+            work_units: work_units.into_iter().map(WorkUnitView::from).collect(),
+        }
+    }
+}
+
 /// `POST /projects/{id}/repos` の要求本文（管理系）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]

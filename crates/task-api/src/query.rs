@@ -149,7 +149,7 @@ pub(crate) fn parse_snake<T: DeserializeOwned>(what: &str, value: &str) -> Resul
 }
 
 /// `Event` の serde の `type` 名（`types` クエリの語彙）。
-pub(crate) const EVENT_TYPES: [&str; 22] = [
+pub(crate) const EVENT_TYPES: [&str; 24] = [
     "created",
     "transitioned",
     "worker_started",
@@ -178,6 +178,10 @@ pub(crate) const EVENT_TYPES: [&str; 22] = [
     "routing_decided",
     // ADR-0072 D5（Phase E1）: run 終了時に確定させた checkpoint。
     "checkpoint_saved",
+    // ADR-0072 D5（Phase E2）: 計画の採用（新規または replan）。
+    "execution_planned",
+    // ADR-0072 D5（Phase E2）: WorkUnit の状態遷移。
+    "work_unit_transitioned",
 ];
 
 pub(crate) fn event_type_name(event: &Event) -> &'static str {
@@ -204,6 +208,8 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::WorkspacePruned { .. } => "workspace_pruned",
         Event::RoutingDecided { .. } => "routing_decided",
         Event::CheckpointSaved { .. } => "checkpoint_saved",
+        Event::ExecutionPlanned { .. } => "execution_planned",
+        Event::WorkUnitTransitioned { .. } => "work_unit_transitioned",
     }
 }
 

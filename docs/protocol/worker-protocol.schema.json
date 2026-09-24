@@ -1619,6 +1619,17 @@
           ],
           "description": "Phase 30（ADR-0033 D4 追記）: 対話 run で、担当のノードが自分の仕事の分野（`node.genre`）を持つ\nときだけ `Some`。対話そのものは常に対話用分野（`task.genre`）で走るが、その人が自分の得意分野を\n知って答えられるように、前置きに「仕事で使う道具」として渡す（決定的。`[[genres]]` を引くだけ）。"
         },
+        "work_unit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkUnitPromptContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0072 D9/D21: 計画のある Task の WorkUnit の run のときだけ `Some`。`## Objective` は\nTask 全体の目的ではなく、この WorkUnit の `objective` に差し替わる（`preamble`/`claude_code`\nが読む）。暗黙の WorkUnit（計画の無い Task）の run では常に `None`\n（プロンプトは E1 までと 1 バイトも変わらない）。"
+        },
         "workspace_note": {
           "description": "Phase 43（ADR-0039 D3）: **案件が作業場所を決めている run** にだけ載る 1 行（そのコードがどこに\nあるか）。ディスパッチャが `projects.workspace` から決定的に組む（`preamble::workspace_note`）。\n作業場所を決めていない案件・案件に属さないタスクでは `None` で、プロンプトは Phase 42 までと\nバイト単位で同じ。",
           "type": [
@@ -2144,6 +2155,53 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "WorkUnitPromptContext": {
+      "description": "`context.work_unit`（ADR-0072 D9/D21。Phase E2）。",
+      "properties": {
+        "dependency_summaries": {
+          "description": "D9: 依存する WU の最終 checkpoint の要約（`\"<title>: <completed の最後の1件、または「完了」>\"`\nの形。依存が無ければ空）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "done_when": {
+          "description": "D14 の `done_when`（この WU の完了の目安。`## Acceptance criteria` に載る）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "key": {
+          "description": "計画の中の slug。",
+          "type": "string"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "plan_overview": {
+          "description": "D9: 計画の中の WU 一覧（key・title・status を 1 行ずつ）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "task_objective_excerpt": {
+          "description": "D9: Task 全体の目的の先頭 1,500 文字（参考として渡す）。",
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "title",
+        "objective",
+        "task_objective_excerpt"
+      ],
       "type": "object"
     },
     "WorkerHint": {
