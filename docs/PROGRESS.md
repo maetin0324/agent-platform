@@ -17822,3 +17822,7 @@ frontier=`gpt-6-astra`(high) / standard=`gpt-6-sol`(medium) / cheap=`gpt-6-luna`
 - ゲート: `cargo fmt --all -- --check` 0、`cargo clippy --workspace -- -D warnings` 0、`cargo test --workspace` 2116 成功 / 0 失敗 / 4 ignore、
   GUI typecheck・lint・test（71 files / 1086 件）成功、`UPDATE_SCHEMA=1` と `gen:types` で API 型を同期。
 - 未解決: 提案 — bnode150 に入ってから localhost へ転送する 2 段 forward（`via`）は、IB 側が塞がれたら要る。
+- 再提出（attempt 2、2026-09-24 16:14Z）: main 573e9a5 を取り込み（PROGRESS.md の衝突のみ）。この間に master が 16:10Z に張り直され、
+  予告どおり稼働中デーモンが旧 target `bnode150:18000` で転送を作り直して qwen が `reachable: false` に戻っていた。
+  同じ手順（`ssh -O cancel` → `-O forward -L 127.0.0.1:18000:10.110.0.150:18000`）で張り替え、約 40 秒後に `reachable: true`、
+  `celeris/cheap` → 200・`x-celeris-source: openai-compatible:qwen`・応答 `PONG`。恒久的には、昇格でデーモンが config.toml の新 target を読み直せば直る。
