@@ -9694,6 +9694,27 @@
       },
       "type": "object"
     },
+    "ReviewResult": {
+      "description": "レビューの結果（その run の後の `review_pass` / `review_fail`）。",
+      "properties": {
+        "failed_criteria": {
+          "description": "不合格だった受け入れ条件の番号。",
+          "items": {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "passed": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "passed"
+      ],
+      "type": "object"
+    },
     "ReviewerConfigView": {
       "properties": {
         "adapter": {
@@ -9757,6 +9778,163 @@
       "required": [
         "id",
         "has_instructions"
+      ],
+      "type": "object"
+    },
+    "RoutingAudit": {
+      "description": "ワーカー run 1 件の routing の監査。",
+      "properties": {
+        "account": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "adapter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "escalation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "features": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskFeatures"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "harness": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "lane": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "org_node": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "policy_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasoning_effort": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "retries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "review": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rule_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        },
+        "wall_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "task_id",
+        "run_id"
       ],
       "type": "object"
     },
@@ -11353,6 +11531,43 @@
       },
       "type": "object"
     },
+    "TaskRoutingView": {
+      "description": "`GET /tasks/{id}/routing` の応答（ADR-0068 D5）。なぜその担当・harness・lane・model になったかの監査。\n`runs` はワーカー run ごと（古い run が先）で、各 run の `escalation` がエスカレーションの履歴になる。\nまだ run が無いタスクは `runs` が空（404 にはしない。知らないタスクだけが 404）。",
+      "properties": {
+        "assignee": {
+          "description": "現在の担当（`Task.assignee`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "routing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TaskRouting"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "routing の出自（tier を誰が決めたか・捨てた LLM の担当 `dropped_assignee`・features の上書き）。"
+        },
+        "runs": {
+          "items": {
+            "$ref": "#/$defs/RoutingAudit"
+          },
+          "type": "array"
+        },
+        "task_id": {
+          "$ref": "#/$defs/TaskId"
+        }
+      },
+      "required": [
+        "task_id",
+        "runs"
+      ],
+      "type": "object"
+    },
     "TaskSummary": {
       "properties": {
         "actions": {
@@ -12670,6 +12885,10 @@
     "task_list": {
       "$ref": "#/$defs/TaskList"
     },
+    "task_routing": {
+      "$ref": "#/$defs/TaskRoutingView",
+      "description": "ADR-0068 D5: `GET /tasks/{id}/routing`。"
+    },
     "timeline": {
       "$ref": "#/$defs/Timeline",
       "description": "ADR-0044 D5: `GET /tasks/{id}/timeline`。"
@@ -12765,6 +12984,7 @@
     "comment_result",
     "reopen",
     "timeline",
+    "task_routing",
     "console",
     "console_block",
     "console_hello",

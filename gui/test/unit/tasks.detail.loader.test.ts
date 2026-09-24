@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CelerisClient } from "~/celeris/client.server";
 import { CelerisError } from "~/celeris/errors";
-import type { ArtifactList, CommentList, EventsPage, TaskDetail, Timeline, TreeView } from "~/celeris/types";
+import type {
+  ArtifactList,
+  CommentList,
+  EventsPage,
+  TaskDetail,
+  TaskRoutingView,
+  Timeline,
+  TreeView,
+} from "~/celeris/types";
 import { loadTaskDetail } from "~/routes/tasks.$id";
 import { type MockCeleris, sendJson, sendProblem, startMockCeleris } from "../mock-celeris/server";
 
@@ -138,6 +146,8 @@ describe("loadTaskDetail", () => {
       genres: [],
       // ADR-0046 D5（Phase 59）: `assigned` イベントが無いので null。
       assignedEvent: null,
+      // celeris ADR-0068 D5: `GET /tasks/{id}/routing` を登録していないので落ちて null（パネルを出さない）。
+      routing: null,
       // ADR-0043 D6（Phase 52 + 53 のマージ）: 作業ツリーは `?tab=files` のときだけ引く。
       files: null,
       // マージ（Phase 54）: 「変更」タブを見ていないので引かない（`?tab=changes` のときだけ）。
@@ -161,6 +171,19 @@ describe("loadTaskDetail", () => {
     }
     // 「ファイル」タブを見ていないので `GET /tasks/{id}/tree` は叩かない。
     expect(mock.requests.some((r) => r.url.startsWith("/api/v1/tasks/T1/tree"))).toBe(false);
+  });
+
+  it("GET /tasks/{id}/routing の監査をそのまま routing に載せる（celeris ADR-0068 D5）", async () => {
+    serveTask();
+    const routing: TaskRoutingView = {
+      task_id: "T1",
+      routing: { tier_source: "hint", dropped_assignee: "research" },
+      runs: [{ task_id: "T1", run_id: "R1", org_node: "coding", harness: "coding", lane: "standard", model: "m" }],
+    };
+    mock.on("GET", "/api/v1/tasks/T1/routing", (_req, res) => sendJson(res, 200, routing));
+
+    const result = await loadTaskDetail(client, "T1", new Request("http://gui.invalid/tasks/T1"));
+    expect(result.routing).toEqual(routing);
   });
 
   it("reviewing / 承認タスクは GET /inbox の未決の承認のうち自分か子のものだけ humanReview に載せる", async () => {

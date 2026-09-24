@@ -48,6 +48,8 @@ pub mod releases;
 mod reports;
 /// ADR-0043 D1（Phase 52）: 案件のリポジトリ（`project_repos`）の CRUD。
 pub mod repos;
+/// ADR-0068 D5: タスクの routing の監査（`GET /tasks/{id}/routing`）。
+pub mod routing;
 pub mod schema;
 pub mod secrets;
 /// Phase 82（ADR-0056 D3 続き）: skills を GUI から見る・作る・mount する（`GET/PUT/DELETE /skills…`、

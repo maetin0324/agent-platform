@@ -825,6 +825,7 @@ export interface ApiV1Schema {
   task_edit: TaskEdit;
   task_edit_result: EditResult;
   task_list: TaskList;
+  task_routing: TaskRoutingView;
   timeline: Timeline;
   transition_result: TransitionResult;
   tree: TreeView;
@@ -5229,6 +5230,58 @@ export interface TaskList {
   items: TaskSummary[];
   next_cursor?: string | null;
   total: number;
+}
+/**
+ * ADR-0068 D5: `GET /tasks/{id}/routing`。
+ */
+export interface TaskRoutingView {
+  /**
+   * 現在の担当（`Task.assignee`）。
+   */
+  assignee?: string | null;
+  /**
+   * routing の出自（tier を誰が決めたか・捨てた LLM の担当 `dropped_assignee`・features の上書き）。
+   */
+  routing?: TaskRouting | null;
+  runs: RoutingAudit[];
+  task_id: TaskId;
+}
+/**
+ * ワーカー run 1 件の routing の監査。
+ */
+export interface RoutingAudit {
+  account?: string | null;
+  adapter?: string | null;
+  cost_usd?: number | null;
+  escalation?: string | null;
+  features?: TaskFeatures | null;
+  harness?: string | null;
+  input_tokens?: number | null;
+  lane?: Tier | null;
+  model?: string | null;
+  org_node?: string | null;
+  outcome?: string | null;
+  output_tokens?: number | null;
+  policy_version?: string | null;
+  provider?: string | null;
+  reasoning_effort?: string | null;
+  reasons?: string[];
+  retries?: number | null;
+  review?: ReviewResult | null;
+  rule_id?: string | null;
+  run_id: string;
+  task_id: TaskId;
+  wall_ms?: number | null;
+}
+/**
+ * レビューの結果（その run の後の `review_pass` / `review_fail`）。
+ */
+export interface ReviewResult {
+  /**
+   * 不合格だった受け入れ条件の番号。
+   */
+  failed_criteria?: number[];
+  passed: boolean;
 }
 /**
  * ADR-0044 D5: `GET /tasks/{id}/timeline`。

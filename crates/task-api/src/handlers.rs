@@ -178,6 +178,8 @@ pub(crate) fn router(state: ApiState) -> Router {
         .merge(crate::releases::routes())
         // ADR-0044 D5（Phase 53）: タスクのタイムライン。実装は `crate::timeline`。
         .merge(crate::timeline::routes())
+        // ADR-0068 D5: タスクの routing の監査。実装は `crate::routing`。
+        .merge(crate::routing::routes())
         // ADR-0048 D1（Phase 60a）: Console の読み取り側。実装は `crate::console`。
         .merge(crate::console::routes())
         // ADR-0053 D4（Phase 65）: LLM source の観測。実装は `crate::llm_sources`。

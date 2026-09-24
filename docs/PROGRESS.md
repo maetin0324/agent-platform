@@ -17257,3 +17257,11 @@ provider/model）/ Review の 4 層。組織木は継承の名前空間（命令
 - P-114-6: GUI/API に `task_routing_audit` を出す（次の Phase。タスク画面の「なぜこの lane / model か」）。
 - P-114-7: Phase 2 の shadow 分類器（`ShadowClassifier`）・metrics-aware routing・lead+sidekick・部門リードの
   選択的起動（ADR-0068 §5）。
+
+### Phase 114 続き: routing 監査の API / GUI（P-114-6 を解消）
+
+- `GET /tasks/{id}/routing`（`TaskRoutingView`: 担当・`Task.routing` の出自・run ごとの `RoutingAudit`）。実装 `crates/task-api/src/routing.rs`、テスト `crates/task-api/tests/routing.rs`。
+- GUI: タスク詳細に `TaskRoutingPanel`（org → harness → lane → model の順に理由・features・policy 版・エスカレーション履歴）。
+- ゲート: `cargo test --workspace --no-fail-fast` 2059 passed / 0 failed、`cargo clippy --workspace --all-targets -- -D warnings` exit 0、
+  GUI `pnpm typecheck` / `pnpm lint` exit 0、`pnpm vitest run` 1073 passed。
+- 未検証: 本番 CoS 対話での実機確認（P-114-5）。`cargo fmt --check` の config.rs 差分は既存（未変更）。
