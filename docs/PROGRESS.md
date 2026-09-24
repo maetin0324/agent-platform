@@ -17826,3 +17826,18 @@ frontier=`gpt-6-astra`(high) / standard=`gpt-6-sol`(medium) / cheap=`gpt-6-luna`
   予告どおり稼働中デーモンが旧 target `bnode150:18000` で転送を作り直して qwen が `reachable: false` に戻っていた。
   同じ手順（`ssh -O cancel` → `-O forward -L 127.0.0.1:18000:10.110.0.150:18000`）で張り替え、約 40 秒後に `reachable: true`、
   `celeris/cheap` → 200・`x-celeris-source: openai-compatible:qwen`・応答 `PONG`。恒久的には、昇格でデーモンが config.toml の新 target を読み直せば直る。
+- 再提出（attempt 3、2026-09-24 16:35Z〜）: attempt 2 は評価器の `cargo test --workspace` が
+  `accounts_admin::tests::codex_login_start_returns_user_code_and_poll_detects_completion` で落ちて不合格
+  （`login process exited before showing an authorization url`。手元では 193/193 成功、評価器では 16 秒かかる負荷下）。
+  原因は `start_login` / `start_login_codex` の競合: 子が URL を出して終了したあと、読み取りタスク（`pump_reader`）が
+  パイプを読む前に `try_wait` が終了を見ると「URL を出す前に終了」と誤判定する（スレッド飢餓で `spawn` から最初の
+  `try_wait` までが 200 ms を超えると必ず起きる）。再現: テストプロセスに SIGSTOP 300 ms / SIGCONT 3 ms を繰り返す
+  `artifacts/attempt3/stutter.sh` で旧ロジック 6/10 失敗、修正後 0/10（CPU 負荷だけでは 0/100 で再現せず）。
+  直し: 終了を検知したら `drain_readers`（両読み取りタスクを `READER_JOIN_TIMEOUT` まで join）で読み切ってから
+  もう一度だけ探す（claude・codex 両方）。回帰テスト 3 件（`*_even_when_the_process_exits_immediately` ×2、
+  `start_login_codex_still_reports_process_exited_when_no_url_was_printed`）。
+  併せて、専用 target dir での 1 回目の全体テストで `dispatcher::tests::provider_failure_requeues_without_consuming_attempts`
+  が負荷で落ちた（cooldown 200 ms に対し 50 ms 後の tick が遅れて `dispatched=1`）ので、テストの cooldown を 1500 ms に広げた。
+  ゲート: `cargo fmt --all --check` 0、`cargo clippy --workspace -- -D warnings` 0、`cargo test --workspace` 2119 成功 / 0 失敗 / 4 ignore。
+  実機（16:35Z、旧 release 0e20e1b2a058 稼働中）: `GET /llm/sources` qwen `reachable: true`、3 段とも qwen に解決、
+  `celeris/cheap` → 200・`x-celeris-source: openai-compatible:qwen`・応答 `PONG`（57/26 token）。

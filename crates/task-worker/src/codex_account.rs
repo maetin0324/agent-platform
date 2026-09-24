@@ -18,8 +18,8 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 
 use crate::claude_account::{
-    AccountCheck, AccountCheckResult, LoginError, LoginOutcome, LoginResult, READER_JOIN_TIMEOUT,
-    join_with_timeout, pump_reader, strip_escape_codes,
+    AccountCheck, AccountCheckResult, LoginError, LoginOutcome, LoginResult, drain_readers,
+    pump_reader, strip_escape_codes,
 };
 use crate::codex::now_unix_secs;
 use crate::protocol::ProviderFailure;
@@ -238,21 +238,32 @@ pub async fn start_login_codex(
     let stderr = child.stderr.take().ok_or(LoginError::NotPiped)?;
 
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let out_task = tokio::spawn(pump_reader(stdout, buf.clone()));
-    let err_task = tokio::spawn(pump_reader(stderr, buf.clone()));
+    let mut out_task = Some(tokio::spawn(pump_reader(stdout, buf.clone())));
+    let mut err_task = Some(tokio::spawn(pump_reader(stderr, buf.clone())));
+
+    let find = |bytes: &[u8]| {
+        let url = extract_device_url(bytes);
+        let user_code = extract_device_code(bytes);
+        match (url, user_code) {
+            (Some(url), Some(user_code)) => Some((url, user_code)),
+            _ => None,
+        }
+    };
 
     let start = Instant::now();
     let found = loop {
         {
             let snapshot = buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            let url = extract_device_url(&snapshot);
-            let user_code = extract_device_code(&snapshot);
-            if let (Some(url), Some(user_code)) = (url, user_code) {
-                break Some((url, user_code));
+            if let Some(found) = find(&snapshot) {
+                break Some(found);
             }
         }
         if let Ok(Some(_status)) = child.try_wait() {
-            break None;
+            // 終了後もパイプに出力が残りうる。読み切ってから最後にもう一度だけ探す（`codex login --device-auth`
+            // は URL とコードを出した後すぐ終わることがあり、負荷下では読み取りタスクが追いつかない）。
+            drain_readers(&mut out_task, &mut err_task).await;
+            let snapshot = buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            break find(&snapshot);
         }
         if start.elapsed() >= url_timeout {
             break None;
@@ -272,8 +283,7 @@ pub async fn start_login_codex(
             let exited = child.try_wait().ok().flatten().is_some();
             send_signal_to_group(&child, Signal::SIGKILL);
             let _ = child.wait().await;
-            join_with_timeout(out_task, READER_JOIN_TIMEOUT).await;
-            join_with_timeout(err_task, READER_JOIN_TIMEOUT).await;
+            drain_readers(&mut out_task, &mut err_task).await;
             Err(if exited {
                 LoginError::ProcessExited
             } else {
@@ -572,6 +582,60 @@ sleep 30"#
         let result = session.wait(Duration::from_secs(5)).await;
         assert_eq!(result.result, LoginOutcome::Ok);
         assert!(acct.join("auth.json").is_file());
+    }
+
+    /// 回帰: 子が URL とコードを出して**すぐに終了**しても、終了検知の前にパイプに残った出力を読み切ってから
+    /// 探すので「URL を出す前に終了した」と誤判定しない（accounts_admin の codex ログインテストが CI 負荷下で
+    /// `ProcessExited` になった競合）。読み取りタスクが追いつく前に終了させるため、遅延なしの stub を繰り返す。
+    #[tokio::test]
+    async fn start_login_codex_finds_url_and_code_even_when_the_process_exits_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = stub(
+            dir.path(),
+            r#"printf '%s\n' 'https://auth.openai.com/codex/device' 'ABCD-EFGHI'
+printf '%s' '{}' > "$CODEX_HOME/auth.json"
+exit 0
+"#,
+        );
+        for i in 0..20 {
+            let acct = account_dir(dir.path(), &format!("a{i}"));
+            let session = start_login_codex(
+                command.to_str().unwrap(),
+                &acct,
+                &[],
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("iteration {i}: {e}"));
+            assert_eq!(session.url, "https://auth.openai.com/codex/device");
+            assert_eq!(session.user_code, "ABCD-EFGHI");
+            let result = session.wait(Duration::from_secs(5)).await;
+            assert_eq!(result.result, LoginOutcome::Ok);
+            assert!(acct.join("auth.json").is_file());
+        }
+    }
+
+    /// 上の回帰の裏: 出力を読み切っても URL が無ければ、従来どおり `ProcessExited`（`Timeout` ではない）。
+    #[tokio::test]
+    async fn start_login_codex_still_reports_process_exited_when_no_url_was_printed() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = stub(
+            dir.path(),
+            "printf 'codex 0.1.0\nno device flow here\n'
+exit 0
+",
+        );
+        let acct = account_dir(dir.path(), "a");
+        let err = start_login_codex(
+            command.to_str().unwrap(),
+            &acct,
+            &[],
+            Duration::from_secs(5),
+        )
+        .await
+        .err()
+        .expect("must fail");
+        assert!(matches!(err, LoginError::ProcessExited), "{err}");
     }
 
     #[tokio::test]

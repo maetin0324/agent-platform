@@ -10094,8 +10094,10 @@ mod tests {
             _sink: &dyn EventSink,
         ) -> Result<RunOutcome, AdapterError> {
             if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                // 下のテストは「50 ms 後の tick ではまだ cooldown 中」を見る。負荷で tick が遅れても明けないよう、
+                // cooldown は十分長く取る（`run_until_idle` は 20 ms × 300 tick = 6 秒まで待つ）。
                 return Err(AdapterError::Throttled {
-                    retry_after: Duration::from_millis(200),
+                    retry_after: Duration::from_millis(1500),
                 });
             }
             std::fs::write(req.workspace.join("touched"), "1").unwrap();

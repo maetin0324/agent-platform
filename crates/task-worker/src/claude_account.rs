@@ -365,6 +365,22 @@ pub(crate) async fn join_with_timeout(handle: JoinHandle<()>, timeout: Duration)
     }
 }
 
+/// 子プロセスが終了した後に、パイプに残っている出力を読み切る（両方の読み取りタスクを `READER_JOIN_TIMEOUT`
+/// まで待つ）。`start_login` / `start_login_codex` は「終了を検知した瞬間の共有バッファ」ではなく、読み切った後の
+/// バッファで URL を探す。そうしないと、子が URL を出して直ぐに終了したときや、負荷で読み取りタスクが遅れたときに
+/// 「URL を出す前に終了した」と誤判定する（accounts_admin の codex ログインテストが CI 負荷下で落ちた原因）。
+pub(crate) async fn drain_readers(
+    out_task: &mut Option<JoinHandle<()>>,
+    err_task: &mut Option<JoinHandle<()>>,
+) {
+    if let Some(handle) = out_task.take() {
+        join_with_timeout(handle, READER_JOIN_TIMEOUT).await;
+    }
+    if let Some(handle) = err_task.take() {
+        join_with_timeout(handle, READER_JOIN_TIMEOUT).await;
+    }
+}
+
 pub async fn start_login(
     command: &str,
     account_dir: &Path,
@@ -390,8 +406,8 @@ pub async fn start_login(
     let stderr = child.stderr.take().ok_or(LoginError::NotPiped)?;
 
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let out_task = tokio::spawn(pump_reader(stdout, buf.clone()));
-    let err_task = tokio::spawn(pump_reader(stderr, buf.clone()));
+    let mut out_task = Some(tokio::spawn(pump_reader(stdout, buf.clone())));
+    let mut err_task = Some(tokio::spawn(pump_reader(stderr, buf.clone())));
 
     let start = Instant::now();
     let url = loop {
@@ -402,7 +418,10 @@ pub async fn start_login(
             }
         }
         if let Ok(Some(_status)) = child.try_wait() {
-            break None;
+            // 終了後もパイプに出力が残りうる。読み切ってから最後にもう一度だけ探す。
+            drain_readers(&mut out_task, &mut err_task).await;
+            let snapshot = buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            break extract_oauth_url(&snapshot);
         }
         if start.elapsed() >= url_timeout {
             break None;
@@ -417,8 +436,8 @@ pub async fn start_login(
             account_dir: account_dir.to_path_buf(),
             child: Some(child),
             stdin: Some(stdin),
-            out_task: Some(out_task),
-            err_task: Some(err_task),
+            out_task,
+            err_task,
             buf,
         }),
         None => {
@@ -427,8 +446,7 @@ pub async fn start_login(
             // が起動する孫プロセスも一緒に止める）。
             send_signal_to_group(&child, Signal::SIGKILL);
             let _ = child.wait().await;
-            join_with_timeout(out_task, READER_JOIN_TIMEOUT).await;
-            join_with_timeout(err_task, READER_JOIN_TIMEOUT).await;
+            drain_readers(&mut out_task, &mut err_task).await;
             Err(if exited {
                 LoginError::ProcessExited
             } else {
@@ -793,6 +811,34 @@ fi
     }
 
     /// N6: 空白だけのコードも拒否する。
+    /// 回帰（codex 側と同じ競合）: URL を出してすぐ終了する子でも、パイプを読み切ってから探すので URL が取れる。
+    #[tokio::test]
+    async fn start_login_finds_the_url_even_when_the_process_exits_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = stub(
+            dir.path(),
+            "printf 'visit: https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=abc\n'
+exit 0
+",
+        );
+        for i in 0..20 {
+            let acct = account_dir(dir.path(), &format!("a{i}"));
+            let session = start_login(
+                command.to_str().unwrap(),
+                &acct,
+                &[],
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("iteration {i}: {e}"));
+            assert_eq!(
+                session.url,
+                "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=abc"
+            );
+            session.cancel();
+        }
+    }
+
     #[tokio::test]
     async fn submit_code_rejects_whitespace_only_code() {
         let dir = tempfile::tempdir().unwrap();
