@@ -127,6 +127,7 @@ fn dispatcher(
                 tier: Tier::Standard,
                 adapter: None,
             },
+            reviewer_tier_override: None,
             clusters: HashMap::new(),
             cluster_cooldown: Duration::from_secs(1),
             max_requeues: 5,

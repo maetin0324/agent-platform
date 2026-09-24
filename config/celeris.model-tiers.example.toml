@@ -1,5 +1,9 @@
-# Desired names are labels, not verified executable model IDs.
-# Set model_id and REMOVE unavailable_reason only after verifying access.
+# ADR-0069 Phase 118 D2: model IDs measured by actually running the CLI (2026-09-24, this repo's
+# production hosts). Claude Code and Codex (ChatGPT account) both accepted these IDs; codex's
+# reasoning_effort is passed to the CLI as `-c model_reasoning_effort="<value>"` (ADR-0069 Phase 118
+# D1). claude-code has no known equivalent flag, so its bindings omit reasoning_effort.
+# If your account/plan differs, re-verify before deploying and set unavailable_reason on any tier
+# that fails (celeris blocks tasks routed to that tier rather than silently substituting a model).
 # Credentials live in Accounts; both providers can reuse their adapter's pool.
 [accounts]
 claude_dir = "claude-accounts"
@@ -12,13 +16,13 @@ account_pool = true
 # account_id = "subscription-a" # optional; omitted means automatic pool selection
 [providers.tier_models.frontier]
 name = "fable"
-unavailable_reason = "実行モデルID未確認"
+model_id = "claude-fable-5-1"
 [providers.tier_models.standard]
 name = "opus"
-unavailable_reason = "実行モデルID未確認"
+model_id = "claude-opus-5-5"
 [providers.tier_models.cheap]
 name = "sonnet"
-unavailable_reason = "実行モデルID未確認"
+model_id = "claude-sonnet-5"
 
 [[providers]]
 id = "gpt"
@@ -26,10 +30,13 @@ adapter = "codex"
 account_pool = true
 [providers.tier_models.frontier]
 name = "astra"
-unavailable_reason = "実行モデルID未確認"
+model_id = "gpt-6-astra"
+reasoning_effort = "high"
 [providers.tier_models.standard]
 name = "sol"
-unavailable_reason = "実行モデルID未確認"
+model_id = "gpt-6-sol"
+reasoning_effort = "medium"
 [providers.tier_models.cheap]
 name = "luna"
-unavailable_reason = "実行モデルID未確認"
+model_id = "gpt-6-luna"
+reasoning_effort = "low"

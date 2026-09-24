@@ -329,7 +329,8 @@ async fn claude_non_stream_round_trip() {
     // system メッセージが `system` フィールドに分離されていること。
     let captured = fake.captured.lock().expect("lock");
     assert_eq!(captured[0]["system"], "You are terse.");
-    assert_eq!(captured[0]["model"], "claude-sonnet-5");
+    // ADR-0069 Phase 118 D2: default_claude_models の standard は claude-opus-5-5（実測 ID）。
+    assert_eq!(captured[0]["model"], "claude-opus-5-5");
 }
 
 // ---------------------------------------------------------------------------

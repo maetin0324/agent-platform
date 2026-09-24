@@ -1050,23 +1050,18 @@ fn default_remove_worktree_when() -> String {
 }
 
 /// `[reviewer]`（ADR-0010 D9, P-30）: `Check::Reviewer` の判定 run に使う adapter / tier。
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewerConfig {
     /// 省略時は tier だけで選ぶ（設定表の優先順）。
     #[serde(default)]
     pub adapter: Option<String>,
-    #[serde(default = "default_reviewer_tier")]
-    pub tier: Tier,
-}
-
-impl Default for ReviewerConfig {
-    fn default() -> Self {
-        Self {
-            adapter: None,
-            tier: default_reviewer_tier(),
-        }
-    }
+    /// ADR-0069 Phase 118 D4: 明示すればそれが勝つ（部署の `[profile] review.tier` を除く）。省略時
+    /// （既定 `None`）は、worker run の lane と同じにして組織の天井で丸める
+    /// （`Dispatcher::pick_reviewer` が決める。`reviewer_hint.tier` の後方互換の既定値には
+    /// 引き続き `default_reviewer_tier()` を使う）。
+    #[serde(default)]
+    pub tier: Option<Tier>,
 }
 
 fn default_reviewer_tier() -> Tier {
@@ -2226,21 +2221,33 @@ impl Config {
             ));
         }
         // ADR-0010 D9: Reviewer run を満たせるプロバイダが無い設定は、Reviewer 条件のタスクが無音で待ち続ける原因になる。
+        // ADR-0069 Phase 118 D4: `[reviewer] tier` が未設定なら lane はタスクごとに動的に決まる
+        // （worker run の lane に一致・組織の天井で丸め）ので、特定の 1 tier だけを検査する意味が無い。
+        // その場合は「（`adapter` 制約を満たす）プロバイダが 1 つ以上の tier を提供しているか」に緩める。
         let reviewer = &self.reviewer;
-        let reviewer_ok = self.providers.iter().any(|p| {
-            p.tiers.contains(&reviewer.tier)
-                && reviewer.adapter.as_deref().is_none_or(|a| p.adapter == a)
-        });
+        let reviewer_ok = match reviewer.tier {
+            Some(explicit) => self.providers.iter().any(|p| {
+                p.tiers.contains(&explicit)
+                    && reviewer.adapter.as_deref().is_none_or(|a| p.adapter == a)
+            }),
+            None => self.providers.iter().any(|p| {
+                !p.tiers.is_empty() && reviewer.adapter.as_deref().is_none_or(|a| p.adapter == a)
+            }),
+        };
         if !reviewer_ok {
-            return Err(ConfigError::Invalid(format!(
-                "[reviewer] no provider offers tier {:?}{} for reviewer runs",
-                reviewer.tier,
-                reviewer
-                    .adapter
-                    .as_deref()
-                    .map(|a| format!(" with adapter {a:?}"))
-                    .unwrap_or_default()
-            )));
+            let adapter_suffix = reviewer
+                .adapter
+                .as_deref()
+                .map(|a| format!(" with adapter {a:?}"))
+                .unwrap_or_default();
+            return Err(ConfigError::Invalid(match reviewer.tier {
+                Some(t) => format!(
+                    "[reviewer] no provider offers tier {t:?}{adapter_suffix} for reviewer runs"
+                ),
+                None => format!(
+                    "[reviewer] no provider offers any tier{adapter_suffix} for reviewer runs"
+                ),
+            }));
         }
         // ADR-0013 D11: loopback 以外で API をリッスンするならトークンを必須にする。
         if let Some(listen) = self.api.listen
@@ -2667,7 +2674,7 @@ impl Config {
         self.adapters.fake.command = FakeAdapter::default_command();
         // レビューも偽のアダプタだけ（`Check::Reviewer` を持つ煙試験を書いても LLM は呼ばれない）。
         self.reviewer.adapter = Some(FakeAdapter::ID.to_string());
-        self.reviewer.tier = Tier::Standard;
+        self.reviewer.tier = Some(Tier::Standard);
 
         self.providers.retain(|p| p.id != SMOKE_ID);
         self.providers.push(ProviderConfig {
@@ -2725,9 +2732,14 @@ impl Config {
             max_reviewer_retries: self.review.max_reviewer_retries,
             max_infra_retries: self.dispatch.max_infra_retries,
             reviewer_hint: WorkerHint {
-                tier: self.reviewer.tier,
+                // ADR-0069 Phase 118 D4: 他に何も分からないときの既定値（後方互換）。実際の reviewer
+                // run の lane は `Dispatcher::pick_reviewer` が `reviewer_tier_override` /
+                // `profile.review_tier` / worker lane から動的に決める。
+                tier: self.reviewer.tier.unwrap_or_else(default_reviewer_tier),
                 adapter: self.reviewer.adapter.clone(),
             },
+            // ADR-0069 Phase 118 D4: `[reviewer] tier` が明示されているときだけ `Some`。
+            reviewer_tier_override: self.reviewer.tier,
             clusters: self.cluster_specs(),
             // ADR-0018 D2: 多重接続が無いクラスタは、プロバイダの cooldown と同じ長さだけ外す。
             cluster_cooldown: Duration::from_secs(self.error_cooldown_secs),
@@ -4644,11 +4656,20 @@ tiers = ["cheap"]
         .unwrap();
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("[reviewer]") && err.contains("codex"), "{err}");
+        // ADR-0069 Phase 118 D4: `[reviewer] tier` が未設定なら lane は動的（worker lane に一致・
+        // 天井で丸め）なので、どれか 1 tier を提供していれば足りる（従来は既定の Standard 固定で
+        // 検査していたため、frontier だけのプロバイダはこの検査に落ちていた）。
         let cfg: Config = toml::from_str(
             "[[providers]]\nid = \"x\"\nadapter = \"fake\"\ntiers = [\"frontier\"]\n",
         )
         .unwrap();
-        assert!(cfg.validate().unwrap_err().to_string().contains("Standard"));
+        assert!(cfg.validate().is_ok());
+        // `[reviewer] tier` を明示すれば、その 1 tier を提供するプロバイダが無ければ従来どおりエラー。
+        let cfg: Config = toml::from_str(
+            "[reviewer]\ntier = \"cheap\"\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\ntiers = [\"frontier\"]\n",
+        )
+        .unwrap();
+        assert!(cfg.validate().unwrap_err().to_string().contains("Cheap"));
         assert!(toml::from_str::<Config>("[reviewer]\nbogus = 1\n").is_err());
         let cfg: Config = toml::from_str("retry_backoff_base_secs = 20\nretry_backoff_max_secs = 10\n[[providers]]\nid = \"x\"\nadapter = \"fake\"\n").unwrap();
         assert!(cfg.validate().is_err());

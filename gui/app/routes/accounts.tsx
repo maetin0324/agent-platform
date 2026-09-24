@@ -25,8 +25,11 @@ import type {
   McpCallsView,
   McpClient,
   McpClientsView,
+  Providers,
+  ProviderView,
   SecretList,
   SecretView,
+  Tier,
 } from "~/celeris/types";
 import { AccountActionFlash, ErrorFlash, SecretActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
@@ -80,6 +83,11 @@ export interface AccountsData {
    * トークンが要る。落ちても `/accounts` 自体は壊さず、この節だけに案内を出す（secrets と同じ扱い）。 */
   mcpClients: McpClientsView | null;
   mcpClientsError: ActionError | null;
+  /** ADR-0069 Phase 118 D3: `GET /providers` を読み取り専用で読み、`tier_models`（プロバイダごとの
+   * tier → 実行モデル/effort）を表示する。編集はこれまでどおり `/providers` 画面で行う（ここには
+   * フォームを置かない）。落ちても `/accounts` 自体は壊さない（secrets と同じ扱い）。 */
+  providers: Providers | null;
+  providersError: ActionError | null;
   fetchedAt: string;
 }
 
@@ -134,6 +142,13 @@ export async function loadAccounts(client: CelerisClient, request: Request): Pro
   } catch (e) {
     mcpClientsError = secretsListError(e);
   }
+  let providers: Providers | null = null;
+  let providersError: ActionError | null = null;
+  try {
+    providers = await client.get<Providers>("/providers", { signal: request.signal });
+  } catch (e) {
+    providersError = secretsListError(e);
+  }
   return {
     accounts,
     secrets,
@@ -143,6 +158,8 @@ export async function loadAccounts(client: CelerisClient, request: Request): Pro
     llmSourcesError,
     mcpClients,
     mcpClientsError,
+    providers,
+    providersError,
     fetchedAt: new Date().toISOString(),
   };
 }
@@ -256,6 +273,8 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
     llmSourcesError,
     mcpClients,
     mcpClientsError,
+    providers,
+    providersError,
     fetchedAt,
   } = loaderData;
   // celeris の SSE（daemon tick）による自動再検証のたびに `<Form>` の actionData は消える（React Router の仕様、
@@ -287,13 +306,15 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
       <AccountActionFlash outcome={fetcher.data} />
 
       {/* Phase 95（ADR-0055 ラウンド 19、所見、重さ「高」）: このページは
-          アカウント（Claude/Codex ごとに複数枚のカード）→ LLM source → MCP クライアント → API キー、と
-          性質の違う節が縦に並ぶ長い 1 ページ（実測で 4 画面分超）。`/help` と同じ「目次から飛ぶ」
-          パターン（`PageToc`）を、アカウント一覧より後ろの節（スクロールで埋もれやすい 3 節）にだけ足す。
-          既存の `id`（`llm-sources-heading` 等）や節の実装には触れない。 */}
+          アカウント（Claude/Codex ごとに複数枚のカード）→ プロバイダのモデル階層 → LLM source →
+          MCP クライアント → API キー、と性質の違う節が縦に並ぶ長い 1 ページ（実測で 4 画面分超）。
+          `/help` と同じ「目次から飛ぶ」パターン（`PageToc`）を、アカウント一覧より後ろの節
+          （スクロールで埋もれやすい節）にだけ足す。既存の `id`（`llm-sources-heading` 等）や
+          節の実装には触れない。 */}
       <PageToc
         label="アカウントの目次"
         items={[
+          { id: "provider-tier-models-heading", icon: "cpu", label: "モデル階層" },
           { id: "llm-sources-heading", icon: "server", label: "LLM source" },
           { id: "mcp-clients-heading", icon: "network", label: "MCP クライアント" },
           { id: "secrets-heading", icon: "lock", label: "API キー" },
@@ -402,6 +423,8 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
         );
       })()}
 
+      <ProviderTierModelsSection providers={providers} error={providersError} />
+
       <LlmSourcesSection
         llmSources={llmSources}
         unavailable={llmSourcesUnavailable}
@@ -419,6 +442,95 @@ export default function AccountsPage({ loaderData }: Route.ComponentProps) {
         fetchedAt={fetchedAt}
       />
     </div>
+  );
+}
+
+const PROVIDER_TIER_ORDER: Tier[] = ["frontier", "standard", "cheap"];
+
+/**
+ * 「モデル階層」節（ADR-0069 Phase 118 D3）。`GET /providers` の `tier_models`（プロバイダごとの
+ * tier → 実行モデル/reasoning effort）をそのまま表にする。`/providers` 画面のプロバイダカードに
+ * ある同じ情報の読み取り専用の要約で、編集フォームはここには置かない（編集は `/providers` で行う）。
+ */
+function ProviderTierModelsSection({ providers, error }: { providers: Providers | null; error: ActionError | null }) {
+  const items = providers?.items ?? [];
+  const withTierModels = items.filter((item) => Object.keys(item.tier_models ?? {}).length > 0);
+  return (
+    <section
+      id="provider-tier-models"
+      aria-labelledby="provider-tier-models-heading"
+      className="space-y-4"
+      data-testid="provider-tier-models-section"
+    >
+      <SectionTitle icon="cpu" id="provider-tier-models-heading" count={withTierModels.length}>
+        モデル階層
+      </SectionTitle>
+
+      {error ? (
+        <ErrorFlash error={error} />
+      ) : withTierModels.length === 0 ? (
+        <EmptyState icon="cpu" title="階層別モデルが設定されたプロバイダがありません">
+          <Link to="/providers" className={touchLinkClass}>
+            プロバイダ画面
+          </Link>
+          で <Mono>tier_models</Mono> を設定すると、tier ごとの実行モデルがここに出ます。
+        </EmptyState>
+      ) : (
+        <div className="grid items-start gap-4 xl:grid-cols-2">
+          {withTierModels.map((item) => (
+            <ProviderTierModelsCard key={item.id} item={item} />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ProviderTierModelsCard({ item }: { item: ProviderView }) {
+  return (
+    <Card data-testid="provider-tier-models-row" data-provider-id={item.id}>
+      <CardHeader
+        icon="cpu"
+        title={<Mono className="text-sm font-semibold text-fg">{item.id}</Mono>}
+        description={
+          item.adapter === "codex" ? "GPT (Codex)" : item.adapter === "claude-code" ? "Claude" : item.adapter
+        }
+      />
+      <CardBody>
+        <dl className="space-y-2 text-sm">
+          {PROVIDER_TIER_ORDER.map((tier) => {
+            const binding = item.tier_models?.[tier];
+            return (
+              <div key={tier} className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <dt className="w-20 shrink-0 font-medium text-fg-muted">{tier}</dt>
+                <dd className="min-w-0 break-all" data-testid={`provider-tier-models-${item.id}-${tier}`}>
+                  {binding ? (
+                    <>
+                      {binding.name}
+                      {" -> "}
+                      {binding.unavailable_reason ? (
+                        <span className="text-danger-soft-fg">unavailable: {binding.unavailable_reason}</span>
+                      ) : binding.model_id ? (
+                        <Mono>{binding.model_id}</Mono>
+                      ) : (
+                        <span className="text-fg-subtle">(model_id 未設定)</span>
+                      )}
+                      {binding.reasoning_effort && (
+                        <Badge tone="neutral" className="ml-1.5">
+                          effort={binding.reasoning_effort}
+                        </Badge>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-fg-subtle">(未設定)</span>
+                  )}
+                </dd>
+              </div>
+            );
+          })}
+        </dl>
+      </CardBody>
+    </Card>
   );
 }
 

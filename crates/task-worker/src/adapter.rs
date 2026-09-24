@@ -149,6 +149,18 @@ pub trait WorkerAdapter: Send + Sync {
         None
     }
 
+    /// ADR-0069 Phase 118 D1: このアダプタは reasoning effort を実際に CLI へ渡せるか
+    /// （`with_reasoning_effort` が `Some` を返しうるか）。既定 `false`（対応する引数・環境変数が
+    /// 無い。`claude-code` はこの既定のまま）。
+    fn supports_reasoning_effort(&self) -> bool {
+        false
+    }
+    /// ADR-0069 Phase 118 D1: 指定した reasoning effort を持つ複製を返す（`with_model` と同じ形）。
+    /// 対応しないアダプタは既定の `None`（呼び出し側は元のアダプタのまま実行する）。
+    fn with_reasoning_effort(&self, _effort: &str) -> Option<Arc<dyn WorkerAdapter>> {
+        None
+    }
+
     async fn run(
         &self,
         req: RunRequest,

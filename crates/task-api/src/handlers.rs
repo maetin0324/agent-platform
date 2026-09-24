@@ -3091,7 +3091,7 @@ mod tests {
                 plan_auto_accept: false,
                 reviewer: ReviewerConfigView {
                     adapter: None,
-                    tier: task_core::Tier::Standard,
+                    tier: Some(task_core::Tier::Standard),
                 },
                 providers: vec![],
                 clusters: vec![],

@@ -27,6 +27,7 @@ use commands::query::{self, LogArgs, LsArgs, ShowArgs};
 use commands::replay::{self, ReplayArgs};
 use commands::rereview::{self, RereviewArgs};
 use commands::retry::{self, RetryArgs};
+use commands::routing::{self as routing_cmd, RoutingCommand};
 use commands::worker::{self, WorkerCommand};
 use commands::workspace::{self, WorkspaceCommand};
 use error::CliError;
@@ -96,6 +97,11 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// ADR-0069 Phase 118 D3: `routing show`。tier → 実行モデル/effort の表。DB には触らない。
+    Routing {
+        #[command(subcommand)]
+        command: RoutingCommand,
+    },
     /// ADR-0046 D7: 組織の移行（`org migrate-v2`）。
     Org {
         #[command(subcommand)]
@@ -132,6 +138,8 @@ fn dispatch(store: &SqliteStore, db_path: &Path, command: Command) -> Result<Exi
         Command::Org { command } => org_cmd::run(store, db_path, command),
         // `Config` は DB を開く前に処理される（`main` を見よ）。
         Command::Config { command } => config_cmd::run(command),
+        // `Routing` も同じ（設定ファイルだけを読む。`main` を見よ）。
+        Command::Routing { command } => routing_cmd::run(command),
         Command::Add(args) => add::run(store, args),
         Command::Plan(args) => plan::run(store, args),
         Command::PlanLint => plan_lint::run(store),
@@ -172,6 +180,16 @@ fn main() -> ExitCode {
     // ADR-0046 D3: `config to-harnesses` は設定ファイルしか読まない（DB を開かない）。
     if let Command::Config { command } = cli.command {
         return match config_cmd::run(command) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+    // ADR-0069 Phase 118 D3: `routing show` も設定ファイルしか読まない（DB を開かない）。
+    if let Command::Routing { command } = cli.command {
+        return match routing_cmd::run(command) {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("error: {e}");

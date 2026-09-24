@@ -456,7 +456,7 @@ roles = ["smoke"]
 
     // レビューも偽のアダプタ（`Check::Reviewer` を書いても LLM は呼ばれない。ADR-0041 §3）。
     assert_eq!(verify.reviewer.adapter.as_deref(), Some("fake"));
-    assert_eq!(verify.reviewer.tier, Tier::Standard);
+    assert_eq!(verify.reviewer.tier, Some(Tier::Standard));
 }
 
 /// ADR-0041 D5 (e): 通常運転は `smoke` を組み込まない。偽のアダプタのプロバイダが**無い**設定では、

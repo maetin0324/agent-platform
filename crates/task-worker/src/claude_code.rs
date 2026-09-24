@@ -2965,6 +2965,56 @@ printf '%s\n' '{"type":"turn.completed"}'
         }
     }
 
+    /// ADR-0069 Phase 118 D1: claude-code には effort 相当の CLI 引数・環境変数が無い
+    /// （`claude --help` を実行して確認できる本物の CLI が無いこの環境では、この判断は運用側の
+    /// 実測メモに基づく）。`WorkerAdapter` の既定（`supports_reasoning_effort() == false`、
+    /// `with_reasoning_effort` は `None`）のままなので、設定に `reasoning_effort` を書いても argv には
+    /// 一切現れない（`--model` は従来どおり渡る）。
+    #[tokio::test]
+    async fn tier_reasoning_effort_does_not_reach_claude_code_argv() {
+        use task_core::{Tier, model_routing::ModelBinding};
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_claude(dir.path(), args_log_script());
+        let base = ClaudeCodeAdapter::new(config);
+        assert!(!base.supports_reasoning_effort());
+        assert!(base.with_reasoning_effort("high").is_none());
+        let adapter = crate::tiered::TieredAdapter {
+            base: Arc::new(base),
+            account_id: None,
+            credential_error: None,
+            models: [(
+                Tier::Standard,
+                ModelBinding {
+                    name: "requested-name".into(),
+                    model_id: Some("claude-sonnet-5".into()),
+                    unavailable_reason: None,
+                    reasoning_effort: Some("medium".into()),
+                },
+            )]
+            .into(),
+        };
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.task.worker_hint.tier = Tier::Standard;
+        let _ = adapter
+            .run(
+                req,
+                "tier-run-1",
+                default_limits(),
+                &RecordingSink::default(),
+            )
+            .await
+            .unwrap();
+        let args = captured_args(dir.path());
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.to_ascii_lowercase().contains("reasoning") || a == "medium"),
+            "{args:?}"
+        );
+        let model = args.windows(2).find(|pair| pair[0] == "--model").unwrap()[1].clone();
+        assert_eq!(model, "claude-sonnet-5");
+    }
+
     fn args_log_script() -> &'static str {
         r#"
 for a in "$@"; do printf '%s\0' "$a" >> args.log; done

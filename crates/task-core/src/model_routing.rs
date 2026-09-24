@@ -11,8 +11,10 @@ pub struct ModelBinding {
     pub model_id: Option<String>,
     #[serde(default)]
     pub unavailable_reason: Option<String>,
-    /// ADR-0069 D4（Phase 114）: この lane で使う reasoning effort（例 `"medium"`）。Phase 1 では
-    /// 監査記録（`LaneResolution`）に残すだけで、CLI には渡さない。無ければ `None`。
+    /// ADR-0069 D4（Phase 114）/ Phase 118 D1: この lane で使う reasoning effort（例 `"medium"`）。
+    /// 対応するアダプタ（codex: `-c model_reasoning_effort="<値>"`）には実際に渡す。対応しない
+    /// アダプタ（claude-code。相当する CLI 引数・環境変数が無い）では設定しても渡らず、監査記録
+    /// （`LaneResolution.reasoning_effort`）にも `None` として残る。無ければ `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 }

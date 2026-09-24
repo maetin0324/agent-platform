@@ -491,7 +491,13 @@ pub struct DispatchConfig {
     pub retry_backoff_base: Duration,
     pub retry_backoff_max: Duration,
     /// ADR-0010 D9（P-30）: `Reviewer` run の `pick` と合成 `Review` タスクの `worker_hint`。
+    /// ADR-0069 Phase 118 D4: `tier` は他に何も分からないときの既定値（後方互換）で、実際の lane は
+    /// `pick_reviewer` が `reviewer_tier_override` / 部署の `profile.review_tier` / worker lane から
+    /// 動的に決める。
     pub reviewer_hint: task_core::WorkerHint,
+    /// ADR-0069 Phase 118 D4: `[reviewer] tier` が明示されているときだけ `Some`（設定の優先順位で
+    /// worker lane 一致の既定より強いが、部署の `profile.review_tier` には負ける）。
+    pub reviewer_tier_override: Option<task_core::Tier>,
     /// ADR-0018: `WorkspaceSpec::Remote{cluster}` が指すクラスタ。キーは `cluster` の名前。
     pub clusters: HashMap<String, ClusterSpec>,
     /// ADR-0018 D2: 多重接続が無いクラスタを、この時間だけ dispatch の対象から外す。
@@ -4538,7 +4544,11 @@ impl Dispatcher {
                         provider: Some(provider_id.clone()),
                         account: account.clone(),
                         model_id: model,
-                        reasoning_effort: adapter.reasoning_effort_for_tier(task.worker_hint.tier),
+                        // ADR-0069 Phase 118 D1: 監査記録は「設定した」値ではなく「実際に CLI へ
+                        // 渡った」値を残す（対応しないアダプタでは `None` になる）。
+                        reasoning_effort: adapter
+                            .reasoning_effort_for_tier(task.worker_hint.tier)
+                            .filter(|_| adapter.supports_reasoning_effort()),
                     },
                     quota_reason: Some(routing_reason.clone()),
                     decision,
@@ -6020,10 +6030,46 @@ impl Dispatcher {
         let profile = department
             .as_deref()
             .map(|id| task_core::profile::resolve(&org, id));
+        // ADR-0069 Phase 118 D4: reviewer の lane は、上ほど強い優先順位で決める。
+        //   1. 部署の `profile.review_tier`（ADR-0069 D2。最も具体的な指定）。
+        //   2. `[reviewer] tier` の明示（`reviewer_tier_override`）。
+        //   3. 既定: worker run の lane に一致させ、組織の天井（`lane_ceiling`）で丸める。
+        // 1./2. は丸めない（人・運用の明示は組織の既定より強い。D2 の「人の明示 tier は天井で
+        // 丸めない」と同じ考え方を運用の明示にも適用する）。
+        let ceiling = profile
+            .as_ref()
+            .map(|p| p.lane_ceiling())
+            .unwrap_or_default();
+        let worker_lane = task.worker_hint.tier;
+        let (default_tier, default_clamp) = ceiling.clamp(worker_lane);
+        let (reviewer_lane, review_rule_id, review_reasons) = match (
+            profile.as_ref().and_then(|p| p.review_tier),
+            self.config.reviewer_tier_override,
+        ) {
+            (Some(dept_tier), _) => (
+                dept_tier,
+                "reviewer/department-review-tier",
+                vec![format!(
+                    "org profile review.tier = {dept_tier:?} (most specific; ADR-0069 D2)"
+                )],
+            ),
+            (None, Some(explicit)) => (
+                explicit,
+                "reviewer/explicit-config",
+                vec![format!(
+                    "[reviewer] tier = {explicit:?} (explicit config; Phase 118 D4)"
+                )],
+            ),
+            (None, None) => {
+                let mut reasons = vec![format!("default: matches the worker lane {worker_lane:?}")];
+                if let Some(clamp) = &default_clamp {
+                    reasons.push(clamp.clone());
+                }
+                (default_tier, "reviewer/matches-worker-lane", reasons)
+            }
+        };
         let mut hint = self.config.reviewer_hint.clone();
-        if let Some(tier) = profile.as_ref().and_then(|p| p.review_tier) {
-            hint.tier = tier;
-        }
+        hint.tier = reviewer_lane;
 
         // ADR-0054 Phase 67c: 部署のレビュー・切り分け run（`kind = lead`）も、継続セッションの
         // (adapter, account) に留まれるかを先に試す（`resolve_node_session` と同じキー）。
@@ -6114,6 +6160,55 @@ impl Dispatcher {
             None => (None, Vec::new()),
         };
         tracing::info!(task_id = %task.id, %review_run_id, adapter = %adapter_id, provider = %provider_id, account = account.as_deref(), "starting reviewer run");
+        // ADR-0069 Phase 118 D4: reviewer run にも `Event::RoutingDecided` を残す（Phase 114 は worker
+        // run にしか出していなかった）。reviewer は `TaskFeatures` 規則表を通らないので `rule_id` は
+        // 上で決めた 3 種のいずれか、`source = System`（policy ではなく config/組織の指定で決まる）。
+        // ストア書き込み失敗はレビューそのものを止めない（`warned_unroutable` と同じベストエフォート）。
+        let review_model_id = adapter
+            .model_for_tier(hint.tier)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let review_reasoning_effort = adapter
+            .reasoning_effort_for_tier(hint.tier)
+            .filter(|_| adapter.supports_reasoning_effort());
+        let review_record = task_core::RoutingRecord {
+            org_node: department.clone(),
+            harness: Some("reviewer".to_string()),
+            decision: task_core::LaneDecision {
+                lane: reviewer_lane,
+                proposed: worker_lane,
+                source: task_core::TierSource::System,
+                rule_id: review_rule_id.to_string(),
+                policy_version: task_core::LANE_POLICY_VERSION.to_string(),
+                features: task_core::TaskFeatures::infer(task),
+                reasons: review_reasons,
+                clamped_by: if review_rule_id == "reviewer/matches-worker-lane" {
+                    default_clamp.clone()
+                } else {
+                    None
+                },
+                hint: None,
+                escalation: None,
+                shadow: None,
+            },
+            resolution: task_core::model_routing::LaneResolution {
+                lane: Some(reviewer_lane),
+                adapter: adapter_id.clone(),
+                provider: Some(provider_id.clone()),
+                account: account.clone(),
+                model_id: review_model_id,
+                reasoning_effort: review_reasoning_effort,
+            },
+            quota_reason: None,
+        };
+        let _ = self.store.append_event(
+            task.id,
+            &Event::RoutingDecided {
+                run_id: review_run_id.clone(),
+                record: Box::new(review_record),
+            },
+        );
         Some((
             provider_id,
             selected_account,
@@ -7969,6 +8064,7 @@ mod tests {
                 retry_backoff_base: Duration::ZERO,
                 retry_backoff_max: Duration::ZERO,
                 reviewer_hint: crate::review::reviewer_hint(),
+                reviewer_tier_override: None,
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
@@ -8891,6 +8987,116 @@ mod tests {
         assert_eq!(store.get(other.id).unwrap().unwrap().status, Status::Done);
     }
 
+    fn reviewer_routing_record(store: &dyn TaskStore, task_id: TaskId) -> task_core::RoutingRecord {
+        store
+            .events_for(task_id)
+            .unwrap()
+            .into_iter()
+            .find_map(|(_, e)| match e {
+                Event::RoutingDecided { record, .. } => Some(*record),
+                _ => None,
+            })
+            .expect("routing_decided for the reviewer run")
+    }
+
+    /// ADR-0069 Phase 118 D4（既定）: `[reviewer] tier` も部署の `review.tier` も無ければ、reviewer の
+    /// lane は worker run の lane に一致させ、組織の天井（`budget.max_lane`）で丸める。
+    #[tokio::test]
+    async fn reviewer_lane_defaults_to_the_worker_lane_capped_by_the_org_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut eng = org_node_of("eng", Some("secretary"), OrgKind::Department, None);
+        eng.profile.budget.max_lane = Some(Tier::Standard);
+        for n in [
+            org_node_of("secretary", None, OrgKind::Secretary, Some("secretary")),
+            eng,
+        ] {
+            store.org_upsert(&n).unwrap();
+        }
+        let mut r = new_task(dir.path(), Check::Reviewer, 0);
+        r.assignee = Some("eng".into());
+        r.worker_hint.tier = Tier::Frontier;
+        store.insert(&r).unwrap();
+        let adapter = Arc::new(FileAdapter {
+            plan_json: String::new(),
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"ok"}]}"#.into(),
+            delay: Duration::from_millis(5),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let report = run_until_idle(&mut d, 300).await;
+        assert!(report.idle);
+        assert_eq!(store.get(r.id).unwrap().unwrap().status, Status::Done);
+        let record = reviewer_routing_record(store.as_ref(), r.id);
+        assert_eq!(record.harness.as_deref(), Some("reviewer"));
+        assert_eq!(record.decision.lane, Tier::Standard, "{record:?}");
+        assert_eq!(record.decision.proposed, Tier::Frontier);
+        assert_eq!(record.decision.rule_id, "reviewer/matches-worker-lane");
+        assert!(record.decision.clamped_by.is_some(), "{record:?}");
+        assert_eq!(record.resolution.lane, Some(Tier::Standard));
+    }
+
+    /// ADR-0069 Phase 118 D4: `[reviewer] tier` の明示は既定（worker lane 一致）に勝つ。
+    #[tokio::test]
+    async fn explicit_reviewer_tier_config_wins_over_the_worker_lane_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        for n in [
+            org_node_of("secretary", None, OrgKind::Secretary, Some("secretary")),
+            org_node_of("eng", Some("secretary"), OrgKind::Department, None),
+        ] {
+            store.org_upsert(&n).unwrap();
+        }
+        let mut r = new_task(dir.path(), Check::Reviewer, 0);
+        r.assignee = Some("eng".into());
+        r.worker_hint.tier = Tier::Frontier;
+        store.insert(&r).unwrap();
+        let adapter = Arc::new(FileAdapter {
+            plan_json: String::new(),
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"ok"}]}"#.into(),
+            delay: Duration::from_millis(5),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.reviewer_tier_override = Some(Tier::Cheap);
+        let report = run_until_idle(&mut d, 300).await;
+        assert!(report.idle);
+        let record = reviewer_routing_record(store.as_ref(), r.id);
+        assert_eq!(record.decision.lane, Tier::Cheap, "{record:?}");
+        assert_eq!(record.decision.rule_id, "reviewer/explicit-config");
+        assert_eq!(record.decision.clamped_by, None);
+    }
+
+    /// ADR-0069 Phase 118 D4: 部署の `[profile] review.tier`（ADR-0069 D2）は `[reviewer] tier` の
+    /// 明示より強い（最も具体的な指定）。
+    #[tokio::test]
+    async fn department_review_tier_wins_over_the_explicit_reviewer_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut eng = org_node_of("eng", Some("secretary"), OrgKind::Department, None);
+        eng.profile.review.tier = Some(Tier::Frontier);
+        for n in [
+            org_node_of("secretary", None, OrgKind::Secretary, Some("secretary")),
+            eng,
+        ] {
+            store.org_upsert(&n).unwrap();
+        }
+        let mut r = new_task(dir.path(), Check::Reviewer, 0);
+        r.assignee = Some("eng".into());
+        r.worker_hint.tier = Tier::Standard;
+        store.insert(&r).unwrap();
+        let adapter = Arc::new(FileAdapter {
+            plan_json: String::new(),
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"ok"}]}"#.into(),
+            delay: Duration::from_millis(5),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.reviewer_tier_override = Some(Tier::Cheap);
+        let report = run_until_idle(&mut d, 300).await;
+        assert!(report.idle);
+        let record = reviewer_routing_record(store.as_ref(), r.id);
+        assert_eq!(record.decision.lane, Tier::Frontier, "{record:?}");
+        assert_eq!(record.decision.rule_id, "reviewer/department-review-tier");
+    }
+
     /// ADR-0054 D1（Phase 67）: 部署の根ノード（`department_of` が返す id）は、Reviewer run のたびに
     /// **同じ継続セッション**（`kind = lead`）を使う。1 本目の run で新規セッション（`turns = 1`）ができ、
     /// 2 本目の run では **同じ `session_id` のまま** `turns = 2` に進む（`--resume` 相当の継続）。
@@ -8937,6 +9143,7 @@ mod tests {
                 retry_backoff_base: Duration::ZERO,
                 retry_backoff_max: Duration::ZERO,
                 reviewer_hint: crate::review::reviewer_hint(),
+                reviewer_tier_override: None,
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
@@ -9093,6 +9300,7 @@ mod tests {
                 retry_backoff_base: Duration::ZERO,
                 retry_backoff_max: Duration::ZERO,
                 reviewer_hint: crate::review::reviewer_hint(),
+                reviewer_tier_override: None,
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
@@ -9266,6 +9474,7 @@ mod tests {
                 retry_backoff_base: Duration::ZERO,
                 retry_backoff_max: Duration::ZERO,
                 reviewer_hint: crate::review::reviewer_hint(),
+                reviewer_tier_override: None,
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
@@ -13594,6 +13803,7 @@ mod tests {
                 retry_backoff_base: Duration::ZERO,
                 retry_backoff_max: Duration::ZERO,
                 reviewer_hint: crate::review::reviewer_hint(),
+                reviewer_tier_override: None,
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues,
@@ -18577,7 +18787,12 @@ mod tests {
         );
         assert_eq!(record.harness.as_deref(), Some("coding"));
         assert_eq!(record.resolution.model_id, "cheap-id");
-        assert_eq!(record.resolution.reasoning_effort.as_deref(), Some("low"));
+        // ADR-0069 Phase 118 D1: この記録は「設定した」値ではなく「実際に CLI へ渡った」値。
+        // `InstantAdapter`（このテストの基盤アダプタ）は `WorkerAdapter::supports_reasoning_effort`
+        // の既定（`false`）のままなので `None`（`crates/task-worker/src/codex.rs` の
+        // `tier_reasoning_effort_reaches_cli_as_a_dash_c_config_override` が実際に codex へ渡る
+        // ことを別途検証する）。
+        assert_eq!(record.resolution.reasoning_effort, None);
         // 監査の集計に乗る。
         let audit = task_ops::routing_audit::task_routing_audit(store.as_ref(), task.id).unwrap();
         assert_eq!(audit.len(), 1);
@@ -19026,6 +19241,7 @@ mod knowledge_fallback_tests {
                 retry_backoff_base: Duration::ZERO,
                 retry_backoff_max: Duration::ZERO,
                 reviewer_hint: crate::review::reviewer_hint(),
+                reviewer_tier_override: None,
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,

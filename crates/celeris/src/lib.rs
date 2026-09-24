@@ -200,6 +200,9 @@ pub fn build_adapters(config: &Config) -> HashMap<ProviderId, Arc<dyn WorkerAdap
                     command: base.command.clone(),
                     extra_args: base.extra_args.clone(),
                     model: effective_model(&p.model, &base.model),
+                    // ADR-0069 Phase 118 D1: tier ごとの effort は `TieredAdapter::run` が
+                    // `with_reasoning_effort` で動的に足す（`p.tier_models` から）。ここは常に `None`。
+                    reasoning_effort: None,
                     env: merged_env_with_secrets(
                         &base.env,
                         &base.env_from_secrets,
