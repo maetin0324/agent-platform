@@ -50,6 +50,10 @@ sd_db_from_config() {
   [ -f "$SD_CONFIG" ] || { printf '%s' "$CELERIS_STATE_DIR/celeris.sqlite3"; return 0; }
   # 最初の節（`[...]`）より前の、トップレベルの `db = "..."` だけを見る。
   v="$(sed -n '/^[[:space:]]*\[/q; s/^[[:space:]]*db[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$SD_CONFIG" | head -n 1)"
+  # ADR-0064 D1（Phase 110a）: `[db]` テーブル形式（`path = "..."`）も見る。`[db]` 見出しから次の見出しまで。
+  if [ -z "$v" ]; then
+    v="$(sed -n '/^[[:space:]]*\[db\][[:space:]]*$/,/^[[:space:]]*\[/{ s/^[[:space:]]*path[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p; }' "$SD_CONFIG" | head -n 1)"
+  fi
   if [ -z "$v" ]; then printf '%s' "$CELERIS_STATE_DIR/celeris.sqlite3"; return 0; fi
   case "$v" in
     "~/"*) printf '%s/%s' "$HOME" "${v#"~/"}" ;;
