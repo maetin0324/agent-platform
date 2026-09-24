@@ -17488,6 +17488,102 @@ mod tests {
         );
     }
 
+    /// ADR-0006 Phase 115 D3（本番障害 01M3915FARENW8M0JM11XVF6W0）: 報告のまとめ（`report-compressor`）
+    /// のような diff を作らない内部タスクは、その案件にリポジトリが付いていても worktree を作らない
+    /// （`work_dir = workspace` のまま走る）。`task_ops::add::create_support_task` を実際に通して、
+    /// `resolve_repos` の primary 継承の抑止（`workspace_mode: Shared`）と `task_workspaces_for` の
+    /// 両方が効くことを確かめる（D4(c)）。
+    #[tokio::test]
+    async fn a_compaction_task_does_not_get_a_worktree_even_when_its_project_has_a_primary_repo() {
+        let root = tempfile::tempdir().unwrap();
+        let code = root.path().join("agent-platform");
+        init_test_repo(&code);
+
+        let ws_root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let (project_id, _repos) = project_with_repos(
+            &store,
+            &[("agent-platform", code.as_path(), task_core::RepoKind::Git)],
+        );
+        store
+            .org_upsert(&org_node_of("secretary", None, OrgKind::Secretary, None))
+            .unwrap();
+        store
+            .org_upsert(&org_node_of(
+                "engineering",
+                Some("secretary"),
+                OrgKind::Department,
+                None,
+            ))
+            .unwrap();
+
+        let spec = task_ops::add::NewTaskSpec {
+            title: "報告のまとめ: engineering 課".into(),
+            objective: "まとめてください".into(),
+            acceptance: Vec::new(),
+            kind: TaskKind::Execute,
+            tier: None,
+            priority: Some(task_ops::add::PriorityInput::Number(0)),
+            parent: None,
+            depends_on: Vec::new(),
+            max_turns: Some(8),
+            max_wall_secs: Some(600),
+            max_retries: 1,
+            role: Some(task_core::report::COMPACTION_ROLE.to_string()),
+            genre: None,
+            aggregate: false,
+            project_id: Some(project_id),
+            milestone_id: None,
+            assignee: Some("engineering".to_string()),
+            workspace: None,
+            cluster: None,
+            workspace_mode: Some(task_core::WorkspaceMode::Shared),
+            adapter: None,
+            repos: Vec::new(),
+            labels: Vec::new(),
+            skills: Vec::new(),
+            mode: None,
+            category: None,
+            status: None,
+        };
+        let task = task_ops::add::create_support_task(
+            store.as_ref(),
+            spec,
+            &[],
+            &[],
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        // ADR-0006 Phase 115 D3: 案件の primary（`agent-platform`）を暗黙に継がない。
+        assert!(task.repos.is_empty(), "{:?}", task.repos);
+
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let adapter = Arc::new(RecordingAdapter {
+            seen: seen.clone(),
+            files: Vec::new(),
+        });
+        let mut d = worktree_dispatcher(store.clone(), adapter, ws_root.path(), None);
+        // `task_workspaces_for` が `None`（worktree を用意しない）ことを直接確かめる。
+        assert!(
+            d.task_workspaces_for(&task).is_none(),
+            "compaction task should not get any worktree"
+        );
+
+        run_until_idle(&mut d, 60).await;
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
+
+        let task_dir = ws_root.path().join(task.id.to_string());
+        // work_dir が無い＝ cwd はそのまま workspace（`task_dir`）。
+        let (cwd, workspace, _artifacts) = seen.lock().unwrap()[0].clone();
+        assert_eq!(
+            cwd, workspace,
+            "cwd should just be the workspace, no worktree cwd"
+        );
+        assert_eq!(workspace, task_dir);
+        assert!(!task_dir.join("tree").exists(), "no single-repo worktree");
+        assert!(!task_dir.join("repos").exists(), "no per-repo worktree dir");
+    }
+
     /// ADR-0043 D3 / D4: `[commands] setup` が落ちたら run を始めず、既存の質問の経路で `blocked` にする。
     #[tokio::test]
     async fn a_failing_setup_blocks_the_task_with_a_question_instead_of_starting_the_run() {

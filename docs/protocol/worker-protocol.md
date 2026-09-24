@@ -586,6 +586,17 @@ celeris はこれを直接パースできない。そこでこれらのアダプ
 {"question": "..."}
 ```
 
+**置き場は必ず成果物ディレクトリの絶対パス（Phase 115、ADR-0006 追記）**: プロンプトの結果ファイル
+指示（`result_json_instructions`）は `RunRequest::artifacts_rel()` を使うので、`work_dir`（§3.1）が
+ある run（部署のリポジトリの `git worktree` で cwd がそこになる run）では常に絶対パスになる。
+`work_dir != workspace` の run のプロンプト冒頭にも「cwd は `<work_dir>`。成果物ディレクトリは
+`<artifacts_dir>`。相対 `artifacts/` はリポジトリの中を指すので使わない」の 2 行が出る
+（`claude_code::work_dir_note`。`codex` も同じ関数を再利用）。それでもワーカーが cwd 相対の
+`artifacts/result.json`（= `<work_dir>/artifacts/result.json`）に書いてしまった場合、アダプタは
+run 終了時にそのファイルへフォールバックし、正しい置き場へ**移して**採用する（worktree の中には
+残さない。`subprocess::adopt_result_json_written_under_work_dir`）。本番障害
+01M3915FARENW8M0JM11XVF6W0 / 01M38T8N17MEWPTJQXGX1TNYJD の再発防止。
+
 **`memory`（v4, ADR-0033 D6, Phase 24）**: 結果ファイルに `memory` があれば、celeris はその中身を担当ノードの
 長期記憶に**日付付きの箇条書きで追記する**（`- 2026-09-17: …` の 1 項目 1 行）。
 

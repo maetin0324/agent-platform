@@ -560,12 +560,19 @@ pub fn compaction_objective(node: &OrgNode, pending: &[Report]) -> String {
             r.body.trim()
         ));
     }
+    // ADR-0006 Phase 115 D1（本番障害 01M3915FARENW8M0JM11XVF6W0）: この `objective` はタスク作成時に
+    // 一度だけ組み立てて保存する静的な文字列で、実行時の work_dir（部署のリポジトリの worktree になる
+    // ことがある）を知らない。ここでパスを断定すると、cwd が worktree のときに相対パスとして誤読される
+    // 事故があったため、パスは書かず「下の Instructions（`result_json_instructions`。常に実行時の
+    // 絶対パスで組む）を見ろ」とだけ指示する。
     out.push_str(
         "\n---- まとめ方 ----\n\
          分かったこと・確認できた結果・次にできそうなこと（論文の framing 等）、の順に、3〜8 行で書いてください。\n\
          数字と証拠のある事実を優先し、推測はそうと分かるように書いてください。\n\
          悪い知らせは既に上に個別で届いているので、ここではまとめない（監査 L-2）。\n\
-         まとめた文章を `artifacts/result.json` の `summary` に入れて終わってください（この run の成果物はそれだけです）。\n",
+         まとめた文章を、この run の指示にある結果ファイル（`result.json`）の `summary` に入れて終わって\n\
+         ください（この run の成果物はそれだけです。書き方・置き場は下の Instructions のとおりで、\n\
+         `objective` に書いたこの文とは別に、そこに常に正確な場所が指示されます）。\n",
     );
     out
 }
@@ -1024,6 +1031,9 @@ mod tests {
         assert!(text.contains(&a.headline), "{text}");
         assert!(text.contains(&b.headline), "{text}");
         assert!(text.contains("3〜8 行"), "{text}");
+        // ADR-0006 Phase 115 D1: この静的な文字列は work_dir を知らないので、`artifacts/result.json`
+        // を（絶対でも相対でも）断定しない。実行時の Instructions に置き場を任せる。
+        assert!(!text.contains("artifacts/result.json"), "{text}");
     }
 
     #[test]

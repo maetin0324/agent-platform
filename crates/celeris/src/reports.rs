@@ -170,7 +170,10 @@ fn compaction_spec(
         // 作業ディレクトリは `workspace_root/<task_id>`（相対パスをディスパッチャが解決する）。
         workspace: None,
         cluster: None,
-        workspace_mode: None,
+        // ADR-0006 Phase 115 D3: diff を作らない裏方タスクなので worktree を作らない
+        // （`workspace_mode: Shared` で `resolve_repos` の primary 継承もしない。
+        // `work_dir = workspace` のまま走る。本番障害: 01M3915FARENW8M0JM11XVF6W0）。
+        workspace_mode: Some(task_core::WorkspaceMode::Shared),
         adapter: None,
         // ADR-0044 D3: 裏方（報告のまとめ）にラベル・種類は付けない。
         labels: Vec::new(),

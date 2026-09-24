@@ -17206,3 +17206,118 @@ Phase 114 release gateで、文書メンテナンスの新規入口Linkに44px�
 - 失敗 A 01M38J4X53P1Y684FS42Z6R0VZ（ルーティング再設計）: 02:11Z の切替で旧インスタンスが「drain timeout; aborting the run」→ 03:27Z「lease expired; reclaimed」（89 分の run を破棄）→ 再 run 2 回はいずれも done → reviewing → 03:46Z failed（attempts 3 > max_retries 2）。通知なし。
 - 失敗 B 01M38FXZZVDNY2VQS2R2ZDWYX0（Knowledge GC）: 配送・昇格済みなのにレビューの `cargo test --workspace` が exit 101 → 再 run 2 回が「claude exited without <ws>/artifacts/result.json」（cwd が worktree、Phase 115 の原因）→ failed。通知なし。
 - 同時間帯（DB 移設前）: 「failed to renew lease」×5、「could not update the instance role this tick」×26、「delivery tick failed: database is locked」×1。
+## Phase 115: result.json の置き場を work_dir に依存させない。内部タスクは worktree を作らない（2026-09-24）
+
+ADR-0006 に Phase 115 追記節を書いてから実装した（内容は当初「Phase 114」として依頼されたが、main に
+Celeris の自己改善が先に phase 114 として入ったため Phase 115 に採番し直した。D1〜D4 の内容自体は変更なし）。
+
+背景（本番で確認済み、再調査なし）: 「報告のまとめ: Engineering」（compaction タスク、role
+`report-compressor`）が 2 件連続で失敗（01M3915FARENW8M0JM11XVF6W0 / 01M38T8N17MEWPTJQXGX1TNYJD）。
+`error(retryable=true): claude exited without <workspace>/artifacts/result.json`。原因は (1) 案件の
+primary リポジトリを暗黙継承して worktree が作られ `work_dir != workspace` になっていたのに、
+`task-core::report::compaction_objective`（タスクの `objective` 自体）が相対パス `` `artifacts/result.json` ``
+を直書きしていた、(2) diff を作らない内部タスクなのに部署のリポジトリが付いているだけで毎回 worktree を
+作っていた（無駄で遅い）、の 2 つ。
+
+### D1（プロンプトは常に絶対パス）
+
+- 条件: compaction オブジェクト（`task_core::report::compaction_objective`）と `preamble.rs`/
+  `claude_code.rs::build_prompt` 周辺、`codex.rs` の同等箇所が、結果ファイルの置き場を常に正しく
+  （静的テキストでは断定せず、実行時は絶対パスで）指示する。`work_dir != workspace` のときプロンプト
+  冒頭に「cwd は `<work_dir>`。成果物ディレクトリは `<artifacts_dir>`。相対 `artifacts/` は使わない」の
+  2 行が出る。
+- 実行したコマンド: `cargo test -p task-worker --lib claude_code::tests -- --nocapture 2>&1 | grep
+  work_dir_note`、`cargo test -p task-worker --lib codex::tests -- --nocapture 2>&1 | grep
+  work_dir_note`
+- 出力の要点: `work_dir_note_appears_in_the_prompt_when_work_dir_differs_from_workspace` が
+  claude_code / codex それぞれ `ok`。`compaction_objective` は `report.rs` の
+  `the_compaction_objective_contains_every_child_report` に `!text.contains("artifacts/result.json")`
+  の assertion を追加して確認（`cargo test -p task-core --lib
+  the_compaction_objective_contains_every_child_report` → **1 passed; 0 failed**）。
+- 実装: `crates/task-core/src/report.rs::compaction_objective`（パスの直書きを除去し「下の
+  Instructions を見ろ」に変更）。`crates/task-worker/src/claude_code.rs::work_dir_note`（pub(crate)、
+  純粋関数）。`crates/task-worker/src/codex.rs`（`work_dir_note` を re-export して再利用）。
+  `docs/protocol/worker-protocol.md` §9 に同じ内容の説明を追記。
+
+### D2（フォールバック）
+
+- 条件: run 終了時に `<artifacts_dir>/result.json` が無く `<work_dir>/artifacts/result.json` が有れば、
+  正しい置き場へ移して採用し `Done` になる。WARN ログを出し、worktree 側には残らない（移動後に空になった
+  `artifacts/` も消える）。claude-code / codex 両アダプタ、Phase 112 D3「最終メッセージから回収」より前。
+- 実行したコマンド: `cargo test -p task-worker --lib
+  a_result_json_written_under_work_dir_is_adopted_and_not_left_behind`
+- 出力の要点: claude_code::tests / codex::tests それぞれ **1 passed; 0 failed**（`Done` になり
+  `<artifacts_dir>/result.json` に内容が移り、`<work_dir>/artifacts/` ディレクトリごと消えていることを
+  確認）。
+- 実装: `crates/task-worker/src/subprocess.rs::adopt_result_json_written_under_work_dir`
+  （pub(crate)）。呼び出し: `claude_code.rs`（`(None, Some(meta))` 分岐、`terminal_from_result` の前）、
+  `codex.rs`（`TurnSignal::Completed` 分岐、Phase 112 D3 の `NotFound` 判定より前）。run 開始時の
+  名残掃除（`<work_dir>/artifacts/result.json` を消す）も両アダプタに追加。
+
+### D3（内部タスクは worktree を作らない）
+
+- 条件: `celeris::reports` の compaction タスク、`knowledge_maint` の知識整理タスク、
+  `conversation`（CoS 対話）は、部署にリポジトリが付いていても git worktree を作らず、
+  `work_dir = workspace` で走る。
+- 実行したコマンド: `cargo test -p task-dispatch --lib
+  a_compaction_task_does_not_get_a_worktree_even_when_its_project_has_a_primary_repo`
+- 出力の要点: **1 passed; 0 failed**。`task_ops::add::create_support_task` を実際に通し、案件に
+  primary リポジトリ `agent-platform` を登録したうえで、compaction タスクの `task.repos` が空のまま
+  （`d.task_workspaces_for(&task)` が `None`）、実行時の `cwd == workspace`（`task_dir` そのもの）、
+  `tree`/`repos` ディレクトリのどちらも作られないことを確認。
+- 実装: `crates/task-ops/src/add.rs::resolve_repos` に `skip_fallback: bool` を追加（`Local`
+  （`cluster` 無し）で `workspace_mode == Some(Shared)` なら親・案件 primary への暗黙継承をしない）、
+  `build_task` が `Local` の `WorkspaceSpec.mode` にも `spec.workspace_mode` を通すよう修正（従来は
+  `Remote` にしか効かず、`Local` は常に `mode: None` 固定だった）。`crates/celeris/src/reports.rs`
+  （`compaction_spec`）・`crates/celeris/src/knowledge_maint.rs`（知識整理タスクの spec）で
+  `workspace_mode: Some(WorkspaceMode::Shared)` を明示。`crates/task-ops/src/conversation.rs`
+  （`conversation_task`）でも `mode: Some(WorkspaceMode::Shared)` を明示（対話は元々 `repos` が
+  常に空で worktree を作らないが、念のため）。計画（`project_plan.rs`）・人が作る通常タスクは対象外
+  （`Local` の `workspace_mode` を明示しない限り従来どおり案件 primary を継ぐ）。
+
+### D4（テスト）
+
+- 追加したテスト:
+  - `crates/task-worker/src/claude_code.rs`:
+    `work_dir_note_appears_in_the_prompt_when_work_dir_differs_from_workspace`（D4(a)）、
+    `a_result_json_written_under_work_dir_is_adopted_and_not_left_behind`（D4(b)）。
+  - `crates/task-worker/src/codex.rs`: 同名の 2 件（codex アダプタ版）。
+  - `crates/task-dispatch/src/dispatcher.rs`:
+    `a_compaction_task_does_not_get_a_worktree_even_when_its_project_has_a_primary_repo`（D4(c)）。
+  - `crates/task-core/src/report.rs`: `the_compaction_objective_contains_every_child_report` に
+    `artifacts/result.json` を含まない assertion を追加（D4(d)。文字列自体を書かなくなったので
+    「絶対パスに更新」ではなく「そもそも書かない」ことを確認する形にした）。
+
+### ゲート
+
+| 条件 | 実行したコマンド | 出力の要点 |
+| --- | --- | --- |
+| D1 単体（claude-code） | `cargo test -p task-worker --lib claude_code::tests` | exit 0。**59 passed; 0 failed**（うち新規 2） |
+| D1 単体（codex） | `cargo test -p task-worker --lib codex::tests` | exit 0。**49 passed; 0 failed**（うち新規 2） |
+| task-worker 全体 | `cargo test -p task-worker --lib --no-fail-fast` | exit 0。**496 passed; 0 failed; 1 ignored**（Phase 114 時点 492 + 新規 4） |
+| D3 単体 | `cargo test -p task-dispatch --lib a_compaction_task_does_not_get_a_worktree` | exit 0。**1 passed; 0 failed** |
+| task-dispatch 全体 | `cargo test -p task-dispatch --lib --no-fail-fast` | exit 0。**244 passed; 0 failed**（既存 243 + 新規 1） |
+| task-ops / task-core / celeris | `cargo test -p task-ops -p task-core -p celeris --no-fail-fast` | exit 0。回帰なし（`resolve_repos`/`build_task`/`conversation_task` の既存テストすべて green） |
+| test（全体） | `cargo test --workspace --no-fail-fast` | exit 0。**FAILED 0**（79 個の `test result:` ブロックが全て `ok`、合計 **2062 passed / 0 failed / 4 ignored**） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| rustfmt（変更箇所のみ） | `rustfmt --check --edition 2024 <touched files>` | 追加・変更した行に整形差分なし（既存の無関係な全体整形差分は Phase 114 と同様に除外して確認） |
+| スキーマ | 実施していない（`NewTaskSpec`/`WorkspaceSpec`/`Task` 等のフィールドは追加・変更していない。`workspace_mode` は既存フィールドの意味を Local にも広げただけ） | `committed_schema_matches_generated` は上記ワークスペース全体テストに含まれ green |
+| GUI | 実施していない（`gui/` に差分無し） | `git status --short gui/` は空 |
+| unwrap() | `git diff` で追加行の `unwrap()` を目視確認 | 追加した非テストコードに `unwrap()` は無い（`?`/`if let`/`match`/`unwrap_or_default` のみ）。`unwrap()` は全てテスト内 |
+| ディスパッチャ・ストアに LLM 呼び出しを追加していない | `git status --short` で変更ファイルを確認 | `crates/task-core/src/report.rs`、`crates/task-ops/src/{add.rs,conversation.rs}`、`crates/task-worker/src/{claude_code.rs,codex.rs,subprocess.rs}`、`crates/task-dispatch/src/dispatcher.rs`（テスト追加のみ）、`crates/celeris/src/{reports.rs,knowledge_maint.rs}`、`docs/adr/0006-*.md`、`docs/protocol/worker-protocol.md`。いずれも決定的な文字列組み立て・ファイル移動・配線とテストのみ、LLM 呼び出しなし |
+
+### 未解決事項
+
+- P-115-1: D2 のフォールバックは `<work_dir>/artifacts/result.json` の 1 か所だけを見る。さらに別の
+  相対パス誤読パターンは未観測・未対応。
+- P-115-2: D3 は `report-compressor` / `knowledge` / 対話の 3 種類だけを対象にした。今後増える
+  「diff を作らない内部タスク」も同じパターン（`create_support_task` + `workspace_mode: Shared`）を
+  踏襲するかはその都度の実装者判断。
+- P-115-3（実機未確認。ADR-0009 P-34）: 本番タスク 01M3915FARENW8M0JM11XVF6W0 /
+  01M38T8N17MEWPTJQXGX1TNYJD は `failed` のまま残っている可能性がある。本番 DB を直接操作していないので
+  現状は変えていない。
+
+### 提案
+
+- P-115-4: デプロイ後、上記 2 件の本番タスクに `celerisctl rereview` を打つか、自然に再発しないことを
+  確認するかは人の判断待ち（Phase 113 の P-113-4 と同種の運用判断）。

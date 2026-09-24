@@ -23,8 +23,8 @@ use crate::progress;
 use crate::protocol::{Answer, Evidence, ProviderFailure, RunContext, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
-    LineOutcome, MAX_LINE_BYTES, kill_now, read_line_limited, read_tail, reap_after_terminal,
-    write_result_json,
+    LineOutcome, MAX_LINE_BYTES, adopt_result_json_written_under_work_dir, kill_now,
+    read_line_limited, read_tail, reap_after_terminal, write_result_json,
 };
 
 /// `[adapters.claude_code]`（config.toml, ADR-0006 D6）。
@@ -105,6 +105,29 @@ impl WorkerAdapter for ClaudeCodeAdapter {
         let mut config = self.config.clone();
         config.container = Some(plan);
         Some(Arc::new(ClaudeCodeAdapter::new(config)))
+    }
+}
+
+/// ADR-0006 Phase 115 D1（本番障害 01M3915FARENW8M0JM11XVF6W0 / 01M38T8N17MEWPTJQXGX1TNYJD）:
+/// `work_dir`（実際の cwd）が `workspace` と異なる run（部署のリポジトリの git worktree で走るタスク）
+/// だけ、プロンプトの先頭に「cwd と成果物ディレクトリは別」の注意を 2 行足す。`result_json_instructions`
+/// は既に `artifacts_dir` の絶対パスで書く（`RunRequest::artifacts_rel` が `work_dir.is_some()` のとき
+/// 絶対パスを返す）が、その絶対パスの指示を読み飛ばして相対 `artifacts/` を書いてしまう事故があったため、
+/// 冒頭で明示的に注意する。`work_dir` が無い・`workspace` と同じなら何も足さない（既存の文面は
+/// 1 バイトも変わらない）。純粋関数。
+pub(crate) fn work_dir_note(
+    work_dir: Option<&Path>,
+    workspace: &Path,
+    artifacts_dir: &Path,
+) -> String {
+    match work_dir {
+        Some(wd) if wd != workspace => format!(
+            "cwd は `{}`（リポジトリの worktree）。成果物ディレクトリは `{}`。\
+             相対 `artifacts/` はリポジトリの中を指すので使わない。\n\n",
+            wd.display(),
+            artifacts_dir.display()
+        ),
+        _ => String::new(),
     }
 }
 
@@ -730,8 +753,19 @@ async fn run_claude_code(
     let result_path = req.artifact_path("result.json");
     let _ = tokio::fs::remove_file(&result_path).await;
     clear_delegate_file(&req.artifacts_dir).await;
+    // ADR-0006 Phase 115 D2: 同じ理由（前回の run の名残と誤読しない）で、work_dir 側の名残候補も消す
+    // （`work_dir != workspace` のときだけ意味がある。無ければ何もしない）。
+    if let Some(work_dir) = req.work_dir.as_deref()
+        && work_dir != req.workspace
+    {
+        let _ = tokio::fs::remove_file(work_dir.join("artifacts").join("result.json")).await;
+    }
 
-    let prompt = build_prompt(&req.task, &req.context, run_id, &artifacts_rel);
+    let prompt = format!(
+        "{}{}",
+        work_dir_note(req.work_dir.as_deref(), &req.workspace, &req.artifacts_dir),
+        build_prompt(&req.task, &req.context, run_id, &artifacts_rel)
+    );
     // ADR-0023 D2 / M1: この run で何を渡したかを残す（`request.json` は構造、`prompt.txt` は実際の文面）。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
@@ -964,6 +998,15 @@ async fn run_claude_code(
                 )
             }
             (None, Some(meta)) => {
+                // ADR-0006 Phase 115 D2: `result.json` を読む前に、work_dir 側の名残を採用する
+                // （Phase 112 D3 相当の「回収」はこのアダプタには無いが、同じ原則で最優先に判定する）。
+                adopt_result_json_written_under_work_dir(
+                    &req.artifacts_dir,
+                    req.work_dir.as_deref(),
+                    &req.workspace,
+                    run_id,
+                )
+                .await;
                 let outcome = terminal_from_result(
                     &req.artifacts_dir,
                     &artifacts_rel,
@@ -1744,6 +1787,92 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert_eq!(
             std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap(),
             r#"{"summary":"sibling"}"#
+        );
+    }
+
+    /// ADR-0006 Phase 115 D1（本番障害 01M3915FARENW8M0JM11XVF6W0）: `work_dir != workspace`
+    /// （部署のリポジトリの git worktree で走るタスク）だけ、プロンプト冒頭に cwd と成果物ディレクトリの
+    /// 絶対パスの注意が 2 行出る（D4(a)）。`work_dir` が無い他の全テストの文面は変わらない。
+    #[tokio::test]
+    async fn work_dir_note_appears_in_the_prompt_when_work_dir_differs_from_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().join("repos/agent-platform");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"summary":"ok","evidence":[]}' > artifacts/result.json
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#,
+        );
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.work_dir = Some(work_dir.clone());
+        let sink = RecordingSink::default();
+        let adapter = ClaudeCodeAdapter::new(config);
+        let outcome = adapter
+            .run(req, "run-wd-1", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
+        let prompt = std::fs::read_to_string(dir.path().join("runs/run-wd-1/prompt.txt")).unwrap();
+        assert!(
+            prompt.contains(&format!("cwd は `{}`", work_dir.display())),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "成果物ディレクトリは `{}`",
+                dir.path().join("artifacts").display()
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("相対 `artifacts/` はリポジトリの中を指すので使わない"),
+            "{prompt}"
+        );
+    }
+
+    /// ADR-0006 Phase 115 D2（本番障害 01M3915FARENW8M0JM11XVF6W0 / 01M38T8N17MEWPTJQXGX1TNYJD）:
+    /// 偽 claude スタブが（指示を読み違えて）cwd 相対の `artifacts/result.json`（=
+    /// `<work_dir>/artifacts/result.json`）に書いても、正しい置き場（`<artifacts_dir>/result.json`）へ
+    /// 移して採用し `Done` になる。worktree 側には残らない（D4(b)）。
+    #[tokio::test]
+    async fn a_result_json_written_under_work_dir_is_adopted_and_not_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().join("repos/agent-platform");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let config = stub_claude(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"summary":"wrote to the worktree by mistake","evidence":[]}' > artifacts/result.json
+echo '{"type":"result","subtype":"success","is_error":false}'
+"#,
+        );
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.work_dir = Some(work_dir.clone());
+        let sink = RecordingSink::default();
+        let adapter = ClaudeCodeAdapter::new(config);
+        let outcome = adapter
+            .run(req, "run-wd-2", default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Done { summary, .. } => {
+                assert_eq!(summary, "wrote to the worktree by mistake")
+            }
+            other => panic!("expected done, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap(),
+            r#"{"summary":"wrote to the worktree by mistake","evidence":[]}"#
+        );
+        assert!(
+            !work_dir.join("artifacts").exists(),
+            "the stray artifacts/ dir under work_dir should be gone"
         );
     }
 
