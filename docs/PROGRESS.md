@@ -17157,3 +17157,10 @@ resume run は codex の既定の（読み取り専用の）承認・サンド�
   人が明示的に再判定を指示できるようになったが、GUI 側で「reviewer のインフラ失敗が繰り返された」と
   「reviewer が本当に不合格と判定した」を見分けられるようにする（`ReviewVerdict.reason` の文面で
   区別はできるが、承認画面での強調表示は今回のスコープ外）。
+
+## Phase 113 の本番反映（2026-09-24 00:50Z、Fable が統合・昇格）
+
+- 統合 63c42da（PROGRESS.md の衝突のみ、両方残す）。ゲート: `cargo test --workspace --no-fail-fast` FAILED 0、clippy 警告 0。1 回目の release は `pnpm-mobile-audit` の perf 予算（home の LCP 10376 ms、CPU x4、load 7〜8 のコールドスタート）で落ちたが GUI 無変更のフレークと判断して作り直し、2 回目は通過。release `63c42daf676a`、verify 全 true、ライブ切替（from c0e72f139ba7）。
+- 実機確認（そのまま設計どおりに動いた）: `POST /tasks/01M35X86XTK84F97QW0CN5PGMR/rereview` → `failed → reviewing`。journal: 「lead session resume rejected; session retired」→「reviewer run hit a provider/infra failure; review deferred」→ 新規 reviewer run 01M38E9YAA2BESG61MB7XD8Y2D が criterion 1 を合格 → `review_pass` で done（75 秒）。人の承認（approval 01M381GRMXM8MP23BZ1E4RKWP2）は保持され、二度目の承認は求められていない。
+- CoS 経由で作られた GUI 修正の子タスク 01M38AJZ5QD9E88ZD6FDDWG968 は done。
+- DB 移設: in-flight 0 で `relocate-db.sh /var/lib/celeris/celeris.sqlite3 --dry-run` は計画（stop → VACUUM INTO → integrity → config 書き換え → 旧ファイル rename → start → /config 確認）を出して通過。本番実行は auto mode の分類（Production Deploy）で拒否されたため人が実行する（P-113-6: `promote.sh` / `migrate-to-celeris.sh` と同様に許可リストへ）。
