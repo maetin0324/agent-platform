@@ -17717,3 +17717,9 @@ frontier=`gpt-6-astra`(high) / standard=`gpt-6-sol`(medium) / cheap=`gpt-6-luna`
 - 検査 `check-resume-recovery.mjs` にシナリオ C（モック celeris が `/tasks/:id` を 503 problem+json → 復旧）を追加。修正前ビルド 9/13（C の 4 件 FAIL）、修正後 13/13（3 回連続）。
 - `pnpm` 相当: biome check exit 0、tsc -b exit 0、react-router build 成功、vitest 69 files / 1067 tests 成功。
 - 未確認: スマホ実機での長時間バックグラウンド、実デプロイ更新（チャンク 404 は `vite:preloadError` の発火で代替）。
+
+## Phase 118 の本番反映（2026-09-24 14:38Z）
+
+- 統合 6566ad4（PROGRESS.md 衝突のみ）。ゲート: fmt 0、cargo test FAILED 0、clippy 0、GUI typecheck / lint / test 1080 件 / gen:types 差分ゼロ。release `6566ad486acd`。verify は 1 回目の check 6（smoke）が `POST /tasks timed out`（load 6〜10 の中）、再実行で全 true（live_ok）。in-flight 0 でライブ切替（from 0e20e1b2a058）。
+- 実機: 昇格後の `celerisctl routing show --config`（読み取り）と `GET /providers` が同じ表を返す: claude-pool / claude-code-local = fable → claude-fable-5-1 / opus → claude-opus-5-5 / sonnet → claude-sonnet-5、codex-pool = astra → gpt-6-astra [high] / sol → gpt-6-sol [medium] / luna → gpt-6-luna [low]。`[llm_proxy.models]` も同じ。以後のタスクは lane ごとにこれらが選ばれる（Routing パネルの `resolution.model_id` / `reasoning_effort` で run ごとに確認できる）。
+- 未解決（Phase 118 から）: P-118-1 `pricing.rs` が `claude-fable` の単価を知らず frontier の費用推定が None。P-118-2 プロキシ経由の tier 別 effort は未対応。
