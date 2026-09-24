@@ -100,6 +100,29 @@ pub fn consecutive_reviewer_requeues(events: &[(u64, Event)]) -> u32 {
     n
 }
 
+/// ADR-0054 D2（Phase 113）: Reviewer run **自身のインフラ都合の失敗**（`is_error` の結果・
+/// プロセス失敗・resume 拒否など。プロバイダが分類できた供給側失敗＝[`consecutive_reviewer_requeues`]
+/// とは別物）で延期したときの `WorkerProgress.msg` の接頭辞。
+pub const REVIEWER_INFRA_FAILURE_PREFIX: &str = "reviewer run infra failure: ";
+
+/// 現在の reviewing での、Reviewer run 自身のインフラ都合の失敗による連続延期回数
+/// （[`consecutive_reviewer_requeues`] と同じ数え方。最後の `Transitioned` 以降の
+/// [`REVIEWER_INFRA_FAILURE_PREFIX`] 付き `WorkerProgress` を数える。プロバイダの供給側失敗の
+/// カウンタとは別に、`[review] max_reviewer_retries` と組み合わせて使う）。
+pub fn consecutive_reviewer_infra_failures(events: &[(u64, Event)]) -> u32 {
+    let mut n = 0;
+    for (_, ev) in events.iter().rev() {
+        match ev {
+            Event::Transitioned { .. } => break,
+            Event::WorkerProgress { msg, .. } if msg.starts_with(REVIEWER_INFRA_FAILURE_PREFIX) => {
+                n += 1
+            }
+            _ => {}
+        }
+    }
+    n
+}
+
 /// ADR-0010 D6（P-3）: `min(base·2^(attempts-1), max)`。`attempts == 0` または `base == 0` なら 0。
 pub fn retry_backoff(base: Duration, max: Duration, attempts: u32) -> Duration {
     if attempts == 0 || base.is_zero() {

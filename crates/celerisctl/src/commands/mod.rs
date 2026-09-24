@@ -19,6 +19,9 @@ pub mod plan_lint;
 pub mod projects;
 pub mod query;
 pub mod replay;
+/// ADR-0051 / ADR-0054 Phase 113 D3: `celerisctl rereview <task_id>`。既存成果を再判定する
+/// （新しい実装 run は起こさない）。
+pub mod rereview;
 pub mod worker;
 /// ADR-0066 D2（Phase 110b）: `celerisctl workspace prune`。
 pub mod workspace;

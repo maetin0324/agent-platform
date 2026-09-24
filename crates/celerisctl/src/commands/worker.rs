@@ -845,6 +845,7 @@ mod tests {
             adapters: Default::default(),
             plan: Default::default(),
             reviewer: Default::default(),
+            review: Default::default(),
             api: Default::default(),
             providers: vec![],
             providers_include: None,

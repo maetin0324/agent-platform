@@ -266,7 +266,35 @@ fn consumes_interrupt(outcome: &str) -> bool {
         && outcome != "lease_expired"
 }
 
+/// ADR-0054 Phase 113 D3: そのタスクが `failed` になった直近の遷移が `Trigger::ReviewFail`
+/// （`Event::Transitioned{reason: "review_fail", to: Failed}`）か（純粋関数）。`ReviewFail` は
+/// `task.status == Reviewing` のときしか発火せず（`transition.rs`）、`Reviewing` に入るのは実装 run が
+/// `done`（`Trigger::WorkerDone`）した後だけなので、これが `true` なら「実装は最後まで通ったが、
+/// review の判定（reviewer 条件・command 条件・human 条件のどれか）が不合格だった」ことを意味する。
+/// 実装 run 自体が供給側失敗の requeue 上限や `max_retries` の枯渇で `failed` になった場合
+/// （`Trigger::Requeue`/`WorkerError` 経由）はこの条件を満たさない（reopen で仕切り直すべき）。
+pub fn review_fail_is_the_only_reason_for_failure(events: &[(u64, Event)]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find_map(|(_, e)| match e {
+            Event::Transitioned { reason, .. } => Some(reason.as_str()),
+            _ => None,
+        })
+        == Some("review_fail")
+}
+
 /// 既存成果を部署のレビュアーで再判定する。新しい実装runは作らない。
+///
+/// ADR-0054 Phase 113 D3 追記: `done` からに加えて、`failed` からも許す。ただし
+/// [`review_fail_is_the_only_reason_for_failure`] が `true` のとき（＝直前の実装 run は `done` で、
+/// review 判定だけが不合格だった。それ以外の理由で `failed` になったタスク、例えば実装 run 自体が
+/// 供給側失敗の requeue 上限に達した場合は対象外）だけに限る。`task_core::transition::transition`
+/// （純粋関数、event 履歴を持たない）は `Status::Failed` からの遷移そのものは許しているので、
+/// ここで event 履歴を見て絞り込む。人の承認（`Check::Human`）が既に `Done` の `Approval` 子タスクで
+/// 承認済みなら、`attempts` を変えずに再判定することで（`human_approval_title` が `attempts` を含むため）
+/// ディスパッチャの `resolve_human_approvals` が同じ子タスクを見つけて再利用する（人に二度承認させない。
+/// D2 と同じ考え方）。
 pub fn rereview(
     store: &dyn TaskStore,
     id: TaskId,
@@ -290,6 +318,16 @@ pub fn rereview(
         return Err(OpsError::Validation(
             "reviewer条件を持つ通常タスクだけを再レビューできます".into(),
         ));
+    }
+    if task.status == Status::Failed {
+        let events = store.events_for(id)?;
+        if !review_fail_is_the_only_reason_for_failure(&events) {
+            return Err(OpsError::Validation(
+                "failedなタスクを再レビューできるのは、直前の実装runがdoneでreview判定だけが\
+                 不合格だった場合だけです（それ以外の理由でfailedになった場合はreopenしてください）"
+                    .into(),
+            ));
+        }
     }
     let outcome = store.apply_transition(id, Trigger::Rereview, None)?;
     Ok(TransitionResult {
@@ -371,6 +409,39 @@ mod tests {
                 .iter()
                 .any(|(_, e)| matches!(e, Event::WorkerStarted { .. }))
         );
+    }
+
+    /// ADR-0054 Phase 113 D3/D4(d): `failed` は「直前の実装 run が `done` で、review 判定だけが
+    /// 不合格だった」（最後の遷移が `review_fail`）ときだけ再レビューできる。それ以外の理由で
+    /// `failed`（例: 実装 run 自体が requeue 上限を使い切った `WorkerError`）は拒否する。
+    #[test]
+    fn rereview_from_failed_requires_the_last_transition_to_be_review_fail() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut task = sample_task(Status::Running);
+        task.acceptance[0].check = Check::Reviewer;
+        task.budget.max_retries = 0;
+        store.insert(&task).unwrap();
+        // 実装 run 自体が失敗（供給側失敗の requeue 上限。`review_fail` ではない）で `failed` になった
+        // ケースは対象外。
+        store
+            .apply_transition(task.id, Trigger::WorkerError { retryable: true }, None)
+            .unwrap();
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Failed);
+        let err = rereview(&store, task.id, None).unwrap_err();
+        assert!(matches!(err, OpsError::Validation(_)), "{err:?}");
+
+        // review 判定の不合格（`review_fail`）で `failed` になったケースは許す。
+        let store2 = SqliteStore::open_in_memory().unwrap();
+        let mut task2 = sample_task(Status::Reviewing);
+        task2.acceptance[0].check = Check::Reviewer;
+        task2.budget.max_retries = 0;
+        store2.insert(&task2).unwrap();
+        store2
+            .apply_transition(task2.id, Trigger::ReviewFail, None)
+            .unwrap();
+        assert_eq!(store2.get(task2.id).unwrap().unwrap().status, Status::Failed);
+        let result = rereview(&store2, task2.id, None).unwrap();
+        assert_eq!(result.to, Status::Reviewing);
     }
 
     /// `running` のタスクは**必ずリースを持つ**（`acquire_lease` がそう作る）。割り込みの

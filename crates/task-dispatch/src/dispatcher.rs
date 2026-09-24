@@ -33,8 +33,9 @@ use task_ops::daemon::{
 };
 use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
-    AnswerNote, REVIEWER_REQUEUED_PREFIX, ReviewNote, answers_from_events, approval_decision_note,
-    artifacts_for_run, consecutive_requeues, consecutive_reviewer_requeues, human_approval_title,
+    AnswerNote, REVIEWER_INFRA_FAILURE_PREFIX, REVIEWER_REQUEUED_PREFIX, ReviewNote,
+    answers_from_events, approval_decision_note, artifacts_for_run, consecutive_requeues,
+    consecutive_reviewer_infra_failures, consecutive_reviewer_requeues, human_approval_title,
     last_run_id, prior_review_from_events, retry_backoff,
 };
 use task_worker::{
@@ -491,6 +492,12 @@ pub struct DispatchConfig {
     pub cluster_cooldown: Duration,
     /// ADR-0011（P-38）: 同じ試行での連続 requeue の上限。達したら供給側失敗を通常の失敗（attempts 消費）として扱う。
     pub max_requeues: u32,
+    /// ADR-0054 D2（Phase 113）: `[review] max_reviewer_retries`。Reviewer run **自身のインフラ都合の
+    /// 失敗**（`is_error` の結果・プロセス失敗・resume 拒否など。プロバイダが分類できた供給側失敗の
+    /// `max_requeues` とは別軸）で reviewing を延期できる連続回数の上限。達したら「判定できなかった」
+    /// を「reviewer infra failure ×N」として不合格にする（`fail_all` はしない。人の承認・command・
+    /// artifact_exists の結果は保持する）。既定 3。
+    pub max_reviewer_retries: u32,
     /// ADR-0016 D1: `[[roles]]`。run 開始時に `RunContext.role`（指示文）を載せ、委譲された子の既定に使う。
     pub roles: Vec<RoleSpec>,
     /// ADR-0027 D1: `[[genres]]`。委譲の分野解決（`default_role` の既定の穴埋め）と、委譲できる run に渡す
@@ -3303,44 +3310,67 @@ impl Dispatcher {
         }
         let mut throttled_events = Vec::new();
         if let Some(pf) = outcome.provider_failure.take() {
-            let review_account = entry.as_ref().and_then(|e| e.account.clone());
-            let review_account_adapter = entry.as_ref().and_then(|e| e.account_adapter);
-            if let Some(provider) = entry.as_ref().and_then(|e| e.provider.clone()) {
-                // ADR-0024 D4: プール経由の Reviewer run の失敗もプロバイダを cooldown にせず、アカウントに向ける。
-                let policy_outcome = if review_account.is_some() {
-                    ProviderOutcome::Ok
-                } else {
-                    pf.outcome.clone()
-                };
-                self.policy.report(provider.clone(), &policy_outcome);
-                match (&review_account, review_account_adapter) {
-                    (Some(acct), Some(adapter)) => self.record_account_failure(
-                        adapter,
-                        acct,
-                        cooldown_reason_name(&pf.outcome),
-                        &pf.outcome,
-                    ),
-                    _ => {
-                        if let Some(ev) = self.provider_throttled_event(
-                            &provider,
-                            &pf.outcome,
-                            cooldown_reason_name(&pf.outcome),
-                        ) {
-                            throttled_events.push(ev);
+            // ADR-0054 D2（Phase 113）: `pf.outcome = Some(..)` はプロバイダが分類できた供給側失敗
+            // （Throttled/Exhausted/AuthFailed）で、従来どおりプロバイダ/アカウントの cooldown に
+            // 報告する。`None` は「reviewer run 自身のインフラ都合の失敗」（is_error の結果・
+            // プロセス失敗・resume 拒否など）で、こちらは cooldown の対象にしない
+            // （プロバイダ・アカウントの問題ではなく、たまたまこの run が失敗しただけのため）。
+            if let Some(classified) = pf.outcome.clone() {
+                let review_account = entry.as_ref().and_then(|e| e.account.clone());
+                let review_account_adapter = entry.as_ref().and_then(|e| e.account_adapter);
+                if let Some(provider) = entry.as_ref().and_then(|e| e.provider.clone()) {
+                    // ADR-0024 D4: プール経由の Reviewer run の失敗もプロバイダを cooldown にせず、アカウントに向ける。
+                    let policy_outcome = if review_account.is_some() {
+                        ProviderOutcome::Ok
+                    } else {
+                        classified.clone()
+                    };
+                    self.policy.report(provider.clone(), &policy_outcome);
+                    match (&review_account, review_account_adapter) {
+                        (Some(acct), Some(adapter)) => self.record_account_failure(
+                            adapter,
+                            acct,
+                            cooldown_reason_name(&classified),
+                            &classified,
+                        ),
+                        _ => {
+                            if let Some(ev) = self.provider_throttled_event(
+                                &provider,
+                                &classified,
+                                cooldown_reason_name(&classified),
+                            ) {
+                                throttled_events.push(ev);
+                            }
                         }
                     }
                 }
             }
-            let deferrals = consecutive_reviewer_requeues(&self.store.events_for(task_id)?);
-            if deferrals < self.config.max_requeues {
-                // ADR-0010 D5（P-29）: Reviewer run の供給側失敗は判定しない。reviewing のまま次 tick に回し、
-                // プロバイダを cooldown にする（attempts を消費しない）。
+            // ADR-0054 D2（Phase 113）: 分類できた供給側失敗は従来どおり `max_requeues` /
+            // `REVIEWER_REQUEUED_PREFIX` で数える。reviewer run 自身のインフラ都合の失敗は、
+            // 別のカウンタ・別の上限（`[review] max_reviewer_retries`、既定 3。criterion ごとではなく
+            // この reviewing 試行での連続失敗回数だが、Reviewer 条件は同じ run でまとめて判定される
+            // ため実質的に criterion ごとの回数と一致する）で数え、プロバイダの cooldown 回数とは
+            // 混ぜない。
+            let is_infra_failure = pf.outcome.is_none();
+            let (deferrals, limit, prefix) = if is_infra_failure {
+                (
+                    consecutive_reviewer_infra_failures(&self.store.events_for(task_id)?),
+                    self.config.max_reviewer_retries,
+                    REVIEWER_INFRA_FAILURE_PREFIX,
+                )
+            } else {
+                (
+                    consecutive_reviewer_requeues(&self.store.events_for(task_id)?),
+                    self.config.max_requeues,
+                    REVIEWER_REQUEUED_PREFIX,
+                )
+            };
+            if deferrals < limit {
+                // ADR-0010 D5（P-29）/ ADR-0054 D2: Reviewer run の供給側・インフラ失敗は判定しない。
+                // reviewing のまま次 tick に回す（attempts を消費しない）。
                 self.store.append_event(
                     task_id,
-                    &Event::worker_progress(
-                        run_id.clone(),
-                        format!("{REVIEWER_REQUEUED_PREFIX}{}", pf.message),
-                    ),
+                    &Event::worker_progress(run_id.clone(), format!("{prefix}{}", pf.message)),
                 )?;
                 if let Some(ev) = &reviewer_finished {
                     self.store.append_event(task_id, ev)?;
@@ -3351,20 +3381,24 @@ impl Dispatcher {
                 if let Some(entry) = entry {
                     self.pending_subjects.insert(task_id, entry.subject);
                 }
-                tracing::warn!(%task_id, %run_id, reason = %pf.message, "reviewer run hit a provider failure; review deferred");
+                tracing::warn!(%task_id, %run_id, reason = %pf.message, infra = is_infra_failure, "reviewer run hit a provider/infra failure; review deferred");
                 return Ok(());
             }
-            // ADR-0011（P-38）: 連続延期が上限に達したら、未判定の Reviewer 条件を fail として通常どおり判定を適用する。
-            tracing::warn!(%task_id, %run_id, reason = %pf.message, max_requeues = self.config.max_requeues, "reviewer run requeue limit reached; failing reviewer criteria");
+            // ADR-0011（P-38）/ ADR-0054 D2: 連続延期・連続インフラ失敗が上限に達したら、未判定の
+            // Reviewer 条件を fail として通常どおり判定を適用する（人の承認・command・artifact_exists
+            // の結果は `outcome.verdicts` に既に入っているのでそのまま残る）。
+            let limit_message = if is_infra_failure {
+                format!("reviewer infra failure ×{limit}: {}", pf.message)
+            } else {
+                format!("requeue limit ({limit}) reached: {}", pf.message)
+            };
+            tracing::warn!(%task_id, %run_id, reason = %pf.message, limit, infra = is_infra_failure, "reviewer run retry limit reached; failing reviewer criteria");
             if let Some(Event::WorkerFinished {
                 outcome: finished_outcome,
                 ..
             }) = reviewer_finished.as_mut()
             {
-                *finished_outcome = format!(
-                    "error(retryable=false): requeue limit ({}) reached: {}",
-                    self.config.max_requeues, pf.message
-                );
+                *finished_outcome = format!("error(retryable=false): {limit_message}");
             }
             for (idx, criterion) in task.acceptance.iter().enumerate() {
                 if matches!(criterion.check, Check::Reviewer)
@@ -3373,10 +3407,7 @@ impl Dispatcher {
                     outcome.verdicts.push(Verdict {
                         criterion_idx: idx,
                         pass: false,
-                        reason: format!(
-                            "requeue limit ({}) reached: {}",
-                            self.config.max_requeues, pf.message
-                        ),
+                        reason: limit_message.clone(),
                     });
                 }
             }
@@ -7666,6 +7697,7 @@ mod tests {
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
+                max_reviewer_retries: 3,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -8632,6 +8664,7 @@ mod tests {
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
+                max_reviewer_retries: 3,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -8786,6 +8819,7 @@ mod tests {
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
+                max_reviewer_retries: 3,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -8851,6 +8885,177 @@ mod tests {
         assert_eq!(
             after_third.turns, 1,
             "a fresh session starts at 0 turns, then this run touches it once"
+        );
+    }
+
+    /// Phase 113 D1/D2/D4(b)（ADR-0054 追記）: 1 回目の（resume を頼まれた）reviewer run は、実機の
+    /// `claude_code.rs`（Phase 113 で直した後）と同じ挙動を模す — resume 拒否を `session_resume_failed`
+    /// で報告**しつつ**、`Terminal::Error{retryable: true}` で終わる（`fail_all` されない、D2）。
+    /// 2 回目（session が retire されて新規セッションになった run）は、正常に `review.json` を書いて
+    /// `Terminal::Done` で終わる。
+    struct ResumeRejectingThenSucceedingReviewAdapter {
+        review_json: String,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for ResumeRejectingThenSucceedingReviewAdapter {
+        fn id(&self) -> &str {
+            "claude-code"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            std::fs::create_dir_all(&req.artifacts_dir).unwrap();
+            let resuming = req.context.session.as_ref().is_some_and(|s| s.resume);
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if resuming {
+                // ADR-0054 Phase 113 D1: `claude_code.rs::run_claude_code` が `result` メッセージを
+                // 観測できた run（`error_during_execution`/`is_error`）でも、resume 拒否の文言が
+                // stderr にあれば `session_resume_failed` を報告するようになった。
+                sink.session_resume_failed(
+                    "No conversation found with session ID: 01a0d017-e32a-4cad-b10c-0cb63869ae13",
+                );
+                return Ok(RunOutcome {
+                    terminal: Terminal::Error {
+                        message: "claude result: error_during_execution".into(),
+                        retryable: true,
+                    },
+                    exit_code: Some(1),
+                });
+            }
+            std::fs::write(req.artifacts_dir.join("review.json"), &self.review_json).unwrap();
+            Ok(RunOutcome {
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// Phase 113 D1+D2+D4(b)（ADR-0054 追記。本番のタスク 01M35X86XTK84F97QW0CN5PGMR /
+    /// reviewer run 01M388BENASH3JEBWFS03KEQYT の再現）: 1 回目の reviewer run が resume 拒否で
+    /// `error_during_execution`/`is_error` 終わっても、`fail_all` されず reviewing のまま延期され
+    /// （D2）、resume 拒否は retire される（D1）。2 回目は新規セッション（`resume=false`）で走り、
+    /// 判定が出て `Done` になる。Phase 67〜112 時点はこの経路（`result` を観測できた resume 拒否）を
+    /// 一切 self-heal できず、この形の失敗はそのまま `failed` になっていた。
+    #[tokio::test]
+    async fn a_resume_rejection_that_still_produced_a_result_self_heals_and_the_retry_produces_a_verdict()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        seed_conversation_org(store.as_ref());
+
+        let policy = StaticPolicy::new(
+            vec![ProviderSpec {
+                id: "p1".into(),
+                adapter: "claude-code".into(),
+                tiers: vec![Tier::Frontier, Tier::Standard, Tier::Cheap],
+                concurrency: 2,
+                model: "m".into(),
+            }],
+            Duration::from_secs(1),
+        );
+        let adapter = Arc::new(ResumeRejectingThenSucceedingReviewAdapter {
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"ok"}]}"#.into(),
+            calls: AtomicUsize::new(0),
+        });
+        let adapter_handle = adapter.clone();
+        let mut adapters: HashMap<ProviderId, Arc<dyn WorkerAdapter>> = HashMap::new();
+        adapters.insert("p1".into(), adapter);
+        let mut d = Dispatcher::new(
+            store.clone(),
+            Box::new(policy),
+            HashMap::from([("p1".to_string(), "m".to_string())]),
+            adapters,
+            std::collections::HashSet::new(),
+            DispatchConfig {
+                delivery: Default::default(),
+                max_concurrency: 2,
+                lease_grace: Duration::from_secs(60),
+                idle_timeout: Duration::from_secs(5),
+                kill_grace: Duration::from_millis(100),
+                review_timeout: Duration::from_secs(5),
+                workspace_root: PathBuf::from("/nonexistent"),
+                plan_auto_accept: false,
+                retry_backoff_base: Duration::ZERO,
+                retry_backoff_max: Duration::ZERO,
+                reviewer_hint: crate::review::reviewer_hint(),
+                clusters: HashMap::new(),
+                cluster_cooldown: Duration::from_secs(1),
+                max_requeues: 5,
+                max_reviewer_retries: 3,
+                roles: Vec::new(),
+                genres: Vec::new(),
+                delegation: DelegationLimits::default(),
+                accounts: None,
+                memory_dir: None,
+                worktree_branch_prefix: task_worker::DEFAULT_BRANCH_PREFIX.to_string(),
+                releases_dir: None,
+                containers: ContainersRuntimeConfig::default(),
+                knowledge: KnowledgeRuntimeConfig::default(),
+                session_rollover_tokens: 400_000,
+                shared_build_cache: false,
+                build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
+                workspace_prune_after_secs: 0,
+            },
+        );
+
+        // 1 本目: `coding-poc` の Reviewer run。新規セッション（resume していないので拒否は起きない）。
+        let mut first = new_task(dir.path(), Check::Reviewer, 0);
+        first.assignee = Some("coding-poc".into());
+        store.insert(&first).unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(store.get(first.id).unwrap().unwrap().status, Status::Done);
+
+        // 2 本目: 同じ部署 → resume を頼まれる → resume 拒否で `error_during_execution` になる
+        // （D1: self-heal で session を retire）が、`fail_all` はされず（D2）、3 本目として
+        // 新規セッションでやり直して判定が出る。
+        let mut second = new_task(dir.path(), Check::Reviewer, 0);
+        second.assignee = Some("coding-poc".into());
+        store.insert(&second).unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        assert_eq!(
+            store.get(second.id).unwrap().unwrap().status,
+            Status::Done,
+            "D2: the infra failure did not fail_all; the retried run produced a passing verdict"
+        );
+        assert_eq!(
+            store.get(second.id).unwrap().unwrap().attempts,
+            0,
+            "the deferred retry did not consume an attempt"
+        );
+        assert!(
+            adapter_handle.calls.load(Ordering::SeqCst) >= 2,
+            "the adapter ran at least twice for the second task"
+        );
+
+        let events = store.events_for(second.id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: true, .. })),
+            "{events:?}"
+        );
+        // resume 拒否は D1 どおりその場で retire された（`node_sessions` の履歴で確認できる: 3 本目の
+        // 部署は同じ `coding` だが、resume 拒否のあとは新規セッションで走った——2 本目のタスクが
+        // `Done` になったこと自体が、resume 拒否の run 単体では止まらず先に進んだ証拠。ここでは加えて
+        // 有効なセッションが（retire→新規作成で）存在することも確認する）。
+        assert!(
+            store
+                .node_session_active("coding", SessionKind::Lead, None)
+                .unwrap()
+                .is_some(),
+            "a fresh lead session exists after the self-heal"
         );
     }
 
@@ -9072,6 +9277,128 @@ mod tests {
                 .iter()
                 .any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: true, reason, .. } if reason.contains("approved")))
         );
+    }
+
+    /// Phase 113 D3/D4(d)（ADR-0054 追記）: `Review` kind の run だけを見る。1 回目（`n=0`）は
+    /// `Reviewer` criterion（idx 1）を不合格にし、2 回目以降（`rereview` 後）は合格にする
+    /// （resume やインフラ都合の失敗ではなく、判定そのものが変わるケースを模す）。
+    struct TogglingReviewAdapter {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for TogglingReviewAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            if req.task.kind != TaskKind::Review {
+                return Ok(done_outcome());
+            }
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            std::fs::create_dir_all(&req.artifacts_dir).unwrap();
+            let pass = n >= 1;
+            std::fs::write(
+                req.artifacts_dir.join("review.json"),
+                format!(r#"{{"verdicts":[{{"criterion":1,"pass":{pass},"reason":"r"}}]}}"#),
+            )
+            .unwrap();
+            Ok(RunOutcome {
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// Phase 113 D3/D4(d)（ADR-0054 追記。本番のタスク 01M35X86XTK84F97QW0CN5PGMR の障害を踏まえた
+    /// 回復手段）: `Human` 条件が承認済みのまま `Reviewer` 条件だけが不合格で `failed`
+    /// （直前の遷移は `review_fail`）になったタスクを `task_ops::comment::rereview` で再判定すると、
+    /// 承認済みの `Approval` 子タスクを**再利用**し（人に二度承認させない）、`Reviewer` 条件だけを
+    /// やり直す。2 回目は合格して `Done` になる。
+    #[tokio::test]
+    async fn rereview_from_failed_reuses_the_approved_human_child_and_only_reruns_the_reviewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(dir.path(), Check::Human, 0);
+        task.acceptance.push(Criterion {
+            text: "r".into(),
+            check: Check::Reviewer,
+        });
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(TogglingReviewAdapter {
+            calls: AtomicUsize::new(0),
+        });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 2);
+
+        let approval = wait_for_approval_child(&mut d, &store, task.id).await;
+        store
+            .apply_transition(
+                approval.id,
+                Trigger::Approve,
+                Some(Event::ApprovalDecided {
+                    by: "human".into(),
+                    approved: true,
+                    note: Some("looks good".into()),
+                }),
+            )
+            .unwrap();
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!(
+            t.status,
+            Status::Failed,
+            "the reviewer criterion genuinely failed the first time"
+        );
+        assert_eq!(t.attempts, 1);
+
+        let approvals_before: Vec<_> = store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.parent_id == Some(task.id) && c.kind == TaskKind::Approval)
+            .collect();
+        assert_eq!(approvals_before.len(), 1);
+        assert_eq!(approvals_before[0].id, approval.id);
+        assert_eq!(approvals_before[0].status, Status::Done);
+
+        // `failed` からの再レビュー（最後の遷移が `review_fail` なので許される。D3）。
+        let result = task_ops::comment::rereview(store.as_ref(), task.id, None).unwrap();
+        assert_eq!(result.to, Status::Reviewing);
+        assert_eq!(
+            store.get(task.id).unwrap().unwrap().attempts,
+            0,
+            "attempts rolled back to what it was when the approved child was created"
+        );
+
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!(t.status, Status::Done, "the retried reviewer run passed");
+
+        let approvals_after: Vec<_> = store
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.parent_id == Some(task.id) && c.kind == TaskKind::Approval)
+            .collect();
+        assert_eq!(
+            approvals_after.len(),
+            1,
+            "no new Approval child was created; the human was not asked again"
+        );
+        assert_eq!(approvals_after[0].id, approval.id);
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 2, "the reviewer ran exactly twice");
     }
 
     /// ADR-0033 D2（監査 D-3）: 承認子タスクは親の `project_id` / `milestone_id` / `assignee` を継ぐ
@@ -9705,6 +10032,39 @@ mod tests {
         }
     }
 
+    /// Phase 113（ADR-0054 D2）: `AlwaysThrottledAdapter` と違い、`Err(AdapterError::Throttled)`
+    /// （プロバイダが分類できる供給側失敗）ではなく `Ok(Terminal::Error{retryable: true})` を返す
+    /// （`is_error` の結果・クラッシュ相当。分類できない「reviewer run 自身のインフラ都合の失敗」）。
+    struct AlwaysInfraFailingReviewAdapter {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for AlwaysInfraFailingReviewAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            if req.task.kind != TaskKind::Review {
+                return Ok(done_outcome());
+            }
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(RunOutcome {
+                terminal: Terminal::Error {
+                    message: "claude result: error_during_execution".into(),
+                    retryable: true,
+                },
+                exit_code: Some(1),
+            })
+        }
+    }
+
     fn transition_reasons(store: &Arc<dyn TaskStore>, id: TaskId) -> Vec<String> {
         store
             .events_for(id)
@@ -10022,6 +10382,44 @@ mod tests {
             .unwrap();
         assert_eq!(consecutive_reviewer_requeues(&events[..last_transition]), 2);
         assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: false, reason, .. } if reason.starts_with("requeue limit (2) reached"))));
+    }
+
+    /// Phase 113 D2/D4(c)（ADR-0054 追記。実機障害 2026-09-23、タスク 01M35X86XTK84F97QW0CN5PGMR）:
+    /// reviewer run **自身のインフラ都合の失敗**（`is_error`/クラッシュ相当。`AlwaysThrottledAdapter`
+    /// が使う「プロバイダが分類できる供給側失敗」とは別カウンタ）は `max_reviewer_retries` までは
+    /// `fail_all` せず reviewing のままやり直す。上限に達したときだけ「reviewer infra failure ×N」で
+    /// 不合格にする（`consecutive_reviewer_requeues` とは別に `consecutive_reviewer_infra_failures` で
+    /// 数える）。
+    #[tokio::test]
+    async fn reviewer_infra_failure_retry_limit_fails_reviewer_criteria() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Reviewer, 0);
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(AlwaysInfraFailingReviewAdapter {
+            calls: AtomicUsize::new(0),
+        });
+        let mut d = dispatcher(store.clone(), adapter.clone(), 2);
+        d.config.max_reviewer_retries = 2;
+        let report = run_until_idle(&mut d, 500).await;
+        assert!(report.idle);
+        let t = store.get(task.id).unwrap().unwrap();
+        assert_eq!((t.status, t.attempts), (Status::Failed, 1));
+        assert_eq!(adapter.calls.load(Ordering::SeqCst), 3);
+        let events = store.events_for(task.id).unwrap();
+        // 最後の遷移（review_fail）の直前までで数える（その後ろには ReviewVerdict が続く）。
+        let last_transition = events
+            .iter()
+            .rposition(|(_, e)| matches!(e, Event::Transitioned { .. }))
+            .unwrap();
+        assert_eq!(
+            consecutive_reviewer_infra_failures(&events[..last_transition]),
+            2
+        );
+        // プロバイダが分類できる供給側失敗のカウンタ（`REVIEWER_REQUEUED_PREFIX`）は動かない
+        // （別軸であることの裏取り）。
+        assert_eq!(consecutive_reviewer_requeues(&events[..last_transition]), 0);
+        assert!(events.iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: false, reason, .. } if reason.starts_with("reviewer infra failure ×2"))));
     }
 
     /// 監査の指摘（ADR-0012 D2）: 取得窓（max_concurrency*4+16）を優先度の高い経路なしタスクが埋めても、窓の外の実行可能な
@@ -12681,6 +13079,7 @@ mod tests {
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues,
+                max_reviewer_retries: 3,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -17794,6 +18193,7 @@ mod knowledge_fallback_tests {
                 clusters: HashMap::new(),
                 cluster_cooldown: Duration::from_secs(1),
                 max_requeues: 5,
+                max_reviewer_retries: 3,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),

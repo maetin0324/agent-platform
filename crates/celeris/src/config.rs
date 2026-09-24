@@ -64,6 +64,11 @@ pub struct Config {
     pub plan: PlanConfig,
     #[serde(default)]
     pub reviewer: ReviewerConfig,
+    /// ADR-0054 D2（Phase 113）: `[review]`。Reviewer run 自身のインフラ都合の失敗（`is_error`/
+    /// プロセス失敗/resume 拒否/分類できないレート制限文言）を、条件不合格にせず reviewing のまま
+    /// やり直す回数の上限。`[reviewer]`（判定 run の adapter/tier）とは別のテーブル。
+    #[serde(default)]
+    pub review: ReviewConfig,
     #[serde(default)]
     pub api: ApiConfig,
     #[serde(default)]
@@ -1047,6 +1052,28 @@ impl Default for ReviewerConfig {
 
 fn default_reviewer_tier() -> Tier {
     Tier::Standard
+}
+
+/// `[review]`（ADR-0054 D2, Phase 113）: `[reviewer]`（判定 run の adapter/tier）とは別。
+/// Reviewer run 自身のインフラ都合の失敗（is_error の結果・プロセス失敗・resume 拒否・分類できない
+/// レート制限文言）で判定を保留し、reviewing のままやり直す回数の上限。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewConfig {
+    #[serde(default = "default_max_reviewer_retries")]
+    pub max_reviewer_retries: u32,
+}
+
+impl Default for ReviewConfig {
+    fn default() -> Self {
+        Self {
+            max_reviewer_retries: default_max_reviewer_retries(),
+        }
+    }
+}
+
+fn default_max_reviewer_retries() -> u32 {
+    3
 }
 fn default_retry_backoff_base_secs() -> u64 {
     10
@@ -2643,6 +2670,7 @@ impl Config {
             retry_backoff_base: Duration::from_secs(self.retry_backoff_base_secs),
             retry_backoff_max: Duration::from_secs(self.retry_backoff_max_secs),
             max_requeues: self.max_requeues,
+            max_reviewer_retries: self.review.max_reviewer_retries,
             reviewer_hint: WorkerHint {
                 tier: self.reviewer.tier,
                 adapter: self.reviewer.adapter.clone(),

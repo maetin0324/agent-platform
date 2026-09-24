@@ -132,10 +132,16 @@ fn has_status_context(text: &str, start: usize, end: usize) -> bool {
 /// アダプタに拒否された（見つからない・失効した）ように見えるか。`claude-code` の crash 分類
 /// （`stderr` 末尾）や `codex` の crash 分類に使う決定的な部分一致（大文字小文字を無視）。
 ///
-/// **この文言の一覧は実機で確認していない**（ADR-0009 P-34: 本物の CLI に「無い session id」で
-/// `--resume`/`resume` を渡して観測できる環境がこのサンドボックスに無い）。誤って一致しなくても
-/// run 自体は通常どおり失敗として扱われるだけで安全（次の run が新規セッションになる機会を逃すだけ）。
-/// 実機で確認できたら、ここに実際の文言を追加すること。
+/// Phase 113（ADR-0054 追記。実機観測 2026-09-23、Claude Code CLI）: 本番のタスク
+/// 01M35X86XTK84F97QW0CN5PGMR の reviewer run（01M388BENASH3JEBWFS03KEQYT）の stderr そのまま:
+/// `No conversation found with session ID: 01a0d017-e32a-4cad-b10c-0cb63869ae13`。Phase 67 時点の
+/// 一覧は「実機で確認していない」想定文（`No conversation found for session …`）しか書いておらず、
+/// 実際の文言（`with session ID: <uuid>`）は「no conversation found」を含む部分一致なので幸い当たって
+/// いた（`RESUME_REJECTION_PATTERNS` は変わらず有効）。壊れていたのは呼び出し側の配線（この関数では
+/// ない。`claude_code.rs::run_claude_code` が `result` メッセージを観測できた run ではこの関数を一切
+/// 呼んでいなかった。Phase 113 D1 で直した）。この追記では、将来の文言の揺れに備えて
+/// `could not resume` を加え、「session ... not found」のように間に id が挟まる形は
+/// [`looks_like_resume_rejection`] 側でギャップ許容の判定も行う。
 const RESUME_REJECTION_PATTERNS: &[&str] = &[
     "no conversation found",
     "session not found",
@@ -146,13 +152,38 @@ const RESUME_REJECTION_PATTERNS: &[&str] = &[
     "session has expired",
     "could not find session",
     "resume: not found",
+    "could not resume",
 ];
 
 /// `resume` を頼んだ run のエラー文面（`stderr` 末尾・結果メッセージ）が
-/// [`RESUME_REJECTION_PATTERNS`] のどれかを含むか。呼び出し側（`resume` を頼んでいたときだけ）で使う。
+/// [`RESUME_REJECTION_PATTERNS`] のどれかを含むか、または「session」の後に近接して「not found」が
+/// 現れるか（`session 01a0d017-… not found` のように間に id が挟まる形。Phase 113）。
+/// 呼び出し側（`resume` を頼んでいたときだけ）で使う。
 pub fn looks_like_resume_rejection(text: &str) -> bool {
     let lower = text.to_lowercase();
     RESUME_REJECTION_PATTERNS.iter().any(|p| lower.contains(p))
+        || contains_gap_pattern(&lower, "session", "not found", 80)
+}
+
+/// `before` の出現位置の直後、`max_gap` バイト以内に `after` が現れるか（`lower` は小文字化済み前提）。
+/// `session 01a0d017-e32a-4cad-b10c-0cb63869ae13 not found` のように、`before`/`after` の間に
+/// 可変長の id や語句が挟まる文面を、固定文字列の部分一致だけでは拾えないために使う（Phase 113）。
+fn contains_gap_pattern(lower: &str, before: &str, after: &str, max_gap: usize) -> bool {
+    let mut search_from = 0;
+    while let Some(pos) = lower[search_from..].find(before) {
+        let start = search_from + pos + before.len();
+        let window_end = (start + max_gap).min(lower.len());
+        // `String` を byte index で切ると char 境界を壊すことがあるので、境界まで縮める。
+        let mut end = window_end;
+        while end < lower.len() && !lower.is_char_boundary(end) {
+            end += 1;
+        }
+        if lower[start..end.max(start)].contains(after) {
+            return true;
+        }
+        search_from = search_from + pos + before.len();
+    }
+    false
 }
 
 /// Phase 98（ADR-0054 追記。実機観測 2026-09-22 00:18 UTC、codex-cli 0.155.1）:
@@ -383,6 +414,29 @@ ImportError: cannot import name 'Image' from 'PIL' (unknown location)
         }
         assert!(!looks_like_resume_rejection("wall clock exceeded"));
         assert!(!looks_like_resume_rejection(""));
+    }
+
+    /// Phase 113 D4(a): 本番のタスク 01M35X86XTK84F97QW0CN5PGMR / reviewer run
+    /// 01M388BENASH3JEBWFS03KEQYT で観測した実機の文言そのもの。
+    #[test]
+    fn phase_113_matches_the_production_claude_code_wording() {
+        assert!(looks_like_resume_rejection(
+            "No conversation found with session ID: 01a0d017-e32a-4cad-b10c-0cb63869ae13"
+        ));
+    }
+
+    /// Phase 113 D1: `could not resume` と、id が間に挟まる「session <id> not found」の形。
+    #[test]
+    fn phase_113_matches_could_not_resume_and_session_id_not_found_with_a_gap() {
+        assert!(looks_like_resume_rejection("Error: could not resume conversation"));
+        assert!(looks_like_resume_rejection(
+            "session 01a0d017-e32a-4cad-b10c-0cb63869ae13 not found"
+        ));
+        // 「session」と「not found」が離れすぎている（無関係な文脈）ものまでは拾わない。
+        assert!(!looks_like_resume_rejection(&format!(
+            "session {} start ok; separately, the file was not found",
+            "x".repeat(200)
+        )));
     }
 
     /// Phase 67b: `--session-id`/`--resume` に渡してよい id かどうか。
