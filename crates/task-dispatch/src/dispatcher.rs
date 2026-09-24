@@ -915,6 +915,17 @@ struct AwaitingChildren {
     plan: Option<PlanOutput>,
 }
 
+/// ADR-0072 D15（Phase E2）: `dispatch_ready` が計画のある Task について何をすべきか
+/// （`wu_dispatch_gate`）。
+enum WuDispatchGate {
+    /// 計画を持たない Task（暗黙の WorkUnit）。従来どおり。
+    Atomic,
+    /// この WorkUnit の run を起こす。
+    RunWorkUnit(Box<task_core::WorkUnitRow>),
+    /// この tick では何もしない（`Stuck`／`AllDone`／`RunPlanner`。E2 に planner は無い）。
+    Skip,
+}
+
 /// run 開始時に決める、ワーカーに渡す追加の文脈（ADR-0016 D1 / D3, ADR-0027 D1）。
 #[derive(Debug, Default)]
 struct RunExtras {
@@ -975,6 +986,12 @@ struct RunExtras {
     /// ADR-0056 D3（Phase 79）: mount 名にあったが KB に無かった skill（`run_ready` 相当の呼び出し元が
     /// `status` の進行イベントを 1 行出す。`RunContext` には乗らない）。
     missing_skills: Vec<String>,
+    /// ADR-0072 D9/D21（Phase E2）: 計画のある Task の WorkUnit の run にだけ `Some`
+    /// （`RunContext.work_unit` にそのまま乗る）。
+    work_unit: Option<task_worker::protocol::WorkUnitPromptContext>,
+    /// ADR-0072 D9（Phase E2）: この run が WU の continuation なら、events からではなく
+    /// `runs` 索引から組み立てた続きの文脈（`run_worker` は events から求める代わりにこれを使う）。
+    continuation_override: Option<task_worker::ContinuationContext>,
 }
 
 struct ReviewEntry {
@@ -3037,6 +3054,12 @@ impl Dispatcher {
             tracing::warn!(%task_id, %run_id, status = ?task.status, "stale worker result discarded");
             return Ok(());
         }
+        // ADR-0072 D6（Phase E2）: 計画のある Task で、この run が `running` の WorkUnit のものなら
+        // `Some`（`last_run_id` が一致するもの。無ければ暗黙の WorkUnit = 従来どおり `None`）。
+        let current_wu = self.store.work_units_for(task_id)?.into_iter().find(|u| {
+            u.status == task_core::WorkUnitStatus::Running
+                && u.last_run_id.as_deref() == Some(run_id.as_str())
+        });
 
         let mut subject = ReviewSubject::default();
         // ADR-0013 D9: 供給側失敗なら種別（ProviderThrottled.reason）を、result を消費する前に取っておく。
@@ -3213,11 +3236,199 @@ impl Dispatcher {
                 }
             },
         };
-        // ADR-0072 D7/D8/D9/D11/D18（Phase E1）: 予算切れ・yield の続き（continuation）。
+        // ADR-0072 D7/D8/D9/D11/D18（Phase E1/E2）: 予算切れ・yield の続き（continuation）。
         // checkpoint は常に合成して残す（(b)）。continuation そのものの可否・上限到達の扱いは
         // `[execution]` で決める。無効化・上限到達のときは trigger/outcome_str を従来の形に戻す。
         let mut checkpoint_event: Option<Event> = None;
-        if let Some(end) = run_end
+        // ADR-0072 D5（Phase E2）: `runs` 索引の `finish` に使う（`(g)`。atomic/WU どちらの run にも
+        // 書く）。
+        let mut checkpoint_for_index: Option<task_core::Checkpoint> = None;
+        // ADR-0072 D6（Phase E2）: この run が WU の run なら、その WU の新しい行と、伝播で
+        // 一緒に書く他の WU の新しい行（`newly_blocked`/`newly_ready`）、`plan_complete` かどうか。
+        let mut wu_update: Option<(
+            task_core::WorkUnitRow,
+            &'static str,
+            Vec<task_core::WorkUnitRow>,
+        )> = None;
+        if let Some(wu) = &current_wu {
+            // ADR-0072 D6（Phase E2）: WU の run。`end` が無ければ（分類できない供給側・インフラの
+            // 失敗）、harness_error 相当として WU を ready に戻すだけで、Task レベルの trigger は
+            // 触らない（既存の Requeue/InfraRequeue/WorkerError の経路のまま。D6 の表どおり）。
+            let effective_end = run_end.unwrap_or(task_core::RunEnd::HarnessError {
+                class: task_core::HarnessErrorClass::Infra,
+            });
+            let reset_only = matches!(
+                effective_end,
+                task_core::RunEnd::HarnessError { .. } | task_core::RunEnd::Cancelled
+            );
+            let mut checkpoint_opt: Option<task_core::Checkpoint> = None;
+            let mut prev_checkpoint_opt: Option<task_core::Checkpoint> = None;
+            let mut no_progress_before = 0u32;
+            if effective_end.is_continuable() && self.config.execution.continuation {
+                let events_so_far = self.store.events_for(task_id)?;
+                let workspace_dir = self.task_dir(&task);
+                let artifacts_dir = workspace_dir.as_ref().map(|d| self.artifacts_dir(&task, d));
+                let workspaces = self.task_workspaces_for(&task);
+                let cwd = workspaces.as_ref().and_then(|w| w.cwd());
+                let branch = workspaces
+                    .as_ref()
+                    .and_then(|w| w.repos.first())
+                    .and_then(|r| r.branch())
+                    .unwrap_or_default();
+                let activity: Vec<crate::checkpoint::ToolActivity> = events_so_far
+                    .iter()
+                    .filter_map(|(_, ev)| match ev {
+                        Event::WorkerProgress {
+                            run_id: r,
+                            kind: Some(task_core::ProgressKind::ToolUse),
+                            tool,
+                            summary,
+                            ..
+                        } if r == &run_id => Some(crate::checkpoint::ToolActivity::Use {
+                            tool: tool.clone(),
+                            summary: summary.clone(),
+                        }),
+                        Event::WorkerProgress {
+                            run_id: r,
+                            kind: Some(task_core::ProgressKind::ToolResult),
+                            error,
+                            ..
+                        } if r == &run_id => {
+                            Some(crate::checkpoint::ToolActivity::Result { error: *error })
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                let mechanical = crate::checkpoint::gather(cwd, branch, &activity);
+                let worker_checkpoint = yield_checkpoint_json
+                    .as_ref()
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .or_else(|| {
+                        artifacts_dir
+                            .as_deref()
+                            .and_then(crate::checkpoint::read_worker_checkpoint)
+                    });
+                let checkpoint_end = effective_end
+                    .as_checkpoint_end()
+                    .unwrap_or(task_core::CheckpointEnd::BudgetExhausted);
+                let ctx = task_core::CheckpointContext {
+                    task_id: task_id.to_string(),
+                    work_unit: Some(wu.key.clone()),
+                    run_id: run_id.clone(),
+                    run_seq: wu.runs,
+                    end: checkpoint_end,
+                    created_at: rfc3339(OffsetDateTime::now_utc()),
+                };
+                let checkpoint = task_core::merge_checkpoint(worker_checkpoint, mechanical, ctx);
+                prev_checkpoint_opt = latest_checkpoint(&events_so_far, Some(&wu.id));
+                no_progress_before = no_progress_streak(&events_so_far, Some(&wu.id));
+                checkpoint_event = Some(Event::CheckpointSaved {
+                    run_id: run_id.clone(),
+                    work_unit_id: Some(wu.id.clone()),
+                    checkpoint: Box::new(checkpoint.clone()),
+                });
+                checkpoint_opt = Some(checkpoint);
+            }
+            checkpoint_for_index = checkpoint_opt.clone();
+
+            if effective_end.is_continuable() && !self.config.execution.continuation {
+                // ADR-0072 §6 (f): `[execution] continuation = false` なら従来どおり
+                // `WorkerError{retryable:true}` に戻す（WU の状態は変えない）。
+                trigger = Trigger::WorkerError { retryable: true };
+                outcome_str = format!(
+                    "error(retryable=true): {} (continuation disabled)",
+                    describe_run_end(effective_end)
+                );
+            } else {
+                let units = self.store.work_units_for(task_id)?;
+                let limits = crate::execution_scheduler::WuLimits {
+                    max_continuations: self.config.execution.max_continuations_per_work_unit,
+                    no_progress_limit: self.config.execution.no_progress_limit,
+                    max_retries: task.budget.max_retries,
+                };
+                let decision = crate::execution_scheduler::decide(
+                    effective_end,
+                    &run_id,
+                    wu,
+                    &units,
+                    crate::execution_scheduler::ContinuationInputs {
+                        checkpoint: checkpoint_opt.as_ref(),
+                        prev_checkpoint: prev_checkpoint_opt.as_ref(),
+                        no_progress_before,
+                    },
+                    limits,
+                );
+                if !reset_only {
+                    trigger = decision.trigger;
+                    match decision.reason {
+                        "failed" => {
+                            let msg = outcome_str
+                                .strip_prefix("error(retryable=false): ")
+                                .or_else(|| outcome_str.strip_prefix("error(retryable=true): "))
+                                .unwrap_or(outcome_str.as_str());
+                            outcome_str = format!(
+                                "error(retryable=false): work unit {} failed: {msg}",
+                                wu.key
+                            );
+                        }
+                        "limit" => {
+                            if let Some(question) = &decision.outcome_override {
+                                outcome_str = question.clone();
+                            }
+                        }
+                        "continue" => {
+                            outcome_str = format!(
+                                "continue: {} の続き（WorkUnit {}, Run #{}）",
+                                describe_run_end(effective_end),
+                                wu.key,
+                                wu.runs + 1
+                            );
+                        }
+                        "retry" => {
+                            outcome_str = format!(
+                                "work_unit_retry: WorkUnit {} を最初からやり直します（{}/{}）",
+                                wu.key, decision.updated.retries, limits.max_retries
+                            );
+                        }
+                        _ => {}
+                    }
+                    if decision.plan_complete {
+                        // D15: Task の完了。`ReviewSubject.summary` は WU ごとの最終 checkpoint の
+                        // `completed` を key ごとに 1 段落ずつ並べた決定的な要約にする（evidence は
+                        // この最後の run のものを残す）。checkpoint が無い WU は「完了」とだけ書く。
+                        let mut paragraphs = Vec::new();
+                        for u in &units {
+                            if u.id == wu.id {
+                                continue;
+                            }
+                            if !u.status.is_active() || u.status != task_core::WorkUnitStatus::Done
+                            {
+                                continue;
+                            }
+                            let completed = u
+                                .last_run_id
+                                .as_deref()
+                                .and_then(|rid| self.store.run_index_get(rid).ok().flatten())
+                                .and_then(|r| r.checkpoint)
+                                .map(|cp| cp.completed.join("; "))
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "完了".to_string());
+                            paragraphs.push(format!("{}: {}", u.spec.title, completed));
+                        }
+                        let this_completed = checkpoint_for_index
+                            .as_ref()
+                            .map(|cp| cp.completed.join("; "))
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| subject.summary.clone());
+                        paragraphs.push(format!("{}: {}", wu.spec.title, this_completed));
+                        subject.summary = paragraphs.join("\n");
+                    }
+                }
+                let mut all_new_rows = decision.newly_blocked.clone();
+                all_new_rows.extend(decision.newly_ready.clone());
+                wu_update = Some((decision.updated, decision.reason, all_new_rows));
+            }
+        } else if let Some(end) = run_end
             && end.is_continuable()
         {
             let events_so_far = self.store.events_for(task_id)?;
@@ -3290,6 +3501,7 @@ impl Dispatcher {
                 } else {
                     no_progress_streak(&events_so_far, None) + 1
                 };
+                checkpoint_for_index = Some(checkpoint.clone());
                 checkpoint_event = Some(Event::CheckpointSaved {
                     run_id: run_id.clone(),
                     work_unit_id: None,
@@ -3380,6 +3592,68 @@ impl Dispatcher {
             peak_context_tokens: None,
             turns: None,
         });
+        // ADR-0072 D5/D6/D15（Phase E2）: WU の行の更新（このWU自身 + 伝播で一緒に決まった他のWU）を、
+        // Task の trigger の適用とは別に先に書く（既存の `RoutingDecided` 等の慣習と同じ:
+        // 別のトランザクションでも監査上の実害は無い。再起動時の照合は `work_units.status` を正とする）。
+        if let Some((updated_wu, reason, side_effect_rows)) = wu_update.take() {
+            let from = current_wu
+                .as_ref()
+                .map(|w| w.status)
+                .unwrap_or(updated_wu.status);
+            if let Err(e) = self.store.work_unit_transition(
+                task_id,
+                updated_wu.clone(),
+                Event::WorkUnitTransitioned {
+                    work_unit_id: updated_wu.id.clone(),
+                    key: updated_wu.key.clone(),
+                    from,
+                    to: updated_wu.status,
+                    reason: reason.to_string(),
+                    run_id: Some(run_id.clone()),
+                },
+            ) {
+                tracing::warn!(%task_id, %run_id, error = %e, "failed to record the work unit transition");
+            }
+            for row in side_effect_rows {
+                // D15: `newly_ready`/`dependents_to_block` の対象は、必ず未着手（`pending`）の
+                // WU だけ（依存が未解決な限り `ready` には上がれないため）。
+                let dep_reason = if row.status == task_core::WorkUnitStatus::Blocked {
+                    "dependency_failed"
+                } else {
+                    "dependency_ready"
+                };
+                if let Err(e) = self.store.work_unit_transition(
+                    task_id,
+                    row.clone(),
+                    Event::WorkUnitTransitioned {
+                        work_unit_id: row.id.clone(),
+                        key: row.key.clone(),
+                        from: task_core::WorkUnitStatus::Pending,
+                        to: row.status,
+                        reason: dep_reason.to_string(),
+                        run_id: None,
+                    },
+                ) {
+                    tracing::warn!(%task_id, %run_id, work_unit = %row.key, error = %e, "failed to record a dependent work unit transition");
+                }
+            }
+        }
+        // ADR-0072 D5（Phase E2）: `runs` 索引の finish（(g): 全タスクの run について書く）。
+        {
+            let index_status = run_end
+                .map(task_core::RunIndexStatus::from_run_end)
+                .unwrap_or(task_core::RunIndexStatus::HarnessError);
+            if let Err(e) = self.store.run_index_finish(
+                &run_id,
+                index_status,
+                checkpoint_for_index.clone(),
+                usage,
+                metrics,
+                OffsetDateTime::now_utc(),
+            ) {
+                tracing::warn!(%task_id, %run_id, error = %e, "failed to finish the runs index row");
+            }
+        }
         let finished = Event::WorkerFinished {
             run_id: run_id.clone(),
             outcome: outcome_str.clone(),
@@ -4403,6 +4677,16 @@ impl Dispatcher {
                         let until = now + infra_backoff_delay(infra_n);
                         self.infra_backoff.insert(task.id, until);
                     }
+                    // ADR-0072 D15（Phase E2）: この run が計画のある Task の WU のものだったなら、
+                    // その WU の行も `running` のまま残さず、checkpoint があれば `needs_continuation`、
+                    // 無ければ `ready` に戻す（`WorkUnitTransitioned{reason: "restart_reconcile"}`）。
+                    if let Err(e) = self.reconcile_work_unit_run(
+                        task.id,
+                        &lease.worker_run_id,
+                        "restart_reconcile",
+                    ) {
+                        tracing::warn!(task_id = %task.id, run_id = %lease.worker_run_id, error = %e, "failed to reconcile the work unit for a reclaimed lease");
+                    }
                     count += 1;
                 }
                 Err(StoreError::InvalidTransition(e)) => {
@@ -4578,6 +4862,240 @@ impl Dispatcher {
             .map(str::to_string)
     }
 
+    /// ADR-0072 D15（Phase E2）: `run_id` の run が「まだ `running` の WU」に属していたら、
+    /// checkpoint があれば `needs_continuation`、無ければ `ready` に戻す
+    /// （`WorkUnitTransitioned{reason}`）。属していなければ何もしない（`Ok(())`）。
+    fn reconcile_work_unit_run(
+        &self,
+        task_id: TaskId,
+        run_id: &str,
+        reason: &str,
+    ) -> Result<(), DispatchError> {
+        let units = self.store.work_units_for(task_id)?;
+        let Some(wu) = units.iter().find(|u| {
+            u.status == task_core::WorkUnitStatus::Running
+                && u.last_run_id.as_deref() == Some(run_id)
+        }) else {
+            return Ok(());
+        };
+        let has_checkpoint = self
+            .store
+            .runs_for_work_unit(&wu.id)?
+            .iter()
+            .any(|r| r.checkpoint.is_some());
+        let mut updated = wu.clone();
+        updated.status = if has_checkpoint {
+            task_core::WorkUnitStatus::NeedsContinuation
+        } else {
+            task_core::WorkUnitStatus::Ready
+        };
+        self.store.work_unit_transition(
+            task_id,
+            updated.clone(),
+            Event::WorkUnitTransitioned {
+                work_unit_id: wu.id.clone(),
+                key: wu.key.clone(),
+                from: task_core::WorkUnitStatus::Running,
+                to: updated.status,
+                reason: reason.to_string(),
+                run_id: Some(run_id.to_string()),
+            },
+        )?;
+        Ok(())
+    }
+
+    /// ADR-0072 D15（Phase E2）: `dispatch_ready` がこの Task について何をすべきか。
+    fn wu_dispatch_gate(&self, task_id: TaskId) -> Result<WuDispatchGate, DispatchError> {
+        if self.store.execution_plan_active(task_id)?.is_none() {
+            return Ok(WuDispatchGate::Atomic);
+        }
+        let mut units = self.store.work_units_for(task_id)?;
+        // ADR-0072 D18（Phase E2）: 人の回答（`Trigger::Answer` で Task が `Blocked` から `Ready` に
+        // 戻った）で、`blocked(question|limit)` の WU を再開する（窓は 0 に戻る。`Ready`/
+        // `NeedsContinuation` が無い = `next_work_unit` が `Stuck` を返すときだけ試す）。
+        if matches!(
+            task_core::next_work_unit(&units),
+            task_core::NextStep::Stuck(_)
+        ) {
+            let resumable: Vec<task_core::WorkUnitRow> = units
+                .iter()
+                .filter(|u| {
+                    u.status == task_core::WorkUnitStatus::Blocked
+                        && matches!(
+                            u.blocked_reason,
+                            Some(task_core::WorkUnitBlockedReason::Question)
+                                | Some(task_core::WorkUnitBlockedReason::Limit)
+                        )
+                })
+                .cloned()
+                .collect();
+            for wu in resumable {
+                let resumed = crate::execution_scheduler::resume_after_answer(&wu);
+                self.store.work_unit_transition(
+                    task_id,
+                    resumed.clone(),
+                    Event::WorkUnitTransitioned {
+                        work_unit_id: wu.id.clone(),
+                        key: wu.key.clone(),
+                        from: task_core::WorkUnitStatus::Blocked,
+                        to: resumed.status,
+                        reason: "answer".to_string(),
+                        run_id: None,
+                    },
+                )?;
+            }
+            units = self.store.work_units_for(task_id)?;
+        }
+        match task_core::next_work_unit(&units) {
+            task_core::NextStep::RunWorkUnit(id) => {
+                match units.into_iter().find(|u| u.id == id) {
+                    Some(wu) => Ok(WuDispatchGate::RunWorkUnit(Box::new(wu))),
+                    // 理論上到達しない（`next_work_unit` は `units` の中の id しか返さない）。
+                    None => Ok(WuDispatchGate::Skip),
+                }
+            }
+            // E2 に planner は無い。`AllDone` は `on_worker_finished` が最後の WU の完了で
+            // 既に `WorkerDone` に遷移させているはずなので、ここに来るのは再起動直後の一瞬の
+            // 不整合くらい（次 tick の `reconcile_work_unit_runs` が直す）。
+            task_core::NextStep::AllDone | task_core::NextStep::RunPlanner { .. } => {
+                Ok(WuDispatchGate::Skip)
+            }
+            task_core::NextStep::Stuck(reason) => {
+                tracing::warn!(task_id = %task_id, %reason, "execution plan stuck; not dispatching this tick");
+                Ok(WuDispatchGate::Skip)
+            }
+        }
+    }
+
+    /// ADR-0072 D5/D6/D9（Phase E2）: WU の run を始める（行の遷移・`runs` 索引・prompt 文脈）。
+    /// `extras.work_unit`/`extras.continuation_override` を書き換える。
+    #[allow(clippy::too_many_arguments)]
+    fn start_work_unit_run(
+        &self,
+        task_id: TaskId,
+        wu: &task_core::WorkUnitRow,
+        run_id: &str,
+        adapter_id: &str,
+        model: &str,
+        account: Option<&str>,
+        extras: &mut RunExtras,
+    ) -> Result<(), DispatchError> {
+        let is_continuation = wu.status == task_core::WorkUnitStatus::NeedsContinuation;
+        if is_continuation {
+            extras.continuation_override = self.work_unit_continuation_context(wu);
+        }
+        let mut updated = wu.clone();
+        updated.status = task_core::WorkUnitStatus::Running;
+        updated.blocked_reason = None;
+        updated.runs += 1;
+        updated.last_run_id = Some(run_id.to_string());
+        updated.updated_at = rfc3339(OffsetDateTime::now_utc());
+        self.store.work_unit_transition(
+            task_id,
+            updated,
+            Event::WorkUnitTransitioned {
+                work_unit_id: wu.id.clone(),
+                key: wu.key.clone(),
+                from: wu.status,
+                to: task_core::WorkUnitStatus::Running,
+                reason: "dispatch".to_string(),
+                run_id: Some(run_id.to_string()),
+            },
+        )?;
+        self.store.run_index_start(task_core::RunRow {
+            run_id: run_id.to_string(),
+            task_id: task_id.to_string(),
+            work_unit_id: Some(wu.id.clone()),
+            role: task_core::RunIndexRole::Worker,
+            seq: wu.runs + 1,
+            status: task_core::RunIndexStatus::Running,
+            adapter: Some(adapter_id.to_string()),
+            model: Some(model.to_string()),
+            account: account.map(str::to_string),
+            session_id: None,
+            checkpoint: None,
+            usage: None,
+            metrics: None,
+            started_at: rfc3339(OffsetDateTime::now_utc()),
+            finished_at: None,
+        })?;
+        let units = self.store.work_units_for(task_id)?;
+        extras.work_unit = Some(self.work_unit_prompt_context(task_id, &units, wu)?);
+        Ok(())
+    }
+
+    /// ADR-0072 D9（Phase E2）: WU の spec から prompt に渡す文脈を組み立てる（`## Objective` の
+    /// 差し替え・計画の一覧・依存する WU の完了要約）。
+    fn work_unit_prompt_context(
+        &self,
+        task_id: TaskId,
+        units: &[task_core::WorkUnitRow],
+        wu: &task_core::WorkUnitRow,
+    ) -> Result<task_worker::protocol::WorkUnitPromptContext, DispatchError> {
+        let task_objective_excerpt = self
+            .store
+            .get(task_id)?
+            .map(|t| t.objective.chars().take(1500).collect::<String>())
+            .unwrap_or_default();
+        let plan_overview: Vec<String> = units
+            .iter()
+            .map(|u| format!("{}: {} [{}]", u.key, u.spec.title, u.status.as_str()))
+            .collect();
+        let mut dependency_summaries = Vec::new();
+        for dep_key in &wu.spec.depends_on {
+            let Some(dep) = units.iter().find(|u| &u.key == dep_key) else {
+                continue;
+            };
+            let completed = dep
+                .last_run_id
+                .as_deref()
+                .and_then(|run_id| self.store.run_index_get(run_id).ok().flatten())
+                .and_then(|r| r.checkpoint)
+                .and_then(|cp| cp.completed.last().cloned())
+                .unwrap_or_else(|| "完了".to_string());
+            dependency_summaries.push(format!("{}: {}", dep.spec.title, completed));
+        }
+        Ok(task_worker::protocol::WorkUnitPromptContext {
+            key: wu.key.clone(),
+            title: wu.spec.title.clone(),
+            objective: wu.spec.objective.clone(),
+            done_when: wu.spec.done_when.clone(),
+            task_objective_excerpt,
+            dependency_summaries,
+            plan_overview,
+        })
+    }
+
+    /// ADR-0072 D9（Phase E2）: この WU の continuation の文脈を `runs` 索引から組み立てる
+    /// （events は WU をまたぐ run の区別を持たないため、`events` ではなく `runs` を使う。
+    /// E1 の `build_continuation_context` と同じ役割の WU 版）。
+    fn work_unit_continuation_context(
+        &self,
+        wu: &task_core::WorkUnitRow,
+    ) -> Option<task_worker::ContinuationContext> {
+        if wu.continuations == 0 {
+            return None;
+        }
+        let runs = self.store.runs_for_work_unit(&wu.id).ok()?;
+        let last = runs.last()?;
+        let checkpoint = last.checkpoint.clone()?;
+        let checkpoint_json = serde_json::to_value(&checkpoint).ok()?;
+        let previous_end = match last.status {
+            task_core::RunIndexStatus::Yielded => "yielded".to_string(),
+            other => other.as_str().to_string(),
+        };
+        let prior_runs: Vec<String> = runs
+            .iter()
+            .map(|r| format!("Run #{} {}", r.seq, r.status.as_str()))
+            .collect();
+        Some(task_worker::ContinuationContext {
+            run_seq: wu.runs + 1,
+            previous_end,
+            checkpoint: checkpoint_json,
+            prior_runs,
+        })
+    }
+
     fn dispatch_ready(&mut self) -> Result<usize, DispatchError> {
         self.unroutable.clear();
         self.cluster_waiting.clear();
@@ -4615,6 +5133,14 @@ impl Dispatcher {
                 Some(task) => task,
                 // 候補が無くて `blocked` にした（人に聞いた）。この tick では dispatch しない。
                 None => continue,
+            };
+            // ADR-0072 D6/D15（Phase E2）: 計画のある Task は、次に走らせる WorkUnit を
+            // 決定的な scheduler（`task_core::next_work_unit`）で選ぶ。計画が無ければ従来どおり
+            // （`current_wu = None`。プロンプト・遷移は E1 までと 1 バイトも変わらない。(i)）。
+            let current_wu = match self.wu_dispatch_gate(task.id)? {
+                WuDispatchGate::Atomic => None,
+                WuDispatchGate::RunWorkUnit(wu) => Some(*wu),
+                WuDispatchGate::Skip => continue,
             };
             // ADR-0010 D6（P-3）: ready に入った時刻（DB の updated_at）からのバックオフ。
             if task.attempts > 0 {
@@ -4864,7 +5390,7 @@ impl Dispatcher {
                         adapter: adapter_id.clone(),
                         provider: Some(provider_id.clone()),
                         account: account.clone(),
-                        model_id: model,
+                        model_id: model.clone(),
                         // ADR-0069 Phase 118 D1: 監査記録は「設定した」値ではなく「実際に CLI へ
                         // 渡った」値を残す（対応しないアダプタでは `None` になる）。
                         reasoning_effort: adapter
@@ -4944,6 +5470,21 @@ impl Dispatcher {
                         task_core::ProgressFields::of(task_core::ProgressKind::Status),
                     ),
                 )?;
+            }
+            // ADR-0072 D6/D9/D15（Phase E2）: 計画のある Task の WU の run。WU の行を `running` にし
+            // （`runs`/`last_run_id` を更新）、`runs` 索引に 1 行作り、prompt に載せる文脈を組み立てる。
+            if let Some(wu) = &current_wu
+                && let Err(e) = self.start_work_unit_run(
+                    task.id,
+                    wu,
+                    &run_id,
+                    &adapter_id,
+                    &model,
+                    account.as_deref(),
+                    &mut extras,
+                )
+            {
+                tracing::warn!(task_id = %task.id, work_unit = %wu.key, error = %e, "failed to record the work unit run start; continuing without work-unit context");
             }
             // ADR-0052 D2: フォールバックの前置き（LangMem に渡しているのと同じ抽出の指示 + 出力契約）を
             // 役割の指示文として載せる。依頼文（`maintenance_objective`）は `task.objective` のまま。
@@ -5342,6 +5883,10 @@ impl Dispatcher {
             session_diff,
             skills,
             missing_skills,
+            // ADR-0072 D9/D21（Phase E2）: WU の run かどうかは `dispatch_ready` が判断し、
+            // ここ（`run_extras`）の返り値を上書きする（ここでは常に `None`）。
+            work_unit: None,
+            continuation_override: None,
         })
     }
 
@@ -8021,10 +8566,17 @@ async fn run_worker(
             session_diff: extras.session_diff,
             // ADR-0056 D3（Phase 79）: mount された skills（KB に実在したものだけ）。
             skills: extras.skills,
-            // ADR-0072 D9（Phase E1）: 予算切れ・yield の続きなら、前の run の checkpoint と
+            // ADR-0072 D9（Phase E1/E2）: 予算切れ・yield の続きなら、前の run の checkpoint と
             // これまでの run の 1 行要約。continuation でない run では `None`
-            // （プロンプトは D10 の追加分を除きバイト単位で従来どおり）。
-            continuation: build_continuation_context(&events),
+            // （プロンプトは D10 の追加分を除きバイト単位で従来どおり）。WU の run では
+            // `dispatch_ready` が `runs` 索引から組み立てた文脈（`continuation_override`）を使う
+            // （events は WU をまたぐ run_id の区別を持たないため）。
+            continuation: extras
+                .continuation_override
+                .clone()
+                .or_else(|| build_continuation_context(&events)),
+            // ADR-0072 D9/D21（Phase E2）: 計画のある Task の WU の run にだけ `Some`。
+            work_unit: extras.work_unit.clone(),
         },
     };
     // ADR-0066 D1（Phase 110b）: ローカルの git worktree のホスト実行にだけ、共有ビルドキャッシュの
@@ -19839,6 +20391,469 @@ mod tests {
             .expect("再起動後の run も continuation を持つ");
         assert_eq!(cont.run_seq, 2);
         assert!(cont.previous_end.starts_with("budget_exhausted"));
+    }
+    // ========== ADR-0072（Phase E2）: ExecutionPlan / WorkUnit の決定的 scheduler ==========
+
+    /// WU の `key`（`req.context.work_unit`。無ければ `"atomic"`）ごとに、呼ばれるたびに 1 つずつ
+    /// 消費する応答の列。無くなれば `Terminal::Done` を返す。渡された `RunContext` も記録する。
+    struct WuScriptAdapter {
+        script: StdMutex<HashMap<String, std::collections::VecDeque<Terminal>>>,
+        seen: Arc<StdMutex<Vec<(String, task_worker::RunContext)>>>,
+    }
+
+    impl WuScriptAdapter {
+        fn new(script: HashMap<String, Vec<Terminal>>) -> Self {
+            WuScriptAdapter {
+                script: StdMutex::new(
+                    script
+                        .into_iter()
+                        .map(|(k, v)| (k, v.into_iter().collect()))
+                        .collect(),
+                ),
+                seen: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for WuScriptAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            let key = req
+                .context
+                .work_unit
+                .as_ref()
+                .map(|w| w.key.clone())
+                .unwrap_or_else(|| "atomic".to_string());
+            self.seen
+                .lock()
+                .unwrap()
+                .push((key.clone(), req.context.clone()));
+            let terminal = self
+                .script
+                .lock()
+                .unwrap()
+                .get_mut(&key)
+                .and_then(|q| q.pop_front())
+                .unwrap_or(Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                });
+            Ok(RunOutcome {
+                terminal,
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    fn wu_spec(key: &str, depends_on: &[&str]) -> task_core::WorkUnitSpec {
+        task_core::WorkUnitSpec {
+            key: key.to_string(),
+            kind: task_core::WorkUnitKind::Implement,
+            title: format!("Work on {key}"),
+            objective: format!("Implement {key} thoroughly and completely"),
+            depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+            done_when: vec![format!("{key} is done")],
+            checks: vec![],
+            context: task_core::WorkUnitContext::default(),
+            harness: None,
+            features: None,
+            budget: None,
+            outputs: vec![],
+        }
+    }
+
+    fn adopt_three_step_plan(
+        store: &Arc<dyn TaskStore>,
+        task_id: TaskId,
+    ) -> task_core::ExecutionPlanRow {
+        let spec = task_core::ExecutionPlanSpec {
+            schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
+            rationale: "A -> B -> C".to_string(),
+            work_units: vec![
+                wu_spec("a", &[]),
+                wu_spec("b", &["a"]),
+                wu_spec("c", &["b"]),
+            ],
+        };
+        task_ops::execution::adopt_plan(
+            store.as_ref(),
+            task_id,
+            spec,
+            task_core::PlanOrigin::Fixture,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("adopt plan")
+    }
+
+    /// ADR-0072 §6 E2 (c)(f)(i): 3 WU（A → B → C）の直列実行。各完了で `Continue{advance}`、最後は
+    /// `WorkerDone` → 最終レビュー → `done`。`runs` の索引が 3 件、それぞれ正しい `work_unit_id`/`seq`
+    /// を持つ（(g)）。
+    #[tokio::test]
+    async fn three_work_units_run_in_order_and_complete_the_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        adopt_three_step_plan(&store, task_id);
+
+        let adapter = Arc::new(WuScriptAdapter::new(HashMap::new()));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+
+        let units = store.work_units_for(task_id).unwrap();
+        assert_eq!(units.len(), 3);
+        for u in &units {
+            assert_eq!(u.status, task_core::WorkUnitStatus::Done, "{u:?}");
+            assert_eq!(u.runs, 1);
+        }
+
+        let runs = store.runs_for_task(task_id).unwrap();
+        assert_eq!(runs.len(), 3, "{runs:?}");
+        let mut by_seq: Vec<&task_core::RunRow> = runs.iter().collect();
+        by_seq.sort_by_key(|r| r.started_at.clone());
+        let keys: Vec<String> = by_seq
+            .iter()
+            .map(|r| {
+                let wu_id = r.work_unit_id.clone().expect("work_unit_id");
+                units.iter().find(|u| u.id == wu_id).unwrap().key.clone()
+            })
+            .collect();
+        assert_eq!(keys, vec!["a", "b", "c"], "must run in dependency order");
+        for r in &runs {
+            assert_eq!(r.status, task_core::RunIndexStatus::Completed);
+            assert_eq!(r.role, task_core::RunIndexRole::Worker);
+        }
+
+        // Task レベルの trigger の理由: advance が 2 回（a→b, b→c の後）、最後は worker_done。
+        let events = store.events_for(task_id).unwrap();
+        let reasons: Vec<&str> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::Transitioned { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasons.iter().filter(|r| **r == "advance").count(),
+            2,
+            "{reasons:?}"
+        );
+        assert!(reasons.contains(&"worker_done"), "{reasons:?}");
+
+        // WorkUnitTransitioned の数（dispatch x3, completed x3, dependency_ready x2）。
+        let wu_events = events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::WorkUnitTransitioned { .. }))
+            .count();
+        assert!(wu_events >= 8, "{wu_events}: {events:?}");
+
+        // (i): このプロンプトは WU の objective を使い、Task 全体の objective ではない。
+        let seen = adapter.seen.lock().unwrap();
+        let (_, ctx_a) = seen.iter().find(|(k, _)| k == "a").unwrap();
+        assert_eq!(
+            ctx_a.work_unit.as_ref().unwrap().objective,
+            "Implement a thoroughly and completely"
+        );
+    }
+
+    /// ADR-0072 §6 E2 (d): WU の失敗 → retry → 上限で `failed`。依存先は `blocked(dependency_failed)`。
+    /// planner の無い E2 では replan できないので Task は `failed`。
+    #[tokio::test]
+    async fn a_work_unit_failure_at_the_retry_limit_fails_the_task_and_blocks_dependents() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            // `task.budget.max_retries` は WU の `retries` の上限にも使われる（E2 は WU ごとの
+            // 予算を planner から受け取らないので Task の budget を使う）。ここでは 1（初回 + 1 回の
+            // retry = 計 2 回で使い切る）。
+            1,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        adopt_three_step_plan(&store, task_id);
+
+        let mut script = HashMap::new();
+        script.insert(
+            "b".to_string(),
+            vec![
+                Terminal::Error {
+                    message: "boom".into(),
+                    retryable: true,
+                },
+                Terminal::Error {
+                    message: "boom again".into(),
+                    retryable: true,
+                },
+            ],
+        );
+        let adapter = Arc::new(WuScriptAdapter::new(script));
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Failed, "{stored:?}");
+
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        let b = units.iter().find(|u| u.key == "b").unwrap();
+        let c = units.iter().find(|u| u.key == "c").unwrap();
+        assert_eq!(a.status, task_core::WorkUnitStatus::Done, "{a:?}");
+        assert_eq!(b.status, task_core::WorkUnitStatus::Failed, "{b:?}");
+        assert_eq!(c.status, task_core::WorkUnitStatus::Blocked, "{c:?}");
+        assert_eq!(
+            c.blocked_reason,
+            Some(task_core::WorkUnitBlockedReason::DependencyFailed)
+        );
+
+        let events = store.events_for(task_id).unwrap();
+        let last_outcome = events
+            .iter()
+            .rev()
+            .find_map(|(_, e)| match e {
+                Event::WorkerFinished { outcome, .. } => Some(outcome.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            last_outcome.contains("work unit b failed"),
+            "{last_outcome}"
+        );
+    }
+
+    /// ADR-0072 §6 E2 (e): WU の question → Task が `blocked` → 回答で再開する。
+    #[tokio::test]
+    async fn a_work_unit_question_blocks_the_task_and_an_answer_resumes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        adopt_three_step_plan(&store, task_id);
+
+        let mut script = HashMap::new();
+        script.insert(
+            "a".to_string(),
+            vec![Terminal::Question {
+                text: "どちらの方針にしますか".into(),
+            }],
+        );
+        let adapter = Arc::new(WuScriptAdapter::new(script));
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Blocked, "{stored:?}");
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        assert_eq!(a.status, task_core::WorkUnitStatus::Blocked);
+        assert_eq!(
+            a.blocked_reason,
+            Some(task_core::WorkUnitBlockedReason::Question)
+        );
+
+        store
+            .apply_transition(
+                task_id,
+                Trigger::Answer,
+                Some(Event::Answered {
+                    question: "どちらの方針にしますか".into(),
+                    answer: "A でお願いします".into(),
+                }),
+            )
+            .unwrap();
+        assert_eq!(store.get(task_id).unwrap().unwrap().status, Status::Ready);
+
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+        let units = store.work_units_for(task_id).unwrap();
+        assert!(
+            units
+                .iter()
+                .all(|u| u.status == task_core::WorkUnitStatus::Done)
+        );
+    }
+
+    /// ADR-0072 §6 E2 (f): WU の continuation（E1 の checkpoint の仕組みを WU の単位で使う）。
+    #[tokio::test]
+    async fn a_work_unit_yield_continues_with_a_checkpoint_scoped_to_that_work_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        adopt_three_step_plan(&store, task_id);
+
+        let mut script = HashMap::new();
+        script.insert(
+            "a".to_string(),
+            vec![Terminal::Yielded {
+                checkpoint: serde_json::json!({
+                    "completed": ["A の下ごしらえ"],
+                    "remaining": ["A の仕上げ"],
+                    "next_action": "仕上げに入る",
+                }),
+                usage: None,
+            }],
+        );
+        let adapter = Arc::new(WuScriptAdapter::new(script));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        assert_eq!(a.continuations, 1, "{a:?}");
+        assert_eq!(a.runs, 2, "1回目 yield, 2回目 done");
+
+        let events = store.events_for(task_id).unwrap();
+        let checkpoints: Vec<_> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::CheckpointSaved {
+                    work_unit_id: Some(id),
+                    checkpoint,
+                    ..
+                } if *id == a.id => Some(checkpoint.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(checkpoints.len(), 1, "{events:?}");
+        assert_eq!(checkpoints[0].completed, vec!["A の下ごしらえ".to_string()]);
+
+        // 2 回目の run（a の続き）に渡った RunContext には continuation が載る。
+        let seen = adapter.seen.lock().unwrap();
+        let a_runs: Vec<&task_worker::RunContext> = seen
+            .iter()
+            .filter(|(k, _)| k == "a")
+            .map(|(_, c)| c)
+            .collect();
+        assert_eq!(a_runs.len(), 2);
+        assert!(
+            a_runs[0].continuation.is_none(),
+            "1回目は continuation 無し"
+        );
+        let continuation = a_runs[1]
+            .continuation
+            .as_ref()
+            .expect("2回目は continuation あり");
+        assert_eq!(continuation.run_seq, 2);
+    }
+
+    /// ADR-0072 §6 E2 (h): 再起動後の照合。`running` のまま落ちた WU の run は、`reclaim_expired_leases`
+    /// （lease 失効 → `InfraRequeue`）と同じ経路で `ready`/`needs_continuation` に戻る。
+    #[tokio::test]
+    async fn a_work_unit_stuck_running_after_a_restart_is_reconciled_on_lease_expiry() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        task.status = Status::Running;
+        let run_id = "run-crashed".to_string();
+        task.lease = Some(task_core::Lease {
+            worker_run_id: run_id.clone(),
+            // 既に失効している。
+            expires_at: OffsetDateTime::now_utc() - Duration::from_secs(60),
+        });
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        store
+            .append_event(
+                task_id,
+                &Event::Created {
+                    task: Box::new(task.clone()),
+                },
+            )
+            .unwrap();
+        let plan = adopt_three_step_plan(&store, task_id);
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap().clone();
+        let mut running_a = a.clone();
+        running_a.status = task_core::WorkUnitStatus::Running;
+        running_a.runs = 1;
+        running_a.last_run_id = Some(run_id.clone());
+        store
+            .work_unit_transition(
+                task_id,
+                running_a.clone(),
+                Event::WorkUnitTransitioned {
+                    work_unit_id: a.id.clone(),
+                    key: a.key.clone(),
+                    from: task_core::WorkUnitStatus::Ready,
+                    to: task_core::WorkUnitStatus::Running,
+                    reason: "dispatch".into(),
+                    run_id: Some(run_id.clone()),
+                },
+            )
+            .unwrap();
+        let _ = &plan;
+
+        let adapter = Arc::new(WuScriptAdapter::new(HashMap::new()));
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        // `reclaim_expired_leases` は `Status::Running` のタスクだけを見る（`tick` の一部）。
+        d.tick().unwrap();
+
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        assert_eq!(
+            a.status,
+            task_core::WorkUnitStatus::Ready,
+            "checkpoint が無いので ready に戻る: {a:?}"
+        );
     }
 }
 
