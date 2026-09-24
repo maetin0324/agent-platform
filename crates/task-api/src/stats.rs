@@ -45,12 +45,24 @@ struct DayTotals {
 }
 
 /// `WorkerFinished.outcome` の分類（api.md §5.2。ディスパッチャの文字列の接頭辞と対）。
-pub fn classify_outcome(outcome: &str) -> RunOutcomeKind {
+///
+/// ADR-0070 D3 / P-E0-3: `infra_requeue: ` も（供給側の `requeue: ` と同じく）attempts を消費しない
+/// 再試行なので `Requeue` に数える（これまで分類が無く `Error` に落ちていた不整合を直す）。
+/// ADR-0072 D9/D11/D19（Phase E1）: `continue: ` は continuation（失敗ではない）。`end` があれば
+/// それを優先する（分類できない古い経路は文字列判定にフォールバック）。
+pub fn classify_outcome(outcome: &str, end: Option<&task_core::RunEnd>) -> RunOutcomeKind {
+    if let Some(task_core::RunEnd::Yielded | task_core::RunEnd::BudgetExhausted { .. }) = end
+        && outcome.starts_with("continue: ")
+    {
+        return RunOutcomeKind::Continued;
+    }
     if outcome.starts_with("done: ") {
         RunOutcomeKind::Done
     } else if outcome.starts_with("question: ") {
         RunOutcomeKind::Question
-    } else if outcome.starts_with("requeue: ") {
+    } else if outcome.starts_with("continue: ") {
+        RunOutcomeKind::Continued
+    } else if outcome.starts_with("requeue: ") || outcome.starts_with("infra_requeue: ") {
         RunOutcomeKind::Requeue
     } else if outcome.starts_with("interrupted: ") {
         // ADR-0044 D2/D8（Phase 53）: 人のコメントで止めた run は失敗ではない。
@@ -96,6 +108,7 @@ impl StatsState {
                 run_id,
                 outcome,
                 usage,
+                end,
                 ..
             } => {
                 let provider = self
@@ -103,14 +116,15 @@ impl StatsState {
                     .remove(run_id)
                     .unwrap_or_else(|| UNKNOWN_PROVIDER.to_string());
                 let totals = self.providers.entry(provider).or_default();
-                match classify_outcome(outcome) {
+                match classify_outcome(outcome, end.as_ref()) {
                     RunOutcomeKind::Done => totals.done += 1,
                     RunOutcomeKind::Question => totals.question += 1,
                     RunOutcomeKind::Error => totals.error += 1,
                     RunOutcomeKind::Requeue => totals.requeue += 1,
                     RunOutcomeKind::LeaseExpired => totals.lease_expired += 1,
                     // ADR-0044 D8: 割り込みはどの集計にも数えない（run は起きたが失敗でも成功でもない）。
-                    RunOutcomeKind::Interrupted => {}
+                    // ADR-0072 D9/D11（Phase E1）: continuation も同様（まだ続いている。失敗ではない）。
+                    RunOutcomeKind::Interrupted | RunOutcomeKind::Continued => {}
                 }
                 let input = usage.and_then(|u| u.input_tokens).unwrap_or(0);
                 let output = usage.and_then(|u| u.output_tokens).unwrap_or(0);
@@ -235,6 +249,7 @@ impl AccountStatsState {
                 run_id,
                 outcome,
                 usage,
+                end,
                 ..
             } => {
                 let Some(key) = self.open_runs.remove(run_id) else {
@@ -242,14 +257,15 @@ impl AccountStatsState {
                 };
                 let totals = self.accounts.entry(key).or_default();
                 // S5: §5.8 のプロバイダ集計と同じ規則。`error` は `RunOutcomeKind::Error` だけを数える
-                // （question/requeue/lease_expired はエラーではない）。
-                match classify_outcome(outcome) {
+                // （question/requeue/lease_expired/continue はエラーではない）。
+                match classify_outcome(outcome, end.as_ref()) {
                     RunOutcomeKind::Done => totals.done += 1,
                     RunOutcomeKind::Error => totals.error += 1,
                     RunOutcomeKind::Question
                     | RunOutcomeKind::Requeue
                     | RunOutcomeKind::LeaseExpired
-                    | RunOutcomeKind::Interrupted => {}
+                    | RunOutcomeKind::Interrupted
+                    | RunOutcomeKind::Continued => {}
                 }
                 let input = usage.and_then(|u| u.input_tokens).unwrap_or(0);
                 let output = usage.and_then(|u| u.output_tokens).unwrap_or(0);
@@ -308,33 +324,57 @@ mod tests {
             usage,
             role: None,
             metrics: None,
+            end: None,
         }
     }
 
     #[test]
     fn outcome_prefixes_are_classified() {
-        assert_eq!(classify_outcome("done: ok"), RunOutcomeKind::Done);
+        assert_eq!(classify_outcome("done: ok", None), RunOutcomeKind::Done);
         assert_eq!(
-            classify_outcome("question: which?"),
+            classify_outcome("question: which?", None),
             RunOutcomeKind::Question
         );
         assert_eq!(
-            classify_outcome("requeue: throttled"),
+            classify_outcome("requeue: throttled", None),
             RunOutcomeKind::Requeue
         );
         assert_eq!(
-            classify_outcome("lease_expired"),
+            classify_outcome("lease_expired", None),
             RunOutcomeKind::LeaseExpired
         );
-        assert_eq!(classify_outcome("lease_expired: x"), RunOutcomeKind::Error);
+        assert_eq!(
+            classify_outcome("lease_expired: x", None),
+            RunOutcomeKind::Error
+        );
         // ADR-0044 D2/D8（Phase 53）: 人のコメントで止めた run は失敗ではない。
         assert_eq!(
-            classify_outcome("interrupted: comment"),
+            classify_outcome("interrupted: comment", None),
             RunOutcomeKind::Interrupted
         );
         assert_eq!(
-            classify_outcome("error(retryable=true): boom"),
+            classify_outcome("error(retryable=true): boom", None),
             RunOutcomeKind::Error
+        );
+        // ADR-0070 D3 / P-E0-3: `infra_requeue: ` も `Requeue` に数える。
+        assert_eq!(
+            classify_outcome("infra_requeue: adapter: boom", None),
+            RunOutcomeKind::Requeue
+        );
+        // ADR-0072 D9/D11/D19（Phase E1）: `continue: ` は continuation（失敗ではない）。
+        assert_eq!(
+            classify_outcome(
+                "continue: budget_exhausted(turns) の続き（Run #2）",
+                Some(&task_core::RunEnd::BudgetExhausted {
+                    kind: task_core::BudgetKind::Turns
+                })
+            ),
+            RunOutcomeKind::Continued
+        );
+        assert_eq!(
+            classify_outcome("continue: yielded の続き（Run #2）", None),
+            RunOutcomeKind::Continued,
+            "end が無くても接頭辞だけで分類できる"
         );
     }
 
@@ -429,6 +469,7 @@ mod tests {
                 }),
                 role,
                 metrics: None,
+                end: None,
             },
         ));
         let today = Date::from_calendar_date(2026, time::Month::September, 14).unwrap_or(Date::MIN);

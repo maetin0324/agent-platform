@@ -99,6 +99,7 @@ fn finished(run_id: &str, outcome: &str, usage: Option<Usage>) -> Event {
         usage,
         role: None,
         metrics: None,
+        end: None,
     }
 }
 

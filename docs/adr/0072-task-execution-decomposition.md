@@ -1,7 +1,7 @@
 # ADR-0072: Task の下に内部の実行層（ExecutionPlan / WorkUnit / Run）を置き、session の予算切れを Task の失敗にしない
 
 - 日付: 2026-09-24
-- 状態: **Proposed**（Phase E0 = 調査と設計。Phase E1 に着手するときに Accepted にする）
+- 状態: **Accepted**（Phase E0 = 調査と設計。Phase E1 で着手し Accepted にした。2026-09-24）
 - 関連:
   - ADR-0002（状態機械）、ADR-0003 / 0006（ワーカープロトコルと結果ファイル規約）
   - ADR-0007（Planner / Reviewer）、ADR-0016 / 0021（委譲と子の失敗）
@@ -997,3 +997,39 @@ GUI を触る Phase では `pnpm typecheck` / `lint` / `test` / `gen:types` の�
   E5 で決める。
 - **U9**: remote（ssh）の worktree の mechanical checkpoint は E1 の対象外（worker の checkpoint だけ）。
 - **U10**: gate の閾値（score ≥ 5）と重みは推測の初期値。shadow の記録（E3〜E5）と dogfood（E6）で調整する。
+
+## Phase E1 実装時の逸脱・明確化（2026-09-24）
+
+実装しながら見つかった、D5〜D10 の記述とコードの食い違い。黙って逸脱せず、ここに記録する。
+
+- **D5 からの逸脱: `WorkerStarted.run_seq` は event のフィールドとして持たせず、events から純粋に導出する**
+  （`task_ops::derive::current_run_seq`。非 Reviewer の `WorkerStarted` の件数を数えるだけ）。
+  理由: `run_seq` は「そのタスクの中の何回目の worker run か」という、既存の events から完全に復元できる
+  情報であり、DESIGN 原則 6（events から現在状態を再構成できる）にも適う。一方でこれを `Event::WorkerStarted`
+  の新規フィールドとして追加すると、この enum バリアントを struct literal で組み立てている**約 60 箇所**
+  （task-core / task-ops / task-dispatch / task-api / celeris / celerisctl の実装とテスト）すべてに機械的な
+  変更が要る（`Event::WorkerFinished.end`（D7 の本体で必須）と合わせると 140 箇所超）。値を持たない冗長な
+  フィールドのためにこの範囲を広げるのは不釣り合いと判断し、導出関数に倒した。`WorkerFinished.end` は
+  D7 の分類そのもの（continuation 判定に必須）なので、そちらは予定どおり追加した。
+- **D5 の checkpoint schema: JSON の tag を `"kind"` から `"type"` に変更**。`RunEnd::BudgetExhausted{kind:
+  BudgetKind}` のフィールド名 `kind` が `#[serde(tag = "kind")]` の外側タグ名と衝突する（`schemars`/`serde`
+  が「variant field name conflicts with internal tag」でコンパイルエラーにする）ため、外側タグを `"type"`
+  にした（`Check`（`task_core::model::Check`）など、このコードベースの他の tagged enum と同じ命名）。
+- **`task_core::execution::Decision` を `CheckpointDecision` に改名**。`task_core::approval::Decision`
+  （既存、`lib.rs` で re-export 済み）と名前が衝突するため。
+- **D19「`task-api::stats::classify_outcome` と `view.rs::classify_outcome` は `end` があれば優先する」の実装**:
+  両方の `classify_outcome` に `end: Option<&RunEnd>` を追加し、`end` が `Yielded`/`BudgetExhausted` かつ
+  outcome 文字列が `"continue: "` で始まるときだけ新設の `RunOutcomeKind::Continued` を返す（それ以外は
+  従来どおり文字列の接頭辞で分類）。`RunSummary` にも `end: Option<RunEnd>`（D20 のバッジの下地）を追加した。
+  同じ作業で **P-E0-3**（`stats.rs::classify_outcome` が `"infra_requeue: "` を分類していなかった）も直した
+  （`Requeue` に分類する。供給側の `requeue:` と同じ「attempts を消費しない再試行」という性質のため）。
+- **P-E0-2 の直接の修正は見送った**: 調査で見つけた「claude-code で result.json が無いとき、
+  `Ok(Terminal::Error)` になり attempts を消費する（ADR-0070 D3 の想定と食い違う）」は、この Phase の
+  `RunEnd` 分類の追加とは独立した既存の不整合で、直すと `WorkerError` → `InfraRequeue` の遷移になり
+  既存のテスト・本番挙動が変わる。E1 の「(f) 既存の遷移は変わらない」を優先し、今回は手を付けていない。
+  E2 以降（`HarnessErrorClass::Supply`/`Infra` の配線）で改めて判断すること。
+- **reviewer/planner run と `Terminal::Yielded`/`BudgetExhausted`**: reviewer run は worker run と同じ
+  `claude_code::run_claude_code` を通るため、理論上は reviewer run でも予算切れ・yield の `Terminal` が
+  返りうる。continuation（D9/D11）は worker run だけの仕組みなので、reviewer 側では「判定できなかった」
+  として `max_reviewer_retries` の再試行に倒す（既存の `Terminal::Error{retryable:true}` と同じ経路。
+  `crates/task-dispatch/src/review.rs`）。checkpoint は作らない（reviewer run に checkpoint の出番は無い）。

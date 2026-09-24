@@ -313,6 +313,7 @@ async fn posting_a_human_comment_follows_the_effect_table() {
             usage: None,
             role: None,
             metrics: None,
+            end: None,
         }],
     );
     let resp = send(

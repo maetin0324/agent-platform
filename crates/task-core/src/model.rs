@@ -714,6 +714,14 @@ pub struct RunMetrics {
     /// この run が始まった時点で、同じタスクが既に消費していた試行回数（`Task.attempts`）。
     /// 0 なら初回の試行。
     pub retries: u32,
+    /// ADR-0072 D19（Phase E1）: この run で観測した context 量（input + cache_read + cache_creation）
+    /// の最大値。取れないアダプタ（codex / acp。ADR-0072 §7 U2）は `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_context_tokens: Option<u64>,
+    /// ADR-0072 D19（Phase E1）: この run のモデルの turn 数（取れる範囲。claude-code はアシスタント
+    /// メッセージの件数）。取れなければ `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
 }
 
 /// run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。
@@ -913,6 +921,10 @@ pub enum Event {
         /// この run の起点時刻を持たない経路（無い）は `None`。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metrics: Option<RunMetrics>,
+        /// ADR-0072 D7（Phase E1）: この run の終わり方の構造化した分類。導入前のイベント、または
+        /// 分類できなかった run（旧経路の字句判定に頼るしかないもの）は `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end: Option<crate::execution::RunEnd>,
     },
     ReviewVerdict {
         run_id: String,
@@ -1019,6 +1031,15 @@ pub enum Event {
     RoutingDecided {
         run_id: String,
         record: Box<crate::model_policy::RoutingRecord>,
+    },
+    /// ADR-0072 D5/D8（Phase E1）: run 終了時に daemon が確定させた checkpoint（worker の申告 +
+    /// mechanical の合成）。状態は変えない（`replay` の attempts 計算は無視する）。
+    CheckpointSaved {
+        run_id: String,
+        /// E1 では常に `None`（暗黙の WorkUnit）。E2 以降で WorkUnit の id を持つ。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work_unit_id: Option<String>,
+        checkpoint: Box<crate::execution::Checkpoint>,
     },
 }
 

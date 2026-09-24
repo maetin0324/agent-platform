@@ -82,7 +82,10 @@ async fn routing_returns_per_run_audit_and_dropped_assignee() {
                     metrics: Some(task_core::RunMetrics {
                         wall_ms: 1234,
                         retries: 1,
+                        peak_context_tokens: None,
+                        turns: None,
                     }),
+                    end: None,
                 },
             )
             .expect("finished");

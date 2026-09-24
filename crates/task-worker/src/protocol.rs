@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use task_core::{
-    ArtifactRef, DelegateTask, GenreSpec, ProgressFields, ProgressKind, Status, Task, TaskId, Usage,
+    ArtifactRef, BudgetKind, DelegateTask, GenreSpec, ProgressFields, ProgressKind, Status, Task,
+    TaskId, Usage,
 };
 
 /// `run.protocol`。v2（ADR-0016 M9）: `delegate` メッセージ、`context.role`、`context.children`、`task.role` / `task.aggregate` を追加。
@@ -731,6 +732,22 @@ pub enum WorkerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_failure: Option<ProviderFailure>,
     },
+    /// ADR-0072 D9/D10（Phase E1）: graceful yield（`result.json` の `{"yield": {...}}`）。`checkpoint`
+    /// は checkpoint の意味の欄を寛容に持つ生の JSON（`task_core::WorkerCheckpointInput` と同じ形）。
+    /// この行を出さないワーカーはそのまま動く（追加のみ。`PROTOCOL_VERSION` は変えない）。
+    Yielded {
+        checkpoint: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
+    },
+    /// ADR-0072 D7（Phase E1）: turn / wall-clock / context の上限に当たった（予算切れでも usage を運ぶ）。
+    /// 追加のみ（`PROTOCOL_VERSION` は変えない）。
+    BudgetExhausted {
+        kind: BudgetKind,
+        message: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        usage: Option<Usage>,
+    },
 }
 
 impl WorkerMessage {
@@ -741,6 +758,8 @@ impl WorkerMessage {
             WorkerMessage::Question { .. }
                 | WorkerMessage::Done { .. }
                 | WorkerMessage::Error { .. }
+                | WorkerMessage::Yielded { .. }
+                | WorkerMessage::BudgetExhausted { .. }
         )
     }
 

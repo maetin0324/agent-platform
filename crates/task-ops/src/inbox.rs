@@ -720,6 +720,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .expect("finished");
@@ -844,6 +845,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .expect("finished");
@@ -927,6 +929,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .expect("finished");
@@ -975,6 +978,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .expect("finished");
@@ -1035,6 +1039,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .expect("finished");
@@ -1080,6 +1085,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .expect("finished");

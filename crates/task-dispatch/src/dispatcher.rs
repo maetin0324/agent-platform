@@ -35,8 +35,9 @@ use task_ops::delegate::{pending_children, plan_delegation};
 use task_ops::derive::{
     AnswerNote, INFRA_FAILURE_MARKER, REVIEWER_INFRA_FAILURE_PREFIX, REVIEWER_REQUEUED_PREFIX,
     ReviewNote, answers_from_events, approval_decision_note, artifacts_for_run,
-    consecutive_infra_requeues, consecutive_requeues, consecutive_reviewer_infra_failures,
-    consecutive_reviewer_requeues, human_approval_title, infra_backoff_delay, last_run_id,
+    consecutive_continuations, consecutive_infra_requeues, consecutive_requeues,
+    consecutive_reviewer_infra_failures, consecutive_reviewer_requeues, current_run_seq,
+    human_approval_title, infra_backoff_delay, last_run_id, latest_checkpoint, no_progress_streak,
     prior_review_from_events, retry_backoff,
 };
 use task_worker::{
@@ -552,6 +553,33 @@ pub struct DispatchConfig {
     /// ADR-0066 D2（Phase 110b）: `[workspace] prune_after_secs`（既定 86400、`0` で無効）。終端に
     /// なってからこの秒数経った作業場所から、ビルド生成物だけを刈る。
     pub workspace_prune_after_secs: u64,
+    /// ADR-0072 D18（Phase E1）: `[execution]`。continuation の可否と上限。
+    pub execution: ExecutionConfig,
+}
+
+/// ADR-0072 D18（Phase E1）: `[execution]`。continuation（予算切れ・yield の続き）の可否と上限。
+/// E2 以降の欄（`max_work_units` 等）は ExecutionPlan/WorkUnit と一緒に導入する（今回は範囲外）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionConfig {
+    /// `[execution] continuation`（既定 `true`）。`false` なら E1 の continuation を無効にし、
+    /// 予算切れ・yield を従来どおり `WorkerError{retryable:true}` として扱う（ADR-0072 §6 (f)）。
+    pub continuation: bool,
+    /// `[execution] max_continuations_per_work_unit`（既定 3）。暗黙の WorkUnit では 1 タスクの
+    /// continuation の合計回数（1 つの WU の Run は最大 `continuation + 1` 回）。
+    pub max_continuations_per_work_unit: u32,
+    /// `[execution] no_progress_limit`（既定 2）。進捗なしの continuation が連続この回数で
+    /// `blocked` にする。
+    pub no_progress_limit: u32,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            continuation: true,
+            max_continuations_per_work_unit: 3,
+            no_progress_limit: 2,
+        }
+    }
 }
 
 /// `[knowledge]`（ADR-0047 D1 / D2。Phase 61）。
@@ -684,6 +712,42 @@ fn cross_department_questions_of(events: &[(u64, Event)], run_id: &str) -> Vec<S
         }
     }
     out
+}
+
+/// ADR-0072 D7（Phase E1）: 「二重の安全網」。構造化した `Terminal::BudgetExhausted` を返さない
+/// 古い経路・アダプタのために、`Terminal::Error{retryable:true}` のメッセージを字句判定する
+/// （`task_core::is_budget_outcome` と同じ語彙。分類できなければ `None`）。
+fn classify_budget_kind_from_text(message: &str) -> Option<task_core::BudgetKind> {
+    let m = message.to_lowercase();
+    if task_core::looks_like_context_exceeded(&m) {
+        Some(task_core::BudgetKind::Context)
+    } else if m.contains("max_turns") || m.contains("max turns") || m.contains("turn limit") {
+        Some(task_core::BudgetKind::Turns)
+    } else if m.contains("wall-clock") || m.contains("wall clock") || m.contains("budget") {
+        Some(task_core::BudgetKind::WallClock)
+    } else {
+        None
+    }
+}
+
+/// ADR-0072 D9（Phase E1）: `WorkerFinished.outcome` に載せる、人が読む 1 行の終わり方の説明。
+fn describe_run_end(end: task_core::RunEnd) -> String {
+    match end {
+        task_core::RunEnd::Completed => "completed".to_string(),
+        task_core::RunEnd::Yielded => "yielded".to_string(),
+        task_core::RunEnd::BudgetExhausted { kind } => {
+            let k = match kind {
+                task_core::BudgetKind::Turns => "turns",
+                task_core::BudgetKind::WallClock => "wall_clock",
+                task_core::BudgetKind::Context => "context",
+            };
+            format!("budget_exhausted({k})")
+        }
+        task_core::RunEnd::Question => "question".to_string(),
+        task_core::RunEnd::Failed { retryable } => format!("failed(retryable={retryable})"),
+        task_core::RunEnd::HarnessError { class } => format!("harness_error({class:?})"),
+        task_core::RunEnd::Cancelled => "cancelled".to_string(),
+    }
 }
 
 /// Phase 33: `recent_work_of` が `list_page` から読む候補の上限（裏方タスクを除いた後に
@@ -2916,6 +2980,10 @@ impl Dispatcher {
         // ADR-0070 D3（Phase 116）: `Trigger::InfraRequeue` を選んだときだけ `Some(n)`（n 回目の
         // インフラ再試行）。`Ok(outcome) =>` の中で `self.infra_backoff` のバックオフ期限を立てるのに使う。
         let mut infra_requeue_n: Option<u32> = None;
+        // ADR-0072 D7（Phase E1）: この run の構造化した終わり方（`WorkerFinished.end` に写す）。
+        let mut run_end: Option<task_core::RunEnd> = None;
+        // ADR-0072 D9: `Terminal::Yielded` の生の checkpoint JSON（`result.json` の `yield`）。
+        let mut yield_checkpoint_json: Option<serde_json::Value> = None;
         let (mut trigger, mut outcome_str, usage, provider_outcome) = match result {
             Ok(RunOutcome {
                 terminal:
@@ -2930,6 +2998,7 @@ impl Dispatcher {
                     summary: summary.clone(),
                     evidence,
                 };
+                run_end = Some(task_core::RunEnd::Completed);
                 (
                     Trigger::WorkerDone,
                     format!("done: {summary}"),
@@ -2948,6 +3017,7 @@ impl Dispatcher {
                     summary: text.clone(),
                     evidence: Vec::new(),
                 };
+                run_end = Some(task_core::RunEnd::Completed);
                 (
                     Trigger::WorkerDone,
                     format!("done: {text}"),
@@ -2958,21 +3028,70 @@ impl Dispatcher {
             Ok(RunOutcome {
                 terminal: Terminal::Question { text },
                 ..
-            }) => (
-                Trigger::WorkerQuestion,
-                format!("question: {text}"),
-                None,
-                ProviderOutcome::Ok,
-            ),
+            }) => {
+                run_end = Some(task_core::RunEnd::Question);
+                (
+                    Trigger::WorkerQuestion,
+                    format!("question: {text}"),
+                    None,
+                    ProviderOutcome::Ok,
+                )
+            }
             Ok(RunOutcome {
                 terminal: Terminal::Error { message, retryable },
                 ..
-            }) => (
-                Trigger::WorkerError { retryable },
-                format!("error(retryable={retryable}): {message}"),
-                None,
-                ProviderOutcome::Ok,
-            ),
+            }) => {
+                // ADR-0072 D7: 二重の安全網。構造化されていない `Error` でも、予算切れの語彙なら
+                // `BudgetExhausted` として分類する（usage はこの経路では運べない）。
+                run_end = if retryable {
+                    classify_budget_kind_from_text(&message)
+                        .map(|kind| task_core::RunEnd::BudgetExhausted { kind })
+                } else {
+                    None
+                };
+                if run_end.is_none() {
+                    run_end = Some(task_core::RunEnd::Failed { retryable });
+                }
+                (
+                    Trigger::WorkerError { retryable },
+                    format!("error(retryable={retryable}): {message}"),
+                    None,
+                    ProviderOutcome::Ok,
+                )
+            }
+            // ADR-0072 D9/D10（Phase E1）: graceful yield（result.json の `{"yield": {...}}`）。
+            // `trigger`/`outcome_str` はここでは仮の値で、continuation の判定（下）で確定させる。
+            Ok(RunOutcome {
+                terminal: Terminal::Yielded { checkpoint, usage },
+                ..
+            }) => {
+                run_end = Some(task_core::RunEnd::Yielded);
+                yield_checkpoint_json = Some(checkpoint);
+                (
+                    Trigger::WorkerError { retryable: true },
+                    "error(retryable=true): yielded".to_string(),
+                    usage,
+                    ProviderOutcome::Ok,
+                )
+            }
+            // ADR-0072 D7（Phase E1）: turn / wall-clock / context の上限に当たった。usage を運ぶ。
+            Ok(RunOutcome {
+                terminal:
+                    Terminal::BudgetExhausted {
+                        kind,
+                        message,
+                        usage,
+                    },
+                ..
+            }) => {
+                run_end = Some(task_core::RunEnd::BudgetExhausted { kind });
+                (
+                    Trigger::WorkerError { retryable: true },
+                    format!("error(retryable=true): budget exhausted ({kind:?}): {message}"),
+                    usage,
+                    ProviderOutcome::Ok,
+                )
+            }
             Err(e) => match provider_failure_outcome(&e) {
                 // ADR-0010 D5（P-21）: 供給側失敗は attempts を消費せず requeue し、プロバイダを cooldown にする。
                 Some(po)
@@ -3017,6 +3136,116 @@ impl Dispatcher {
                 }
             },
         };
+        // ADR-0072 D7/D8/D9/D11/D18（Phase E1）: 予算切れ・yield の続き（continuation）。
+        // checkpoint は常に合成して残す（(b)）。continuation そのものの可否・上限到達の扱いは
+        // `[execution]` で決める。無効化・上限到達のときは trigger/outcome_str を従来の形に戻す。
+        let mut checkpoint_event: Option<Event> = None;
+        if let Some(end) = run_end
+            && end.is_continuable()
+        {
+            let events_so_far = self.store.events_for(task_id)?;
+            let run_seq = current_run_seq(&events_so_far);
+            let workspace_dir = self.task_dir(&task);
+            let artifacts_dir = workspace_dir.as_ref().map(|d| self.artifacts_dir(&task, d));
+            let workspaces = self.task_workspaces_for(&task);
+            let cwd = workspaces.as_ref().and_then(|w| w.cwd());
+            let branch = workspaces
+                .as_ref()
+                .and_then(|w| w.repos.first())
+                .and_then(|r| r.branch())
+                .unwrap_or_default();
+            // ADR-0072 D8: `tests_run`（最大 10 件）と `recent_activity`（最大 20 行）は、この run の
+            // `WorkerProgress{kind: tool_use}` と、それに続く `tool_result` の組から作る。
+            let activity: Vec<crate::checkpoint::ToolActivity> = events_so_far
+                .iter()
+                .filter_map(|(_, ev)| match ev {
+                    Event::WorkerProgress {
+                        run_id: r,
+                        kind: Some(task_core::ProgressKind::ToolUse),
+                        tool,
+                        summary,
+                        ..
+                    } if r == &run_id => Some(crate::checkpoint::ToolActivity::Use {
+                        tool: tool.clone(),
+                        summary: summary.clone(),
+                    }),
+                    Event::WorkerProgress {
+                        run_id: r,
+                        kind: Some(task_core::ProgressKind::ToolResult),
+                        error,
+                        ..
+                    } if r == &run_id => {
+                        Some(crate::checkpoint::ToolActivity::Result { error: *error })
+                    }
+                    _ => None,
+                })
+                .collect();
+            let mechanical = crate::checkpoint::gather(cwd, branch, &activity);
+            // D9: 優先順位は `result.json.yield` > `checkpoint.json` > mechanical。
+            let worker_checkpoint = yield_checkpoint_json
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                .or_else(|| {
+                    artifacts_dir
+                        .as_deref()
+                        .and_then(crate::checkpoint::read_worker_checkpoint)
+                });
+            let checkpoint_end = end
+                .as_checkpoint_end()
+                .unwrap_or(task_core::CheckpointEnd::BudgetExhausted);
+            let ctx = task_core::CheckpointContext {
+                task_id: task_id.to_string(),
+                work_unit: None,
+                run_id: run_id.clone(),
+                run_seq,
+                end: checkpoint_end,
+                created_at: rfc3339(OffsetDateTime::now_utc()),
+            };
+            let checkpoint = task_core::merge_checkpoint(worker_checkpoint, mechanical, ctx);
+
+            if self.config.execution.continuation {
+                let continuations_so_far = consecutive_continuations(&events_so_far);
+                let prev_checkpoint = latest_checkpoint(&events_so_far);
+                let progressed =
+                    task_core::checkpoint_shows_progress(prev_checkpoint.as_ref(), &checkpoint);
+                let no_progress = if progressed {
+                    0
+                } else {
+                    no_progress_streak(&events_so_far) + 1
+                };
+                checkpoint_event = Some(Event::CheckpointSaved {
+                    run_id: run_id.clone(),
+                    work_unit_id: None,
+                    checkpoint: Box::new(checkpoint),
+                });
+                if continuations_so_far >= self.config.execution.max_continuations_per_work_unit
+                    || no_progress >= self.config.execution.no_progress_limit
+                {
+                    // ADR-0072 D18: 上限到達・進捗なしは失敗にせず、人に聞く（blocked）。
+                    trigger = Trigger::WorkerQuestion;
+                    outcome_str = format!(
+                        "question: 実行が進みません（continuation {continuations_so_far} 回 / 進捗なし {no_progress} 回）。予算を増やして続ける／分割し直す（replan）／中止のいずれかを選んでください。"
+                    );
+                } else {
+                    trigger = Trigger::Continue {
+                        why: task_core::ContinueWhy::Continue,
+                    };
+                    outcome_str = format!(
+                        "continue: {} の続き（Run #{}）",
+                        describe_run_end(end),
+                        run_seq + 1
+                    );
+                }
+            } else {
+                // ADR-0072 §6 (f): `[execution] continuation = false` なら従来どおり
+                // `WorkerError{retryable:true}` に戻す（checkpoint も保存しない）。
+                trigger = Trigger::WorkerError { retryable: true };
+                outcome_str = format!(
+                    "error(retryable=true): {} (continuation disabled)",
+                    describe_run_end(end)
+                );
+            }
+        }
         // ADR-0054 D1（Phase 67）: CoS の対話 run（継続セッション）は、この run の usage を
         // `node_sessions.approx_tokens` に積む（rollover 判定の材料。turns も 1 進む）。継続セッションの
         // 対象でない run（`node_sessions` の行が無い）では `node_session_touch` が no-op で返るだけ。
@@ -3071,6 +3300,8 @@ impl Dispatcher {
         let metrics = run_since.map(|since| task_core::RunMetrics {
             wall_ms: wall_ms_since(since),
             retries: task.attempts,
+            peak_context_tokens: None,
+            turns: None,
         });
         let finished = Event::WorkerFinished {
             run_id: run_id.clone(),
@@ -3078,8 +3309,13 @@ impl Dispatcher {
             usage,
             role: None,
             metrics,
+            end: run_end,
         };
         let mut events = vec![finished];
+        // ADR-0072 D5/D8（Phase E1）: `CheckpointSaved` は `WorkerFinished` と同じトランザクションで残す。
+        if let Some(checkpoint_event) = checkpoint_event {
+            events.push(checkpoint_event);
+        }
         if let Some(reason) = failure_reason {
             match (&account, account_adapter) {
                 // ADR-0024 D4: アカウントの cooldown として記録する（`ProviderThrottled` イベントは出さない）。
@@ -3359,6 +3595,8 @@ impl Dispatcher {
         let review_metrics = entry.as_ref().map(|e| task_core::RunMetrics {
             wall_ms: wall_ms_since(e.since),
             retries: 0,
+            peak_context_tokens: None,
+            turns: None,
         });
         let mut reviewer_finished = outcome.reviewer_run.take().map(|r| Event::WorkerFinished {
             run_id: r.run_id,
@@ -3366,6 +3604,7 @@ impl Dispatcher {
             usage: r.usage,
             role: Some(RunRole::Reviewer),
             metrics: review_metrics,
+            end: None,
         });
         let Some(task) = self.store.get(task_id)? else {
             return Ok(());
@@ -4046,6 +4285,8 @@ impl Dispatcher {
             let metrics = run_since.map(|since| task_core::RunMetrics {
                 wall_ms: wall_ms_since(since),
                 retries: task.attempts,
+                peak_context_tokens: None,
+                turns: None,
             });
             let infra_n = consecutive_infra_requeues(&self.store.events_for(task.id)?) + 1;
             let (trigger, outcome_text) = if infra_n <= self.config.max_infra_retries {
@@ -4071,6 +4312,9 @@ impl Dispatcher {
                 usage: None,
                 role: None,
                 metrics,
+                end: Some(task_core::RunEnd::HarnessError {
+                    class: task_core::HarnessErrorClass::LeaseExpired,
+                }),
             };
             match self
                 .store
@@ -8085,6 +8329,7 @@ mod tests {
                 shared_build_cache: false,
                 build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
                 workspace_prune_after_secs: 0,
+                execution: ExecutionConfig::default(),
             },
         )
     }
@@ -9162,6 +9407,7 @@ mod tests {
                 shared_build_cache: false,
                 build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
                 workspace_prune_after_secs: 0,
+                execution: ExecutionConfig::default(),
             },
         );
 
@@ -9319,6 +9565,7 @@ mod tests {
                 shared_build_cache: false,
                 build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
                 workspace_prune_after_secs: 0,
+                execution: ExecutionConfig::default(),
             },
         );
 
@@ -9493,6 +9740,7 @@ mod tests {
                 shared_build_cache: false,
                 build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
                 workspace_prune_after_secs: 0,
+                execution: ExecutionConfig::default(),
             },
         );
 
@@ -13827,6 +14075,7 @@ mod tests {
                 shared_build_cache: false,
                 build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
                 workspace_prune_after_secs: 0,
+                execution: ExecutionConfig::default(),
             },
         )
     }
@@ -16058,6 +16307,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .unwrap();
@@ -16506,6 +16756,7 @@ mod tests {
                 usage: None,
                 role: None,
                 metrics: None,
+                end: None,
             },
         )];
         let done_task = Task {
@@ -16525,6 +16776,7 @@ mod tests {
                 usage: None,
                 role: None,
                 metrics: None,
+                end: None,
             },
         )];
         let failed_task = Task {
@@ -16546,6 +16798,7 @@ mod tests {
                 usage: None,
                 role: None,
                 metrics: None,
+                end: None,
             },
         )];
         assert_eq!(
@@ -16566,6 +16819,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             ),
             (
@@ -16647,6 +16901,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .unwrap();
@@ -19264,6 +19519,7 @@ mod knowledge_fallback_tests {
                 shared_build_cache: false,
                 build_cache_dir: PathBuf::from("/nonexistent-build-cache"),
                 workspace_prune_after_secs: 0,
+                execution: ExecutionConfig::default(),
             },
         )
     }

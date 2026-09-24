@@ -45,7 +45,10 @@ mod tests {
                     metrics: Some(task_core::RunMetrics {
                         wall_ms: 5,
                         retries: 0,
+                        peak_context_tokens: None,
+                        turns: None,
                     }),
+                    end: None,
                 },
             )
             .unwrap();

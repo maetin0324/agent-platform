@@ -152,6 +152,76 @@ pub fn infra_backoff_delay(n: u32) -> Duration {
     }
 }
 
+/// ADR-0072 D18（Phase E1）: 現在の試行での連続 continuation 回数（`Trigger::Continue` の
+/// `reason == "continue"`）。`consecutive_requeues` / `consecutive_infra_requeues` と対称
+/// （新しい順に数え、`dispatch` は読み飛ばし、それ以外の reason — `answer` を含む — で止まる。D18:
+/// 「人が回答すると、その窓のカウンタは回答の時点から数え直す」）。
+pub fn consecutive_continuations(events: &[(u64, Event)]) -> u32 {
+    let mut n = 0;
+    for (_, ev) in events.iter().rev() {
+        if let Event::Transitioned { reason, .. } = ev {
+            match reason.as_str() {
+                "continue" => n += 1,
+                "dispatch" => {}
+                _ => break,
+            }
+        }
+    }
+    n
+}
+
+/// ADR-0072 D5/D8（Phase E1）: 直近の `Event::CheckpointSaved` の checkpoint（無ければ `None`）。
+/// 暗黙の WorkUnit（`work_unit_id: None`）を対象にする。
+pub fn latest_checkpoint(events: &[(u64, Event)]) -> Option<task_core::Checkpoint> {
+    events.iter().rev().find_map(|(_, ev)| match ev {
+        Event::CheckpointSaved {
+            work_unit_id: None,
+            checkpoint,
+            ..
+        } => Some((**checkpoint).clone()),
+        _ => None,
+    })
+}
+
+/// ADR-0072 D18（Phase E1）: 「最後の `answer` 以降」の窓の中で、連続して進捗のなかった
+/// checkpoint の数（`task_core::checkpoint_shows_progress` で判定）。「回答の時点から数え直す」
+/// （D18）ので、窓に入って最初の checkpoint は**窓の外の checkpoint とは比べない**（`prev = None`
+/// と同じ扱い＝常に「進捗あり」からやり直す）。`no_progress_limit` と組み合わせて使う。
+pub fn no_progress_streak(events: &[(u64, Event)]) -> u32 {
+    let mut window_start_seq: u64 = 0;
+    for (seq, ev) in events {
+        if let Event::Transitioned { reason, .. } = ev
+            && reason == "answer"
+        {
+            window_start_seq = *seq;
+        }
+    }
+    let mut streak: u32 = 0;
+    let mut prev: Option<task_core::Checkpoint> = None;
+    let mut baseline_reset = false;
+    for (seq, ev) in events {
+        if let Event::CheckpointSaved {
+            work_unit_id: None,
+            checkpoint,
+            ..
+        } = ev
+        {
+            let in_window = *seq >= window_start_seq;
+            if in_window && !baseline_reset {
+                // 窓に入って最初の checkpoint: 窓の外の checkpoint とは比べない（D18「数え直す」）。
+                prev = None;
+                baseline_reset = true;
+            }
+            let progressed = task_core::checkpoint_shows_progress(prev.as_ref(), checkpoint);
+            if in_window {
+                streak = if progressed { 0 } else { streak + 1 };
+            }
+            prev = Some((**checkpoint).clone());
+        }
+    }
+    streak
+}
+
 /// ADR-0070 D1（Phase 116）: `failed` の分類。`infra` はレース・切替・供給側都合、`work` はレビュー
 /// 不合格やワーカー自身の明示的な失敗（人が中身を見て判断すべきもの）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
@@ -293,6 +363,17 @@ pub fn last_run_id(events: &[(u64, Event)]) -> Option<String> {
     })
 }
 
+/// ADR-0072 D5（Phase E1）: 暗黙の WorkUnit での「このタスクの中の連番」（`WorkerStarted.run_seq`
+/// を DB の列としては持たず、events から数える。D5 は「WorkUnit の中の Run #n」と書いているが、
+/// 暗黙の WU では「タスク内の連番」と同義）。Reviewer run は数えない（ADR-0014 D1）。`events` に
+/// 最後に始まったワーカー run の `WorkerStarted` が含まれていれば、その run の番号（1 始まり）を返す。
+pub fn current_run_seq(events: &[(u64, Event)]) -> u32 {
+    events
+        .iter()
+        .filter(|(_, ev)| matches!(ev, Event::WorkerStarted { role, .. } if !is_reviewer(*role)))
+        .count() as u32
+}
+
 /// `Human` criterion 用の `Approval` 子タスクの `title`（既存子の照合キーにも使う。ADR-0008 D2）。
 /// ADR-0010 D8（P-35）: 試行（`attempts + 1`）を含めるので、再レビューでは新しい子が作られる。
 pub fn human_approval_title(task: &Task, idx: usize) -> String {
@@ -376,6 +457,7 @@ mod tests {
             usage: None,
             role,
             metrics: None,
+            end: None,
         };
         let events: Vec<(u64, Event)> = vec![
             started("run-1", None),
@@ -526,6 +608,7 @@ mod tests {
             usage: None,
             role: None,
             metrics: None,
+            end: None,
         }
     }
 
@@ -826,6 +909,7 @@ mod tests {
                 usage: None,
                 role: None,
                 metrics: None,
+                end: None,
             },
         )];
         assert_eq!(latest_question(&events), "which version?");
@@ -834,5 +918,131 @@ mod tests {
     #[test]
     fn latest_question_empty_without_worker_finished() {
         assert_eq!(latest_question(&[]), "");
+    }
+
+    /// ADR-0072 D18（Phase E1）: `consecutive_continuations` は `consecutive_requeues` と対称
+    /// （新しい順に `continue` を数え、`dispatch` は読み飛ばし、それ以外の reason — `answer` を
+    /// 含む — で止まる）。
+    #[test]
+    fn consecutive_continuations_counts_trailing_continues_and_resets_on_answer() {
+        let events: Vec<(u64, Event)> = vec![
+            (0, transitioned("worker_done")),
+            (1, transitioned("continue")),
+            (2, transitioned("dispatch")),
+            (3, transitioned("continue")),
+        ];
+        assert_eq!(consecutive_continuations(&events), 2);
+
+        let with_answer: Vec<(u64, Event)> = vec![
+            (0, transitioned("continue")),
+            (1, transitioned("continue")),
+            (2, transitioned("answer")),
+            (3, transitioned("dispatch")),
+            (4, transitioned("continue")),
+        ];
+        assert_eq!(
+            consecutive_continuations(&with_answer),
+            1,
+            "answer 以降だけを数える"
+        );
+    }
+
+    fn checkpoint_saved(run_id: &str, completed: usize, remaining: usize, head: &str) -> Event {
+        Event::CheckpointSaved {
+            run_id: run_id.into(),
+            work_unit_id: None,
+            checkpoint: Box::new(task_core::Checkpoint {
+                schema: task_core::CHECKPOINT_SCHEMA.into(),
+                task_id: "t".into(),
+                work_unit: None,
+                run_id: run_id.into(),
+                run_seq: 1,
+                end: task_core::CheckpointEnd::BudgetExhausted,
+                source: task_core::CheckpointSource::Mechanical,
+                completed: (0..completed).map(|i| format!("c{i}")).collect(),
+                remaining: (0..remaining).map(|i| format!("r{i}")).collect(),
+                decisions: vec![],
+                files_changed: vec![],
+                tests_run: vec![],
+                known_failures: vec![],
+                artifact_refs: vec![],
+                next_action: "next".into(),
+                open_questions: vec![],
+                plan_issue: None,
+                repo_state: Some(task_core::RepoState {
+                    branch: "b".into(),
+                    base: "base".into(),
+                    head: head.into(),
+                    uncommitted: true,
+                    diff_stat: "1 file".into(),
+                }),
+                recent_activity: vec![],
+                created_at: "2026-09-24T00:00:00Z".into(),
+            }),
+        }
+    }
+
+    /// ADR-0072 D5/D8（Phase E1）: `latest_checkpoint` は最新の（暗黙 WU の）checkpoint を返す。
+    #[test]
+    fn latest_checkpoint_returns_the_most_recent_one() {
+        let events: Vec<(u64, Event)> = vec![
+            (0, checkpoint_saved("r1", 1, 3, "h1")),
+            (1, checkpoint_saved("r2", 2, 2, "h2")),
+        ];
+        let cp = latest_checkpoint(&events).expect("some checkpoint");
+        assert_eq!(cp.run_id, "r2");
+        assert!(latest_checkpoint(&[]).is_none());
+    }
+
+    /// ADR-0072 D18（Phase E1）: 進捗の無い checkpoint が連続すると streak が伸び、進捗があれば
+    /// 0 に戻る。`answer` 以降だけを数える（窓は 0 に戻る）。
+    #[test]
+    fn no_progress_streak_counts_consecutive_checkpoints_without_progress() {
+        let events: Vec<(u64, Event)> = vec![
+            (0, checkpoint_saved("r1", 1, 3, "h1")),
+            // 進捗なし（completed/remaining/head 同じ）。
+            (1, checkpoint_saved("r2", 1, 3, "h1")),
+            (2, checkpoint_saved("r3", 1, 3, "h1")),
+        ];
+        assert_eq!(no_progress_streak(&events), 2, "r2, r3 が無進捗");
+
+        let mut progressed = events.clone();
+        progressed.push((3, checkpoint_saved("r4", 2, 3, "h1")));
+        assert_eq!(
+            no_progress_streak(&progressed),
+            0,
+            "completed が増えれば進捗あり"
+        );
+
+        let mut answered = events.clone();
+        answered.push((3, transitioned("answer")));
+        answered.push((4, checkpoint_saved("r4", 1, 3, "h1")));
+        assert_eq!(
+            no_progress_streak(&answered),
+            0,
+            "answer 直後の最初の checkpoint は窓の外の r3 と比べて進捗なしだが、streak は答え以降だけを数える"
+        );
+    }
+
+    /// ADR-0072 D5（Phase E1）: `current_run_seq` は Reviewer run を数えず、暗黙の WU での
+    /// ワーカー run の連番を返す。
+    #[test]
+    fn current_run_seq_counts_worker_runs_only() {
+        let started = |run_id: &str, role: Option<RunRole>| Event::WorkerStarted {
+            run_id: run_id.into(),
+            adapter: "fake".into(),
+            model: "m".into(),
+            provider: None,
+            account: None,
+            role,
+            task_role: None,
+        };
+        let events: Vec<(u64, Event)> = vec![
+            (0, started("r1", None)),
+            (1, started("rev-1", Some(RunRole::Reviewer))),
+            (2, started("r2", None)),
+        ];
+        assert_eq!(current_run_seq(&events), 2);
+        assert_eq!(current_run_seq(&[]), 0);
     }
 }

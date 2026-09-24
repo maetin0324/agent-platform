@@ -735,6 +735,33 @@ async fn run_reviewer_inner(
             record.outcome = format!("error(retryable=false): {message}");
             return fail_all(format!("{tag}: reviewer run failed: {message}"));
         }
+        // ADR-0072 D7（Phase E1）: reviewer run は continuation の対象外（graceful yield の前置きも
+        // 付けない。D10）。同じ claude-code の実行経路を通るので理論上は起こりうるが、起きたときは
+        // 「判定できなかっただけ」として reviewer のやり直し（`max_reviewer_retries`）に任せる
+        // （`retryable = true` の `Terminal::Error` と同じ扱い）。
+        Terminal::BudgetExhausted {
+            kind,
+            message,
+            usage,
+        } => {
+            run.sink
+                .progress(&format!("budget exhausted ({kind:?}): {message}"));
+            record.outcome = format!("requeue: reviewer run failed: budget exhausted: {message}");
+            record.usage = usage;
+            return Err(ReviewerProviderFailure {
+                outcome: None,
+                message: format!("{tag}: reviewer run failed: budget exhausted: {message}"),
+            });
+        }
+        Terminal::Yielded { usage, .. } => {
+            run.sink.progress("yielded instead of judging");
+            record.outcome = "requeue: reviewer run yielded instead of judging".to_string();
+            record.usage = usage;
+            return Err(ReviewerProviderFailure {
+                outcome: None,
+                message: format!("{tag}: reviewer run yielded instead of judging"),
+            });
+        }
     }
     let text = match std::fs::read_to_string(&review_path) {
         Ok(t) => t,

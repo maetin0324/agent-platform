@@ -10,6 +10,8 @@ pub mod artifacts;
 pub mod comment;
 pub mod console_action;
 pub mod delegate;
+/// ADR-0072（Phase E1）: Run lifecycle / checkpoint / continuation の純粋な型と関数。
+pub mod execution;
 /// ADR-0046 D3（Phase 59）: ハーネス = 実行契約（`[[harnesses]]`。旧 `[[genres]]` + `[[roles]]`）。
 pub mod harness;
 /// ADR-0040 D4（Phase 47）: celeris のインスタンスの役割（`daemon_instances`）。
@@ -137,6 +139,15 @@ pub use store::{
     is_busy_error,
 };
 pub use transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
+// ---- ADR-0072（Phase E1）: Run lifecycle / checkpoint / continuation ----
+pub use execution::{
+    BudgetKind, CHECKPOINT_MAX_BYTES, CHECKPOINT_MAX_ITEMS, CHECKPOINT_MAX_STRING_CHARS,
+    CHECKPOINT_SCHEMA, Checkpoint, CheckpointArtifactRef, CheckpointContext, CheckpointDecision,
+    CheckpointEnd, CheckpointFileChange, CheckpointKnownFailure, CheckpointSource,
+    CheckpointTestRun, ContinueWhy, HarnessErrorClass, MechanicalCheckpoint, RepoState, RunEnd,
+    WorkerCheckpointInput, checkpoint_shows_progress, looks_like_context_exceeded,
+    merge_checkpoint, parse_worker_checkpoint, truncate_checkpoint,
+};
 
 pub mod model_routing;
 // ---- ADR-0069（Phase 114）: routing の 4 層（lane policy・retry/escalation・監査）----
@@ -148,6 +159,6 @@ pub use model_policy::{
     ShadowClassifier, ShadowDecision, TaskFeatureHints, TaskFeatures,
 };
 pub use retry_policy::{
-    AttemptOutcome, AttemptRecord, BudgetState, EscalationPolicy, RetryDecision,
+    AttemptOutcome, AttemptRecord, BudgetState, EscalationPolicy, RetryDecision, is_budget_outcome,
 };
 pub use routing_audit::{ReviewResult, RoutingAudit, routing_audit};

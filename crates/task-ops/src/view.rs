@@ -225,6 +225,10 @@ pub struct RunSummary {
     pub finished_at: Option<String>,
     pub outcome: Option<RunOutcomeKind>,
     pub outcome_text: Option<String>,
+    /// ADR-0072 D19/D20（Phase E1）: この run の構造化した終わり方（`WorkerFinished.end`）。
+    /// 導入前の run・分類できなかった run は `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<task_core::RunEnd>,
     pub usage: Option<Usage>,
     pub progress: u32,
     pub artifacts: u32,
@@ -258,6 +262,9 @@ pub enum RunOutcomeKind {
     /// ADR-0044 D2/D8（Phase 53）: 人のコメントで止めた run（`interrupted: comment`）。
     /// **失敗ではない**ので `bad_news` にも `error_cooldown` にも数えない。
     Interrupted,
+    /// ADR-0072 D9/D11（Phase E1）: 予算切れ・yield の続き（`Trigger::Continue`）。**失敗ではない**
+    /// （checkpoint から新しい run が続く。`Interrupted` と同じく集計には数えない）。
+    Continued,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
@@ -460,12 +467,31 @@ pub(crate) fn build_task_summary(
 /// `outcome` 文字列を `RunOutcomeKind` に分類する（`docs/gui/api.md` §5.2）。`outcome_text` は
 /// 接頭辞を除いた残りの文字列（`lease_expired` は完全一致で残りが無いので `None`。`error` は元の
 /// 文字列全体を `outcome_text` に入れる。GUI が生の理由を表示できるようにするための判断）。
-fn classify_outcome(outcome: &str) -> (RunOutcomeKind, Option<String>) {
+///
+/// ADR-0072 D19（Phase E1）: `end`（`WorkerFinished.end`。構造化された分類）があれば、それを
+/// 優先する。`end` が無い run（導入前・分類できなかった経路）は従来どおり字句判定にフォールバックする。
+fn classify_outcome(
+    outcome: &str,
+    end: Option<&task_core::RunEnd>,
+) -> (RunOutcomeKind, Option<String>) {
+    if let Some(task_core::RunEnd::Yielded | task_core::RunEnd::BudgetExhausted { .. }) = end
+        && let Some(text) = outcome.strip_prefix("continue: ")
+    {
+        // continuation した（`[execution] continuation = false` や上限到達で従来の `error(...)`/
+        // `question: ...` に戻ったときは、その文字列どおりに分類する）。
+        return (RunOutcomeKind::Continued, Some(text.to_string()));
+    }
     if let Some(text) = outcome.strip_prefix("done: ") {
         (RunOutcomeKind::Done, Some(text.to_string()))
     } else if let Some(text) = outcome.strip_prefix("question: ") {
         (RunOutcomeKind::Question, Some(text.to_string()))
+    } else if let Some(text) = outcome.strip_prefix("continue: ") {
+        (RunOutcomeKind::Continued, Some(text.to_string()))
     } else if let Some(text) = outcome.strip_prefix("requeue: ") {
+        (RunOutcomeKind::Requeue, Some(text.to_string()))
+    } else if let Some(text) = outcome.strip_prefix("infra_requeue: ") {
+        // ADR-0070 D3 / P-E0-3: インフラ都合の再試行も `Requeue` に数える（attempts を消費しない
+        // 再試行という点で供給側の `requeue` と同じ性質）。
         (RunOutcomeKind::Requeue, Some(text.to_string()))
     } else if let Some(text) = outcome.strip_prefix("interrupted: ") {
         // ADR-0044 D2/D8: 人のコメントによる割り込み（失敗ではない）。
@@ -507,6 +533,7 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                     finished_at: None,
                     outcome: None,
                     outcome_text: None,
+                    end: None,
                     usage: None,
                     progress: 0,
                     artifacts: 0,
@@ -537,12 +564,14 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                 run_id,
                 outcome,
                 usage,
+                end,
                 ..
             } => {
                 if let Some(r) = by_run.get_mut(run_id) {
                     r.finished_at = Some(row.ts.clone());
                     r.usage = *usage;
-                    let (kind, text) = classify_outcome(outcome);
+                    r.end = *end;
+                    let (kind, text) = classify_outcome(outcome, end.as_ref());
                     r.outcome = Some(kind);
                     r.outcome_text = text;
                 }
@@ -1039,6 +1068,7 @@ mod tests {
             usage: None,
             role: None,
             metrics: None,
+            end: None,
         }
     }
 
@@ -1072,6 +1102,7 @@ mod tests {
                 }),
                 role: Some(RunRole::Reviewer),
                 metrics: None,
+                end: None,
             },
         ];
         let rows: Vec<EventRow> = events
@@ -1789,6 +1820,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .expect("append worker finished");
@@ -1874,6 +1906,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 },
             )
             .expect("finished");

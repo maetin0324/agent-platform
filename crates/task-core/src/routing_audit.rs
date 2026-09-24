@@ -133,6 +133,7 @@ pub fn routing_audit(task: &Task, events: &[Event]) -> Vec<RoutingAudit> {
                 usage,
                 role,
                 metrics,
+                ..
             } if *role != Some(RunRole::Reviewer) => {
                 let i = find(&mut out, run_id);
                 let a = &mut out[i];
@@ -225,7 +226,10 @@ mod tests {
                 metrics: Some(RunMetrics {
                     wall_ms: 1234,
                     retries: 1,
+                    peak_context_tokens: None,
+                    turns: None,
                 }),
+                end: None,
             },
             // reviewer run の WorkerFinished は数えない
             Event::WorkerFinished {
@@ -234,6 +238,7 @@ mod tests {
                 usage: None,
                 role: Some(RunRole::Reviewer),
                 metrics: None,
+                end: None,
             },
             Event::ReviewVerdict {
                 run_id: "rev".into(),

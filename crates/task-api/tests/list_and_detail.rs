@@ -320,6 +320,7 @@ async fn inbox_returns_the_task_ops_inbox_as_json() {
             usage: None,
             role: None,
             metrics: None,
+            end: None,
         }],
     );
 

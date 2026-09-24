@@ -105,6 +105,7 @@ pub fn post_human_comment_as(
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 }],
                 None => Vec::new(),
             };
@@ -648,6 +649,7 @@ mod tests {
                         usage: None,
                         role: None,
                         metrics: None,
+                        end: None,
                     }],
                 )
                 .expect("requeue");
@@ -691,6 +693,7 @@ mod tests {
                     usage: None,
                     role: None,
                     metrics: None,
+                    end: None,
                 }],
             )
             .expect("worker_done");
