@@ -1,18 +1,30 @@
+import { useState } from "react";
 import { Form, Link, useActionData, useNavigation } from "react-router";
 import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
-import { celerisErrorResponse } from "~/celeris/errors";
+import { CelerisError, celerisErrorResponse } from "~/celeris/errors";
 import { Button } from "~/components/ui/button";
 import { textareaClass } from "~/components/ui/form";
 import type { Route } from "./+types/projects.$id.docs-maintenance";
 
 type MaintenanceView = { audit: unknown; proposal: unknown; policy: unknown; saved_report?: unknown };
 
+export async function loadMaintenance(client: CelerisClient, projectId: string, signal?: AbortSignal) {
+  try {
+    const view = await client.get<MaintenanceView>(`/projects/${encodeURIComponent(projectId)}/docs/maintenance`, {
+      signal,
+    });
+    return { ...view, unavailable: null as string | null };
+  } catch (e) {
+    if (e instanceof CelerisError && e.code === "docs_unavailable") {
+      return { audit: null, proposal: null, policy: null, saved_report: null, unavailable: e.detail };
+    }
+    throw e;
+  }
+}
+
 export async function loader({ params, request }: Route.LoaderArgs) {
   try {
-    return await getCelerisClient().get<MaintenanceView>(
-      `/projects/${encodeURIComponent(params.id)}/docs/maintenance`,
-      { signal: request.signal },
-    );
+    return await loadMaintenance(getCelerisClient(), params.id, request.signal);
   } catch (e) {
     throw celerisErrorResponse(e);
   }
@@ -44,20 +56,48 @@ export async function submitMaintenance(
 
 export default function DocumentationMaintenance({ loaderData, params }: Route.ComponentProps) {
   const outcome = useActionData<typeof action>();
+  const [showSavedReport, setShowSavedReport] = useState(false);
   const busy = useNavigation().state !== "idle";
   const taskId =
     outcome?.result && typeof outcome.result === "object" && "task_id" in outcome.result
       ? String(outcome.result.task_id)
       : null;
+  if (loaderData.unavailable) {
+    return (
+      <div className="space-y-6">
+        <Link
+          className="inline-flex min-h-11 items-center text-sm font-medium text-fg-muted hover:text-fg"
+          to={`/projects/${params.id}`}
+        >
+          ← 案件詳細
+        </Link>
+        <h1 className="text-xl font-semibold">文書の監査と整理</h1>
+        <p>この案件では文書監査を利用できません。ローカルの Git リポジトリが必要です。</p>
+        <p className="text-fg-muted">{loaderData.unavailable}</p>
+      </div>
+    );
+  }
   return (
-    <main className="space-y-6">
-      <Link to={`/projects/${params.id}/docs`}>← 文書</Link>
+    <div className="space-y-6">
+      <Link
+        className="inline-flex min-h-11 items-center text-sm font-medium text-fg-muted hover:text-fg"
+        to={`/projects/${params.id}/docs`}
+      >
+        ← 文書
+      </Link>
       <h1 className="text-xl font-semibold">文書の監査と整理</h1>
       <p>
         監査はコミット済み文書を読み取ります。分類は根拠付きの候補です。整理案の承認はその内容だけに有効で、変更は隔離した作業ツリーに作成されます。
       </p>
       {outcome?.error && <p role="alert">{outcome.error}</p>}
-      {taskId && <Link to={`/tasks/${taskId}?tab=changes`}>整理結果の差分を確認し、検証タスクを開始する</Link>}
+      {taskId && (
+        <Link
+          className="inline-flex min-h-11 items-center text-sm font-medium text-fg-muted hover:text-fg"
+          to={`/tasks/${taskId}?tab=changes`}
+        >
+          整理結果の差分を確認し、検証タスクを開始する
+        </Link>
+      )}
       {outcome?.result != null && (
         <pre className="overflow-auto whitespace-pre-wrap">{JSON.stringify(outcome.result, null, 2)}</pre>
       )}
@@ -71,11 +111,13 @@ export default function DocumentationMaintenance({ loaderData, params }: Route.C
         <pre className="max-h-96 overflow-auto whitespace-pre-wrap">{JSON.stringify(loaderData.audit, null, 2)}</pre>
       </section>
       {loaderData.saved_report != null && (
-        <details>
-          <summary>保存済み監査レポート</summary>
-          <pre className="max-h-96 overflow-auto whitespace-pre-wrap">
-            {JSON.stringify(loaderData.saved_report, null, 2)}
-          </pre>
+        <details onToggle={(event) => setShowSavedReport(event.currentTarget.open)}>
+          <summary className="flex min-h-11 cursor-pointer items-center">保存済み監査レポート</summary>
+          {showSavedReport && (
+            <pre className="max-h-96 overflow-auto whitespace-pre-wrap">
+              {JSON.stringify(loaderData.saved_report, null, 2)}
+            </pre>
+          )}
         </details>
       )}
       <section className="space-y-3">
@@ -92,7 +134,7 @@ export default function DocumentationMaintenance({ loaderData, params }: Route.C
             rows={14}
             defaultValue={JSON.stringify(loaderData.proposal, null, 2)}
           />
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-3">
             <Button name="op" value="approve" disabled={busy}>
               この整理案を承認
             </Button>
@@ -122,6 +164,6 @@ export default function DocumentationMaintenance({ loaderData, params }: Route.C
           </Button>
         </Form>
       </section>
-    </main>
+    </div>
   );
 }

@@ -17192,3 +17192,9 @@ GUI は1067件成功、`pnpm typecheck` / `pnpm lint` 成功。
 初期版の制約: GC は全文が文字予算に収まらない巨大ページを skip する。
 docs authority は自動確定しない。生成元未宣言の drift は未確認、remote repo・外部事実検証・
 AGENTS/map の自動公開・change-driven freshness は対象外。
+
+Phase 114 release gateで、文書メンテナンスの新規入口Linkに44px未満のtap-targetを検出。
+新規Linkと保存済みreportの操作領域を拡大し、承認操作列を狭幅で折返す。
+新画面を共通mobile/e2e fixtureにも追加した。固定SHAのrelease/verify成功まで本番には反映しない。
+初回Rust release gateの既存SSE/replay並行実行不一致は単独再確認・全体再実行とも成功し、
+2回目のRust gateは2057成功/0失敗/4ignoreだった。

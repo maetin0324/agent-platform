@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CelerisClient } from "~/celeris/client.server";
-import { submitMaintenance } from "~/routes/projects.$id.docs-maintenance";
+import { CelerisError } from "~/celeris/errors";
+import { loadMaintenance, submitMaintenance } from "~/routes/projects.$id.docs-maintenance";
 
 describe("documentation maintenance human gate", () => {
   it("approval submits exactly the displayed plan and does not apply it", async () => {
@@ -28,5 +29,31 @@ describe("documentation maintenance human gate", () => {
     expect(post).not.toHaveBeenCalled();
     form.set("plan", JSON.stringify({ revision: "old", actions: [] }));
     expect((await submitMaintenance(client, "project", form)).error).toContain("stale approval");
+  });
+});
+
+describe("documentation maintenance availability", () => {
+  it("renders unsupported repositories as an unavailable view without actionable data", async () => {
+    const client = {
+      get: vi
+        .fn()
+        .mockRejectedValue(
+          new CelerisError({ status: 409, code: "docs_unavailable", detail: "local Git repository required" }),
+        ),
+    } as unknown as CelerisClient;
+    const view = await loadMaintenance(client, "remote-project");
+    expect(view.unavailable).toBe("local Git repository required");
+    expect(view.audit).toBeNull();
+    expect(view.proposal).toBeNull();
+    expect(view.policy).toBeNull();
+  });
+  it.each(["unauthorized", "docs_maintenance", "project_not_found"])("preserves %s errors", async (code) => {
+    const error = new CelerisError({
+      status: code === "unauthorized" ? 401 : 409,
+      code,
+      detail: "must remain visible",
+    });
+    const client = { get: vi.fn().mockRejectedValue(error) } as unknown as CelerisClient;
+    await expect(loadMaintenance(client, "project")).rejects.toBe(error);
   });
 });
