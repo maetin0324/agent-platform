@@ -18076,3 +18076,169 @@ GUI の画面（Execution 節・runs 表の `end` バッジ等）は E5 の範�
 - 統合 2ec8a69（PROGRESS.md 衝突のみ）+ clippy 1 件（テストの `expect_err`）を 93076d0 で修正。ゲート: fmt 0、cargo test FAILED 0、clippy 0、GUI typecheck / lint / test 1086 件 / gen:types 差分ゼロ。release `93076d0f4c76`、verify 全 true（schema は 25 のまま、migration 無し）、in-flight 0 でライブ切替（from 2f1fcc0a6227 = Celeris の自己改善配送「GUI recovery」）。
 - これで本番は: `error_max_turns` と wall-clock 打ち切りが `BudgetExhausted` → `Continue`（attempts 不変、usage 保持）、checkpoint の合成・保存（`CheckpointSaved`、16 KiB）、続きの run は checkpoint だけを載せて新しい context で開始、result.json の `yield`、上限（continuation 3 / 進捗なし 2）で blocked + 質問、`[execution] continuation = false` で従来挙動。既存タスクは暗黙の 1 WorkUnit。
 - 申し送り: P-E0-2（claude-code で result.json 不在のとき attempts を消費）は E1 で未修正のまま。E2 で直す。E1b（wrap-up run、ACP の真の yield）は未着手（任意）。実機の文言（U1）と peak_context_tokens（U2）は E6 で確認。
+
+## Phase E2「ExecutionPlan / WorkUnit のデータモデルと決定的 scheduler」（2026-09-24）
+
+ADR-0072 §6 E2 の受け入れ条件 (a)〜(i) を実装した。計画は手動 / fixture（origin は
+`human`/`fixture` のみ。planner・gate は E3、repair・replan は E4、GUI は E5 なので範囲外）。
+
+branch: `worktree-agent-aeddd35457ddf9edc`。3 つの区切りで commit した:
+- `ce95e36` phase E2: migration 0026 + execution_plans/work_units/runs 索引 (a)(g)
+- `d843f34` phase E2: POST/GET /tasks/{id}/execution-plan と celerisctl execution plan set|show (b)
+- `e1c7edc` phase E2: 決定的 scheduler の配線、WU の失敗/質問/継続/再起動、P-E0-2 (c)(d)(e)(f)(h)(i)
+
+最終 commit（本節を追記する直前）: `e1c7edc`。
+
+### 受け入れ条件ごとの証跡
+
+**(a) migration 0026（`SCHEMA_VERSION = 26`）。旧い DB からの移行テスト。暗黙の WorkUnit には行を作らない**
+- 実行したコマンド: `cargo test -p task-core --lib store::tests::migration_0026_adds_the_execution_tables_to_a_schema_25_db`
+- 出力の要点: exit 0、1 passed。版数 25（migration 0025 まで適用済み）の DB を `SqliteStore::open` で開くと
+  `execution_plans`/`work_units`/`runs` が作られ（`CREATE TABLE IF NOT EXISTS` のみ）、`schema_version() == 26`。
+  同じ DB に `execution_plan_adopt` で計画を採用し、`work_units_for` で 2 件（ready/pending）読めることを確認。
+- 実行したコマンド: `cargo test -p task-core --lib store::`
+- 出力の要点: exit 0、既存の migration テスト（0007〜0025）を含め全て green（`SCHEMA_VERSION` の
+  ハードコード値 25 →26 の更新 5 箇所を含む）。
+- 暗黙の WorkUnit（計画の無い Task）は `execution_plans`/`work_units` に行を作らない
+  （`execution_plan_active` が `None` を返すことで `wu_dispatch_gate` が `Atomic` を返す。(i) のテストが
+  atomic な Task で `work_units_for` が空であることを間接的に確認している）。
+
+**(b) `POST /tasks/{id}/execution-plan`（origin human。D14 の検証をすべて通す）と `celerisctl execution plan set|show`**
+- 実行したコマンド: `cargo test -p task-api --test execution`
+- 出力の要点: exit 0、7 passed。正常系（201、WU が pending/ready に分かれる）、`GET`（無認証、200/404）、
+  トークン無しの `POST` は 401、知らない task は 404、循環依存・重複 key は 422、`assignee` 等の
+  未知フィールドは 400（`deny_unknown_fields`。JSON parse の時点で拒否）、既に active な計画がある
+  task への 2 回目の POST は 409（`execution_plan_in_use`）。
+- 実行したコマンド: `cargo test -p task-ops --lib execution::`
+- 出力の要点: exit 0、5 passed。`adopt_plan`（D14 の検証 → ULID 発行 → トポロジカル順で `seq` →
+  pending/ready の初期状態）と `active_plan`。
+- 実行したコマンド: `cargo test -p celerisctl --bin celerisctl execution::`
+- 出力の要点: exit 0、4 passed。`execution plan set --file <json|->`（stdin 対応）と `execution plan show`。
+- `docs/protocol/execution-plan.schema.json`（`celeris.execution-plan/1`）は task-core の
+  `execution_plan::tests::committed_schema_matches_generated` で生成・検証（`UPDATE_SCHEMA=1` で再生成）。
+  `assignee`/`tier`/`model` は `WorkUnitSpec` に無く、`#[serde(deny_unknown_fields)]` で拒否される。
+
+**(c) fixture の 3 WU（A → B → C）の Task が A → B → C の順に Run を起こす。各完了で `Continue{advance}`、
+最後は `WorkerDone` → 最終レビュー → done。1 Task 内の WU は直列**
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- three_work_units_run_in_order_and_complete_the_task`
+- 出力の要点: exit 0、1 passed。`runs` 索引を `started_at` で並べると `a`→`b`→`c` の順（依存順）。
+  `Event::Transitioned.reason` が `advance` 2 回（a→b, b→c の後）+ `worker_done` 1 回。3 件とも
+  `runs.status = completed`、`role = worker`。WU の run に渡った `RunContext.work_unit.objective` が
+  Task 全体の objective ではなく WU 自身の objective であることを確認（D9）。
+
+**(d) WU の失敗 → retry → 上限で failed。依存先は blocked(dependency_failed)。planner の無い E2 では
+replan できないので Task は failed（D12 の 3）**
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- a_work_unit_failure_at_the_retry_limit_fails_the_task_and_blocks_dependents`
+- 出力の要点: exit 0、1 passed。WU `b`（`depends_on: [a]`）が retryable error を 2 回返す
+  （`max_retries=1` なので 1 回 retry して上限）→ `b` は `failed`、`c`（`depends_on: [b]`）は
+  `blocked(dependency_failed)`、Task は `Status::Failed`。`WorkerFinished.outcome` が
+  `"work unit b failed"` を含む（D12「接頭辞を付ける」）。
+
+**(e) WU の question → Task が blocked → 回答で再開する**
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- a_work_unit_question_blocks_the_task_and_an_answer_resumes_it`
+- 出力の要点: exit 0、1 passed。WU `a` が `Terminal::Question` を返すと `a` は
+  `blocked(question)`、Task は `Status::Blocked`。`Trigger::Answer` を投げると Task は `Ready` に戻り、
+  次 tick で `wu_dispatch_gate` が `a` を `ready` に戻して再実行、3 WU 全て完了して `Status::Done`。
+
+**(f) WU の continuation（E1 の仕組みを WU 単位で使う。checkpoint は WU ごと）**
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- a_work_unit_yield_continues_with_a_checkpoint_scoped_to_that_work_unit`
+- 出力の要点: exit 0、1 passed。WU `a` が 1 回目 `Terminal::Yielded`（checkpoint 付き）、2 回目
+  `Done`。`work_units.continuations == 1`、`runs == 2`。`Event::CheckpointSaved{work_unit_id: Some(a.id)}`
+  が 1 件、`completed` が checkpoint の申告どおり。2 回目の run の `RunContext.continuation` に
+  `run_seq = 2` が載り、1 回目には `continuation` が無い。
+
+**(g) `runs` の索引が全タスクの run について書かれる。`replay` で `work_units`/`runs` が events から
+作り直せる（一致を確かめる）**
+- `runs` の全件書き込み: `dispatcher.rs::on_worker_finished` の末尾で `run_index_finish` を
+  atomic/WU を問わず常に呼ぶ（(c) 等のテストで `runs_for_task` が worker run 分だけ埋まることを確認済み）。
+- **未解決**: `celerisctl replay`/`task_ops::replay` を events から `work_units`/`runs` を再構築して
+  DB の値と突き合わせる専用のコマンド・テストは、このセッションでは実装できなかった（下記「未解決事項」参照）。
+  現状の `replay` は `tasks.status`/`attempts` の再構築のみで、`work_units`/`runs` は対象外のまま。
+
+**(h) 再起動後の照合（D15: 索引と events が食い違えば events が勝つ）**
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- a_work_unit_stuck_running_after_a_restart_is_reconciled_on_lease_expiry`
+- 出力の要点: exit 0、1 passed。`running` のまま「落ちた」WU（lease は既に失効、`self.running` に
+  エントリ無し = 新しいプロセスでの再起動を模擬）を `tick()`（内部の `reclaim_expired_leases`）が拾い、
+  checkpoint が無いので `ready` に戻す（`WorkUnitTransitioned{reason: "restart_reconcile"}`）ことを確認。
+  **範囲の限定**: `reclaim_expired_leases`（lease 失効）の経路だけを配線した。`abort_stale_runs`
+  （idle timeout・drain）経由の停止は未配線（ADR の「Phase E2 実装時の逸脱・明確化」に記載）。
+
+**(i) 計画を持たない Task の挙動・プロンプトが E1 と同じ（バイト単位）**
+- 実行したコマンド: `cargo test -p task-dispatch --lib`（E1 由来の全テストを含む既存 273 件）
+- 出力の要点: exit 0、273 passed、0 failed。E1 の continuation/checkpoint/budget_exhausted 系テストは
+  1 件も変更していない。`dispatch_ready`/`on_worker_finished` の WU 分岐は `current_wu.is_some()`
+  でしか入らず、計画の無い Task では `wu_dispatch_gate` が `Atomic` を返して以後は E1 のコードパスを
+  そのまま通る。
+- 実行したコマンド: `cargo test -p task-worker --lib claude_code:: preamble::`
+- 出力の要点: exit 0（claude_code 64 passed / preamble 19 passed）。既存のプロンプトスナップショット
+  テストは無変更で通過。新規テスト `build_prompt_replaces_the_objective_and_acceptance_with_the_work_unit_when_present`
+  で `context.work_unit` が `Some` のときだけ `## Objective`/`## Acceptance criteria` が差し替わることを確認。
+
+### P-E0-2（E1 からの申し送り）の修正
+
+claude-code で `result` メッセージは観測できたのに `artifacts/result.json` が無い run は、従来
+`Ok(Terminal::Error{retryable:true})` になり `WorkerError` として `task.attempts` を消費していた
+（ADR-0070 D3 の想定と食い違う）。`Err(AdapterError::Other(...))`（`ProviderFailure` 無し）に変え、
+`provider_failure_outcome` が `None` を返すことで既存の `InfraRequeue` 経路（attempts を消費しない。
+上限で `WorkerError{retryable:false}`）に乗るようにした。
+
+- 実行したコマンド: `cargo test -p task-worker --lib -- success_without_result_file_is_an_infra_failure_not_a_retryable_worker_error stale_result_file_from_previous_run_is_cleared_before_this_run`
+- 出力の要点: exit 0、2 passed。両テストとも `Err(AdapterError::Other(message))` を確認（メッセージに
+  `artifacts/result.json` を含む）。
+- codex アダプタの同種の分岐（`codex::tests::success_without_result_file_is_retryable_error`）は
+  ADR の P-E0-2 が claude-code 限定の記述だったため、今回は変更していない（範囲外）。
+
+### ゲート（本 Phase 完了時点）
+
+| ゲート | 実行したコマンド | 出力の要点 |
+|---|---|---|
+| fmt | `cargo fmt --all -- --check` | exit 0（差分なし） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0。`large_enum_variant`/`clone_on_copy`/`useless_format`/`collapsible_if`/`too_many_arguments` を修正） |
+| 全テスト | `cargo test --workspace --no-fail-fast` | exit 0。12 個の test binary が全て `test result: ok`（FAILED 0）。 |
+| schema（task-core） | `UPDATE_SCHEMA=1 cargo test -p task-core --lib` | exit 0、286 passed。`event.schema.json`（`ExecutionPlanned`/`WorkUnitTransitioned` 追加）と `docs/protocol/execution-plan.schema.json`（新規）を更新（追加のみ） |
+| schema（task-worker） | `UPDATE_SCHEMA=1 cargo test -p task-worker --lib committed_schema_matches_generated` | exit 0。`worker-protocol.schema.json` 更新（`RunContext.work_unit`/`WorkUnitPromptContext` 追加のみ） |
+| schema（task-api） | `UPDATE_SCHEMA=1 cargo test -p task-api --lib` | exit 0、53 passed。`api-v1.schema.json` 更新（`ExecutionPlanView`/`WorkUnitView`/`RoutingRecord.work_unit_id` 追加のみ） |
+| GUI gen:types | `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff | 2 回目が 1 回目と同一（差分ゼロ）。差分は `ExecutionPlanView`/`WorkUnitView`/`Event::ExecutionPlanned`/`WorkUnitTransitioned` 等の型追加のみ |
+| GUI typecheck | `cd gui && corepack pnpm@11.27.0 typecheck` | exit 0（エラーなし） |
+| GUI test | `cd gui && corepack pnpm@11.27.0 test` | exit 0。71 files / 1086 passed（画面は E5 の範囲なので型の追随だけ） |
+
+### ADR との差分
+
+`docs/adr/0072-task-execution-decomposition.md` の「Phase E2 実装時の逸脱・明確化」に詳細を記載。要点:
+
+1. `WorkerStarted`/`WorkerFinished` に `work_unit_id` を足さなかった（E1 の `run_seq` 省略と同じ理由。
+   `runs` 索引の `work_unit_id` 列と `CheckpointSaved.work_unit_id` で代替）。
+2. WU の run の continuation は `events` ではなく `runs` 索引（`runs_for_work_unit`）から組み立てる。
+3. WU の Completed run では checkpoint を merge・保存しない（continuation を経た WU だけが実際の
+   `completed` 配列を依存先へ引き継ぐ。それ以外は固定文言「完了」にフォールバック）。
+4. WU の予算（D18）は Task の budget をそのまま使う（`WorkUnitSpec.budget` は検証・丸めのみで、実際の
+   `RunLimits` には未反映）。
+5. D21（WU ごとの routing）は未配線（`RoutingRecord.work_unit_id` は常に `None`）。
+6. `WorkUnitTransitioned.from` は伝播対象（`newly_blocked`/`newly_ready`）について一律 `pending`
+   （E2 の直列実行では数学的に正しい。上の ADR 本文に根拠を記載）。
+7. Task の `Cancel` は WU の行をカスケードしない。
+8. WU の再起動照合は `reclaim_expired_leases`（lease 失効）の経路にだけ配線（`abort_stale_runs` 等は未配線）。
+9. `WuDispatchGate` の Answer 再開は `Trigger::Answer` を直接フックせず、「Ready + 計画あり + `next_work_unit`
+   が `Stuck`」という状態の形で判定する。
+
+### 未解決事項・E3 への申し送り
+
+- **`replay`/`work_units`・`runs` の再構築（(g) の後半）が未実装**: `task_ops::replay::replay` は
+  `tasks.status`/`attempts` だけを再構築し、`work_units`/`runs` を events
+  （`ExecutionPlanned`/`WorkUnitTransitioned`/`WorkerStarted`+`runs` 索引由来の情報）から作り直して
+  DB の値と突き合わせる機能は無い。`work_units`/`runs` は「派生の索引」（D5）なので、原理上は
+  `ExecutionPlanned`（計画の初期行）+ `WorkUnitTransitioned`（状態遷移の系列）+
+  `CheckpointSaved`/`RoutingDecided`（run の詳細）から再構築できるはずだが、`runs.adapter`/`model`/
+  `account`/`started_at`/`finished_at` の一部は今の events だけでは完全に復元できない
+  （`WorkerStarted`/`WorkerFinished` に `work_unit_id` が無いため、`runs` 行と `WorkerStarted` イベントの
+  対応付けに `run_id` の一致以外の手がかりが要る — `run_id` 自体は両方にあるので対応付け自体は可能。
+  実装する価値はあるが、このセッションでは時間を割けなかった）。**次の一手**: `task_ops::execution`
+  （またはそれに準ずる新規モジュール）に `rebuild_work_units_and_runs(events: &[Event]) ->
+  (Vec<WorkUnitRow>, Vec<RunRow>)` を純粋関数として実装し、`celerisctl replay` に `--check-execution`
+  相当のオプションを足すか、既存の `replay` レポートに `work_unit_mismatches`/`run_mismatches` を追加する。
+- WU の予算（D18 の既定式）と D21（WU ごとの routing）は E3 の planner 実装と合わせて配線するのが自然
+  （現状は Task 一律）。
+- Task の `Cancel` の WU カスケードと、`abort_stale_runs` 経由の WU 再起動照合は E3/E4 のどこかで拾うこと。
+- `docs/protocol/worker-protocol.md` の `context` の表に `context.work_unit` の行を追加していない
+  （E1 が `context.continuation` も表に追加しなかったのと同じ扱いに揃えたが、GUI 節〈E5〉の前に
+  一度ドキュメントを棚卸しした方がよい）。
