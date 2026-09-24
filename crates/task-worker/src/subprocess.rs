@@ -350,6 +350,65 @@ pub(crate) async fn write_result_json(
     tokio::fs::write(run_dir.join("result.json"), format!("{text}\n")).await
 }
 
+/// ADR-0006 Phase 115 D2（本番障害 01M3915FARENW8M0JM11XVF6W0 / 01M38T8N17MEWPTJQXGX1TNYJD）:
+/// `work_dir != workspace`（部署のリポジトリの git worktree で走るタスク）の run が、正しい置き場
+/// `<artifacts_dir>/result.json` の代わりに cwd 相対の `artifacts/result.json`（= `<work_dir>/artifacts/
+/// result.json`）に書いてしまっていたら、それを正しい置き場へ移して採用する。worktree の中には残さない
+/// （移動後に空になった `artifacts/` も消す）。呼び出し元は結果ファイルを読む**前**（`claude-code`/`codex`
+/// 両アダプタとも、Phase 112 D3 の「最終メッセージから回収」より前）に呼ぶこと。
+///
+/// 何もしないケース: `<artifacts_dir>/result.json` が既にある／`work_dir` が無い・`workspace` と同じ／
+/// `<work_dir>/artifacts/result.json` も無い。
+pub(crate) async fn adopt_result_json_written_under_work_dir(
+    artifacts_dir: &Path,
+    work_dir: Option<&Path>,
+    workspace: &Path,
+    run_id: &str,
+) {
+    if tokio::fs::metadata(artifacts_dir.join("result.json"))
+        .await
+        .is_ok()
+    {
+        return;
+    }
+    let Some(work_dir) = work_dir else { return };
+    if work_dir == workspace {
+        return;
+    }
+    let stray_dir = work_dir.join("artifacts");
+    let stray = stray_dir.join("result.json");
+    if tokio::fs::metadata(&stray).await.is_err() {
+        return;
+    }
+    let target = artifacts_dir.join("result.json");
+    if let Err(e) = tokio::fs::create_dir_all(artifacts_dir).await {
+        warn!(
+            "run {run_id}: could not create {} to adopt a stray result.json: {e}",
+            artifacts_dir.display()
+        );
+        return;
+    }
+    if let Err(rename_err) = tokio::fs::rename(&stray, &target).await {
+        // 別ファイルシステム等で rename できない場合はコピーしてから消す。
+        if let Err(copy_err) = tokio::fs::copy(&stray, &target).await {
+            warn!(
+                "run {run_id}: found {} but could not move it to {} (rename: {rename_err}, copy: {copy_err})",
+                stray.display(),
+                target.display()
+            );
+            return;
+        }
+        let _ = tokio::fs::remove_file(&stray).await;
+    }
+    warn!(
+        "run {run_id}: result.json was written under work_dir ({}); moved to {}",
+        stray.display(),
+        target.display()
+    );
+    // worktree の中に残さない。移動後に空になっていれば `artifacts/` も消す（空でなければ何もしない）。
+    let _ = tokio::fs::remove_dir(&stray_dir).await;
+}
+
 /// ファイル末尾 `max` バイトを文字列として読む（供給側失敗の分類用。ADR-0010 D5）。
 /// ファイルが無い・読めない場合は空文字列を返す（分類対象が無ければ `None` になるだけで、run の
 /// 結果全体には影響させない）。

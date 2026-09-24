@@ -19,14 +19,14 @@ use tokio::process::Command;
 use tracing::warn;
 
 use crate::adapter::{AdapterError, EventSink, RunLimits, RunOutcome, Terminal, WorkerAdapter};
-use crate::claude_code::build_prompt;
+use crate::claude_code::{build_prompt, work_dir_note};
 use crate::delegate_file::{clear_delegate_file, forward_delegate_file};
 use crate::progress;
 use crate::protocol::{Evidence, ProviderFailure, RunRequest};
 use crate::provider::classify_provider_failure;
 use crate::subprocess::{
-    LineOutcome, MAX_LINE_BYTES, kill_now, read_line_limited, read_tail, reap_after_terminal,
-    write_result_json,
+    LineOutcome, MAX_LINE_BYTES, adopt_result_json_written_under_work_dir, kill_now,
+    read_line_limited, read_tail, reap_after_terminal, write_result_json,
 };
 
 /// `[adapters.codex] resume_mode`（ADR-0054 D1。Phase 67）: このインストールの `codex` が
@@ -557,8 +557,19 @@ async fn run_codex(
     let result_path = req.artifact_path("result.json");
     let _ = tokio::fs::remove_file(&result_path).await;
     clear_delegate_file(&req.artifacts_dir).await;
+    // ADR-0006 Phase 115 D2: 同じ理由で、work_dir 側の名残候補も消す（`work_dir != workspace` の
+    // ときだけ意味がある。無ければ何もしない）。
+    if let Some(work_dir) = req.work_dir.as_deref()
+        && work_dir != req.workspace
+    {
+        let _ = tokio::fs::remove_file(work_dir.join("artifacts").join("result.json")).await;
+    }
 
-    let prompt = build_prompt(&req.task, &req.context, run_id, &artifacts_rel);
+    let prompt = format!(
+        "{}{}",
+        work_dir_note(req.work_dir.as_deref(), &req.workspace, &req.artifacts_dir),
+        build_prompt(&req.task, &req.context, run_id, &artifacts_rel)
+    );
     // ADR-0023 D2 / M1: この run で何を渡したかを残す（`request.json` は構造、`prompt.txt` は実際の文面）。
     crate::subprocess::write_run_request(&run_dir, req, run_id).await;
     crate::subprocess::write_run_prompt(&run_dir, &prompt, run_id).await;
@@ -724,6 +735,17 @@ async fn run_codex(
             )
         }
         (None, Some(TurnSignal::Completed { usage })) => {
+            // ADR-0006 Phase 115 D2: 結果ファイルを読む（`result_path` の有無を見る）前に、work_dir 側の
+            // 名残を採用する。Phase 112 D3 の「最終メッセージから回収」より必ず先（`result_path` の
+            // `NotFound` 判定がこの後にあるため、先に採用しておかないと本物の結果を無視して最終メッセージ
+            // から再構成してしまう）。
+            adopt_result_json_written_under_work_dir(
+                &req.artifacts_dir,
+                req.work_dir.as_deref(),
+                &req.workspace,
+                run_id,
+            )
+            .await;
             // A conversation can answer directly; work orders still require their artifacts.
             let terminal = if exit_status.success()
                 && req.task.conversation.is_some()
@@ -1364,6 +1386,92 @@ echo '{"type":"turn.completed"}'
         );
         assert!(result_path.is_file());
         assert!(!work_dir.join("artifacts/result.json").exists());
+    }
+
+    /// ADR-0006 Phase 115 D1（本番障害 01M3915FARENW8M0JM11XVF6W0）: `work_dir != workspace` の run
+    /// では、プロンプト冒頭に cwd と成果物ディレクトリの絶対パスの注意が出る（`claude_code::build_prompt`
+    /// を再利用する `codex` アダプタでも同じ。D4(a)）。
+    #[tokio::test]
+    async fn work_dir_note_appears_in_the_prompt_when_work_dir_differs_from_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().join("repos/agent-platform");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"
+artifact_root=''
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = '--add-dir' ]; then shift; artifact_root="$1"; fi
+    shift
+done
+printf '%s' '{"summary":"ok","evidence":[]}' > "$artifact_root/result.json"
+echo '{"type":"turn.completed"}'
+"#,
+        );
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.work_dir = Some(work_dir.clone());
+        let outcome = CodexAdapter::new(config)
+            .run(req, "run-wd-1", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome.terminal, Terminal::Done { .. }),
+            "{:?}",
+            outcome.terminal
+        );
+        let prompt = std::fs::read_to_string(dir.path().join("runs/run-wd-1/prompt.txt")).unwrap();
+        assert!(
+            prompt.contains(&format!("cwd は `{}`", work_dir.display())),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains(&format!(
+                "成果物ディレクトリは `{}`",
+                dir.path().join("artifacts").display()
+            )),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("相対 `artifacts/` はリポジトリの中を指すので使わない"),
+            "{prompt}"
+        );
+    }
+
+    /// ADR-0006 Phase 115 D2（本番障害 01M3915FARENW8M0JM11XVF6W0 / 01M38T8N17MEWPTJQXGX1TNYJD）:
+    /// `codex` が `--add-dir` を無視して（あるいは resume で落として）cwd 相対の `artifacts/result.json`
+    /// に書いてしまっても、正しい置き場へ移して採用し `Done` になる。worktree 側には残らない（D4(b)）。
+    #[tokio::test]
+    async fn a_result_json_written_under_work_dir_is_adopted_and_not_left_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let work_dir = dir.path().join("repos/agent-platform");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let config = stub_codex(
+            dir.path(),
+            r#"mkdir -p artifacts
+printf '%s' '{"summary":"wrote to the worktree by mistake","evidence":[]}' > artifacts/result.json
+echo '{"type":"turn.completed"}'
+"#,
+        );
+        let mut req = sample_req(dir.path().to_path_buf());
+        req.work_dir = Some(work_dir.clone());
+        let outcome = CodexAdapter::new(config)
+            .run(req, "run-wd-2", default_limits(), &RecordingSink::default())
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Done { summary, .. } => {
+                assert_eq!(summary, "wrote to the worktree by mistake")
+            }
+            other => panic!("expected done, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("artifacts/result.json")).unwrap(),
+            r#"{"summary":"wrote to the worktree by mistake","evidence":[]}"#
+        );
+        assert!(
+            !work_dir.join("artifacts").exists(),
+            "the stray artifacts/ dir under work_dir should be gone"
+        );
     }
 
     #[tokio::test]

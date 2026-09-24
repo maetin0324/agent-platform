@@ -274,7 +274,9 @@ fn build_run_spec(
             assignee: Some(assignee),
             workspace: None,
             cluster: None,
-            workspace_mode: None,
+            // ADR-0006 Phase 115 D3: diff を作らない裏方タスクなので worktree を作らない
+            // （`reports.rs::compaction_spec` と同じ理由）。
+            workspace_mode: Some(task_core::WorkspaceMode::Shared),
             // ADR-0047 D4: harness の解決に頼らず、adapter/tier を明示する（`knowledge` harness は
             // 組み込みのままで `[[genres]]`/`[[roles]]` に射影されないため。task_core::report::KNOWLEDGE_ROLE
             // のドキュメントコメント参照）。

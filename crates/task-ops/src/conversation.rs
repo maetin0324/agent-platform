@@ -13,7 +13,7 @@ use task_core::approval::{Approval, Decision, StandingRule};
 use task_core::{
     Budget, DelegateTask, GenreSpec, ListFilter, ListOrder, Message, MessageId, MessageRole,
     OrgNode, ProjectId, RoleSpec, Status, Task, TaskId, TaskKind, TaskStore, Tier, Trigger,
-    WorkerHint, WorkspaceSpec, conversation_title, department_of, failure_reply,
+    WorkerHint, WorkspaceMode, WorkspaceSpec, conversation_title, department_of, failure_reply,
 };
 use time::OffsetDateTime;
 
@@ -278,9 +278,12 @@ fn conversation_task(
             tier: role.and_then(|r| r.tier).unwrap_or(Tier::Standard),
             adapter: role.and_then(|r| r.adapter.clone()),
         },
+        // ADR-0006 Phase 115 D3: 対話は diff を作らない（repos も常に空。上の `repos: Vec::new()`）ので
+        // worktree を作らない。念のため `mode: Shared` を明示する（`resolve_repos` は経由しないが、
+        // 将来リポジトリ付きの案件に対話タスクを置く経路ができても worktree を切らせない）。
         workspace: WorkspaceSpec::Local {
             path: PathBuf::from(id.to_string()),
-            mode: None,
+            mode: Some(WorkspaceMode::Shared),
         },
         budget: Budget {
             max_turns: CONVERSATION_MAX_TURNS,

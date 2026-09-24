@@ -153,3 +153,102 @@ Phase 3 の提案で持ち越されていた。本 Phase では **採用しな�
   §5.4 の表に反映することを提案（ADR-0003 P-13 の確定版）。
 - **P-25（§5.9）** `taskctl add --check-cmd`（P-17）の採否は依然未決。Phase 4 では見送り、
   シード実行ファイルで代替した（D7）。
+
+## Phase 115 追記（2026-09-24）: `result.json` の置き場を `work_dir` に依存させない
+
+### 背景
+
+本番で「報告のまとめ: Engineering」（`celeris::reports` の compaction タスク、role
+`report-compressor`、adapter `claude-code`）が 2 件連続で失敗した（01M3915FARENW8M0JM11XVF6W0 /
+01M38T8N17MEWPTJQXGX1TNYJD）。outcome は `error(retryable=true): claude exited without
+<workspace>/artifacts/result.json`。
+
+原因は 2 つ重なっていた:
+
+1. **`work_dir != workspace` の worktree で相対 `artifacts/result.json` を書いた**: Engineering の
+   部署の案件にリポジトリ `agent-platform` が primary として登録されていたため、`task-ops::add::
+   resolve_repos`（ADR-0043 D2 の「明示 > 親 > 案件の primary」）が compaction タスクの
+   `repos`（作成時は空）にその primary を継がせ、結果として `task-dispatch::dispatcher::
+   task_workspaces_for` がそのリポジトリの git worktree を用意していた（`work_dir =
+   <workspace>/repos/agent-platform`）。プロンプトの大半（`preamble.rs` / `claude_code.rs::
+   result_json_instructions`）は `RunRequest::artifacts_rel()` 経由で `work_dir.is_some()` のとき
+   既に絶対パスを組んでいたが、`task-core::report::compaction_objective`（compaction タスクの
+   `objective` そのもの）だけが `` `artifacts/result.json` `` と相対パスを直書きしていた。モデルは
+   objective の指示に従い、cwd（= worktree）相対で書いてしまった。
+2. **compaction タスクは diff を作らないのに、部署にリポジトリが付いているというだけで毎回 worktree
+   （`repos/agent-platform` の git worktree）を作っていた**。無駄で遅い（`/home` は NFS 上の loop）。
+   Phase 99（ADR-0059）で「コマンドを実行するだけのオペレーション」は worktree 不要とした流れと
+   同じはずだったが、`workspace_mode` は `Local`（`cluster` 無し）には効いていなかった。
+
+### 決定
+
+**D1. プロンプトは常に絶対パス**。`report.rs` の compaction オブジェクトはタスク作成時に一度だけ
+組み立てて保存する静的な文字列で、実行時の `work_dir`（部署のリポジトリの worktree になることが
+ある）を知らない。ここでパスを断定するのをやめ、「下の Instructions（実行時に絶対パスで組む）を
+見ろ」とだけ書く（`task_core::report::compaction_objective`）。`claude_code.rs::build_prompt` /
+`preamble.rs` は既に `RunRequest::artifacts_rel()` 経由で `work_dir.is_some()` のとき絶対パスを
+組んでいた（ADR-0036 D3）ので変更なし。加えて、`work_dir != workspace` の run にだけ、プロンプトの
+先頭（`claude_code::work_dir_note`。`codex` も同じ関数を再利用）に「cwd は `<work_dir>`（リポジトリの
+worktree）。成果物ディレクトリは `<artifacts_dir>`。相対 `artifacts/` はリポジトリの中を指すので
+使わない。」の 2 行を足す（絶対パスの指示を読み飛ばして相対 `artifacts/` を書いてしまう事故の
+再発防止。`work_dir` が無い・`workspace` と同じ run の文面は 1 バイトも変わらない）。
+
+**D2. フォールバック**: run 終了時に `<artifacts_dir>/result.json` が無く、`<work_dir>/artifacts/
+result.json`（`work_dir != workspace` のとき）が有れば、それを `<artifacts_dir>/result.json` へ移して
+採用し、WARN「result.json was written under work_dir; moved」を出す
+（`subprocess::adopt_result_json_written_under_work_dir`。claude-code / codex の両アダプタが、
+結果ファイルを読む前・かつ Phase 112 D3「最終メッセージから回収」より前に呼ぶ）。worktree の中には
+残さない（移動後に空になった `artifacts/` ディレクトリも消す）。リトライで前回の run の名残と誤読
+しないよう、run 開始時に `<artifacts_dir>/result.json` と同様 `<work_dir>/artifacts/result.json` も
+消す。
+
+**D3. 内部タスクは worktree を作らない**: `resolve_repos`（`task-ops::add`）に「`Local`（`cluster` 無し）
+で `NewTaskSpec.workspace_mode == Some(Shared)` なら、親・案件の primary への暗黙継承をしない」を
+足した（ADR-0059 の `mode: "shared"` の語彙をそのまま流用。`Remote` の意味は変えない）。同時に
+`build_task` が `Local` の `WorkspaceSpec.mode` にも `spec.workspace_mode` を通すようにした（従来は
+`Remote` にしか効かず、`Local` は常に `mode: None` に固定されていた）。`workspace_mode: Some(Shared)`
+になれば `dispatcher::legacy_worktree_for` も worktree を作らないので、diff を作らない内部タスクは
+`repos` も worktree も持たず `work_dir = workspace` のまま走る。適用先:
+`celeris::reports::compaction_spec`、`celeris::knowledge_maint` の知識整理タスク、
+`task_ops::conversation::conversation_task`（対話は元々 `repos` が常に空で worktree を作らないが、
+将来リポジトリ付きの案件に対話タスクを置く経路ができても worktree を切らせないよう念のため明示した）。
+計画（`project_plan.rs`）や人が作る通常のタスクは対象外（`Local` の `workspace_mode` は明示しない限り
+`None` のままで、従来どおり案件の primary を継ぐ）。
+
+**D4. テスト**: `crates/task-worker/src/claude_code.rs` / `codex.rs` に
+`work_dir_note_appears_in_the_prompt_when_work_dir_differs_from_workspace`（D1）と
+`a_result_json_written_under_work_dir_is_adopted_and_not_left_behind`（D2）をそれぞれ追加。
+`crates/task-dispatch/src/dispatcher.rs` に
+`a_compaction_task_does_not_get_a_worktree_even_when_its_project_has_a_primary_repo`（D3。
+`task_ops::add::create_support_task` を実際に通す）を追加。`crates/task-core/src/report.rs` の
+既存テストに「`compaction_objective` は `artifacts/result.json` という文字列を一切含まない」を
+追記（D1 の裏返し）。
+
+### 結果
+
+- `crates/task-worker/src/subprocess.rs`: `adopt_result_json_written_under_work_dir`（pub(crate)、
+  D2）。
+- `crates/task-worker/src/claude_code.rs`: `work_dir_note`（pub(crate)、D1）。プロンプトの先頭へ
+  prepend、run 開始時の名残掃除、`(None, Some(meta))` 分岐で `terminal_from_result` の前に D2 の
+  採用を呼ぶ。
+- `crates/task-worker/src/codex.rs`: 同じ 3 箇所（`work_dir_note` は re-export して再利用）。
+- `crates/task-core/src/report.rs`: `compaction_objective` からパスの直書きを除去（D1）。
+- `crates/task-ops/src/add.rs`: `resolve_repos` に `skip_fallback: bool` を追加、`build_task` が
+  `Local` の `mode` にも `workspace_mode` を通す（D3）。
+- `crates/celeris/src/reports.rs` / `knowledge_maint.rs`、`crates/task-ops/src/conversation.rs`:
+  該当タスクの `workspace_mode` / `WorkspaceSpec.mode` を `Some(Shared)` にする（D3）。
+
+### 未解決事項
+
+- P-115-1: D2 のフォールバックは `<work_dir>/artifacts/result.json` の 1 か所だけを見る。ワーカーが
+  さらに別の相対パス解釈（例えば `work_dir` の親ディレクトリ相対）で書く可能性は未観測・未対応。
+  実機でさらに別の誤読パターンが見つかれば追記する。
+- P-115-2: D3 は `report-compressor` / `knowledge` / 対話の 3 種類だけを対象にした。今後増える
+  「diff を作らない内部タスク」がこの 3 種類のパターン（`create_support_task` + `workspace_mode:
+  Shared`）を踏襲するかは、その都度の実装者の判断に委ねる。
+
+### 提案
+
+- P-115-3: 本番の 01M3915FARENW8M0JM11XVF6W0 / 01M38T8N17MEWPTJQXGX1TNYJD は `failed` のまま残って
+  いる可能性がある（本番 DB を直接操作していないので現状は変えていない）。デプロイ後、
+  `celerisctl rereview` するか自然に再発しないことを確認するかは人の判断待ち。

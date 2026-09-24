@@ -207,11 +207,16 @@ fn default_kind() -> TaskKind {
 ///
 /// - 案件に属さないタスク（`project_id` が無い）で `repos` を書いたら 422
 /// - 案件に無い名前は 422、リモートのリポジトリを他と混ぜたものも 422
+/// - ADR-0006 Phase 115 D3: `skip_fallback` が真なら「親 → 案件の primary」の暗黙継承をしない
+///   （明示の `names` はそれでも解決する）。diff を作らない内部タスク（報告のまとめ・知識整理）が、
+///   部署にリポジトリが付いているというだけで worktree を背負わされないため
+///   （`build_task` が `workspace_mode == Some(Shared)` かつ `cluster` 無しのときに立てる）。
 fn resolve_repos(
     store: &dyn TaskStore,
     project_id: Option<ProjectId>,
     parent: Option<TaskId>,
     names: &[String],
+    skip_fallback: bool,
 ) -> Result<Vec<task_core::RepoRef>, OpsError> {
     let Some(project_id) = project_id else {
         if names.is_empty() {
@@ -225,6 +230,9 @@ fn resolve_repos(
     if !names.is_empty() {
         return task_core::resolve_task_repos(&available, names)
             .map_err(|e| OpsError::Validation(e.to_string()));
+    }
+    if skip_fallback {
+        return Ok(Vec::new());
     }
     // 親から継ぐ（親が持っていなければ案件の primary）。
     if let Some(parent) = parent
@@ -495,7 +503,17 @@ fn build_task(
     validate_depends_on(store, &spec.depends_on)?;
 
     // ADR-0043 D2: このタスクが使う案件のリポジトリ（明示 > 親 > 案件の primary）。
-    let repos = resolve_repos(store, spec.project_id, spec.parent, &spec.repos)?;
+    // ADR-0006 Phase 115 D3: `Local`（`cluster` 無し）で `workspace_mode == Some(Shared)` なら、この
+    // 暗黙継承をしない（diff を作らない内部タスク用。`resolve_repos` のドキュメント参照）。
+    let skip_repo_fallback =
+        spec.cluster.is_none() && spec.workspace_mode == Some(task_core::WorkspaceMode::Shared);
+    let repos = resolve_repos(
+        store,
+        spec.project_id,
+        spec.parent,
+        &spec.repos,
+        skip_repo_fallback,
+    )?;
 
     let id = TaskId::new();
     let workspace = match (spec.cluster, spec.workspace) {
@@ -511,10 +529,16 @@ fn build_task(
             path: PathBuf::from(id.to_string()),
             mode: spec.workspace_mode,
         },
-        (None, Some(path)) => WorkspaceSpec::Local { path, mode: None },
+        // ADR-0006 Phase 115 D3: `Local` にも `workspace_mode` を通す（`Some(Shared)` なら
+        // worktree を切らず、そのまま作業ディレクトリにする。ADR-0059 の語彙と合わせた）。
+        // 省略時は従来どおり `None`（Phase 114 までの出力とバイト単位で同じ）。
+        (None, Some(path)) => WorkspaceSpec::Local {
+            path,
+            mode: spec.workspace_mode,
+        },
         (None, None) => WorkspaceSpec::Local {
             path: PathBuf::from(id.to_string()),
-            mode: None,
+            mode: spec.workspace_mode,
         },
     };
 
