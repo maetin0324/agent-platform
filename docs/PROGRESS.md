@@ -17803,3 +17803,233 @@ frontier=`gpt-6-astra`(high) / standard=`gpt-6-sol`(medium) / cheap=`gpt-6-luna`
 - P-E0-1: DESIGN §5.6（「計画が不正なら failed」）に「Task 内部の実行計画（ADR-0072）は atomic に倒す」という注記を足す（DESIGN.md は書き換えない。人の判断待ち）。
 - P-E0-2: 調査で見つけた既存の不整合。ADR-0070 D3 の記述では「result.json の不在はインフラ扱い」だが、claude-code では `Ok(Terminal::Error)` として届くので attempts を消費している（`Err(AdapterError)` だけがインフラの経路を通る。dispatcher.rs:2966-3016）。E1 で `RunEnd` の分類を入れるときに合わせて直すか、人が判断する。
 - P-E0-3: `task-api::stats::classify_outcome` に `infra_requeue:` の分類が無く、Error として数えている。E5 の metrics で `end` を優先する際に合わせて直す。
+
+## Phase E1「Run lifecycle / checkpoint / continuation」（2026-09-24）
+
+ADR-0072（`docs/adr/0072-task-execution-decomposition.md`）の Status を Proposed → Accepted にし、
+§6 E1 の受け入れ条件 (a)〜(i) を実装した。migration は無し（events を正本にし、新しい `Event` を
+足しただけ）。ExecutionPlan / WorkUnit（E2 以降）には触れていない。
+
+branch: `worktree-agent-a7ce86ee4adbc28f5`。最終 commit は本節末尾の git ログを参照。
+
+### 受け入れ条件ごとの証跡
+
+**(a) claude-code の `error_max_turns` と wall-clock 打ち切りが `RunEnd::BudgetExhausted` になり、
+usage を保持し、`Continue` で Ready に戻る（attempts 不変）**
+- 実行したコマンド: `cargo test -p task-worker --lib claude_code::tests::error_max_turns_subtype_wins_and_becomes_budget_exhausted_with_usage claude_code::tests::wall_clock_exceeded_kills_and_reports_budget_exhausted`
+- 出力の要点: exit 0、2 passed（`error_max_turns` は `result.json` が `summary` を主張していても
+  `BudgetExhausted{kind:Turns}` が勝ち、usage（input/output tokens）を運ぶ。wall-clock 打ち切りは
+  `BudgetExhausted{kind:WallClock}`）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- budget_exhausted_run_continues_without_consuming_attempts_then_blocks_on_no_progress`
+- 出力の要点: exit 0、1 passed。dispatcher レベルで、予算切れの run のたびに `Trigger::Continue`
+  （reason `"continue"`）で `Running → Ready` になり、`stored.attempts == 0` が最後まで保たれることを確認。
+
+**(b) worker の checkpoint.json と mechanical（git）の合成が `CheckpointSaved` に残る。schema 違反・
+無ければ mechanical だけ。16 KiB に切り詰め**
+- 実行したコマンド: `cargo test -p task-core --lib execution::`
+- 出力の要点: exit 0、10 passed。`merge_checkpoint`（worker 優先の意味欄・mechanical 優先の事実欄・
+  tests_run の和集合）、`missing_worker_checkpoint_falls_back_to_mechanical_defaults`、
+  `schema_violation_is_treated_like_missing_checkpoint`、`truncate_checkpoint_shrinks_to_the_overall_byte_cap`
+  （16 KiB 超のデータを決定的に縮めて上限内に収める）を確認。
+- 実行したコマンド: `cargo test -p task-dispatch --lib checkpoint::`
+- 出力の要点: exit 0、5 passed。`task-dispatch/src/checkpoint.rs`（新規）が `task_ops::changes` を
+  再利用して git の読み取りを行い、`WorkerProgress{kind:tool_use}` の対から `tests_run`（最大10件）・
+  `recent_activity`（最大20行）を作ることを確認。
+
+**(c) 次の run の `request.json`/`prompt.txt` に「続きの実行（Run #N）」節と checkpoint が載る。前の
+run の会話・出力の全文は載せない。continuation の無い run のプロンプトは D10 の追加分を除きバイト
+単位で同じ**
+- 実行したコマンド: `cargo test -p task-worker --lib preamble:: claude_code::`
+- 出力の要点: exit 0（preamble 19 passed / claude_code 63 passed）。
+  `continuation_section_is_empty_without_continuation_context`（continuation 無しは 1 バイトも増えない）、
+  `continuation_section_summarizes_the_checkpoint_without_the_full_transcript`（`## 続きの実行（Run #3）` /
+  `### checkpoint（Run #2 の終わり）` / `### これまでの Run（1 行ずつ）` を含み、会話全文は含まない）、
+  `build_prompt_carries_the_continuation_section_when_present` で確認。**既存のプロンプトスナップショット
+  テストは全て無変更で通った**（budget_preamble を対話 run には出さない設計にしたため）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- yielded_run_continues_and_the_next_run_context_carries_the_checkpoint`
+- 出力の要点: exit 0、1 passed。2 回目の run に渡る `RunContext.continuation` が
+  `run_seq=2`・`previous_end="yielded"`・`checkpoint.next_action`・`prior_runs=["Run #1 yielded"]` を
+  正しく持ち、1 回目の run には `continuation` が無いことを確認（dispatcher の
+  `build_continuation_context` が events だけから純粋に組み立てる）。
+
+**(d) result.json の `yield` が `RunEnd::Yielded` になり continuation する**
+- 実行したコマンド: `cargo test -p task-worker --lib -- result_yield_becomes_terminal_yielded`
+  （claude_code / codex / acp / aider の 4 harness すべて）
+- 出力の要点: exit 0、4 passed（各アダプタで `{"yield": {...}}` → `Terminal::Yielded`）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- yielded_run_continues_and_the_next_run_context_carries_the_checkpoint`
+- 出力の要点: exit 0、1 passed。`Terminal::Yielded` → `Trigger::Continue` → 2 回目の run → `done`。
+  `WorkerFinished.end == Some(RunEnd::Yielded)` と `CheckpointSaved` を確認。
+
+**(e) `max_continuations_per_work_unit` への到達と、進捗なし 2 回で `blocked`（人の回答で窓が戻る）**
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- budget_exhausted_run_continues_without_consuming_attempts_then_blocks_on_no_progress`
+- 出力の要点: exit 0、1 passed。mechanical だけの checkpoint（git 差分が無い一時ディレクトリ）が
+  連続して変化しないため、2 回連続で進捗なしと判定され 3 回目の run で `Trigger::WorkerQuestion`
+  （`WorkerFinished.outcome` が `"question: 実行が進みません（continuation 2 回 / 進捗なし 2 回）…"`）
+  になり `Status::Blocked` に到達することを確認。`Trigger::Answer` を投げると `Status::Ready` に戻り
+  （D18「回答の時点から数え直す」）、同じ（進捗を示さない）adapter でもう一度 2 回の continuation の
+  後に再び `Blocked` になることも確認（窓のリセットが機能している証拠）。
+  - 実装ノート: 既存コードの `record_question_approval` は「dispatcher が判断した質問」を
+    `task_core::approval::Approval`（inbox の承認、`TaskKind::Approval` の子タスクとは別物）として
+    記録する経路で、`cross_department`（部またぎの質問）と同じパターンをそのまま踏襲した
+    （`Event::QuestionRaised` は「run の終了を伴わない」dispatcher 発の質問だけに付く既存の規約
+    — 例: `ChildFailed`/`Unroutable` — なので、run が実際に終わった今回のケースでは付けていない。
+    `WorkerFinished.outcome` の `"question: "` 接頭辞が質問の本体になる）。
+- `no_progress_streak` / `consecutive_continuations` の単体テスト:
+  `cargo test -p task-ops --lib derive::` → exit 0、28 passed。
+
+**(f) 既存の遷移・テストは不変。`[execution] continuation = false` で従来の `WorkerError` に戻る**
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- continuation_disabled_restores_the_legacy_worker_error`
+- 出力の要点: exit 0、1 passed。`d.config.execution.continuation = false` で、
+  `AlwaysBudgetExhaustedAdapter`（毎回 `BudgetExhausted`）が `max_retries=1` で 2 回試行して
+  `Status::Failed`・`attempts=2` になる（従来の `WorkerError{retryable:true}` の挙動そのもの）。
+  `CheckpointSaved` も `"continue"` の遷移も一切作らないことを確認。
+- 既存の遷移・テストが壊れていないことは `cargo test --workspace --no-fail-fast`（下記）で確認
+  （done/question/error/requeue/infra の全既存テストが無変更で green）。
+- `transition::tests::table_simple_triggers_full_cross_product` を `Trigger::Continue` を含めて
+  4×8×18 の全列挙に拡張し、`continue_reason_matches_the_why_variant` で `why` ごとの `reason` 文字列
+  （`continue`/`advance`/`work_unit_retry`/`planned`/`replan`）を確認（`cargo test -p task-core --lib transition::` → exit 0、9 passed）。
+
+**(g) `attempt_history`/`replay`/`classify_task_failure`/`stats` が `continue` を試行・失敗に数えない**
+- `attempt_history`: `Event::Transitioned{reason: "continue"}` は既存の match の `_ => None` に落ちる
+  ため元々ノーコード（`retry_policy.rs` の変更不要）。`budget_exhausted_run_continues_without_consuming_attempts_then_blocks_on_no_progress`
+  内で `task_core::retry_policy::attempt_history(&stored, &events_only)` が空になることを直接確認。
+- `replay`: `replay_status_and_attempts` の `bump` 判定も `reason ∈ {"worker_error","lease_expired","review_fail"}`
+  だけを見るため、`"continue"` は既存のまま素通りする（`crates/task-ops/src/replay.rs` 変更不要）。
+- `classify_task_failure`: `Continue` は `Failed` に遷移しないので分類対象にならない（変更不要）。
+- `stats`/`view` の `classify_outcome`: `end` を優先しつつ `"continue: "` 接頭辞を新設の
+  `RunOutcomeKind::Continued` に分類し、`StatsState`/`AccountStats` の集計では
+  「失敗でも成功でもない」ものとして数えない（`Interrupted` と同じ扱い）よう変更。同じ作業で
+  **P-E0-3**（`stats.rs::classify_outcome` が `"infra_requeue: "` を分類せず `Error` に落ちていた）も
+  直し、`Requeue` に分類するようにした。
+  - 実行したコマンド: `cargo test -p task-api --lib stats:: view::` / `cargo test -p task-ops --lib view::`
+  - 出力の要点: exit 0。`outcome_prefixes_are_classified` に `infra_requeue:`/`continue:` のケースを追加して確認。
+
+**(h) daemon 再起動（同じ store で新しい `Dispatcher`）後も、最新の checkpoint から continuation が
+組まれる**
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- continuation_survives_a_dispatcher_restart`
+- 出力の要点: exit 0、1 passed。「前のプロセス」相当の状態を events で直接作り（`Trigger::Dispatch` →
+  `Trigger::Continue` を `store.apply_transition_with_events` で直接発行。d1 のインスタンス自体は
+  作らない — fake adapter が即座に完了するため tick のタイミングで非同期完了を決定的に待つのが難しく、
+  events を直接組み立てる方が再現性が高いと判断）、そのあと**新しい** `Dispatcher`（同じ `store`）を
+  作って続きを回すと、`run_seq=2`・`previous_end` が `budget_exhausted` で始まる `RunContext.continuation`
+  が正しく組まれ、`attempts=0` のまま `Status::Done` に到達することを確認。continuation の状態は
+  プロセス内メモリ（`running`/`infra_backoff`）を一切使わず、`consecutive_continuations`/
+  `latest_checkpoint`/`current_run_seq` が全て events から純粋に導出されるため、この性質は実装上
+  自明に成り立つ（テストはその契約を固定するためのもの）。
+
+**(i) codex / acp / aider でも wall-clock 打ち切りが `BudgetExhausted` になり continuation する**
+- 実行したコマンド: `cargo test -p task-worker --lib codex::tests::wall_clock_exceeded_kills_and_reports_budget_exhausted acp::tests::wall_clock_exceeded_cancels_then_kills_the_process_group aider::tests::wall_clock_timeout_kills_the_process_and_becomes_budget_exhausted`
+- 出力の要点: exit 0、3 passed（3 harness とも `Terminal::BudgetExhausted{kind: WallClock}`）。
+  3 harness とも turn の上限を持たないため、wall-clock だけが継続の入口（D7 の表どおり）。
+- 追加で、`codex` は `turn.failed` の文言が context 超過の語彙に当たれば `BudgetExhausted{kind:Context}`
+  に、`acp` は `stopReason == "max_turn_requests"` を `BudgetExhausted{kind:Turns}` に分類するよう
+  実装した（実機の文言は未確認。§7 U1 のまま。分類できなければ従来どおり `Error`）。
+- 4 harness とも `result.json` の `{"yield": {...}}` → `Terminal::Yielded` に対応
+  （`result_yield_becomes_terminal_yielded` を claude_code/codex/acp/aider それぞれに追加）。
+
+### ADR との差分（「Phase E1 実装時の逸脱・明確化」として ADR-0072 に追記済み）
+
+1. **`WorkerStarted.run_seq` を event のフィールドとして追加せず、events から純粋に導出**
+   （`task_ops::derive::current_run_seq`）。理由: `Event::WorkerStarted`/`WorkerFinished` を struct
+   literal で組み立てている箇所が約 140（`end` を追加した `WorkerFinished` だけで 83）あり、
+   `run_seq`（値を持たない冗長なフィールド）のためにこれ以上ブラスト半径を広げるのは不釣り合いと
+   判断した。`WorkerFinished.end`（D7 の分類そのもの。continuation 判定に必須）は予定どおり追加した。
+2. **checkpoint の JSON tag を `"kind"` から `"type"` に変更**（`RunEnd::BudgetExhausted{kind}` の
+   フィールド名との衝突を避けるため。`Check` 等の既存 tagged enum と同じ命名規則に合わせた）。
+3. **`task_core::execution::Decision` を `CheckpointDecision` に改名**（`task_core::approval::Decision`
+   との名前衝突）。
+4. **D10 の「予算の予告」から絶対時刻（開始 UTC）を外した**。`OffsetDateTime::now_utc()` を prompt に
+   埋め込むと、同じ入力から異なるバイト列が生成され決定性が壊れ、既存の「2 回呼んで同じ文字列になる」
+   前提のプロンプトテストが揺れた（実際に 2 件のテストが flaky に失敗するのを確認して修正）。
+   開始時刻は `WorkerStarted` イベントの `ts` に残るため、prompt には turn/wall の数値の目安だけを書く。
+5. **D10 の harness 別の turn 上限の予告を一本化**: 本来は「claude-code だけ turn 数を出し、他は wall
+   だけ」だが、`build_prompt`（と `RunContext`）は 4 harness で共有しており、呼び出し元でどの harness
+   かを区別するには `build_prompt` の呼び出し口（45 箇所）へパラメータを通す必要がある。予算超過
+   時の実害（誤誘導）は小さいと判断し、「claude-code はこれを `--max-turns` で実際に強制する。他の
+   harness では目安」という 1 文を添えて全 harness 共通のテキストにした。
+6. **reviewer/planner run の `Terminal::BudgetExhausted`/`Yielded`**: reviewer run は worker run と
+   同じ `claude_code::run_claude_code` を通るため理論上は起こりうるが、continuation は worker run
+   だけの仕組みなので、reviewer 側では「判定できなかった」として `max_reviewer_retries` の再試行に
+   倒す（`crates/task-dispatch/src/review.rs`）。checkpoint は作らない。
+7. **`Event::QuestionRaised` は (e) の上限到達では発行していない**。既存の `cross_department`
+   （部またぎの質問）と同じパターンで、`WorkerFinished.outcome` の `"question: "` 接頭辞と
+   `record_question_approval`（inbox の承認記録）だけで足りると判断した（run が実際に終わった上での
+   質問であり、「run の終了ではない」dispatcher 発の質問 — `ChildFailed`/`Unroutable` — とは性質が違う）。
+
+### ゲート（本 Phase 完了時点）
+
+| ゲート | 実行したコマンド | 出力の要点 |
+|---|---|---|
+| fmt | `cargo fmt --all -- --check` | exit 0（差分なし） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| 全テスト | `cargo test --workspace --no-fail-fast` | exit 0。80 個の test binary が全て `test result: ok`（FAILED 0）。 |
+| schema（task-core） | `UPDATE_SCHEMA=1 cargo test -p task-core --lib` | exit 0、268 passed。`event.schema.json` 更新（追加のみ。`CheckpointSaved`・`WorkerFinished.end`・`RunMetrics` の新欄・`RunEnd`/`BudgetKind`/`HarnessErrorClass`/`Checkpoint` 系の型） |
+| schema（task-worker） | `UPDATE_SCHEMA=1 cargo test -p task-worker --lib committed_schema_matches_generated` | exit 0。`worker-protocol.schema.json` 更新（追加のみ。`WorkerMessage::Yielded`/`BudgetExhausted`、`RunContext.continuation`） |
+| schema（task-api） | `cargo test -p task-api --lib committed_schema_matches_generated` | exit 0、差分なし（既存の型のままで再生成が一致） |
+| checkpoint schema | `docs/protocol/checkpoint.schema.json`（新規。`task-core` の `execution::tests::committed_schema_matches_generated` で生成・検証） | exit 0 |
+| GUI gen:types | `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff | 2 回目が 1 回目と bit 単位で一致（IDENTICAL）。差分は `Event::CheckpointSaved`/`WorkerFinished.end`/`RunEnd`/`BudgetKind`/`HarnessErrorClass`/`Checkpoint` 系の型と `RunSummary.end`/`RunOutcomeKind::Continued` の追加のみ |
+| GUI typecheck | `cd gui && corepack pnpm@11.27.0 typecheck` | exit 0（エラーなし） |
+| GUI test | `cd gui && corepack pnpm@11.27.0 test` | exit 0。71 files / 1086 passed |
+
+GUI の画面（Execution 節・runs 表の `end` バッジ等）は E5 の範囲なので今回は型の追随だけで、
+画面の実装はしていない。
+
+### 触ったファイル（要旨）
+
+- 新規: `crates/task-core/src/execution.rs`、`crates/task-dispatch/src/checkpoint.rs`、
+  `docs/protocol/checkpoint.schema.json`
+- task-core: `model.rs`（`WorkerFinished.end`、`RunMetrics` の 2 欄、`Event::CheckpointSaved`）、
+  `transition.rs`（`Trigger::Continue{why}`）、`retry_policy.rs`（`is_budget_outcome` を pub 化・
+  context 語追加）、`lib.rs`（re-export）
+- task-worker: `adapter.rs`（`Terminal::Yielded`/`BudgetExhausted`）、`protocol.rs`
+  （`WorkerMessage` の対応する 2 バリアント、`RunContext.continuation`、`ContinuationContext`）、
+  `subprocess.rs`（`write_result_json`/`run_subprocess` の対応）、`claude_code.rs`
+  （`error_max_turns`/wall-clock 検出、`result.json` の `yield`、D10 の予算予告+rolling checkpoint
+  指示、D9 の続きの実行節）、`codex.rs`/`acp.rs`/`aider.rs`（wall-clock 検出、`yield` 対応）、
+  `preamble.rs`（`continuation_section`）
+- task-dispatch: `dispatcher.rs`（`on_worker_finished` の RunEnd 分類・checkpoint 合成・continuation
+  判定・`ExecutionConfig`・`build_continuation_context`）、`lib.rs`（`checkpoint` モジュール・
+  `ExecutionConfig` の re-export）、`reports.rs`/`review.rs`（新 Terminal バリアントの網羅対応）
+- task-ops: `derive.rs`（`consecutive_continuations`/`latest_checkpoint`/`no_progress_streak`/
+  `current_run_seq`）、`view.rs`（`RunOutcomeKind::Continued`、`classify_outcome` が `end` を優先、
+  `RunSummary.end`）
+- task-api: `stats.rs`（同様の `classify_outcome` 更新、P-E0-3 修正）、`query.rs`
+  （`checkpoint_saved` の event type 名）
+- celeris: `config.rs`（`[execution]` の TOML 設定、`ExecutionTomlConfig`、`dispatch_config()` への配線）、
+  `lib.rs`（疎通確認の Terminal 網羅対応）
+- celerisctl: `commands/worker.rs`（`celerisctl worker run` の `normalize_outcome` の網羅対応）
+- docs: `docs/adr/0072-*.md`（Status Accepted 化 + 「Phase E1 実装時の逸脱・明確化」追記）、
+  `docs/protocol/worker-protocol.md`（§4.5b `yielded`、§4.5c `budget_exhausted`、§4.5d rolling
+  checkpoint、§9 に `yield` の説明を追加）
+
+### 未解決事項（ADR-0072 §7 のうち、この Phase で状況が変わったもの）
+
+- U1（context 超過の実機の文言）: 未確認のまま。claude-code は `result` テキストの字句判定、codex は
+  `turn.failed` のメッセージ、acp は `stopReason == "max_turn_requests"`（Turns）で実装。実機確認は
+  E6（またはこの環境の外で認証が使える環境）で行うこと（ADR-0009 P-34）。このセッションは外向き
+  ネットワークが無い環境のため実施していない。
+- U2（codex/acp の turn ごとの usage）: `RunMetrics.peak_context_tokens`/`turns` は型と配線だけ追加し、
+  実測はしていない（常に `None`。ADR の「取れる範囲だけ」の許容範囲内）。claude-code の stream-json
+  の `assistant.message.usage`（あれば）から `peak_context_tokens` を埋める実装は E1 の範囲外として
+  持ち越した。
+- P-E0-2（result.json 不在時に claude-code が attempts を消費する既存の不整合）: 意図的に直していない
+  （直すと `WorkerError` → `InfraRequeue` に変わり、(f) 「既存の遷移は変わらない」に抵触するため）。
+  E2 以降で `HarnessErrorClass::Supply`/`Infra` を配線するときに、この不整合を一緒に解消するか改めて
+  判断すること。
+- P-E0-3: 本 Phase で解消済み（上記 (g) 参照）。
+
+### E2 への申し送り
+
+- `Event::WorkerStarted.run_seq`/`work_unit_id` と `Event::WorkerFinished.role/end` の `work_unit_id`
+  相当は、E1 では暗黙の WorkUnit（`work_unit_id = None`）のみ。E2 で `execution_plans`/`work_units`/
+  `runs` の migration 0026 を入れるときに、`task_ops::derive::current_run_seq`/`latest_checkpoint`/
+  `no_progress_streak`/`consecutive_continuations` を WorkUnit 単位（`work_unit_id` でフィルタ）に
+  拡張する必要がある（現状は暗黙の WU 前提でタスク全体を見ている）。
+- `task-dispatch/src/checkpoint.rs` の mechanical 収集は `TaskWorkspaces.repos.first()`（先頭リポジトリ）
+  だけを見ている。WorkUnit ごとに複数リポジトリを扱うようになったら見直すこと（E1 の対象は
+  「暗黙の WU = Task 全体」なので、これで正しい）。
+- D14/D17（Planner・replanning）で `Trigger::Continue{why: Advance|WorkUnitRetry|Planned|Replan}` を
+  実際に使う配線はまだ無い（`ContinueWhy` 型と `transition()` の対応はすでに存在する。E2/E3/E4 で
+  使うだけでよい）。
+- `docs/protocol/checkpoint.schema.json` と `Checkpoint`/`WorkerCheckpointInput` は WorkUnit の
+  `work_unit` 欄をすでに持っているが、E1 では常に `null`。E2 で実際に埋めること。

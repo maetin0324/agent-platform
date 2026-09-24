@@ -84,11 +84,11 @@ pub use probe::{PROBE_CACHE_TTL, PROBE_TIMEOUT, Reachability, probe_models};
 pub use process_group::{ProcessGroup, kill_tree, kill_tree_with};
 pub use protocol::{
     ActiveMilestoneContext, ActiveProjectContext, Answer, ChildSummary, ClusterContext,
-    CommentContext, ConversationAddressee, ConversationTurn, Evidence, GenreContext,
-    GenreRoleContext, MemoryContext, MilestoneBrief, MilestoneReviewContext, MilestoneTaskResult,
-    NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, ProviderFailure, RecentWork,
-    ReviewOutput, ReviewRequest, ReviewVerdictOut, RoleContext, RunContext, RunRequest,
-    SessionHandle, WorkerMessage,
+    CommentContext, ContinuationContext, ConversationAddressee, ConversationTurn, Evidence,
+    GenreContext, GenreRoleContext, MemoryContext, MilestoneBrief, MilestoneReviewContext,
+    MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview,
+    ProviderFailure, RecentWork, ReviewOutput, ReviewRequest, ReviewVerdictOut, RoleContext,
+    RunContext, RunRequest, SessionHandle, WorkerMessage,
 };
 pub use provider::classify_provider_failure;
 pub use result_report::{

@@ -750,6 +750,67 @@ fn describe_run_end(end: task_core::RunEnd) -> String {
     }
 }
 
+/// ADR-0072 D9（Phase E1）: この run が continuation（予算切れ・yield の続き）なら、次の run の
+/// `RunContext.continuation` に渡す最小限の文脈を events から純粋に組み立てる。`events` には、
+/// これから始まる run 自身の `WorkerStarted`（run_seq の計算に使う）が既に入っている前提
+/// （`run_worker` が `dispatch` の遷移と `WorkerStarted` の追記のあとに呼ばれるため）。
+/// continuation でなければ `None`（前の run の会話・出力の全文は載せない。D9）。
+fn build_continuation_context(events: &[(u64, Event)]) -> Option<task_worker::ContinuationContext> {
+    if consecutive_continuations(events) == 0 {
+        return None;
+    }
+    let checkpoint = latest_checkpoint(events)?;
+    let run_seq = current_run_seq(events);
+    let previous_end = events
+        .iter()
+        .rev()
+        .find_map(|(_, ev)| match ev {
+            Event::WorkerFinished {
+                role: None,
+                end: Some(e),
+                ..
+            } => Some(describe_run_end(*e)),
+            _ => None,
+        })
+        .unwrap_or_else(|| "budget_exhausted".to_string());
+    // これまでの run の 1 行要約（古い順、最大 10 件）。
+    let mut seq_by_run: HashMap<&str, u32> = HashMap::new();
+    let mut n = 0u32;
+    for (_, ev) in events {
+        if let Event::WorkerStarted {
+            run_id, role: None, ..
+        } = ev
+        {
+            n += 1;
+            seq_by_run.insert(run_id.as_str(), n);
+        }
+    }
+    let mut prior_runs: Vec<String> = Vec::new();
+    for (_, ev) in events {
+        if let Event::WorkerFinished {
+            run_id,
+            role: None,
+            end: Some(e),
+            ..
+        } = ev
+            && let Some(seq) = seq_by_run.get(run_id.as_str())
+        {
+            prior_runs.push(format!("Run #{seq} {}", describe_run_end(*e)));
+        }
+    }
+    if prior_runs.len() > 10 {
+        let start = prior_runs.len() - 10;
+        prior_runs = prior_runs.split_off(start);
+    }
+    let checkpoint_json = serde_json::to_value(&checkpoint).ok()?;
+    Some(task_worker::ContinuationContext {
+        run_seq,
+        previous_end,
+        checkpoint: checkpoint_json,
+        prior_runs,
+    })
+}
+
 /// Phase 33: `recent_work_of` が `list_page` から読む候補の上限（裏方タスクを除いた後に
 /// `RECENT_WORK_LIMIT` 件へ絞るための余裕）。
 const RECENT_WORK_SCAN: usize = 100;
@@ -7942,6 +8003,10 @@ async fn run_worker(
             session_diff: extras.session_diff,
             // ADR-0056 D3（Phase 79）: mount された skills（KB に実在したものだけ）。
             skills: extras.skills,
+            // ADR-0072 D9（Phase E1）: 予算切れ・yield の続きなら、前の run の checkpoint と
+            // これまでの run の 1 行要約。continuation でない run では `None`
+            // （プロンプトは D10 の追加分を除きバイト単位で従来どおり）。
+            continuation: build_continuation_context(&events),
         },
     };
     // ADR-0066 D1（Phase 110b）: ローカルの git worktree のホスト実行にだけ、共有ビルドキャッシュの
@@ -19340,6 +19405,407 @@ mod tests {
             matches!(status, Status::Reviewing | Status::Done),
             "a missing skill mount must not fail the run: {status:?}"
         );
+    }
+
+    // ========== ADR-0072（Phase E1）: run lifecycle / checkpoint / continuation ==========
+
+    /// 常に `Terminal::BudgetExhausted` を返す（checkpoint は書かない。mechanical だけになる）。
+    struct AlwaysBudgetExhaustedAdapter;
+
+    #[async_trait]
+    impl WorkerAdapter for AlwaysBudgetExhaustedAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            _req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            Ok(RunOutcome {
+                terminal: Terminal::BudgetExhausted {
+                    kind: task_core::BudgetKind::Turns,
+                    message: "error_max_turns".into(),
+                    usage: None,
+                },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// ADR-0072 (a)(b)(e)(g): 予算切れは `Trigger::Continue` で `Ready` に戻り attempts を消費しない。
+    /// 進捗のない checkpoint が連続 2 回続くと `blocked`（`QuestionRaised` + `Approval`）。人の回答
+    /// （`Trigger::Answer`）で窓が戻り、また continuation が進む。
+    #[tokio::test]
+    async fn budget_exhausted_run_continues_without_consuming_attempts_then_blocks_on_no_progress()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            2,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        let mut d = dispatcher(store.clone(), Arc::new(AlwaysBudgetExhaustedAdapter), 1);
+
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Blocked, "{stored:?}");
+        assert_eq!(
+            stored.attempts, 0,
+            "continuation は attempts を消費しない (g)"
+        );
+
+        let events = store.events_for(task_id).unwrap();
+        let checkpoint_events = events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::CheckpointSaved { .. }))
+            .count();
+        assert!(checkpoint_events >= 2, "{checkpoint_events}");
+        let ends: Vec<_> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkerFinished {
+                    role: None, end, ..
+                } => Some(*end),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            ends.iter().all(|e| matches!(
+                e,
+                Some(task_core::RunEnd::BudgetExhausted {
+                    kind: task_core::BudgetKind::Turns
+                })
+            )),
+            "{ends:?}"
+        );
+        // D18/D21: 上限到達・進捗なしは（cross_department の質問などと同じ扱いで）`WorkerFinished.outcome`
+        // が `"question: ..."` になり、`Trigger::WorkerQuestion` の一般経路で `blocked` になる。
+        let last_outcome = events
+            .iter()
+            .rev()
+            .find_map(|(_, e)| match e {
+                Event::WorkerFinished {
+                    role: None,
+                    outcome,
+                    ..
+                } => Some(outcome.clone()),
+                _ => None,
+            })
+            .expect("some WorkerFinished");
+        assert!(last_outcome.starts_with("question: "), "{last_outcome}");
+        assert!(last_outcome.contains("進捗なし"), "{last_outcome}");
+
+        // (g): continue は試行に数えない（`retry_policy::attempt_history`）。
+        let events_only: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let history = task_core::retry_policy::attempt_history(&stored, &events_only);
+        assert!(history.is_empty(), "{history:?}");
+        // (g): `classify_task_failure` は blocked のタスクを見ても Failed 前提の分類を返すだけなので
+        // ここでは呼ばない。`stats::classify_outcome` が continue を Error に数えないことは
+        // `task-api::stats::tests::outcome_prefixes_are_classified` で確認済み。
+
+        // D18: 人の回答で窓が戻る。
+        store
+            .apply_transition(
+                task_id,
+                Trigger::Answer,
+                Some(Event::Answered {
+                    question: "実行が進みません".into(),
+                    answer: "続けてください".into(),
+                }),
+            )
+            .unwrap();
+        assert_eq!(store.get(task_id).unwrap().unwrap().status, Status::Ready);
+        let report = run_until_idle(&mut d, 200).await;
+        assert!(report.idle, "{report:?}");
+        // 同じ（進捗を示さない）アダプタなので、また 2 回の無進捗 continuation の後 blocked に戻る。
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Blocked);
+        assert_eq!(stored.attempts, 0);
+    }
+
+    /// 1 回目は `Terminal::Yielded`（checkpoint で進捗を申告）、2 回目は `done` を返すアダプタ。
+    /// 渡された `RunContext` を記録する。
+    struct YieldThenDoneAdapter {
+        seen: Arc<StdMutex<Vec<task_worker::RunContext>>>,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for YieldThenDoneAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            let n = {
+                let mut seen = self.seen.lock().unwrap();
+                seen.push(req.context.clone());
+                seen.len()
+            };
+            if n == 1 {
+                Ok(RunOutcome {
+                    terminal: Terminal::Yielded {
+                        checkpoint: serde_json::json!({
+                            "completed": ["A を実装した"],
+                            "remaining": ["B のテスト"],
+                            "next_action": "B のテストを書く",
+                        }),
+                        usage: None,
+                    },
+                    exit_code: Some(0),
+                })
+            } else {
+                Ok(done_outcome())
+            }
+        }
+    }
+
+    /// ADR-0072 (c)(d): result.json の `yield` は `Terminal::Yielded` → `Trigger::Continue` になり、
+    /// 次の run の `RunContext.continuation` に checkpoint と Run 番号が載る（会話の全文は載らない —
+    /// そもそも `ContinuationContext` は checkpoint の JSON しか運ばない）。1 回目の `RunContext` は
+    /// continuation を持たない。
+    #[tokio::test]
+    async fn yielded_run_continues_and_the_next_run_context_carries_the_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut d = dispatcher(
+            store.clone(),
+            Arc::new(YieldThenDoneAdapter { seen: seen.clone() }),
+            1,
+        );
+
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(
+            stored.attempts, 0,
+            "continuation は attempts を消費しない (g)"
+        );
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+
+        let contexts = seen.lock().unwrap().clone();
+        assert_eq!(contexts.len(), 2, "{contexts:?}");
+        assert!(
+            contexts[0].continuation.is_none(),
+            "最初の run には continuation は無い: {:?}",
+            contexts[0].continuation
+        );
+        let cont = contexts[1]
+            .continuation
+            .as_ref()
+            .expect("2 回目の run は continuation を持つ");
+        assert_eq!(cont.run_seq, 2);
+        assert_eq!(cont.previous_end, "yielded");
+        assert_eq!(cont.checkpoint["next_action"], "B のテストを書く");
+        assert_eq!(cont.prior_runs, vec!["Run #1 yielded".to_string()]);
+
+        let events = store.events_for(task_id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::CheckpointSaved { .. })),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::WorkerFinished {
+                    role: None,
+                    end: Some(task_core::RunEnd::Yielded),
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// ADR-0072 §6 (f): `[execution] continuation = false` なら、予算切れは従来どおり
+    /// `WorkerError{retryable:true}` になり attempts を消費する（continuation しない）。
+    #[tokio::test]
+    async fn continuation_disabled_restores_the_legacy_worker_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        let mut d = dispatcher(store.clone(), Arc::new(AlwaysBudgetExhaustedAdapter), 1);
+        d.config.execution.continuation = false;
+
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Failed, "{stored:?}");
+        assert_eq!(
+            stored.attempts, 2,
+            "max_retries=1 なので 2 回試行して失敗 (f)"
+        );
+        let events = store.events_for(task_id).unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::CheckpointSaved { .. })),
+            "continuation を無効にしたら checkpoint も作らない: {events:?}"
+        );
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::Transitioned { reason, .. } if reason == "worker_error"
+            )),
+            "{events:?}"
+        );
+        assert!(
+            !events.iter().any(
+                |(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == "continue")
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// ADR-0072 (h): daemon の再起動（同じ store で新しい Dispatcher）の後も、
+    /// 最新の checkpoint から continuation が組まれる（全ての状態は DB/events にあり、
+    /// dispatcher のメモリには無いため）。
+    #[tokio::test]
+    async fn continuation_survives_a_dispatcher_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            2,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        // 「daemon 再起動前」の状態を events で直接作る（実際の Dispatcher の tick は使わない — 即完了
+        // する fake adapter で 2 つの tick にまたがる非同期の完了を決定的に待つのは難しいため。
+        // ここで作る events は、実際の on_worker_finished が積む形とバイト単位で同じにする）。
+        store
+            .apply_transition_with_events(
+                task_id,
+                Trigger::Dispatch,
+                vec![Event::WorkerStarted {
+                    run_id: "run-1".into(),
+                    adapter: "instant".into(),
+                    model: "m".into(),
+                    provider: Some("p1".into()),
+                    account: None,
+                    role: None,
+                    task_role: None,
+                }],
+            )
+            .unwrap();
+        let checkpoint = task_core::Checkpoint {
+            schema: task_core::CHECKPOINT_SCHEMA.into(),
+            task_id: task_id.to_string(),
+            work_unit: None,
+            run_id: "run-1".into(),
+            run_seq: 1,
+            end: task_core::CheckpointEnd::BudgetExhausted,
+            source: task_core::CheckpointSource::Mechanical,
+            completed: vec![],
+            remaining: vec!["続きの作業".into()],
+            decisions: vec![],
+            files_changed: vec![],
+            tests_run: vec![],
+            known_failures: vec![],
+            artifact_refs: vec![],
+            next_action: "続ける".into(),
+            open_questions: vec![],
+            plan_issue: None,
+            repo_state: None,
+            recent_activity: vec![],
+            created_at: "2026-09-24T00:00:00Z".into(),
+        };
+        store
+            .apply_transition_with_events(
+                task_id,
+                Trigger::Continue {
+                    why: task_core::ContinueWhy::Continue,
+                },
+                vec![
+                    Event::WorkerFinished {
+                        run_id: "run-1".into(),
+                        outcome: "continue: budget_exhausted(turns) の続き（Run #2）".into(),
+                        usage: None,
+                        role: None,
+                        metrics: None,
+                        end: Some(task_core::RunEnd::BudgetExhausted {
+                            kind: task_core::BudgetKind::Turns,
+                        }),
+                    },
+                    Event::CheckpointSaved {
+                        run_id: "run-1".into(),
+                        work_unit_id: None,
+                        checkpoint: Box::new(checkpoint),
+                    },
+                ],
+            )
+            .unwrap();
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Ready, "{stored:?}");
+        assert_eq!(stored.attempts, 0);
+        // ここまでが「daemon 再起動前」に相当する状態。d1（前のプロセスの Dispatcher）は無く、
+        // 全ての状態は DB/events にある（`infra_backoff` 等のプロセス内メモリは何も使っていない）。
+
+        // 新しい Dispatcher（同じ store）で続きを回す。
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut d2 = dispatcher(
+            store.clone(),
+            Arc::new(InterruptProbeAdapter {
+                seen: seen.clone(),
+                hold: Duration::ZERO,
+            }),
+            1,
+        );
+        let report = run_until_idle(&mut d2, 200).await;
+        assert!(report.idle, "{report:?}");
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.attempts, 0, "continuation は attempts を消費しない");
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+
+        let contexts = seen.lock().unwrap().clone();
+        assert_eq!(contexts.len(), 1, "{contexts:?}");
+        let cont = contexts[0]
+            .continuation
+            .as_ref()
+            .expect("再起動後の run も continuation を持つ");
+        assert_eq!(cont.run_seq, 2);
+        assert!(cont.previous_end.starts_with("budget_exhausted"));
     }
 }
 

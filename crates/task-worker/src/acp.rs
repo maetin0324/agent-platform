@@ -148,6 +148,9 @@ struct ResultFile {
     question: Option<String>,
     #[serde(default)]
     evidence: serde_json::Value,
+    /// ADR-0072 D9（Phase E1）: graceful yield（`claude_code::ResultFile::r#yield` と同じ規約）。
+    #[serde(default, rename = "yield")]
+    r#yield: Option<serde_json::Value>,
 }
 
 fn lenient_evidence(value: serde_json::Value) -> Vec<Evidence> {
@@ -548,13 +551,17 @@ async fn wait_for_response(
     loop {
         let wall_elapsed = start.elapsed();
         if wall_elapsed >= limits.wall_clock {
-            return Ok(WaitOutcome::TimedOut(Terminal::Error {
+            // ADR-0072 D7/§6 (i)（Phase E1）: acp には turn の上限が無いので、wall-clock の打ち切り
+            // が continuation の唯一の入口になる（`Terminal::BudgetExhausted{kind: WallClock}`）。
+            return Ok(WaitOutcome::TimedOut(Terminal::BudgetExhausted {
+                kind: task_core::BudgetKind::WallClock,
                 message: "wall clock exceeded".into(),
-                retryable: true,
+                usage: None,
             }));
         }
         let idle_elapsed = last_activity.elapsed();
         if idle_elapsed >= limits.idle_timeout {
+            // ADR-0072 D7: idle timeout は E1 では harness_error に分類変更しない（§7 U7）。
             return Ok(WaitOutcome::TimedOut(Terminal::Error {
                 message: "idle timeout".into(),
                 retryable: true,
@@ -741,6 +748,16 @@ async fn terminal_from_result_file(
     artifacts_rel: &str,
     stop_reason: &str,
 ) -> Terminal {
+    // ADR-0072 D7/§6 (i)（Phase E1）: `stopReason == "max_turn_requests"` は turn の上限に当たったと
+    // 読める（実機の文言は未確認。§7 U1）。result.json より優先する（claude-code の `error_max_turns`
+    // と同じ扱い）。
+    if stop_reason == "max_turn_requests" {
+        return Terminal::BudgetExhausted {
+            kind: task_core::BudgetKind::Turns,
+            message: format!("acp stopReason: {stop_reason}"),
+            usage: None,
+        };
+    }
     let result_path = artifacts_dir.join("result.json");
     let text = match tokio::fs::read_to_string(&result_path).await {
         Ok(t) => t,
@@ -755,6 +772,7 @@ async fn terminal_from_result_file(
     };
     match serde_json::from_str::<ResultFile>(&text) {
         Ok(rf) => {
+            // ADR-0072 D9: 優先順位は `question` > `summary` > `yield`。
             if let Some(question) = rf.question {
                 Terminal::Question { text: question }
             } else if let Some(summary) = rf.summary {
@@ -766,10 +784,15 @@ async fn terminal_from_result_file(
                     evidence: lenient_evidence(rf.evidence),
                     usage: None,
                 }
+            } else if let Some(checkpoint) = rf.r#yield {
+                Terminal::Yielded {
+                    checkpoint,
+                    usage: None,
+                }
             } else {
                 Terminal::Error {
                     message: format!(
-                        "{artifacts_rel}/result.json has neither 'summary' nor 'question'"
+                        "{artifacts_rel}/result.json has neither 'summary', 'question' nor 'yield'"
                     ),
                     retryable: true,
                 }
@@ -1520,6 +1543,35 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
         }
     }
 
+    /// ADR-0072 D9（Phase E1）: `result.json` の `{"yield": {...}}` が `Terminal::Yielded` になる。
+    #[tokio::test]
+    async fn result_yield_becomes_terminal_yielded() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = stub_acp(
+            dir.path(),
+            &format!(
+                r#"{HANDSHAKE}
+read -r _prompt
+printf '%s' '{{"yield":{{"completed":["A"],"next_action":"do B"}}}}' > artifacts/result.json
+printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
+"#
+            ),
+        );
+        let adapter = AcpAdapter::new(config);
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = adapter
+            .run(req, "run-yield", default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Yielded { checkpoint, .. } => {
+                assert_eq!(checkpoint["next_action"], "do B");
+            }
+            other => panic!("expected yielded, got {other:?}"),
+        }
+    }
+
     /// ADR-0056 D3（Phase 79）: `context.skills` に乗った skill は、前置き（プロンプト文面）の末尾に
     /// `## Skills（celeris）` 節として直接埋め込まれる（acp にはファイルを自動で読む契約が無いため）。
     #[tokio::test]
@@ -1839,11 +1891,12 @@ while true; do sleep 0.1; done
         let outcome = adapter.run(req, "run-8", limits, &sink).await.unwrap();
         assert!(start.elapsed() < Duration::from_secs(5));
         match outcome.terminal {
-            Terminal::Error { retryable, message } => {
-                assert!(retryable);
+            Terminal::BudgetExhausted { kind, message, .. } => {
+                // ADR-0072 D7/§6 (i)（Phase E1）: acp には turn の上限が無いので wall-clock だけが入口。
+                assert_eq!(kind, task_core::BudgetKind::WallClock);
                 assert!(message.contains("wall clock exceeded"), "{message}");
             }
-            other => panic!("expected error, got {other:?}"),
+            other => panic!("expected budget_exhausted, got {other:?}"),
         }
         // stub は 3 番目の read の直後に自分の pid を書く。読めなかった (=タイムアウト前に到達できなかった)
         // 場合はテストの前提が崩れているのでそこで失敗させる。

@@ -354,6 +354,37 @@
       ],
       "type": "string"
     },
+    "ContinuationContext": {
+      "description": "ADR-0072 D9（Phase E1）: 続きの実行に渡す最小限の文脈。前の run の会話・出力の全文は載せない\n（checkpoint と、これまでの run の 1 行要約だけ）。",
+      "properties": {
+        "checkpoint": {
+          "description": "直前の run が確定させた checkpoint（`task_core::Checkpoint` と同じ形。生の JSON のまま\n前置きに埋め込む。celeris 側の型に依存させないため `serde_json::Value`）。"
+        },
+        "previous_end": {
+          "description": "直前の run の終わり方（`\"yielded\"` | `\"budget_exhausted(turns)\"` | …。\n`describe_run_end` と同じ書式。人が読む前置き用の文字列であり、遷移の判断には使わない）。",
+          "type": "string"
+        },
+        "prior_runs": {
+          "description": "これまでの run の 1 行要約（新しい順、最大 10 件。例: `\"Run #2 budget_exhausted(turns)\"`）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "run_seq": {
+          "description": "これから始まる run の番号（1 始まり。前の run が `run_seq` なら、これは `run_seq + 1`）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_seq",
+        "previous_end",
+        "checkpoint"
+      ],
+      "type": "object"
+    },
     "ConversationAddressee": {
       "description": "`context.conversation_addressee`（ADR-0033 D4 / Phase 28）: この run が対話用タスクなら、相手が\n秘書かそれ以外かを表す。対話でない run では `None`。この値そのものは判断せず、`preamble::render`\nが対話専用の指示文（作業を始めない・委譲不可）を出し分けるためだけに使う純粋なデータ\n（判定はディスパッチャが `task.conversation` と組織図から決定的に行う。DESIGN 原則 1）。",
       "enum": [
@@ -1383,6 +1414,17 @@
         "comments_enabled": {
           "description": "ADR-0044 D2: この run はコメントを書ける（`{\"type\":\"comment\",\"body\":\"…\"}`）か。\n`true` のときだけ前置きに「短い進捗や判断の記録はコメントに書け」の節を出す。\n**仕事の run はすべて true** なので、Phase 53 以降、普通の run の前置きにはこの節が必ず入る\n（Phase 52 とバイト単位で同じなのは、この 3 つが既定のまま = レビュー run と対話 run だけ）。",
           "type": "boolean"
+        },
+        "continuation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContinuationContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0072 D9: この run が予算切れ・yield の続き（continuation）のときだけ `Some`。\n`preamble::render` がこれを見て「続きの実行（Run #N）」の節と checkpoint を描く\n（`None` の run のプロンプトは D9 の追加分を除きバイト単位で従来どおり）。"
         },
         "conversation": {
           "description": "ADR-0033 D4: 担当のノードとのこの案件での直近のやり取り（古い順）。",
