@@ -42,9 +42,9 @@ use task_worker::{
     ActiveMilestoneContext, ActiveProjectContext, AdapterError, Answer, ChildSummary,
     CommentContext, ConversationAddressee, ConversationTurn, EventSink, GenreContext,
     LocalWorkspace, MemoryContext, MemoryDir, MilestoneBrief, MilestoneReviewContext,
-    MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, RecentWork,
-    RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings, SshWorkspace,
-    Reachability, SyncMode, Terminal, WorkerAdapter, WorkerMessage, Workspace, WorkspaceError,
+    MilestoneTaskResult, NodeContext, OrgNodeContext, PROTOCOL_VERSION, PriorReview, Reachability,
+    RecentWork, RoleContext, RunContext, RunLimits, RunOutcome, RunRequest, SshSettings,
+    SshWorkspace, SyncMode, Terminal, WorkerAdapter, WorkerMessage, Workspace, WorkspaceError,
     control_master_alive_blocking, remote_dir_is_resolved, remote_exec_instructions,
     resolve_remote_dir,
 };
@@ -1374,15 +1374,22 @@ fn tunnel_prober_loop(
                 let Ok(guard) = state.lock() else { continue };
                 guard
                     .get(&key)
-                    .map(|s| now.duration_since(s.checked_at) >= Duration::from_secs(s.interval_secs))
+                    .map(|s| {
+                        now.duration_since(s.checked_at) >= Duration::from_secs(s.interval_secs)
+                    })
                     .unwrap_or(true)
             };
             if !due {
                 continue;
             }
             let healthy = probe(listen);
-            let Ok(mut guard) = state.lock() else { continue };
-            let prev_interval = guard.get(&key).map(|s| s.interval_secs).unwrap_or(*min_secs);
+            let Ok(mut guard) = state.lock() else {
+                continue;
+            };
+            let prev_interval = guard
+                .get(&key)
+                .map(|s| s.interval_secs)
+                .unwrap_or(*min_secs);
             guard.insert(
                 key,
                 TargetProbeState {
@@ -2033,9 +2040,8 @@ impl Dispatcher {
         }
         // ADR-0062 A: TOTP のクラスタは人の入力が要るので、その場での自動復旧を待たせない。
         if spec.auth == "totp" {
-            reason = format!(
-                "{reason}\nGUI の「クラスタ」画面から TOTP を入力して再接続してください。"
-            );
+            reason =
+                format!("{reason}\nGUI の「クラスタ」画面から TOTP を入力して再接続してください。");
         }
         let first = self
             .cluster_cooldown
@@ -2153,10 +2159,9 @@ impl Dispatcher {
                 && liveness_probe_secs > 0
                 && let Some(probe) = self.cluster_command_probe.clone()
             {
-                let due = self
-                    .last_cluster_command_probe
-                    .get(&id)
-                    .is_none_or(|last| now.duration_since(*last) >= Duration::from_secs(liveness_probe_secs));
+                let due = self.last_cluster_command_probe.get(&id).is_none_or(|last| {
+                    now.duration_since(*last) >= Duration::from_secs(liveness_probe_secs)
+                });
                 if due {
                     self.last_cluster_command_probe.insert(id.clone(), now);
                     let ssh_command = ssh_command.clone();
@@ -2249,7 +2254,12 @@ impl Dispatcher {
         if self.eligible.is_some() {
             return;
         }
-        if !self.config.clusters.values().any(|c| !c.forwards.is_empty()) {
+        if !self
+            .config
+            .clusters
+            .values()
+            .any(|c| !c.forwards.is_empty())
+        {
             return;
         }
         let now_instant = Instant::now();
@@ -2356,9 +2366,7 @@ impl Dispatcher {
     fn refresh_one_forward(&mut self, spec: &ClusterSpec, fwd: &ClusterForwardSpec) {
         let mut listener = self.probe_listener(&fwd.listen);
         let mut ensure_error: Option<String> = None;
-        if !listener
-            && let Some(ensure) = self.tunnel_forward_ensurer.clone()
-        {
+        if !listener && let Some(ensure) = self.tunnel_forward_ensurer.clone() {
             match ensure(&spec.host, &fwd.listen, &fwd.target) {
                 Ok(()) => {
                     listener = self.probe_listener(&fwd.listen);
@@ -2523,7 +2531,12 @@ impl Dispatcher {
         kind: TunnelEventKind,
         at: OffsetDateTime,
     ) {
-        tracing::info!(cluster, listen, kind = kind.as_str(), "tunnel: state transition");
+        tracing::info!(
+            cluster,
+            listen,
+            kind = kind.as_str(),
+            "tunnel: state transition"
+        );
         self.tunnel_events.push_back(TunnelEvent {
             cluster: cluster.to_string(),
             listen: listen.to_string(),
@@ -4608,11 +4621,7 @@ impl Dispatcher {
         let continuing = is_cos_conversation && session.as_ref().is_some_and(|s| s.resume);
         let node = if continuing { None } else { node };
         let memory = if continuing { None } else { memory };
-        let conversation = if continuing {
-            Vec::new()
-        } else {
-            conversation
-        };
+        let conversation = if continuing { Vec::new() } else { conversation };
         let organization = if (available_genres.is_empty() && !is_cos_conversation) || continuing {
             Vec::new()
         } else {
@@ -4935,7 +4944,8 @@ impl Dispatcher {
                              retire して新しいセッションを作る（ADR-0054 Phase 67b）"
                         );
                     }
-                    self.store.node_session_retire(node_id, kind, project_id, now)?;
+                    self.store
+                        .node_session_retire(node_id, kind, project_id, now)?;
                 }
                 // claude-code は celeris が id を前もって決める（`--session-id`）。codex / acp は
                 // アダプタが run の途中で初めて確定させるので、確定するまでは空文字（ADR-0054 D1）。
@@ -5336,9 +5346,13 @@ impl Dispatcher {
         }
         // ADR-0063 D3（Phase 109）: 調査系（literature/web-research）の受け入れ条件に部分達成の
         // 逃げ道が無ければ**警告**（拒否はしない。決定的、LLM は使わない）。
-        for note in
-            task_core::warn_missing_partial_ok(plan, task, org, &self.config.roles, &self.config.genres)
-        {
+        for note in task_core::warn_missing_partial_ok(
+            plan,
+            task,
+            org,
+            &self.config.roles,
+            &self.config.genres,
+        ) {
             tracing::warn!(task_id = %task.id, "{note}");
         }
     }
@@ -6347,6 +6361,34 @@ impl Dispatcher {
             } else {
                 None
             };
+            // A human-approved documentation reconciliation arrives with a committed worktree.
+            // Preserve that exact branch for the subsequent ordinary verification/review task.
+            if task_dir
+                .join("artifacts/reconciliation-plan.json")
+                .is_file()
+                && let Some(marker) = task_ops::workspace::read_marker(&task_dir)
+                && let Some(existing) = marker.repos.iter().find(|r| r.name == row.name)
+                && std::path::Path::new(&existing.source) == source
+                && std::path::Path::new(&existing.dir) == dir
+                && let (Some(branch), Some(sha)) = (&existing.branch, &existing.base)
+                && branch.starts_with("docs-reconcile/")
+                && task_ops::changes::current_branch(&dir).as_ref() == Some(branch)
+            {
+                repos.push(task_worker::TaskRepo::git(
+                    row.name.clone(),
+                    task_worker::LocalWorktree {
+                        dir,
+                        task_dir: task_dir.clone(),
+                        repo: source,
+                        branch: branch.clone(),
+                        base: task_worker::BaseRef {
+                            kind: task_worker::BaseKind::Main,
+                            sha: sha.clone(),
+                        },
+                    },
+                ));
+                continue;
+            }
             match base {
                 Some(base) => repos.push(task_worker::TaskRepo::git(
                     row.name.clone(),
@@ -7103,7 +7145,10 @@ async fn run_worker(
                                 &fresh,
                                 Event::WorkspaceModeDowngraded {
                                     cluster: effective_settings.cluster.clone(),
-                                    path: effective_settings.remote_dir.to_string_lossy().into_owned(),
+                                    path: effective_settings
+                                        .remote_dir
+                                        .to_string_lossy()
+                                        .into_owned(),
                                     reason,
                                 },
                             ) {
@@ -7371,11 +7416,13 @@ async fn run_worker(
     // ADR-0054 D1（Phase 67）: `run_worker` を通る run で継続セッションを持てるのは CoS の対話 run
     // だけ（部門長のレビュー run は `review.rs` の別経路。`run_extras` の `is_cos_conversation` と同じ
     // 判定で `extras.session` が埋まるので、ここでは `req.context.session` の有無だけを見ればよい）。
-    let session_key = req
-        .context
-        .session
-        .is_some()
-        .then(|| (task_core::COS_ID.to_string(), task_core::SessionKind::Conversation, None));
+    let session_key = req.context.session.is_some().then(|| {
+        (
+            task_core::COS_ID.to_string(),
+            task_core::SessionKind::Conversation,
+            None,
+        )
+    });
     // ADR-0067 D3: `store` は `sink` に move されるので、後段の未申告成果物の登録用に控えておく。
     let store_for_undeclared_scan = Arc::clone(&store);
     let sink = StoreSink {
@@ -9090,7 +9137,10 @@ mod tests {
             )
             .unwrap();
         let first = first.unwrap();
-        assert!(!first.resume, "the first run of a session is never a resume");
+        assert!(
+            !first.resume,
+            "the first run of a session is never a resume"
+        );
         assert!(diff0.is_empty(), "a brand-new session has no summary yet");
         assert!(!first.session_id.is_empty());
         let first_id = first.session_id.clone();
@@ -9398,7 +9448,11 @@ mod tests {
             "no new Approval child was created; the human was not asked again"
         );
         assert_eq!(approvals_after[0].id, approval.id);
-        assert_eq!(adapter.calls.load(Ordering::SeqCst), 2, "the reviewer ran exactly twice");
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            2,
+            "the reviewer ran exactly twice"
+        );
     }
 
     /// ADR-0033 D2（監査 D-3）: 承認子タスクは親の `project_id` / `milestone_id` / `assignee` を継ぐ
@@ -10943,7 +10997,13 @@ mod tests {
     /// 間引きを避けたいテストは `d.last_cluster_tunnel_refresh` を過去にずらす（`CLUSTER_LIVENESS_INTERVAL`
     /// の間引きだけがテストから直接いじれる。target probe 側は 1 forward につき最初の 1 回だけ同期に
     /// 種を蒔くので、通常のテストはそれだけで足りる）。
-    fn cluster_spec_with_forward(id: &str, host: &str, auth: &str, listen: &str, target: &str) -> ClusterSpec {
+    fn cluster_spec_with_forward(
+        id: &str,
+        host: &str,
+        auth: &str,
+        listen: &str,
+        target: &str,
+    ) -> ClusterSpec {
         let mut spec = cluster_spec_with_auth(id, host, auth);
         spec.forwards = vec![ClusterForwardSpec {
             listen: listen.into(),
@@ -10961,24 +11021,38 @@ mod tests {
         spec.sync = SyncMode::Worktree;
         let task_id = TaskId::new();
 
-        let worktree_settings =
-            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Worktree);
+        let worktree_settings = spec.ssh_settings(
+            std::path::Path::new("/work/x"),
+            task_id,
+            WorkspaceMode::Worktree,
+        );
         assert_eq!(worktree_settings.sync, SyncMode::Worktree);
 
-        let shared_settings =
-            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Shared);
+        let shared_settings = spec.ssh_settings(
+            std::path::Path::new("/work/x"),
+            task_id,
+            WorkspaceMode::Shared,
+        );
         assert_eq!(shared_settings.sync, SyncMode::None);
 
         // rsync クラスタでも同じ: 省略（既定）は従来どおり、shared は None を強制する。
         spec.sync = SyncMode::Rsync;
         assert_eq!(
-            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Worktree)
-                .sync,
+            spec.ssh_settings(
+                std::path::Path::new("/work/x"),
+                task_id,
+                WorkspaceMode::Worktree
+            )
+            .sync,
             SyncMode::Rsync
         );
         assert_eq!(
-            spec.ssh_settings(std::path::Path::new("/work/x"), task_id, WorkspaceMode::Shared)
-                .sync,
+            spec.ssh_settings(
+                std::path::Path::new("/work/x"),
+                task_id,
+                WorkspaceMode::Shared
+            )
+            .sync,
             SyncMode::None
         );
     }
@@ -11022,7 +11096,11 @@ mod tests {
 
         // DB の上書きがあればそちらが勝つ。
         store
-            .cluster_settings_set("pegasus", Some("/work/NBB/db-override"), OffsetDateTime::now_utc())
+            .cluster_settings_set(
+                "pegasus",
+                Some("/work/NBB/db-override"),
+                OffsetDateTime::now_utc(),
+            )
             .unwrap();
         let (_, resolved, _) = d.cluster_of(&task).expect("cluster configured");
         assert_eq!(resolved, PathBuf::from("/work/NBB/db-override/benchfs"));
@@ -11096,7 +11174,11 @@ mod tests {
         script
     }
 
-    fn remote_task(dir: &std::path::Path, mode: Option<WorkspaceMode>, repos: Vec<task_core::RepoRef>) -> Task {
+    fn remote_task(
+        dir: &std::path::Path,
+        mode: Option<WorkspaceMode>,
+        repos: Vec<task_core::RepoRef>,
+    ) -> Task {
         let mut task = new_task(
             dir,
             Check::Command {
@@ -11178,13 +11260,8 @@ mod tests {
         settings.task_id = task.id.to_string();
         settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
 
-        let outcome = run_worker_for_test(
-            store.clone(),
-            task.id,
-            tmp.path().join("mirror"),
-            settings,
-        )
-        .await;
+        let outcome =
+            run_worker_for_test(store.clone(), task.id, tmp.path().join("mirror"), settings).await;
         assert!(outcome.is_ok(), "{:?}", outcome.err());
 
         let events = store.events_for(task.id).unwrap();
@@ -11224,13 +11301,8 @@ mod tests {
         settings.task_id = task.id.to_string();
         settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
 
-        let outcome = run_worker_for_test(
-            store.clone(),
-            task.id,
-            tmp.path().join("mirror"),
-            settings,
-        )
-        .await;
+        let outcome =
+            run_worker_for_test(store.clone(), task.id, tmp.path().join("mirror"), settings).await;
         assert!(outcome.is_err());
         let events = store.events_for(task.id).unwrap();
         assert!(
@@ -11258,13 +11330,8 @@ mod tests {
         settings.task_id = task.id.to_string();
         settings.ssh_command = vec![stub.to_string_lossy().into_owned()];
 
-        let outcome = run_worker_for_test(
-            store.clone(),
-            task.id,
-            tmp.path().join("mirror"),
-            settings,
-        )
-        .await;
+        let outcome =
+            run_worker_for_test(store.clone(), task.id, tmp.path().join("mirror"), settings).await;
         assert!(outcome.is_err());
         let events = store.events_for(task.id).unwrap();
         assert!(
@@ -11307,11 +11374,13 @@ mod tests {
         let forward_present = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let ensure_calls_hook = ensure_calls.clone();
         let forward_present_hook = forward_present.clone();
-        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
-            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            forward_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        d.set_tunnel_forward_ensurer(Arc::new(
+            move |_host: &str, _listen: &str, _target: &str| {
+                ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                forward_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
         // Phase 85: listener と target の健康は別のフック。この試験では両方を同じフラグに束ねる
         // （ensure が listener を立て、立った listener はそのまま target も健全とみなす）。
         let forward_present_listener = forward_present.clone();
@@ -11331,9 +11400,9 @@ mod tests {
         assert!(d.tunnel_reachable("pegasus", "127.0.0.1:19001"));
         let events = d.take_tunnel_events();
         assert!(
-            events
-                .iter()
-                .any(|e| e.cluster == "pegasus" && e.listen == "127.0.0.1:19001" && e.kind == TunnelEventKind::Up),
+            events.iter().any(|e| e.cluster == "pegasus"
+                && e.listen == "127.0.0.1:19001"
+                && e.kind == TunnelEventKind::Up),
             "{events:?}"
         );
     }
@@ -11380,7 +11449,8 @@ mod tests {
 
         // 2 回目の tick（間引きを避けるため、間隔を過ぎさせる）。まだ同じ outage の間なので、
         // login_needed の再検出（新しいイベント）は起きない。
-        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.last_cluster_tunnel_refresh =
+            Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
         d.refresh_cluster_tunnels();
         assert_eq!(d.clusters_needing_login(), vec!["pegasus".to_string()]);
         let second_events = d.take_tunnel_events();
@@ -11422,11 +11492,13 @@ mod tests {
         let listener_present = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let ensure_calls_hook = ensure_calls.clone();
         let listener_present_hook = listener_present.clone();
-        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
-            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            listener_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        d.set_tunnel_forward_ensurer(Arc::new(
+            move |_host: &str, _listen: &str, _target: &str| {
+                ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                listener_present_hook.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
         let listener_present_probe = listener_present.clone();
         d.set_tunnel_listener_probe(Arc::new(move |_listen: &str| {
             listener_present_probe.load(std::sync::atomic::Ordering::SeqCst)
@@ -11441,7 +11513,8 @@ mod tests {
 
         // listener が消える（誰かが master 側を再起動した、等）。
         listener_present.store(false, std::sync::atomic::Ordering::SeqCst);
-        d.last_cluster_tunnel_refresh = Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
+        d.last_cluster_tunnel_refresh =
+            Some(Instant::now() - CLUSTER_LIVENESS_INTERVAL - Duration::from_millis(1));
         d.refresh_cluster_tunnels();
         assert_eq!(
             ensure_calls.load(std::sync::atomic::Ordering::SeqCst),
@@ -11485,10 +11558,12 @@ mod tests {
         d.set_tunnel_listener_probe(Arc::new(|_listen: &str| true));
         let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let ensure_calls_hook = ensure_calls.clone();
-        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
-            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        d.set_tunnel_forward_ensurer(Arc::new(
+            move |_host: &str, _listen: &str, _target: &str| {
+                ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
         d.set_tunnel_probe(Arc::new(|_listen: &str| false));
 
         d.refresh_cluster_tunnels();
@@ -11503,9 +11578,7 @@ mod tests {
         assert!(!d.tunnel_target_healthy("pegasus", "127.0.0.1:19004"));
         assert_eq!(
             d.tunnel_last_error("pegasus", "127.0.0.1:19004"),
-            Some(
-                "target bnode150:19004 did not answer /v1/models through the forward".to_string()
-            )
+            Some("target bnode150:19004 did not answer /v1/models through the forward".to_string())
         );
         let events = d.take_tunnel_events();
         assert!(
@@ -11585,9 +11658,21 @@ mod tests {
         assert_eq!(next_probe_interval_secs(60, 30, false), 120);
         assert_eq!(next_probe_interval_secs(120, 30, false), 240);
         assert_eq!(next_probe_interval_secs(240, 30, false), 480);
-        assert_eq!(next_probe_interval_secs(480, 30, false), 600, "capped at the max");
-        assert_eq!(next_probe_interval_secs(600, 30, false), 600, "stays at the max");
-        assert_eq!(next_probe_interval_secs(600, 30, true), 30, "one success resets to the minimum");
+        assert_eq!(
+            next_probe_interval_secs(480, 30, false),
+            600,
+            "capped at the max"
+        );
+        assert_eq!(
+            next_probe_interval_secs(600, 30, false),
+            600,
+            "stays at the max"
+        );
+        assert_eq!(
+            next_probe_interval_secs(600, 30, true),
+            30,
+            "one success resets to the minimum"
+        );
         // 設定変更で `probe_interval_secs`（min）が現在値より大きくなっても、min を下限にする。
         assert_eq!(next_probe_interval_secs(10, 30, false), 60);
     }
@@ -11682,10 +11767,12 @@ mod tests {
         }));
         let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let ensure_calls_hook = ensure_calls.clone();
-        d.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
-            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        d.set_tunnel_forward_ensurer(Arc::new(
+            move |_host: &str, _listen: &str, _target: &str| {
+                ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
         let probe_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let probe_calls_hook = probe_calls.clone();
         d.set_tunnel_probe(Arc::new(move |_listen: &str| {
@@ -12664,7 +12751,9 @@ mod tests {
             ..task_core::GenreSpec::default()
         }];
 
-        let extras = d.run_extras(&plan_parent, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&plan_parent, None, None, "claude-code")
+            .unwrap();
         assert_eq!(
             extras.available_genres[0].harness.as_deref(),
             Some("paperqa")
@@ -14166,7 +14255,9 @@ mod tests {
             usage: None,
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root, None);
-        let extras = d.run_extras(&second.task, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&second.task, None, None, "claude-code")
+            .unwrap();
         let texts: Vec<&str> = extras
             .conversation
             .iter()
@@ -14628,7 +14719,9 @@ mod tests {
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
 
-        let extras = d.run_extras(&to_secretary, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&to_secretary, None, None, "claude-code")
+            .unwrap();
         assert!(
             extras.available_genres.is_empty(),
             "対話 run は委譲できない: {extras:?}"
@@ -14728,7 +14821,9 @@ mod tests {
         }));
         let d = person_dispatcher(store.clone(), adapter, workspace_root.clone(), None);
 
-        let extras = d.run_extras(&to_secretary, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&to_secretary, None, None, "claude-code")
+            .unwrap();
         assert_eq!(
             extras.active_projects.len(),
             1,
@@ -14798,9 +14893,15 @@ mod tests {
             .session
             .as_ref()
             .expect("claude-code supports continuous sessions");
-        assert!(!session.resume, "the first run of a session is never a resume");
+        assert!(
+            !session.resume,
+            "the first run of a session is never a resume"
+        );
         assert!(first.node.is_some(), "fresh session: brief を渡す");
-        assert!(!first.organization.is_empty(), "fresh session: 組織の一覧を渡す");
+        assert!(
+            !first.organization.is_empty(),
+            "fresh session: 組織の一覧を渡す"
+        );
         assert_eq!(
             first.active_projects.len(),
             1,
@@ -14970,9 +15071,19 @@ mod tests {
         );
 
         task.project_id = Some(plain.id);
-        assert_eq!(d.run_extras(&task, None, None, "claude-code").unwrap().workspace_note, None);
+        assert_eq!(
+            d.run_extras(&task, None, None, "claude-code")
+                .unwrap()
+                .workspace_note,
+            None
+        );
         task.project_id = None;
-        assert_eq!(d.run_extras(&task, None, None, "claude-code").unwrap().workspace_note, None);
+        assert_eq!(
+            d.run_extras(&task, None, None, "claude-code")
+                .unwrap()
+                .workspace_note,
+            None
+        );
 
         // 対話 run には出さない（会話は編集をしない。ADR-0039 D2）。
         let conversation = task_ops::conversation::start(
@@ -14988,7 +15099,9 @@ mod tests {
         .unwrap()
         .task;
         assert_eq!(
-            d.run_extras(&conversation, None, None, "claude-code").unwrap().workspace_note,
+            d.run_extras(&conversation, None, None, "claude-code")
+                .unwrap()
+                .workspace_note,
             None
         );
     }
@@ -15466,7 +15579,9 @@ mod tests {
         )
         .unwrap();
 
-        let extras = d.run_extras(&started.task, None, None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&started.task, None, None, "claude-code")
+            .unwrap();
         let review = extras
             .milestone_review
             .expect("the review context is filled");
@@ -16022,7 +16137,7 @@ mod tests {
                         path: "artifacts/survey.md".into(),
                         sha256: String::new(),
                         kind: "text".into(),
-            declared: true,
+                        declared: true,
                     },
                 },
             )
@@ -16614,10 +16729,8 @@ mod tests {
         assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Done);
         let runs = captured.lock().unwrap().clone();
         assert_eq!(runs.len(), 1, "{runs:?}");
-        let expected = task_worker::build_cache::cargo_target_dir_env(
-            cache_dir.path(),
-            repo_dir.path(),
-        );
+        let expected =
+            task_worker::build_cache::cargo_target_dir_env(cache_dir.path(), repo_dir.path());
         assert!(
             runs[0].contains(&expected),
             "expected {expected:?} in {:?}",
@@ -16839,7 +16952,10 @@ mod tests {
 
         d.tick().unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert!(target_dir.exists(), "prune_after_secs = 0 must disable pruning");
+        assert!(
+            target_dir.exists(),
+            "prune_after_secs = 0 must disable pruning"
+        );
     }
 
     /// ADR-0041 D1: 前置きに作業ツリー・ブランチ・base と「このブランチにコミットせよ」が出る。
@@ -16868,7 +16984,9 @@ mod tests {
             None,
         );
         let worktree = d.task_workspaces_for(&task).expect("worktree plan");
-        let extras = d.run_extras(&task, Some(&worktree), None, "claude-code").unwrap();
+        let extras = d
+            .run_extras(&task, Some(&worktree), None, "claude-code")
+            .unwrap();
         let note = extras.workspace_note.expect("workspace_note");
         let tree = root.path().join(task.id.to_string()).join("tree");
         assert!(note.contains(&format!("→ `{}`", tree.display())), "{note}");
@@ -17160,6 +17278,105 @@ mod tests {
             out.push(store.repo_get(repo.id).unwrap().unwrap());
         }
         (project.id, out)
+    }
+
+    #[tokio::test]
+    async fn approved_docs_reconciliation_reuses_exact_worktree_branch_and_commit() {
+        use task_ops::{
+            docs_maintenance as docs,
+            workspace::{WorktreeMarker, WorktreeMarkerRepo},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let base = init_test_repo(&source);
+        let workspace = root.path().join("workspaces");
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let (project_id, repos) = project_with_repos(
+            &store,
+            &[("code", source.as_path(), task_core::RepoKind::Git)],
+        );
+        let mut task = new_task(
+            &source,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        task.project_id = Some(project_id);
+        task.repos = repos.iter().map(task_core::RepoRef::of).collect();
+        store.insert(&task).unwrap();
+        let task_dir = workspace.join(task.id.to_string());
+        let attached = task_dir.join("repos/code");
+        let state = root.path().join("state");
+        let mut plan = docs::proposal(&docs::audit(&source, "main").unwrap());
+        plan.actions.push(docs::Action::Rewrite {
+            path: "README.md".into(),
+            body: "# Approved canonical guide\n".into(),
+        });
+        docs::approve_plan(&state, "repo", &plan).unwrap();
+        let approved_sha =
+            docs::apply_plan(&source, "main", &attached, &plan, &state, "repo").unwrap();
+        let branch = git_out(&attached, &["branch", "--show-current"]);
+        let marker = WorktreeMarker {
+            repo: source.display().to_string(),
+            dir: attached.display().to_string(),
+            branch: branch.clone(),
+            base: base.clone(),
+            base_kind: "main".into(),
+            repos: vec![WorktreeMarkerRepo {
+                name: "code".into(),
+                kind: "git".into(),
+                source: source.display().to_string(),
+                dir: attached.display().to_string(),
+                branch: Some(branch.clone()),
+                base: Some(base.clone()),
+                base_kind: Some("main".into()),
+            }],
+        };
+        task_ops::workspace::write_marker(&task_dir, &marker).unwrap();
+        std::fs::create_dir_all(task_dir.join("artifacts")).unwrap();
+        std::fs::write(
+            task_dir.join("artifacts/reconciliation-plan.json"),
+            serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
+        let d = worktree_dispatcher(
+            store,
+            Arc::new(RecordingAdapter {
+                seen: Arc::new(StdMutex::new(Vec::new())),
+                files: vec![],
+            }),
+            &workspace,
+            None,
+        );
+        let planned = d.task_workspaces_for(&task).unwrap();
+        assert_eq!(planned.repos[0].branch(), Some(branch.as_str()));
+        assert_eq!(planned.repos[0].worktree.as_ref().unwrap().base.sha, base);
+        planned.ensure().await.unwrap();
+        assert_eq!(git_out(&attached, &["rev-parse", "HEAD"]), approved_sha);
+        assert_eq!(
+            std::fs::read_to_string(attached.join("README.md")).unwrap(),
+            "# Approved canonical guide\n"
+        );
+        assert_eq!(git_out(&source, &["rev-parse", "main"]), base);
+        std::fs::remove_file(task_dir.join("artifacts/reconciliation-plan.json")).unwrap();
+        assert_ne!(
+            d.task_workspaces_for(&task).unwrap().repos[0].branch(),
+            Some(branch.as_str())
+        );
+        std::fs::write(
+            task_dir.join("artifacts/reconciliation-plan.json"),
+            serde_json::to_vec(&plan).unwrap(),
+        )
+        .unwrap();
+        let mut mismatched = marker;
+        mismatched.repos[0].source = root.path().join("other").display().to_string();
+        task_ops::workspace::write_marker(&task_dir, &mismatched).unwrap();
+        assert_ne!(
+            d.task_workspaces_for(&task).unwrap().repos[0].branch(),
+            Some(branch.as_str())
+        );
     }
 
     /// ADR-0043 D2: git 2 つ + `dir` 1 つのタスクは、`repos/<name>/` に worktree 2 つと
@@ -17889,14 +18106,17 @@ mod tests {
         d.config.knowledge.root = kb.path().to_path_buf();
         write_kb_skill(kb.path(), "writing", "文章の書き方", "本文");
 
-        let (skills, missing) =
-            d.skills_context(&["writing".to_string(), "ghost".to_string()]);
+        let (skills, missing) = d.skills_context(&["writing".to_string(), "ghost".to_string()]);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "writing");
         assert_eq!(skills[0].description, "文章の書き方");
         assert_eq!(
             skills[0].path,
-            kb.path().join("skills").join("writing").display().to_string()
+            kb.path()
+                .join("skills")
+                .join("writing")
+                .display()
+                .to_string()
         );
         assert_eq!(missing, vec!["ghost".to_string()]);
     }
@@ -18325,11 +18545,9 @@ mod knowledge_fallback_tests {
         );
         // 進行に「倒す」の 1 行は出ない。
         assert!(
-            !store
-                .events_for(task.id)
-                .expect("events")
-                .iter()
-                .any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.contains("倒す")))
+            !store.events_for(task.id).expect("events").iter().any(
+                |(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.contains("倒す"))
+            )
         );
     }
 
@@ -18347,11 +18565,17 @@ mod knowledge_fallback_tests {
         let seen_tokens = Arc::new(SyncMutex::new(Vec::new()));
         let capture = seen_tokens.clone();
         d.set_knowledge_probe(Arc::new(move |_, token| {
-            capture.lock().expect("lock").push(token.map(str::to_string));
+            capture
+                .lock()
+                .expect("lock")
+                .push(token.map(str::to_string));
             Reachability::Ok
         }));
         run_until_idle(&mut d, 100).await;
-        assert_eq!(seen_tokens.lock().expect("lock").as_slice(), [Some("secret-proxy-token".to_string())]);
+        assert_eq!(
+            seen_tokens.lock().expect("lock").as_slice(),
+            [Some("secret-proxy-token".to_string())]
+        );
     }
 
     /// ADR-0052 D2: `fallback = false`（＝ `fallback_tier` が無い）なら、届かなくても倒さない

@@ -92,6 +92,7 @@ pub(crate) struct Inner {
     pub(crate) github: crate::GithubSettings,
     /// ADR-0044 D7（Phase 57）: 既定の文書リポジトリを作る場所の根（`~/workspace`）。
     pub(crate) docs_repo_root: Option<std::path::PathBuf>,
+    pub(crate) documentation_state_dir: std::path::PathBuf,
     /// ADR-0047 D1（Phase 61）: `[knowledge] root`。`None` なら `/knowledge/*` は 409。
     pub(crate) knowledge_root: Option<std::path::PathBuf>,
     /// ADR-0053 D4（Phase 65）: `GET /llm/sources`。`None` なら 409 `llm_proxy_unavailable`。
@@ -155,6 +156,9 @@ impl ApiState {
             role: settings.role,
             github: settings.github,
             docs_repo_root: settings.docs_repo_root,
+            documentation_state_dir: settings
+                .documentation_state_dir
+                .unwrap_or_else(task_ops::docs_maintenance::state_root),
             knowledge_root: settings.knowledge_root,
             llm_sources: settings.llm_sources,
             account_stats: Mutex::new(crate::stats::AccountStatsState::default()),

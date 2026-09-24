@@ -868,6 +868,7 @@ mod tests {
             github: Default::default(),
             containers: Default::default(),
             knowledge: Default::default(),
+            docs_maintenance: Default::default(),
             llm_proxy: Default::default(),
             sessions: Default::default(),
             mcp: Default::default(),

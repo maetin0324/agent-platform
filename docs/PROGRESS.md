@@ -17164,3 +17164,31 @@ resume run は codex の既定の（読み取り専用の）承認・サンド�
 - 実機確認（そのまま設計どおりに動いた）: `POST /tasks/01M35X86XTK84F97QW0CN5PGMR/rereview` → `failed → reviewing`。journal: 「lead session resume rejected; session retired」→「reviewer run hit a provider/infra failure; review deferred」→ 新規 reviewer run 01M38E9YAA2BESG61MB7XD8Y2D が criterion 1 を合格 → `review_pass` で done（75 秒）。人の承認（approval 01M381GRMXM8MP23BZ1E4RKWP2）は保持され、二度目の承認は求められていない。
 - CoS 経由で作られた GUI 修正の子タスク 01M38AJZ5QD9E88ZD6FDDWG968 は done。
 - DB 移設: in-flight 0 で `relocate-db.sh /var/lib/celeris/celeris.sqlite3 --dry-run` は計画（stop → VACUUM INTO → integrity → config 書き換え → 旧ファイル rename → start → /config 確認）を出して通過。本番実行は auto mode の分類（Production Deploy）で拒否されたため人が実行する（P-113-6: `promote.sh` / `migrate-to-celeris.sh` と同様に許可リストへ）。
+
+## Phase 114: Knowledge GC と repository docs maintenance（2026-09-24）
+
+ADR-0068。組織の Knowledge、repository の現在仕様、task artifacts の境界を保って
+周期処理と承認付き整理経路を追加した。既存の task-triggered knowledge maintenance と
+artifact promotion、worktree/review/merge は継続利用する。
+
+- Knowledge GC: 既定無効。決定的 scanner と小 batch、既存 support/adapter、hash review state。
+  GC create は拒否し、update/merge/retire は全て inbox。失敗・再起動・実行中の重複を防止する。
+- Docs: committed snapshot の read-only audit、根拠付き normalized view、policy overlay、
+  exact-plan 承認と stale/dirty/path 検査、隔離 worktree への apply と検証 draft task。
+  CLI/API/GUI から監査結果・保存済み report と proposal を確認できる。
+- Doc Gardener: managed opt-in の local Git repo のみ。候補限定 semantic support run は
+  repository を継承しない scratch workspace とし、成果は artifacts に残す。
+- 運用: `docs/knowledge.md`、`docs/repository-documentation-maintenance.md`、設定例を参照。
+  今回、実在 repository の整理や本番設定変更・昇格は実行していない。
+
+検証: `cargo test --workspace` は 2055 passed / 0 failed / 4 ignored、
+`cargo clippy --workspace -- -D warnings` は成功。GC 7件、既存Knowledge操作20件、
+docs core 7件（巨大文書の追加回帰を含む）、API承認/監査2件、Gardener 2件を含む。
+GUI は1067件成功、`pnpm typecheck` / `pnpm lint` 成功。
+追加の dispatcher approved-worktree 再利用回帰は1件成功。
+変更Rustファイルの rustfmt 検査を実施（既存の無関係な全体整形差分は除外）。
+リリースの固定SHAに対する再検証結果は selfdeploy の gate.json/verify.json を正とする。
+
+初期版の制約: GC は全文が文字予算に収まらない巨大ページを skip する。
+docs authority は自動確定しない。生成元未宣言の drift は未確認、remote repo・外部事実検証・
+AGENTS/map の自動公開・change-driven freshness は対象外。

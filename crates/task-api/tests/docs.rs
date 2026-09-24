@@ -584,7 +584,7 @@ fn produced(env: &TestEnv, task: &Task, name: &str, body: &[u8]) {
                     path: format!("artifacts/{name}"),
                     sha256: "0".repeat(64),
                     kind: "file".into(),
-            declared: true,
+                    declared: true,
                 },
             },
         )
@@ -802,5 +802,90 @@ async fn an_unknown_project_is_404() {
         .await,
         404,
         "project_not_found",
+    );
+}
+
+#[tokio::test]
+async fn maintenance_audit_is_read_only_and_apply_requires_exact_approval() {
+    let env = env();
+    let app = env.router();
+    let dir = tempfile::tempdir().unwrap();
+    let (project, repo) = project_with_repo(&app, dir.path(), "docs", None).await;
+    std::fs::write(repo.join("docs/README.md"), "# Human dirty edit\n").unwrap();
+    std::fs::write(repo.join("notes-untracked.md"), "do not touch").unwrap();
+    let endpoint = format!("/api/v1/projects/{project}/docs/maintenance");
+    let result = send(&app, g(&endpoint)).await;
+    assert_eq!(result.status.as_u16(), 200, "{}", result.text());
+    let body = result.json();
+    assert_eq!(body["audit"]["documents"][0]["path"], "docs/README.md");
+    assert_ne!(body["audit"]["documents"][0]["title"], "Human dirty edit");
+    assert_eq!(body["policy"]["mode"], "observe");
+    let refused = send(
+        &app,
+        p(&endpoint, &json!({"op":"apply", "plan":body["proposal"]})),
+    )
+    .await;
+    assert_eq!(refused.status.as_u16(), 409, "{}", refused.text());
+    assert!(refused.text().contains("human approval required"));
+    let unauthenticated = send(
+        &app,
+        post_json(&endpoint, &json!({"op":"approve", "plan":body["proposal"]})),
+    )
+    .await;
+    assert_eq!(unauthenticated.status.as_u16(), 401);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("docs/README.md")).unwrap(),
+        "# Human dirty edit\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join("notes-untracked.md")).unwrap(),
+        "do not touch"
+    );
+}
+
+#[tokio::test]
+async fn maintenance_approved_plan_attaches_to_review_task_and_stale_plan_is_refused() {
+    let env = env();
+    let app = env.router();
+    let dir = tempfile::tempdir().unwrap();
+    let (project, repo) = project_with_repo(&app, dir.path(), "docs", None).await;
+    let endpoint = format!("/api/v1/projects/{project}/docs/maintenance");
+    let audited = send(&app, g(&endpoint)).await.json();
+    let mut plan = audited["proposal"].clone();
+    plan["actions"] = json!([{"operation":"rewrite", "path":"docs/README.md", "body":"# Reviewed documentation\n"}]);
+    let approved = send(&app, p(&endpoint, &json!({"op":"approve","plan":plan}))).await;
+    assert_eq!(approved.status.as_u16(), 200, "{}", approved.text());
+    let applied = send(&app, p(&endpoint, &json!({"op":"apply","plan":plan}))).await;
+    assert_eq!(applied.status.as_u16(), 200, "{}", applied.text());
+    let result = applied.json();
+    assert_eq!(result["merged"], false);
+    let task_id: task_core::TaskId = result["task_id"].as_str().unwrap().parse().unwrap();
+    let task = env.store.get(task_id).unwrap().unwrap();
+    assert_eq!(task.status, Status::Draft);
+    let marker =
+        task_ops::workspace::read_marker(&env.workspace_root.join(task_id.to_string())).unwrap();
+    assert!(marker.branch.starts_with("docs-reconcile/"));
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&marker.dir).join("docs/README.md")).unwrap(),
+        "# Reviewed documentation\n"
+    );
+    assert_ne!(
+        std::fs::read_to_string(repo.join("docs/README.md")).unwrap(),
+        "# Reviewed documentation\n"
+    );
+    let changes = send(&app, g(&format!("/api/v1/tasks/{task_id}/changes"))).await;
+    assert_eq!(changes.status.as_u16(), 200, "{}", changes.text());
+    std::fs::write(repo.join("docs/README.md"), "# Subsequent edit\n").unwrap();
+    git(&repo, &["add", "docs/README.md"]);
+    git(&repo, &["commit", "-m", "subsequent"]);
+    let stale = send(&app, p(&endpoint, &json!({"op":"apply","plan":plan}))).await;
+    assert_eq!(stale.status.as_u16(), 409);
+    assert!(stale.text().contains("stale approval"));
+    let saved = send(&app, p(&endpoint, &json!({"op":"audit"}))).await;
+    assert_eq!(saved.status.as_u16(), 200);
+    let viewed = send(&app, g(&endpoint)).await.json();
+    assert_eq!(
+        viewed["saved_report"]["audit"]["revision"],
+        saved.json()["audit"]["revision"]
     );
 }

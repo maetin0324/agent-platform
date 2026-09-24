@@ -55,6 +55,8 @@ pub fn support_kind(task: &Task) -> Option<&'static str> {
         Some("compaction")
     } else if task.role.as_deref() == Some(KNOWLEDGE_ROLE) {
         Some("knowledge")
+    } else if task.role.as_deref() == Some("doc-gardener") {
+        Some("doc_gardener")
     } else if task.kind == TaskKind::Approval {
         Some("approval")
     } else if task.kind == TaskKind::Review {
@@ -444,7 +446,10 @@ pub fn report_for_cluster_unavailable(
 /// `bad_news` の中からこれだけを `cluster_login_needed` として抜き出すのに使う（見出しでの区別。
 /// `ReportKind` に新しい種類は増やさない。既存の GUI/API が知っている種類のまま）。
 pub fn cluster_login_needed_headline(host: &str) -> String {
-    truncate_chars(&format!("{host} は TOTP ログインが必要"), HEADLINE_MAX_CHARS)
+    truncate_chars(
+        &format!("{host} は TOTP ログインが必要"),
+        HEADLINE_MAX_CHARS,
+    )
 }
 
 /// `headline` が `cluster_login_needed_headline` で作った見出しか（`celeris::notify` が

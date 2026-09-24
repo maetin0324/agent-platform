@@ -37,13 +37,12 @@ use crate::types::{
     AccountCheckResponse, AccountCreateBody, AccountList, AccountLoginCodeBody, AccountLoginResult,
     AccountLoginStart, AccountStats, AccountView, AnswerBody, ArtifactList, CancelBody,
     ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterForwardView,
-    ClusterSettingsPutBody, ClusterSettingsView, ClusterView, Clusters,
-    CommentBody, CommentList, DaemonView, DbInfo, DecisionBody, EventsPage, Health,
-    MilestoneCreateBody, MilestonePatchBody, MilestoneReviewView, MilestoneView, OrgCreateBody,
-    OrgList, OrgPatchBody, ProjectCreateBody, ProjectDetail, ProjectList, ProjectPatchBody,
-    ProjectTaskView, ProviderCheckResponse, ProviderConfigView, ProviderView, Providers,
-    ReloadResult, ReopenBody, RetryBody, RunList, SecretList, SecretPutBody, SecretPutResult,
-    SecretView, ValidationError,
+    ClusterSettingsPutBody, ClusterSettingsView, ClusterView, Clusters, CommentBody, CommentList,
+    DaemonView, DbInfo, DecisionBody, EventsPage, Health, MilestoneCreateBody, MilestonePatchBody,
+    MilestoneReviewView, MilestoneView, OrgCreateBody, OrgList, OrgPatchBody, ProjectCreateBody,
+    ProjectDetail, ProjectList, ProjectPatchBody, ProjectTaskView, ProviderCheckResponse,
+    ProviderConfigView, ProviderView, Providers, ReloadResult, ReopenBody, RetryBody, RunList,
+    SecretList, SecretPutBody, SecretPutResult, SecretView, ValidationError,
 };
 use crate::{API_VERSION, MAX_BODY_BYTES};
 
@@ -121,10 +120,7 @@ pub(crate) fn router(state: ApiState) -> Router {
             post(submit_account_login_code),
         )
         .route("/api/v1/clusters", get(clusters))
-        .route(
-            "/api/v1/clusters/{id}/settings",
-            put(put_cluster_settings),
-        )
+        .route("/api/v1/clusters/{id}/settings", put(put_cluster_settings))
         .route(
             "/api/v1/clusters/{id}/connect",
             post(start_cluster_connect).delete(cancel_cluster_connect),
@@ -406,7 +402,10 @@ async fn org_list(State(state): State<ApiState>, RawQuery(raw): RawQuery) -> Api
             // （無いノードは含めない。CoS はここに出さない。`crate::console::new_conversation` と同じ
             // `NodeSessionStore` を薄く読むだけ）。
             let mut lead_sessions = Vec::new();
-            for node in items.iter().filter(|n| n.kind == task_core::OrgKind::Department) {
+            for node in items
+                .iter()
+                .filter(|n| n.kind == task_core::OrgKind::Department)
+            {
                 if let Some(session) = store
                     .node_session_active(&node.id, task_core::SessionKind::Lead, None)
                     .map_err(store_problem)?
@@ -3031,6 +3030,7 @@ mod tests {
 
     fn state(dir: &std::path::Path) -> ApiState {
         let settings = ApiSettings {
+            documentation_state_dir: None,
             listen: "127.0.0.1:7710".parse().unwrap_or_else(|e| panic!("{e}")),
             // ADR-0044 §5 Phase 53 追記（Phase 55）: `POST /replay` は管理系になったので、
             // この単体テストのルータにもトークンを持たせる（下の要求は Bearer を付ける）。

@@ -7,8 +7,10 @@ pub mod config;
 /// ADR-0064 D3 / D5（Phase 110a）: 背景チェックポイントと定期バックアップ。
 pub mod db_maintenance;
 pub mod delivery;
+pub mod doc_gardener;
 /// ADR-0040 D4（Phase 47）: インスタンスの役割（active / standby / draining / verify）とライブ引き継ぎ。
 pub mod instance;
+pub mod knowledge_gc;
 /// ADR-0047 D4（Phase 62）: 知識の自動メンテナンス（決定的なトリガと適用。LLM は `langmem` アダプタの中）。
 pub mod knowledge_maint;
 /// ADR-0037（Phase 39）: 人の判断が要るときだけ Discord に知らせる（判定は決定的、送信は spawn）。
@@ -808,7 +810,9 @@ pub fn wire_cluster_liveness_hooks(dispatcher: &mut Dispatcher, masters: Cluster
 /// ADR-0062 A（Phase 107）: `ClusterMasters` から、明示的な切断を経ずに終了した master を集める
 /// フック。`try_wait_exit` は非破壊（ブロックしない）なので tick から直接呼んでよい。終了を見つけたら
 /// マップから取り除く（同じ終了を二度返さないため。`ClusterMaster::kill` と同じくもう保持する意味が無い）。
-fn cluster_master_watcher(masters: ClusterMasters) -> task_dispatch::dispatcher::ClusterMasterWatcher {
+fn cluster_master_watcher(
+    masters: ClusterMasters,
+) -> task_dispatch::dispatcher::ClusterMasterWatcher {
     Arc::new(move || {
         let mut exited = Vec::new();
         let Ok(mut held) = masters.lock() else {
@@ -949,7 +953,10 @@ fn tunnel_listener_probe() -> task_dispatch::dispatcher::TunnelListenerProbe {
     const LISTENER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
     Arc::new(|listen: &str| {
         let Ok(addr) = listen.parse::<std::net::SocketAddr>() else {
-            tracing::warn!(listen, "tunnel: could not parse the forward's listen address");
+            tracing::warn!(
+                listen,
+                "tunnel: could not parse the forward's listen address"
+            );
             return false;
         };
         std::net::TcpStream::connect_timeout(&addr, LISTENER_CONNECT_TIMEOUT).is_ok()
@@ -1013,7 +1020,10 @@ pub fn config_view(config: &Config, listen: SocketAddr) -> ConfigView {
                     host: c.host.clone(),
                     // ADR-0059 D6: 設定ファイルの値だけ（DB の上書きは `GET /clusters` の
                     // `ClusterView.work_dir`/`work_dir_source` が持つ）。
-                    work_dir: c.work_dir.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                    work_dir: c
+                        .work_dir
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
                     // ADR-0032 D1: 接続の張り方（`manual` / `publickey` / `totp`）。GUI が出し分けに使う。
                     auth: c.auth.clone(),
                     concurrency: c.concurrency,
@@ -1194,9 +1204,11 @@ pub fn api_settings(
         // ADR-0044 D7（Phase 57）: 案件に git のリポジトリが無いときに文書リポジトリを作る場所
         // （SPEC §5: 成果物は `~/workspace/` に）。`$HOME` が無ければ作れない（409）。
         docs_repo_root: task_core::home_dir().map(|home| home.join("workspace")),
+        documentation_state_dir: None,
         // ADR-0047 D1（Phase 61）: 知識ベースの正本（既定 `~/.local/share/celeris/knowledge`）。**API は作らない**。
         knowledge_root: Some(config.knowledge.root.clone()),
-        llm_sources: llm_proxy_state.map(|s| Arc::new(LlmSourcesAdapter(s)) as task_api::SharedLlmSourcesReader),
+        llm_sources: llm_proxy_state
+            .map(|s| Arc::new(LlmSourcesAdapter(s)) as task_api::SharedLlmSourcesReader),
     }
 }
 
@@ -1239,7 +1251,10 @@ impl RunningLlmProxy {
 /// 動いている MCP サーバー（ADR-0056 D1/D5。Phase 78）。口ごとに別の listener を持つので、
 /// 止めるときは全部の handle をまとめて待つ。
 struct RunningMcp {
-    listeners: Vec<(tokio::sync::oneshot::Sender<()>, tokio::task::JoinHandle<std::io::Result<()>>)>,
+    listeners: Vec<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<std::io::Result<()>>,
+    )>,
 }
 
 impl RunningMcp {
@@ -1279,7 +1294,10 @@ fn build_mcp_state(config: &Config) -> Result<Option<Arc<celeris_mcp::McpState>>
 
 /// `state` を `[mcp]`/`[[mcp.listeners]]` の全ての口に bind して動かす（`config.mcp.resolve_listeners()`
 /// は `Config::validate` が既に検査済み。ここで失敗するのは bind そのものだけ）。
-async fn start_mcp(config: &Config, state: Arc<celeris_mcp::McpState>) -> Result<RunningMcp, DaemonError> {
+async fn start_mcp(
+    config: &Config,
+    state: Arc<celeris_mcp::McpState>,
+) -> Result<RunningMcp, DaemonError> {
     let resolved = config
         .mcp
         .resolve_listeners()
@@ -1293,9 +1311,14 @@ async fn start_mcp(config: &Config, state: Arc<celeris_mcp::McpState>) -> Result
         let addr = bound.local_addr().unwrap_or(listener.listen);
         tracing::info!(%addr, auth = ?listener.auth, "mcp listening");
         let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let handle = tokio::spawn(celeris_mcp::serve(bound, Arc::clone(&state), listener.auth, async move {
-            let _ = stop_rx.await;
-        }));
+        let handle = tokio::spawn(celeris_mcp::serve(
+            bound,
+            Arc::clone(&state),
+            listener.auth,
+            async move {
+                let _ = stop_rx.await;
+            },
+        ));
         listeners.push((stop, handle));
     }
     Ok(RunningMcp { listeners })
@@ -1315,9 +1338,9 @@ fn build_llm_proxy_state(
         return Ok(None);
     }
     let token = config.api.read_token()?;
-    let client = reqwest::Client::builder()
-        .build()
-        .map_err(|e| ApiError::Startup(format!("llm-proxy: could not build the HTTP client: {e}")))?;
+    let client = reqwest::Client::builder().build().map_err(|e| {
+        ApiError::Startup(format!("llm-proxy: could not build the HTTP client: {e}"))
+    })?;
     let claude_book = dispatcher.account_book(task_core::AccountAdapter::ClaudeCode);
     let codex_book = dispatcher.account_book(task_core::AccountAdapter::Codex);
     Ok(Some(llm_proxy::ProxyState::new(
@@ -1334,9 +1357,15 @@ fn build_llm_proxy_state(
 
 /// `state` を `[llm_proxy] listen` に bind して動かす。`standby`/`draining` の間はプロキシ自身の
 /// `guard` が他の管理 API と同じく 503 を返す（bind/unbind は主 API と同じ `SO_REUSEPORT` のライフサイクル）。
-async fn start_llm_proxy(config: &Config, state: Arc<llm_proxy::ProxyState>) -> Result<RunningLlmProxy, DaemonError> {
+async fn start_llm_proxy(
+    config: &Config,
+    state: Arc<llm_proxy::ProxyState>,
+) -> Result<RunningLlmProxy, DaemonError> {
     let listen = config.llm_proxy.listen;
-    let listener = bind_reuseport(listen).map_err(|source| ApiError::Bind { addr: listen, source })?;
+    let listener = bind_reuseport(listen).map_err(|source| ApiError::Bind {
+        addr: listen,
+        source,
+    })?;
     let addr = listener.local_addr().unwrap_or(listen);
     tracing::info!(%addr, "llm-proxy listening");
     let (stop, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1813,6 +1842,29 @@ async fn tick_loop(
                     .memory
                     .as_ref()
                     .map(|m| task_worker::MemoryDir::new(&m.dir));
+                if let Err(e) = doc_gardener::tick(
+                    store.as_ref(),
+                    &config.docs_maintenance,
+                    &config.workspace_root,
+                    &config.role_specs(),
+                    &config.genre_specs(),
+                    now,
+                ) {
+                    tracing::warn!(error = %e, "doc gardener: tick failed; continuing dispatch");
+                }
+                let gc_state = config.db.path.with_extension("knowledge-gc.json");
+                if let Err(e) = knowledge_gc::tick(
+                    store.as_ref(),
+                    &config.knowledge.root,
+                    &gc_state,
+                    &config.workspace_root,
+                    &config.knowledge.gc,
+                    &config.role_specs(),
+                    &config.genre_specs(),
+                    now,
+                ) {
+                    tracing::warn!(error = %e, "knowledge GC: tick failed; continuing dispatch");
+                }
                 match knowledge_maint::schedule(
                     store.as_ref(),
                     &config.knowledge.root,
@@ -3460,11 +3512,12 @@ target = "bnode150:18000"
         .unwrap_or_else(|e| panic!("config: {e}"));
         let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
         let masters: ClusterMasters = Default::default();
-        let mut dispatcher = build_dispatcher(&config, masters)
-            .unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
+        let mut dispatcher =
+            build_dispatcher(&config, masters).unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
 
         // Phase 84b: 実機の ssh 状態に依存しないよう、master は常に死んでいる扱いにする。
-        dispatcher.set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| false));
+        dispatcher
+            .set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| false));
 
         let connector_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let connector_calls_hook = connector_calls.clone();
@@ -3485,9 +3538,9 @@ target = "bnode150:18000"
                 .unwrap_or_else(|e| panic!("nested runtime: {e}"));
             rt.block_on(async { Err::<(), String>("test: no real ssh".to_string()) })
         }));
-        dispatcher.set_tunnel_forward_ensurer(Arc::new(|_host: &str, _listen: &str, _target: &str| {
-            Ok(())
-        }));
+        dispatcher.set_tunnel_forward_ensurer(Arc::new(
+            |_host: &str, _listen: &str, _target: &str| Ok(()),
+        ));
         dispatcher.set_tunnel_probe(Arc::new(|_listen: &str| false));
         dispatcher.set_accepting_new_work(true);
 
@@ -3543,7 +3596,8 @@ auth = "publickey"
         )
         .unwrap_or_else(|e| panic!("config: {e}"));
         let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
-        let store = SqliteStore::open(&config.db.path).unwrap_or_else(|e| panic!("open store: {e}"));
+        let store =
+            SqliteStore::open(&config.db.path).unwrap_or_else(|e| panic!("open store: {e}"));
         let now = OffsetDateTime::now_utc();
         let task = task_core::Task {
             repos: Vec::new(),
@@ -3593,16 +3647,19 @@ auth = "publickey"
             labels: Vec::new(),
             category: Default::default(),
         };
-        store.insert(&task).unwrap_or_else(|e| panic!("insert: {e}"));
+        store
+            .insert(&task)
+            .unwrap_or_else(|e| panic!("insert: {e}"));
 
         let masters: ClusterMasters = Default::default();
-        let mut dispatcher = build_dispatcher(&config, masters)
-            .unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
+        let mut dispatcher =
+            build_dispatcher(&config, masters).unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
 
         // Phase 84b: 実機の ssh 状態に依存しないよう、master は常に死んでいる扱いにする
         // （`try_auto_connect_cluster` は `cluster_connected` を見ないが、`refresh_cluster_liveness`
         // が同じ tick で先に呼ばれるので、ここも決定的な偽物に揃えておく）。
-        dispatcher.set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| false));
+        dispatcher
+            .set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| false));
 
         let connector_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let connector_calls_hook = connector_calls.clone();
@@ -3677,24 +3734,29 @@ target = "bnode150:18000"
         .unwrap_or_else(|e| panic!("config: {e}"));
         let config = Config::load(&config_path).unwrap_or_else(|e| panic!("{e}"));
         let masters: ClusterMasters = Default::default();
-        let mut dispatcher = build_dispatcher(&config, masters)
-            .unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
+        let mut dispatcher =
+            build_dispatcher(&config, masters).unwrap_or_else(|e| panic!("build_dispatcher: {e}"));
 
         // master は常に生存している扱い（実機の ssh 状態には依存しない偽物）。
-        dispatcher.set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| true));
+        dispatcher
+            .set_cluster_liveness_probe(Arc::new(|_ssh_command: &[String], _host: &str| true));
 
         let connector_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let connector_calls_hook = connector_calls.clone();
         dispatcher.set_cluster_connector(Arc::new(move |_cluster_id: &str, _host: &str| {
             connector_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err::<(), String>("must not be called while the master is alive (Phase 84b)".to_string())
+            Err::<(), String>(
+                "must not be called while the master is alive (Phase 84b)".to_string(),
+            )
         }));
         let ensure_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let ensure_calls_hook = ensure_calls.clone();
-        dispatcher.set_tunnel_forward_ensurer(Arc::new(move |_host: &str, _listen: &str, _target: &str| {
-            ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(())
-        }));
+        dispatcher.set_tunnel_forward_ensurer(Arc::new(
+            move |_host: &str, _listen: &str, _target: &str| {
+                ensure_calls_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+        ));
         dispatcher.set_tunnel_probe(Arc::new(|_listen: &str| false));
         dispatcher.set_accepting_new_work(true);
 

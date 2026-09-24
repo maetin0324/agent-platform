@@ -298,3 +298,30 @@ celerisctl knowledge rerun <元のタスクの id> [--db ~/.local/celeris/celeri
 - すべての会話の保存（再利用価値があるものだけ）
 - ノードの手帳（`memory/<node>/notes.md`）自体の自動要約・整理（知識整理 run は手帳を**読んで**
   KB 昇格の候補にするだけで、手帳そのものを書き換えない）
+
+## Periodic Knowledge GC
+
+`[knowledge.gc] enabled = true` で、タスク完了時の整理と独立した定期棚卸しを有効化する。
+接続先は既存 `[knowledge.langmem]` と `langmem` adapter を共用するが、同節の
+`enabled` はタスク完了時の整理だけを制御する。既定では GC は無効。
+
+Rust scanner は Markdown の新鮮な metadata から low confidence、未確認／長期間未確認、
+巨大ページ、同 scope の同一 title／共通 tags、共通 source を検出し、scope・tags・path の近傍を
+既定 8 ページ、24,000 文字以内で選ぶ。`skills/`、`_inbox/`、`_retired/` と symlink は除外する。
+全文が予算に収まらないページは切り詰めて置換提案を作らず skip する（必要なら人が分割する）。
+文字予算には指示文も含む。外部サイト・クラスタ調査、新規事実、create は禁止。
+
+既存 knowledge support task と adapter が候補を抽出する。GC の update/merge/retire は
+confidence を問わず既存 validation を通して `_inbox/` へ保存し、GUI の「知識」で accept/reject
+する。入力外の path や実行中に内容が変わった path には適用しない。タスク完了時の high-confidence
+create/update の自動 commit と merge/retire の人間承認は従来どおり。
+
+DB の隣の `*.knowledge-gc.json` に interval 予約、実行中 task ID、content hash と正常確認時刻を
+保存する。再起動後も実行中は次を起こさず、失敗も interval を消費して retry storm を避ける。
+予約後の起票失敗も次 interval まで待つ。起票と state 保存の間に落ちた場合、残った支援タスクの
+実行中は追加起票しないが、対応する snapshot が無いためその結果を適用しない。
+欠損／不正 JSON 出力・失敗 run は確認済みにしない。正常な空候補は確認済みにできる。
+同 hash で `review_after_hours` 内のページを skip し、内容変更後は再対象にする。
+確認だけでは canonical の `updated` や Git commit を変更しない。state は再生成可能で、
+削除しても Markdown 正本は失われない（未処理 snapshot と確認履歴は失われる）。
+エラーは警告に留め、通常 dispatch と既存 maintenance を継続する。

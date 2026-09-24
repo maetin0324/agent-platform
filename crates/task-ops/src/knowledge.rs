@@ -84,7 +84,9 @@ fn author_args(name: &str, email: &str) -> (String, String) {
 /// 大文字小文字は区別する（正規化はしない）。
 fn dedup_tags_preserve_order(tags: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
-    tags.into_iter().filter(|t| seen.insert(t.clone())).collect()
+    tags.into_iter()
+        .filter(|t| seen.insert(t.clone()))
+        .collect()
 }
 
 fn commit_paths(
@@ -1199,6 +1201,22 @@ impl ApplyOutcome {
 ///
 /// 適用のあとに 1 度だけ [`reindex`] する。
 pub fn apply_candidates(root: &Path, task_id: &str, candidates: &[kb::Candidate]) -> ApplyOutcome {
+    apply_candidates_with_policy(root, task_id, candidates, ApplyPolicy::Task)
+}
+
+/// GC may only propose edits to existing pages, always through human review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyPolicy {
+    Task,
+    Gc,
+}
+
+pub fn apply_candidates_with_policy(
+    root: &Path,
+    task_id: &str,
+    candidates: &[kb::Candidate],
+    policy: ApplyPolicy,
+) -> ApplyOutcome {
     let mut out = ApplyOutcome::default();
     for candidate in candidates {
         let path = match kb::validate_candidate(candidate) {
@@ -1208,7 +1226,24 @@ pub fn apply_candidates(root: &Path, task_id: &str, candidates: &[kb::Candidate]
                 continue;
             }
         };
-        let eligible = candidate.confidence == Confidence::High
+        if policy == ApplyPolicy::Gc
+            && (candidate.op == kb::CandidateOp::Create
+                || path
+                    .split('/')
+                    .any(|part| matches!(part, "skills" | "_inbox" | "_retired"))
+                || !root
+                    .canonicalize()
+                    .ok()
+                    .zip(root.join(&path).canonicalize().ok())
+                    .is_some_and(|(base, target)| target.starts_with(base))
+                || read_page(root, &path).is_none())
+        {
+            out.dropped
+                .push((candidate.path.clone(), "GC cannot create pages".into()));
+            continue;
+        }
+        let eligible = policy == ApplyPolicy::Task
+            && candidate.confidence == Confidence::High
             && candidate.op.direct_commit_eligible()
             && direct_commit_fits(root, &path, candidate.op);
         if eligible && commit_candidate_directly(root, task_id, candidate, &path).is_ok() {
@@ -1434,7 +1469,11 @@ fn frontmatter_field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'
 
 /// `name` / `description` を検証し、`source` 鍵が無ければ frontmatter に足す（ADR-0056 D3: 「出典
 /// `mcp:<client_id>` を frontmatter に残す」）。冪等（既に `source:` があれば触らない）。
-fn prepare_skill_md(name: &str, skill_md: &str, source: Option<&str>) -> Result<String, SkillError> {
+fn prepare_skill_md(
+    name: &str,
+    skill_md: &str,
+    source: Option<&str>,
+) -> Result<String, SkillError> {
     let Some((fields, open, close)) = skill_frontmatter(skill_md) else {
         return Err(SkillError::MissingFrontmatter);
     };
@@ -1471,7 +1510,9 @@ fn safe_relative_path(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\\')
-        && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+        && path
+            .split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
 /// ADR-0056 D3: `skills/<name>/SKILL.md`（＋付属ファイル）を書く（**直接コミット**。mount されるまで
@@ -1498,8 +1539,9 @@ pub fn skills_put(
     for (path, body) in files {
         let file_path = dir.join(path);
         if let Some(parent) = file_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| SkillError::Failed(format!("{} を作れませんでした: {e}", parent.display())))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                SkillError::Failed(format!("{} を作れませんでした: {e}", parent.display()))
+            })?;
         }
         std::fs::write(&file_path, body.as_bytes())
             .map_err(|e| SkillError::Failed(format!("{path} を書けませんでした: {e}")))?;
@@ -1581,7 +1623,11 @@ pub fn skills_delete(root: &Path, name: &str) -> Result<String, SkillError> {
 /// （`celeris-mcp` の `org_mount_skill`/`org_unmount_skill` と、task-api の `POST/DELETE
 /// /org/{id}/skills…` が**同じこの関数**を呼ぶ。挙動が食い違わないようにするため）。
 /// 名前の形が不正なら触らずに `Err`（mount 済みの一覧はそのまま）。
-pub fn set_skill_mount(mounts: &mut Vec<String>, skill: &str, mount: bool) -> Result<(), SkillError> {
+pub fn set_skill_mount(
+    mounts: &mut Vec<String>,
+    skill: &str,
+    mount: bool,
+) -> Result<(), SkillError> {
     if !kb::is_valid_skill_name(skill) {
         return Err(SkillError::InvalidName {
             name: skill.to_string(),
@@ -1836,7 +1882,11 @@ mod tests {
         let item = inbox_get(&root, &ok.id).expect("inbox item");
         assert_eq!(
             item.tags,
-            vec!["environment".to_string(), "hpc".to_string(), "Environment".to_string()],
+            vec![
+                "environment".to_string(),
+                "hpc".to_string(),
+                "Environment".to_string()
+            ],
             "順序を保ったまま重複だけ除く。大文字小文字は別のタグとして残る"
         );
     }
@@ -2311,8 +2361,14 @@ mod tests {
     #[test]
     fn skills_put_writes_the_frontmatter_name_and_description_and_adds_the_source() {
         let (_dir, root) = kb_dir();
-        let path = skills_put(&root, "rust-review", SAMPLE_SKILL_MD, &[], Some("mcp:chatgpt"))
-            .expect("put");
+        let path = skills_put(
+            &root,
+            "rust-review",
+            SAMPLE_SKILL_MD,
+            &[],
+            Some("mcp:chatgpt"),
+        )
+        .expect("put");
         assert_eq!(path, "skills/rust-review/SKILL.md");
         let raw = std::fs::read_to_string(root.join(&path)).expect("read");
         assert!(raw.contains("name: rust-review"));
@@ -2420,7 +2476,10 @@ mod tests {
         let mut mounts = vec!["writing".to_string()];
         set_skill_mount(&mut mounts, "rust-review", true).expect("mount");
         set_skill_mount(&mut mounts, "rust-review", true).expect("mount again");
-        assert_eq!(mounts, vec!["writing".to_string(), "rust-review".to_string()]);
+        assert_eq!(
+            mounts,
+            vec!["writing".to_string(), "rust-review".to_string()]
+        );
 
         set_skill_mount(&mut mounts, "writing", false).expect("unmount");
         set_skill_mount(&mut mounts, "writing", false).expect("unmount again (no-op)");
@@ -2428,6 +2487,10 @@ mod tests {
 
         let err = set_skill_mount(&mut mounts, "Not Valid", true).unwrap_err();
         assert!(matches!(err, SkillError::InvalidName { .. }));
-        assert_eq!(mounts, vec!["rust-review".to_string()], "不正な名前は触らない");
+        assert_eq!(
+            mounts,
+            vec!["rust-review".to_string()],
+            "不正な名前は触らない"
+        );
     }
 }

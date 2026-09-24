@@ -29,14 +29,14 @@ pub mod conversation;
 pub mod docs;
 mod files;
 mod handlers;
-/// ADR-0053 D4（Phase 65）: `GET /llm/sources`。celeris が `LlmSourcesReader` の実装を渡す。
-pub mod llm_sources;
-/// ADR-0056 D4（Phase 78）: MCP クライアント / 呼び出しログの観測（`GET /mcp/clients` / `GET /mcp/calls`）。
-pub mod mcp_admin;
 /// ADR-0047（Phase 61）: 知識ベース（`~/.local/share/celeris/knowledge` の Markdown が正本）。ツリー・ページ・`_inbox`。
 pub mod knowledge;
 /// ADR-0044 D6（Phase 55）: 案件・途中目標の中止・一時停止・アーカイブ。
 pub mod lifecycle;
+/// ADR-0053 D4（Phase 65）: `GET /llm/sources`。celeris が `LlmSourcesReader` の実装を渡す。
+pub mod llm_sources;
+/// ADR-0056 D4（Phase 78）: MCP クライアント / 呼び出しログの観測（`GET /mcp/clients` / `GET /mcp/calls`）。
+pub mod mcp_admin;
 pub mod memory;
 mod middleware;
 pub mod milestones;
@@ -90,13 +90,12 @@ pub use tree::MAX_TEXT_BYTES;
 pub use types::{
     AnswerBody, ApiConfigView, ArtifactList, ArtifactView, CancelBody, ClusterConfigView,
     ClusterConnectCodeBody, ClusterConnectResult, ClusterConnectStart, ClusterForwardView,
-    ClusterSettingsPutBody, ClusterSettingsView, ClusterView, Clusters,
-    ConfigView, DaemonView, DailyUsage, DbInfo, DecisionBody, EventsPage, GenreConfigView, Health,
-    Problem, ProviderConfigView, ProviderStats, ProviderView, Providers, ReleaseChanges,
-    ReleaseCommit, ReleaseItem, ReleasePromoteAccepted, ReleaseRunning, ReleaseVerify, Releases,
-    RetryBody, ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody,
-    SecretPutResult, SecretUse, SecretView, StreamHeartbeat, StreamHello, StreamReset,
-    ValidationError,
+    ClusterSettingsPutBody, ClusterSettingsView, ClusterView, Clusters, ConfigView, DaemonView,
+    DailyUsage, DbInfo, DecisionBody, EventsPage, GenreConfigView, Health, Problem,
+    ProviderConfigView, ProviderStats, ProviderView, Providers, ReleaseChanges, ReleaseCommit,
+    ReleaseItem, ReleasePromoteAccepted, ReleaseRunning, ReleaseVerify, Releases, RetryBody,
+    ReviewerConfigView, RoleConfigView, RunList, SecretList, SecretPutBody, SecretPutResult,
+    SecretUse, SecretView, StreamHeartbeat, StreamHello, StreamReset, ValidationError,
 };
 // ---- ADR-0043（Phase 52）: 案件のリポジトリとファイル閲覧 ----
 pub use types::{
@@ -210,6 +209,8 @@ pub struct ApiSettings {
     /// ADR-0044 D7（Phase 57）: 既定の文書リポジトリを作る場所の根（SPEC §5 の `~/workspace`）。
     /// celeris が `$HOME` を展開して渡す。`None` なら文書リポジトリを作れない（409 `docs_unavailable`）。
     pub docs_repo_root: Option<PathBuf>,
+    /// Repository documentation overlay state; defaults to CELERIS_STATE_DIR.
+    pub documentation_state_dir: Option<PathBuf>,
     // ---- ADR-0047（Phase 61）: 知識ベース。ここから ----
     /// ADR-0047 D1: `[knowledge] root` の絶対パス（既定 `~/.local/share/celeris/knowledge`）。`None` ならこの機能は無効
     /// （`/knowledge/*` は 409 `knowledge_unavailable`）。
@@ -273,7 +274,10 @@ impl std::fmt::Debug for ApiSettings {
             .field("release", &self.release)
             .field("mode", &self.mode)
             .field("role", &self.role.get())
-            .field("llm_sources", &self.llm_sources.as_ref().map(|_| "<reader>"))
+            .field(
+                "llm_sources",
+                &self.llm_sources.as_ref().map(|_| "<reader>"),
+            )
             .finish()
     }
 }
