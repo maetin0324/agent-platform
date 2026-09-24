@@ -337,12 +337,12 @@ impl WorkspaceContext<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedChildDefaults {
     pub genre: Option<String>,
-    /// 子に記録する担当。ADR-0068 D1（Phase 114）で**常に `None`**（LLM が書いた担当は捨て、
+    /// 子に記録する担当。ADR-0069 D1（Phase 114）で**常に `None`**（LLM が書いた担当は捨て、
     /// ADR-0046 D5 の matching が決める）。
     pub assignee: Option<String>,
-    /// ADR-0068 D1: LLM（計画・委譲）が書いたが捨てた担当（監査用。`Task.routing.dropped_assignee`）。
+    /// ADR-0069 D1: LLM（計画・委譲）が書いたが捨てた担当（監査用。`Task.routing.dropped_assignee`）。
     pub dropped_assignee: Option<String>,
-    /// ADR-0068 D1: `tier` の出自（計画・委譲が書いた tier はヒント）。
+    /// ADR-0069 D1: `tier` の出自（計画・委譲が書いた tier はヒント）。
     pub tier_source: crate::model::TierSource,
     pub tier: Tier,
     pub adapter: Option<String>,
@@ -370,7 +370,7 @@ pub fn resolve_child_defaults(
         assignee,
     } = child;
     let role = role_id.and_then(|r| RoleSpec::find(roles, r));
-    // ADR-0068 D1（Phase 114）: 計画・委譲（LLM）が書いた担当は**捨てる**（ADR-0046 D5 の「LLM が
+    // ADR-0069 D1（Phase 114）: 計画・委譲（LLM）が書いた担当は**捨てる**（ADR-0046 D5 の「LLM が
     // 人選する経路は無くす」を実装で強制する。以前は組織にある id ならそのまま子に記録していた）。
     // 捨てた値は監査のために `dropped_assignee` に残す。担当はディスパッチャの matching が決める。
     let _ = org;
@@ -540,7 +540,7 @@ pub fn materialize_delegated_logging(
                 depends_on,
                 status: Status::Draft,
                 priority: parent.priority,
-                // ADR-0068 D1: 委譲の子は lane policy の対象（tier はヒント、捨てた担当を記録）。
+                // ADR-0069 D1: 委譲の子は lane policy の対象（tier はヒント、捨てた担当を記録）。
                 routing: Some(crate::model::TaskRouting {
                     tier_source: defaults.tier_source,
                     dropped_assignee: defaults.dropped_assignee.clone(),
@@ -1027,7 +1027,7 @@ mod tests {
         assert_eq!(out[0].budget.max_turns, 20);
     }
 
-    /// ADR-0033 D4（Phase 24）→ ADR-0068 D1（Phase 114）: 委譲（LLM）が書いた `assignee` は**捨て**、
+    /// ADR-0033 D4（Phase 24）→ ADR-0069 D1（Phase 114）: 委譲（LLM）が書いた `assignee` は**捨て**、
     /// `routing.dropped_assignee` に残す。担当の分野も既定の解決に使わない（担当は matching が決める）。
     #[test]
     fn materialize_drops_the_delegated_assignee_and_records_it() {
@@ -1221,7 +1221,7 @@ mod tests {
         }
     }
 
-    /// ADR-0062 B2（Phase 107）→ ADR-0068 D1（Phase 114）: 委譲が書いた担当は捨てるので、案件から継いだ
+    /// ADR-0062 B2（Phase 107）→ ADR-0069 D1（Phase 114）: 委譲が書いた担当は捨てるので、案件から継いだ
     /// Remote workspace は担当未定のまま Remote に残る（matching が `cluster:<id>` を持つノードだけを
     /// 候補にする）。明示した子（`t.workspace = Some(..)`）も従来どおり落とさない。
     #[test]
@@ -1287,7 +1287,7 @@ mod tests {
         assert_eq!(out3[0].workspace, project);
     }
 
-    /// ADR-0062 B2 の降格そのもの（担当が決まっている経路のための関数。ADR-0068 以降、計画・委譲は
+    /// ADR-0062 B2 の降格そのもの（担当が決まっている経路のための関数。ADR-0069 以降、計画・委譲は
     /// 担当を渡さないのでここには `None` が来るが、規則自体は保つ）。
     #[test]
     fn downgrade_rule_still_applies_when_an_assignee_is_known() {

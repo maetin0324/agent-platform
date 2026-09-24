@@ -1,4 +1,4 @@
-// gui/scripts/check-task-routing.mjs — タスク詳細の「ルーティング」パネル（celeris ADR-0068 D5、
+// gui/scripts/check-task-routing.mjs — タスク詳細の「ルーティング」パネル（celeris ADR-0069 D5、
 // `GET /tasks/{id}/routing`）が、閉じた状態で 1 行（org / harness / lane / model）、開くと features・規則・
 // 理由・コスト等・レビュー結果・捨てた担当の注記を出すこと、360px 幅でも横スクロールが出ないことを確かめる。
 // 偽の celeris（fixture）だけを使い、実 celeris・認証・LLM・外部ネットワークには出ない。

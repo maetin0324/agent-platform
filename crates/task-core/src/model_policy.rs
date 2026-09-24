@@ -1,4 +1,4 @@
-//! ADR-0068 D3（Phase 114）: タスクの性質（`TaskFeatures`）から **lane**（`Tier` の直列化名
+//! ADR-0069 D3（Phase 114）: タスクの性質（`TaskFeatures`）から **lane**（`Tier` の直列化名
 //! `frontier` / `standard` / `cheap` を品質／予算の lane として読む）を決める決定的な policy。
 //!
 //! - 単一スコアではなく**規則表**（上から評価し、最初に当たった規則の `rule_id` を記録する）。
@@ -38,7 +38,7 @@ impl Level {
     }
 }
 
-/// ADR-0068 D3: lane を決めるためのタスクの性質（9 軸）。
+/// ADR-0069 D3: lane を決めるためのタスクの性質（9 軸）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TaskFeatures {
     /// 判断の重さ（設計・方針・調査の結論を出すか）。
@@ -61,7 +61,7 @@ pub struct TaskFeatures {
     pub cross_cutting: Level,
 }
 
-/// ADR-0068 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の
+/// ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の
 /// `create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TaskFeatureHints {
@@ -409,7 +409,7 @@ fn lane_name(lane: Tier) -> &'static str {
     }
 }
 
-/// ADR-0068 D2: 組織（実効 profile）から継いだ lane の天井。`allowed` が空なら集合の制限なし。
+/// ADR-0069 D2: 組織（実効 profile）から継いだ lane の天井。`allowed` が空なら集合の制限なし。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LaneCeiling {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -477,7 +477,7 @@ impl LaneCeiling {
     }
 }
 
-/// ADR-0068 §5（Phase 2 の予約）: shadow mode の分類器（例: Jev）の判断。lane は heuristic のままで、
+/// ADR-0069 §5（Phase 2 の予約）: shadow mode の分類器（例: Jev）の判断。lane は heuristic のままで、
 /// これは並べて記録するだけ。**Phase 1 では作られない**。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct ShadowDecision {
@@ -487,13 +487,13 @@ pub struct ShadowDecision {
     pub confidence: f64,
 }
 
-/// ADR-0068 §5（Phase 2 の予約）: shadow 分類器の境界。**実装は無い**（Phase 2）。
+/// ADR-0069 §5（Phase 2 の予約）: shadow 分類器の境界。**実装は無い**（Phase 2）。
 pub trait ShadowClassifier: Send + Sync {
     fn id(&self) -> &str;
     fn classify(&self, task: &Task, features: &TaskFeatures) -> Option<ShadowDecision>;
 }
 
-/// ADR-0068 D3: lane の決定（監査記録の本体）。
+/// ADR-0069 D3: lane の決定（監査記録の本体）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct LaneDecision {
     /// 最終的な lane（天井・エスカレーションの後。残量による調整の前）。
@@ -519,7 +519,7 @@ pub struct LaneDecision {
     pub shadow: Option<ShadowDecision>,
 }
 
-/// ADR-0068 D5: `Event::RoutingDecided` の中身。
+/// ADR-0069 D5: `Event::RoutingDecided` の中身。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RoutingRecord {
     /// Ownership 層: 担当（`org_nodes.id`）。
@@ -545,7 +545,7 @@ struct LaneRule {
     when: fn(&TaskFeatures) -> bool,
 }
 
-/// ADR-0068 D3 の規則表（上から評価する。最後の `standard/default` は必ず当たる）。
+/// ADR-0069 D3 の規則表（上から評価する。最後の `standard/default` は必ず当たる）。
 const RULES: &[LaneRule] = &[
     LaneRule {
         id: "frontier/judgment-under-uncertainty",
@@ -588,7 +588,7 @@ const RULES: &[LaneRule] = &[
     },
 ];
 
-/// ADR-0068 D3: 決定的な lane policy。
+/// ADR-0069 D3: 決定的な lane policy。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ModelPolicy;
 
@@ -621,7 +621,7 @@ impl ModelPolicy {
     }
 }
 
-/// ADR-0068 D3: そのタスクの lane を決める。`routing` を持たないタスク・execute でないタスクは
+/// ADR-0069 D3: そのタスクの lane を決める。`routing` を持たないタスク・execute でないタスクは
 /// `None`（従来どおり `worker_hint.tier` のまま）。人の明示・System の tier は policy も天井も当てず、
 /// その旨を記録するだけ。
 pub fn decide_for_task(task: &Task, ceiling: &LaneCeiling) -> Option<LaneDecision> {

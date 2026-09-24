@@ -111,7 +111,7 @@ pub struct Timeline {
     pub items: Vec<TimelineItem>,
 }
 
-/// `GET /tasks/{id}/routing` の応答（ADR-0068 D5）。なぜその担当・harness・lane・model になったかの監査。
+/// `GET /tasks/{id}/routing` の応答（ADR-0069 D5）。なぜその担当・harness・lane・model になったかの監査。
 /// `runs` はワーカー run ごと（古い run が先）で、各 run の `escalation` がエスカレーションの履歴になる。
 /// まだ run が無いタスクは `runs` が空（404 にはしない。知らないタスクだけが 404）。
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]

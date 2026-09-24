@@ -110,7 +110,7 @@ pub fn execute(
     now: OffsetDateTime,
 ) -> Result<Option<ActionsOutcome>, OpsError> {
     let source = source_request_context(store, task)?;
-    // ADR-0068 D1: 人の明示（`@<node>` / `tier:<lane>`）を確かめる材料は、この対話タスクのきっかけに
+    // ADR-0069 D1: 人の明示（`@<node>` / `tier:<lane>`）を確かめる材料は、この対話タスクのきっかけに
     // なった**人の発言そのもの**（`task.objective`）。CoS の自己申告は信じない。
     let human_text = task.objective.clone();
     if !store.console_action_run_claim(run_id, task.id, now)? {
@@ -269,7 +269,7 @@ fn create_task_action(
     human_text: &str,
     now: OffsetDateTime,
 ) -> Result<ExecutedAction, String> {
-    // ADR-0068 D1: CoS（LLM）が書いた担当は、人の発言に `@<node>` があるときだけ採る。
+    // ADR-0069 D1: CoS（LLM）が書いた担当は、人の発言に `@<node>` があるときだけ採る。
     // それ以外は捨てて `routing.dropped_assignee` に残し、担当は matching（ADR-0046 D5）が決める。
     let (assignee, dropped_assignee) =
         match assignee.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
@@ -278,7 +278,7 @@ fn create_task_action(
             None => (None, None),
         };
     let assignee = &assignee;
-    // ADR-0068 D1: tier も同じ。人の発言に `tier:<lane>` があるときだけ人の明示、他はヒント。
+    // ADR-0069 D1: tier も同じ。人の発言に `tier:<lane>` があるときだけ人の明示、他はヒント。
     let human_explicit_tier = tier.is_some_and(|t| human_mentions_tier(human_text, t));
     if acceptance.is_empty() {
         return Err(
@@ -410,7 +410,7 @@ fn create_task_action(
     })
 }
 
-/// ADR-0068 D1: 人の発言が `@<node>` でそのノードを名指ししているか（決定的な字句判定。
+/// ADR-0069 D1: 人の発言が `@<node>` でそのノードを名指ししているか（決定的な字句判定。
 /// `@engineering` は `@engineering-x` にはマッチしない）。
 pub fn human_mentions_node(text: &str, node: &str) -> bool {
     if node.is_empty() {
@@ -425,7 +425,7 @@ pub fn human_mentions_node(text: &str, node: &str) -> bool {
     })
 }
 
-/// ADR-0068 D1: 人の発言が `tier:<lane>` / `tier=<lane>` でその lane を明示しているか。
+/// ADR-0069 D1: 人の発言が `tier:<lane>` / `tier=<lane>` でその lane を明示しているか。
 pub fn human_mentions_tier(text: &str, tier: task_core::Tier) -> bool {
     let name = match tier {
         task_core::Tier::Frontier => "frontier",
@@ -715,7 +715,7 @@ mod tests {
         let created = outcome.executed[0].task_id.expect("task id");
         let stored = store.get(created).unwrap().expect("task exists");
         assert_eq!(stored.worker_hint.tier, task_core::Tier::Frontier);
-        // ADR-0068 D1: CoS の tier はヒントとして記録するだけ（lane はディスパッチ時に policy が決める）。
+        // ADR-0069 D1: CoS の tier はヒントとして記録するだけ（lane はディスパッチ時に policy が決める）。
         assert_eq!(
             stored.routing.as_ref().map(|r| r.tier_source),
             Some(task_core::TierSource::Hint)
@@ -893,7 +893,7 @@ mod tests {
                 updated_at: now_t,
             },
         ];
-        // ADR-0068 D1: 担当の指定が効くのは人が `@<node>` で名指ししたときだけ。
+        // ADR-0069 D1: 担当の指定が効くのは人が `@<node>` で名指ししたときだけ。
         let mut task = cos_task();
         task.objective = "sirius で計測して。@web-research に頼んで".into();
         let parsed = parse(
@@ -931,7 +931,7 @@ mod tests {
         assert!(store.list(None).unwrap().is_empty(), "何も作らない");
     }
 
-    /// ADR-0068 D1（Phase 114）: CoS（LLM）が書いた `assignee` は、人の発言に `@<node>` が無ければ
+    /// ADR-0069 D1（Phase 114）: CoS（LLM）が書いた `assignee` は、人の発言に `@<node>` が無ければ
     /// 捨てられ（`routing.dropped_assignee` と返事の要約に残る）、担当は matching に任される。
     #[test]
     fn cos_supplied_assignee_is_dropped_unless_the_human_named_it() {

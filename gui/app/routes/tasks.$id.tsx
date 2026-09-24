@@ -241,7 +241,7 @@ export interface TaskDetailData {
    */
   assignedEvent: { node: string; score: number; reason: string } | null;
   /**
-   * celeris ADR-0068 D5: なぜその担当・harness・lane・model か（`GET /tasks/{id}/routing`）。
+   * celeris ADR-0069 D5: なぜその担当・harness・lane・model か（`GET /tasks/{id}/routing`）。
    * 落ちたら（この API を持たない古い celeris 等）null でパネルを出さない。画面は落とさない。
    */
   routing: TaskRoutingView | null;
@@ -551,7 +551,7 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                 )}
                 {place.milestoneTitle && <p data-testid="task-milestone">途中目標: {place.milestoneTitle}</p>}
               </div>
-              {/* celeris ADR-0068 D5: なぜこの担当・harness・lane・model か。閉じた状態は 1 行。 */}
+              {/* celeris ADR-0069 D5: なぜこの担当・harness・lane・model か。閉じた状態は 1 行。 */}
               <TaskRoutingPanel view={routing} />
               <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-fg-muted">
                 {detail.cluster && (

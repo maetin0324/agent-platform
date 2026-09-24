@@ -1,7 +1,7 @@
 import type { Level, ReviewResult, RoutingAudit, TaskFeatures, TaskRoutingView, TierSource } from "~/celeris/types";
 
 /**
- * タスク詳細の「ルーティング」パネル（celeris ADR-0068 D5、`GET /tasks/{id}/routing`）の表示用の純粋関数。
+ * タスク詳細の「ルーティング」パネル（celeris ADR-0069 D5、`GET /tasks/{id}/routing`）の表示用の純粋関数。
  * celeris が記録した値をそのまま並べるだけで、lane や担当を GUI 側で再計算しない。
  */
 

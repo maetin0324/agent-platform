@@ -496,7 +496,7 @@ export type WorkspaceMode = "worktree" | "shared";
  */
 export type RunRole = "worker" | "reviewer";
 /**
- * ADR-0068 D1: `worker_hint.tier` を誰が決めたか。
+ * ADR-0069 D1: `worker_hint.tier` を誰が決めたか。
  */
 export type TierSource = "human" | "system" | "hint" | "default";
 export type RunOutcomeKind = ("done" | "question" | "error" | "requeue" | "lease_expired") | "interrupted";
@@ -1657,7 +1657,7 @@ export interface ModelBinding {
   model_id?: string | null;
   name: string;
   /**
-   * ADR-0068 D4（Phase 114）: この lane で使う reasoning effort（例 `"medium"`）。Phase 1 では
+   * ADR-0069 D4（Phase 114）: この lane で使う reasoning effort（例 `"medium"`）。Phase 1 では
    * 監査記録（`LaneResolution`）に残すだけで、CLI には渡さない。無ければ `None`。
    */
   reasoning_effort?: string | null;
@@ -2509,7 +2509,7 @@ export interface Task {
    */
   role?: string | null;
   /**
-   * ADR-0068（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。
+   * ADR-0069（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。
    * **これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。
    * 導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。
    */
@@ -2557,7 +2557,7 @@ export interface RepoRef {
   repo_id: RepoId;
 }
 /**
- * ADR-0068 D1 / D3: タスクの routing の出自（`Task.routing`）。
+ * ADR-0069 D1 / D3: タスクの routing の出自（`Task.routing`）。
  */
 export interface TaskRouting {
   /**
@@ -2565,20 +2565,20 @@ export interface TaskRouting {
    */
   assignee_explicit?: boolean;
   /**
-   * LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0068 D1）。
+   * LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0069 D1）。
    */
   dropped_assignee?: string | null;
   /**
-   * TaskFeatures の明示の上書き（ADR-0068 D3）。
+   * TaskFeatures の明示の上書き（ADR-0069 D3）。
    */
   features?: TaskFeatureHints | null;
   /**
-   * ADR-0068 D1: `worker_hint.tier` を誰が決めたか。
+   * ADR-0069 D1: `worker_hint.tier` を誰が決めたか。
    */
   tier_source?: "human" | "system" | "hint" | "default";
 }
 /**
- * ADR-0068 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の
+ * ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の
  * `create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。
  */
 export interface TaskFeatureHints {
@@ -2637,7 +2637,7 @@ export interface Usage {
   output_tokens?: number | null;
 }
 /**
- * ADR-0068 D5: `Event::RoutingDecided` の中身。
+ * ADR-0069 D5: `Event::RoutingDecided` の中身。
  */
 export interface RoutingRecord {
   decision: LaneDecision;
@@ -2687,7 +2687,7 @@ export interface LaneDecision {
   source: TierSource;
 }
 /**
- * ADR-0068 D3: lane を決めるためのタスクの性質（9 軸）。
+ * ADR-0069 D3: lane を決めるためのタスクの性質（9 軸）。
  */
 export interface TaskFeatures {
   /**
@@ -2728,7 +2728,7 @@ export interface TaskFeatures {
   verifiability: "low" | "medium" | "high";
 }
 /**
- * ADR-0068 §5（Phase 2 の予約）: shadow mode の分類器（例: Jev）の判断。lane は heuristic のままで、
+ * ADR-0069 §5（Phase 2 の予約）: shadow mode の分類器（例: Jev）の判断。lane は heuristic のままで、
  * これは並べて記録するだけ。**Phase 1 では作られない**。
  */
 export interface ShadowDecision {
@@ -3575,7 +3575,7 @@ export interface NewTaskSpec {
   cluster?: string | null;
   depends_on?: TaskId[];
   /**
-   * ADR-0068 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。
+   * ADR-0069 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。
    */
   features?: TaskFeatureHints | null;
   /**
@@ -3770,7 +3770,7 @@ export interface Profile {
   tools?: string[];
 }
 /**
- * ADR-0068 D2（Phase 114）: 予算の天井（最も厳しい値が勝つ）。
+ * ADR-0069 D2（Phase 114）: 予算の天井（最も厳しい値が勝つ）。
  */
 export interface BudgetPrefs {
   /**
@@ -3839,7 +3839,7 @@ export interface Permissions {
  */
 export interface ReviewPrefs {
   /**
-   * ADR-0068 D2 / D6（Phase 114）: レビュー不合格のやり直しで lane を 1 段上げてよいか
+   * ADR-0069 D2 / D6（Phase 114）: レビュー不合格のやり直しで lane を 1 段上げてよいか
    * （`false` なら上げない。省略時は上げてよい）。子が勝つ。
    */
   escalate_on_fail?: boolean | null;
@@ -3877,11 +3877,11 @@ export interface EffectiveProfile {
   harnesses_allowed?: string[];
   knowledge?: KnowledgeMount[];
   /**
-   * ADR-0068 D2: 継いだ試行回数の上限（根→葉の最小）。
+   * ADR-0069 D2: 継いだ試行回数の上限（根→葉の最小）。
    */
   max_attempts?: number | null;
   /**
-   * ADR-0068 D2: 継いだ lane の上限（根→葉の最小）。
+   * ADR-0069 D2: 継いだ lane の上限（根→葉の最小）。
    */
   max_lane?: Tier | null;
   /**
@@ -3890,7 +3890,7 @@ export interface EffectiveProfile {
   node_id: string;
   policy?: string[];
   /**
-   * ADR-0068 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。
+   * ADR-0069 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。
    */
   review_escalate_on_fail?: boolean | null;
   review_harness?: string | null;
@@ -5232,7 +5232,7 @@ export interface TaskList {
   total: number;
 }
 /**
- * ADR-0068 D5: `GET /tasks/{id}/routing`。
+ * ADR-0069 D5: `GET /tasks/{id}/routing`。
  */
 export interface TaskRoutingView {
   /**

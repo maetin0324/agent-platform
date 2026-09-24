@@ -69,7 +69,7 @@ pub fn retry_task(
     };
 
     let new_task = Task {
-        // ADR-0068: やり直しは元のタスクの routing の出自を引き継ぐ。
+        // ADR-0069: やり直しは元のタスクの routing の出自を引き継ぐ。
         routing: original.routing.clone(),
         // ADR-0043 D2: やり直しは元のタスクと同じリポジトリで作業する。
         repos: original.repos.clone(),

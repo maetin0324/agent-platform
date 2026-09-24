@@ -11,14 +11,14 @@ pub struct ModelBinding {
     pub model_id: Option<String>,
     #[serde(default)]
     pub unavailable_reason: Option<String>,
-    /// ADR-0068 D4（Phase 114）: この lane で使う reasoning effort（例 `"medium"`）。Phase 1 では
+    /// ADR-0069 D4（Phase 114）: この lane で使う reasoning effort（例 `"medium"`）。Phase 1 では
     /// 監査記録（`LaneResolution`）に残すだけで、CLI には渡さない。無ければ `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
 }
 pub type TierModels = HashMap<Tier, ModelBinding>;
 
-/// ADR-0068 D4: lane の設定上の reasoning effort（束縛が無い・effort を書いていなければ `None`）。
+/// ADR-0069 D4: lane の設定上の reasoning effort（束縛が無い・effort を書いていなければ `None`）。
 pub fn reasoning_effort(bindings: &TierModels, tier: Tier) -> Option<String> {
     bindings
         .get(&tier)
@@ -26,7 +26,7 @@ pub fn reasoning_effort(bindings: &TierModels, tier: Tier) -> Option<String> {
         .filter(|e| !e.trim().is_empty())
 }
 
-/// ADR-0068 D4: lane → provider / account / model / reasoning effort の解決結果（監査記録）。
+/// ADR-0069 D4: lane → provider / account / model / reasoning effort の解決結果（監査記録）。
 /// 解決そのものは従来の `select_provider` → `TieredAdapter::model_for_tier` → `select_tier` のまま。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct LaneResolution {

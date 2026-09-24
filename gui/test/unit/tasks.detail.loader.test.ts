@@ -146,7 +146,7 @@ describe("loadTaskDetail", () => {
       genres: [],
       // ADR-0046 D5（Phase 59）: `assigned` イベントが無いので null。
       assignedEvent: null,
-      // celeris ADR-0068 D5: `GET /tasks/{id}/routing` を登録していないので落ちて null（パネルを出さない）。
+      // celeris ADR-0069 D5: `GET /tasks/{id}/routing` を登録していないので落ちて null（パネルを出さない）。
       routing: null,
       // ADR-0043 D6（Phase 52 + 53 のマージ）: 作業ツリーは `?tab=files` のときだけ引く。
       files: null,
@@ -173,7 +173,7 @@ describe("loadTaskDetail", () => {
     expect(mock.requests.some((r) => r.url.startsWith("/api/v1/tasks/T1/tree"))).toBe(false);
   });
 
-  it("GET /tasks/{id}/routing の監査をそのまま routing に載せる（celeris ADR-0068 D5）", async () => {
+  it("GET /tasks/{id}/routing の監査をそのまま routing に載せる（celeris ADR-0069 D5）", async () => {
     serveTask();
     const routing: TaskRoutingView = {
       task_id: "T1",

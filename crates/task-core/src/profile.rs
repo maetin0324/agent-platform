@@ -10,7 +10,7 @@
 //! | `run` / `model.tier` / `harnesses.default` / `review.*` | **子が勝つ** |
 //! | `model.allowed_tiers` | **交わり**（空の親は制限なし） |
 //! | `policy` | 根→葉の順に**連結**（そのまま並べる） |
-//! | `budget.max_lane` / `budget.max_attempts` | **最小**（最も厳しい値が勝つ。ADR-0068 D2） |
+//! | `budget.max_lane` / `budget.max_attempts` | **最小**（最も厳しい値が勝つ。ADR-0069 D2） |
 //!
 //! 最後に**タスクの上書き**（`EffectiveProfile::with_task`）。ADR-0033 D2 の
 //! 「task > role > assignee > genre」はこれに置き換わる。
@@ -99,7 +99,7 @@ pub struct ReviewPrefs {
     pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
-    /// ADR-0068 D2 / D6（Phase 114）: レビュー不合格のやり直しで lane を 1 段上げてよいか
+    /// ADR-0069 D2 / D6（Phase 114）: レビュー不合格のやり直しで lane を 1 段上げてよいか
     /// （`false` なら上げない。省略時は上げてよい）。子が勝つ。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub escalate_on_fail: Option<bool>,
@@ -111,7 +111,7 @@ impl ReviewPrefs {
     }
 }
 
-/// ADR-0068 D2（Phase 114）: そのノード以下の予算の天井。どちらも**最も厳しい値が勝つ**
+/// ADR-0069 D2（Phase 114）: そのノード以下の予算の天井。どちらも**最も厳しい値が勝つ**
 /// （根→葉の最小。子は緩められない）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -179,7 +179,7 @@ pub struct Profile {
     pub review: ReviewPrefs,
     #[serde(default, skip_serializing_if = "Permissions::is_empty")]
     pub permissions: Permissions,
-    /// ADR-0068 D2（Phase 114）: 予算の天井（最も厳しい値が勝つ）。
+    /// ADR-0069 D2（Phase 114）: 予算の天井（最も厳しい値が勝つ）。
     #[serde(default, skip_serializing_if = "BudgetPrefs::is_empty")]
     pub budget: BudgetPrefs,
 }
@@ -240,19 +240,19 @@ pub struct EffectiveProfile {
     pub review_tier: Option<Tier>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub approvals: Vec<String>,
-    /// ADR-0068 D2: 継いだ lane の上限（根→葉の最小）。
+    /// ADR-0069 D2: 継いだ lane の上限（根→葉の最小）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_lane: Option<Tier>,
-    /// ADR-0068 D2: 継いだ試行回数の上限（根→葉の最小）。
+    /// ADR-0069 D2: 継いだ試行回数の上限（根→葉の最小）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_attempts: Option<u32>,
-    /// ADR-0068 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。
+    /// ADR-0069 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_escalate_on_fail: Option<bool>,
 }
 
 impl EffectiveProfile {
-    /// ADR-0068 D2: このノードの lane の天井（`allowed_tiers` と `budget.max_lane`）。
+    /// ADR-0069 D2: このノードの lane の天井（`allowed_tiers` と `budget.max_lane`）。
     pub fn lane_ceiling(&self) -> crate::model_policy::LaneCeiling {
         crate::model_policy::LaneCeiling {
             allowed: self.allowed_tiers.clone(),
@@ -396,7 +396,7 @@ pub fn resolve(nodes: &[OrgNode], node_id: &str) -> EffectiveProfile {
         if p.review.escalate_on_fail.is_some() {
             out.review_escalate_on_fail = p.review.escalate_on_fail;
         }
-        // ADR-0068 D2: 予算の天井は最も厳しい値が勝つ（子は緩められない）。
+        // ADR-0069 D2: 予算の天井は最も厳しい値が勝つ（子は緩められない）。
         if let Some(max) = p.budget.max_lane {
             out.max_lane = Some(match out.max_lane {
                 Some(cur)
@@ -924,7 +924,7 @@ mod tests {
         assert!(serde_json::from_str::<Profile>(r#"{"model":{"tier":"bogus"}}"#).is_err());
     }
 
-    /// ADR-0068 D2（Phase 114）: 予算の天井は最も厳しい値が勝ち、`allowed_tiers` と合わせて
+    /// ADR-0069 D2（Phase 114）: 予算の天井は最も厳しい値が勝ち、`allowed_tiers` と合わせて
     /// lane の天井になる。導入前の profile（`budget` / `escalate_on_fail` 無し）はそのまま読める。
     #[test]
     fn budget_ceiling_takes_the_strictest_value_and_old_profiles_parse() {

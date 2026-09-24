@@ -557,7 +557,7 @@ pub fn materialize_logging(
                     .collect(),
                 status: Status::Draft,
                 priority: parent.priority,
-                // ADR-0068 D1: 計画の子は lane policy の対象（tier はヒント、捨てた担当を記録）。
+                // ADR-0069 D1: 計画の子は lane policy の対象（tier はヒント、捨てた担当を記録）。
                 routing: Some(crate::model::TaskRouting {
                     tier_source: defaults.tier_source,
                     dropped_assignee: defaults.dropped_assignee.clone(),
@@ -1127,7 +1127,7 @@ mod tests {
             now,
         );
 
-        // ADR-0068 D1（Phase 114）: 計画（LLM）が書いた担当は捨て、`routing.dropped_assignee` に残す
+        // ADR-0069 D1（Phase 114）: 計画（LLM）が書いた担当は捨て、`routing.dropped_assignee` に残す
         // （以前は組織にある id なら子に記録し、その分野を既定に使っていた）。担当の分野も使わない。
         let dropped = |i: usize| {
             children[i]
@@ -1220,7 +1220,7 @@ mod tests {
     fn fix_harness_artifacts_drops_unknown_artifact_checks_and_notes_the_real_ones() {
         let (org, roles, genres) = harness_setup();
         let mut t = new_task("候補テーマの抽出", vec![]);
-        t.genre = Some("literature".into()); // ADR-0068: 担当ではなく harness で指定する
+        t.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         t.objective = "候補テーマを 3〜5 件、引用付きで candidates.json にまとめよ".into();
         t.acceptance = vec![
             Criterion {
@@ -1273,7 +1273,7 @@ mod tests {
     fn fix_harness_artifacts_keeps_the_criterion_as_a_reviewer_check_when_nothing_else_remains() {
         let (org, roles, genres) = harness_setup();
         let mut t = new_task("候補テーマの抽出", vec![]);
-        t.genre = Some("literature".into()); // ADR-0068: 担当ではなく harness で指定する
+        t.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         t.acceptance = vec![Criterion {
             text: "候補テーマ 3 件が引用付きで書かれている".into(),
             check: Check::ArtifactExists {
@@ -1299,7 +1299,7 @@ mod tests {
     fn fix_harness_artifacts_leaves_other_genres_and_matching_names_alone() {
         let (org, roles, genres) = harness_setup();
         let mut coding = new_task("実装", vec![]);
-        coding.genre = Some("coding".into()); // ADR-0068: 担当ではなく harness で指定する
+        coding.genre = Some("coding".into()); // ADR-0069: 担当ではなく harness で指定する
         coding.acceptance = vec![Criterion {
             text: "design.md がある".into(),
             check: Check::ArtifactExists {
@@ -1307,7 +1307,7 @@ mod tests {
             },
         }];
         let mut literature = new_task("調べる", vec![]);
-        literature.genre = Some("literature".into()); // ADR-0068: 担当ではなく harness で指定する
+        literature.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         literature.acceptance = vec![Criterion {
             text: "answer.md がある".into(),
             check: Check::ArtifactExists {
@@ -1329,7 +1329,7 @@ mod tests {
     fn warn_missing_partial_ok_flags_research_children_without_the_escape_hatch() {
         let (org, roles, genres) = harness_setup();
         let mut t = new_task("CHFS の関連研究", vec![]);
-        t.genre = Some("literature".into()); // ADR-0068: 担当ではなく harness で指定する
+        t.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         t.acceptance = vec![Criterion {
             text: "CHFS/FinchFS/GekkoFS/UnifyFS の関連研究をまとめている".into(),
             check: Check::Reviewer,
@@ -1352,7 +1352,7 @@ mod tests {
         let (org, roles, genres) = harness_setup();
 
         let mut with_marker = new_task("CHFS の関連研究", vec![]);
-        with_marker.genre = Some("literature".into()); // ADR-0068: 担当ではなく harness で指定する
+        with_marker.genre = Some("literature".into()); // ADR-0069: 担当ではなく harness で指定する
         with_marker.acceptance = vec![Criterion {
             text: "一次情報で確認できなかった項目は「未確認」と明記されていれば不合格にしない"
                 .into(),
@@ -1368,7 +1368,7 @@ mod tests {
         }];
 
         let mut coding = new_task("実装", vec![]);
-        coding.genre = Some("coding".into()); // ADR-0068: 担当ではなく harness で指定する
+        coding.genre = Some("coding".into()); // ADR-0069: 担当ではなく harness で指定する
         coding.acceptance = vec![Criterion {
             text: "design.md がある".into(),
             check: Check::ArtifactExists {
@@ -1507,7 +1507,7 @@ mod tests {
         }
     }
 
-    /// ADR-0062 B2（Phase 107）→ ADR-0068 D1（Phase 114）: 計画が書いた担当は捨てるので、案件から継いだ
+    /// ADR-0062 B2（Phase 107）→ ADR-0069 D1（Phase 114）: 計画が書いた担当は捨てるので、案件から継いだ
     /// Remote workspace は**担当未定のまま Remote に残る**（ADR-0062 B2 の「担当未定なら判定しない」側。
     /// matching が `cluster:<id>` を持つノードだけを候補にするので後で矛盾しない）。以前は計画の
     /// `assignee` が道具を持たなければここで Local に落としていた。

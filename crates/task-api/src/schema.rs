@@ -143,7 +143,7 @@ pub struct ApiV1Schema {
     pub reopen: ReopenBody,
     /// ADR-0044 D5: `GET /tasks/{id}/timeline`。
     pub timeline: Timeline,
-    /// ADR-0068 D5: `GET /tasks/{id}/routing`。
+    /// ADR-0069 D5: `GET /tasks/{id}/routing`。
     pub task_routing: crate::types::TaskRoutingView,
     // ---- ADR-0048 D1/D2（Phase 60a）: Console の読み取り側 ----
     /// `GET /console` の応答と、その 1 ブロック（9 種）。

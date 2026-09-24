@@ -17167,7 +17167,7 @@ resume run は codex の既定の（読み取り専用の）承認・サンド�
 
 ## Phase 114 — routing を 4 層に分け、CoS から人選とモデル選択を外す（Model/Org routing 再設計 Phase 1、2026-09-24）
 
-ADR-0068（`docs/adr/0068-routing-four-layers.md`）。Ownership（TaskSpec → OrgNode）/ Harness / Model（lane →
+ADR-0069（`docs/adr/0069-routing-four-layers.md`）。Ownership（TaskSpec → OrgNode）/ Harness / Model（lane →
 provider/model）/ Review の 4 層。組織木は継承の名前空間（命令の中継ではない）。`Tier` の直列化名は変えず、
 品質／予算の lane として読む。
 
@@ -17216,7 +17216,7 @@ provider/model）/ Review の 4 層。組織木は継承の名前空間（命令
   レビュー不合格 2 回で cheap → standard）。
 - 意図した挙動変更で書き換え: 計画・委譲の `assignee` が子に残る 2 本、継いだ Remote の降格 2 本、計画の harness
   補正・調査系警告 5 本（担当ではなく `genre` で指定）、Console の cluster 道具検証 1 本（人の発言に `@web-research`）、
-  dispatcher の部またぎ委譲 4 本 → 2 本（詳細は ADR-0068 §4）。プロンプトの文言テスト 2 本。
+  dispatcher の部またぎ委譲 4 本 → 2 本（詳細は ADR-0069 §4）。プロンプトの文言テスト 2 本。
 
 ### ゲート
 
@@ -17256,7 +17256,7 @@ provider/model）/ Review の 4 層。組織木は継承の名前空間（命令
 
 - P-114-6: GUI/API に `task_routing_audit` を出す（次の Phase。タスク画面の「なぜこの lane / model か」）。
 - P-114-7: Phase 2 の shadow 分類器（`ShadowClassifier`）・metrics-aware routing・lead+sidekick・部門リードの
-  選択的起動（ADR-0068 §5）。
+  選択的起動（ADR-0069 §5）。
 
 ### Phase 114 続き: routing 監査の API / GUI（P-114-6 を解消）
 

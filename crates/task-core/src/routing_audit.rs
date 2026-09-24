@@ -1,4 +1,4 @@
-//! ADR-0068 D5（Phase 114）: run ごとの routing の監査記録（担当・harness・lane・model・features・規則・
+//! ADR-0069 D5（Phase 114）: run ごとの routing の監査記録（担当・harness・lane・model・features・規則・
 //! policy の版）と、Phase 104 のメトリクス（cost・tokens・wall time・retries）とレビュー結果を
 //! 突き合わせる純粋関数。イベントは古い順に渡す（`TaskStore::events_for` の順）。
 

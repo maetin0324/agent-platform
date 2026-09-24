@@ -1,4 +1,4 @@
-//! ADR-0068 D5: `GET /tasks/{id}/routing`（読み取り）。
+//! ADR-0069 D5: `GET /tasks/{id}/routing`（読み取り）。
 //!
 //! なぜその担当（org）・harness・lane・model になったかを、`task_ops::routing_audit` がイベントから
 //! 組み立てた run ごとの監査と、タスクの routing の出自（`Task.routing`、捨てた LLM の担当を含む）で返す。

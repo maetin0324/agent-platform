@@ -13,7 +13,7 @@ import {
   tierSourceLabel,
 } from "~/lib/task-routing";
 
-/** `~/lib/task-routing.ts`（celeris ADR-0068 D5 の「ルーティング」パネル）の純粋関数。 */
+/** `~/lib/task-routing.ts`（celeris ADR-0069 D5 の「ルーティング」パネル）の純粋関数。 */
 
 function run(over: Partial<RoutingAudit> = {}): RoutingAudit {
   return { task_id: "T1", run_id: "R1", ...over };

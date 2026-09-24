@@ -1147,7 +1147,7 @@
     },
     "BudgetPrefs": {
       "additionalProperties": false,
-      "description": "ADR-0068 D2（Phase 114）: そのノード以下の予算の天井。どちらも**最も厳しい値が勝つ**\n（根→葉の最小。子は緩められない）。",
+      "description": "ADR-0069 D2（Phase 114）: そのノード以下の予算の天井。どちらも**最も厳しい値が勝つ**\n（根→葉の最小。子は緩められない）。",
       "properties": {
         "max_attempts": {
           "description": "1 タスクあたりの試行回数の上限（エスカレーション込み。タスクの `max_retries + 1` も超えない）。",
@@ -3930,7 +3930,7 @@
           "type": "array"
         },
         "max_attempts": {
-          "description": "ADR-0068 D2: 継いだ試行回数の上限（根→葉の最小）。",
+          "description": "ADR-0069 D2: 継いだ試行回数の上限（根→葉の最小）。",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -3947,7 +3947,7 @@
               "type": "null"
             }
           ],
-          "description": "ADR-0068 D2: 継いだ lane の上限（根→葉の最小）。"
+          "description": "ADR-0069 D2: 継いだ lane の上限（根→葉の最小）。"
         },
         "node_id": {
           "description": "対象のノード（知らない id なら空文字列）。",
@@ -3960,7 +3960,7 @@
           "type": "array"
         },
         "review_escalate_on_fail": {
-          "description": "ADR-0068 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。",
+          "description": "ADR-0069 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。",
           "type": [
             "boolean",
             "null"
@@ -4590,7 +4590,7 @@
           "type": "object"
         },
         {
-          "description": "ADR-0068 D5（Phase 114）: この run の routing の監査記録（担当・harness・lane・model・features・\n当たった規則・policy の版・エスカレーション）。同じ `run_id` の `WorkerStarted` の直後に 1 件。\n状態は変えない（`replay` は無視する）。",
+          "description": "ADR-0069 D5（Phase 114）: この run の routing の監査記録（担当・harness・lane・model・features・\n当たった規則・policy の版・エスカレーション）。同じ `run_id` の `WorkerStarted` の直後に 1 件。\n状態は変えない（`replay` は無視する）。",
           "properties": {
             "record": {
               "$ref": "#/$defs/RoutingRecord"
@@ -5633,7 +5633,7 @@
       "type": "object"
     },
     "LaneDecision": {
-      "description": "ADR-0068 D3: lane の決定（監査記録の本体）。",
+      "description": "ADR-0069 D3: lane の決定（監査記録の本体）。",
       "properties": {
         "clamped_by": {
           "type": [
@@ -5708,7 +5708,7 @@
       "type": "object"
     },
     "LaneResolution": {
-      "description": "ADR-0068 D4: lane → provider / account / model / reasoning effort の解決結果（監査記録）。\n解決そのものは従来の `select_provider` → `TieredAdapter::model_for_tier` → `select_tier` のまま。",
+      "description": "ADR-0069 D4: lane → provider / account / model / reasoning effort の解決結果（監査記録）。\n解決そのものは従来の `select_provider` → `TieredAdapter::model_for_tier` → `select_tier` のまま。",
       "properties": {
         "account": {
           "type": [
@@ -6669,7 +6669,7 @@
           "type": "string"
         },
         "reasoning_effort": {
-          "description": "ADR-0068 D4（Phase 114）: この lane で使う reasoning effort（例 `\"medium\"`）。Phase 1 では\n監査記録（`LaneResolution`）に残すだけで、CLI には渡さない。無ければ `None`。",
+          "description": "ADR-0069 D4（Phase 114）: この lane で使う reasoning effort（例 `\"medium\"`）。Phase 1 では\n監査記録（`LaneResolution`）に残すだけで、CLI には渡さない。無ければ `None`。",
           "type": [
             "string",
             "null"
@@ -6852,7 +6852,7 @@
             }
           ],
           "default": null,
-          "description": "ADR-0068 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。"
+          "description": "ADR-0069 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。"
         },
         "genre": {
           "default": null,
@@ -7556,7 +7556,7 @@
       "properties": {
         "budget": {
           "$ref": "#/$defs/BudgetPrefs",
-          "description": "ADR-0068 D2（Phase 114）: 予算の天井（最も厳しい値が勝つ）。"
+          "description": "ADR-0069 D2（Phase 114）: 予算の天井（最も厳しい値が勝つ）。"
         },
         "deny_tools": {
           "description": "禁止する道具。和だが**常に勝つ**（実効の `tools` から引かれる）。",
@@ -9669,7 +9669,7 @@
       "description": "ADR-0046 D1: レビューの既定（子が勝つ）。",
       "properties": {
         "escalate_on_fail": {
-          "description": "ADR-0068 D2 / D6（Phase 114）: レビュー不合格のやり直しで lane を 1 段上げてよいか\n（`false` なら上げない。省略時は上げてよい）。子が勝つ。",
+          "description": "ADR-0069 D2 / D6（Phase 114）: レビュー不合格のやり直しで lane を 1 段上げてよいか\n（`false` なら上げない。省略時は上げてよい）。子が勝つ。",
           "type": [
             "boolean",
             "null"
@@ -9939,7 +9939,7 @@
       "type": "object"
     },
     "RoutingRecord": {
-      "description": "ADR-0068 D5: `Event::RoutingDecided` の中身。",
+      "description": "ADR-0069 D5: `Event::RoutingDecided` の中身。",
       "properties": {
         "decision": {
           "$ref": "#/$defs/LaneDecision",
@@ -10279,7 +10279,7 @@
       "type": "object"
     },
     "ShadowDecision": {
-      "description": "ADR-0068 §5（Phase 2 の予約）: shadow mode の分類器（例: Jev）の判断。lane は heuristic のままで、\nこれは並べて記録するだけ。**Phase 1 では作られない**。",
+      "description": "ADR-0069 §5（Phase 2 の予約）: shadow mode の分類器（例: Jev）の判断。lane は heuristic のままで、\nこれは並べて記録するだけ。**Phase 1 では作られない**。",
       "properties": {
         "classifier": {
           "type": "string"
@@ -10737,7 +10737,7 @@
               "type": "null"
             }
           ],
-          "description": "ADR-0068（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。\n**これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。\n導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。"
+          "description": "ADR-0069（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。\n**これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。\n導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。"
         },
         "skills": {
           "description": "ADR-0046 D2: このタスクに必要な能力タグ（`org_nodes` の実効 `skills` と突き合わせて担当を決める。\nADR-0046 D5 の matching）。導入前のタスクには無いので既定は空。",
@@ -11176,7 +11176,7 @@
       "type": "object"
     },
     "TaskFeatureHints": {
-      "description": "ADR-0068 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の\n`create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。",
+      "description": "ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の\n`create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。",
       "properties": {
         "ambiguity": {
           "anyOf": [
@@ -11272,7 +11272,7 @@
       "type": "object"
     },
     "TaskFeatures": {
-      "description": "ADR-0068 D3: lane を決めるためのタスクの性質（9 軸）。",
+      "description": "ADR-0069 D3: lane を決めるためのタスクの性質（9 軸）。",
       "properties": {
         "ambiguity": {
           "$ref": "#/$defs/Level",
@@ -11500,14 +11500,14 @@
       "type": "object"
     },
     "TaskRouting": {
-      "description": "ADR-0068 D1 / D3: タスクの routing の出自（`Task.routing`）。",
+      "description": "ADR-0069 D1 / D3: タスクの routing の出自（`Task.routing`）。",
       "properties": {
         "assignee_explicit": {
           "description": "担当（`assignee`）を人が明示したか（false なら matching が決めた／これから決める）。",
           "type": "boolean"
         },
         "dropped_assignee": {
-          "description": "LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0068 D1）。",
+          "description": "LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0069 D1）。",
           "type": [
             "string",
             "null"
@@ -11522,7 +11522,7 @@
               "type": "null"
             }
           ],
-          "description": "TaskFeatures の明示の上書き（ADR-0068 D3）。"
+          "description": "TaskFeatures の明示の上書き（ADR-0069 D3）。"
         },
         "tier_source": {
           "$ref": "#/$defs/TierSource",
@@ -11532,7 +11532,7 @@
       "type": "object"
     },
     "TaskRoutingView": {
-      "description": "`GET /tasks/{id}/routing` の応答（ADR-0068 D5）。なぜその担当・harness・lane・model になったかの監査。\n`runs` はワーカー run ごと（古い run が先）で、各 run の `escalation` がエスカレーションの履歴になる。\nまだ run が無いタスクは `runs` が空（404 にはしない。知らないタスクだけが 404）。",
+      "description": "`GET /tasks/{id}/routing` の応答（ADR-0069 D5）。なぜその担当・harness・lane・model になったかの監査。\n`runs` はワーカー run ごと（古い run が先）で、各 run の `escalation` がエスカレーションの履歴になる。\nまだ run が無いタスクは `runs` が空（404 にはしない。知らないタスクだけが 404）。",
       "properties": {
         "assignee": {
           "description": "現在の担当（`Task.assignee`）。",
@@ -11758,7 +11758,7 @@
       "type": "string"
     },
     "TierSource": {
-      "description": "ADR-0068 D1: `worker_hint.tier` を誰が決めたか。",
+      "description": "ADR-0069 D1: `worker_hint.tier` を誰が決めたか。",
       "oneOf": [
         {
           "const": "human",
@@ -12887,7 +12887,7 @@
     },
     "task_routing": {
       "$ref": "#/$defs/TaskRoutingView",
-      "description": "ADR-0068 D5: `GET /tasks/{id}/routing`。"
+      "description": "ADR-0069 D5: `GET /tasks/{id}/routing`。"
     },
     "timeline": {
       "$ref": "#/$defs/Timeline",

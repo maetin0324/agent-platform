@@ -922,7 +922,7 @@ impl StoreSink {
         // `standing_rules` の前方一致だけを見る決定的なもので、LLM は使わない（DESIGN 原則 1）。
         // Phase 27（監査 H-2）: **バッチは分ける** — 同じ部宛ての提案はその場で子にする。
         let org = self.store.org_list().map_err(|e| format!("store: {e}"))?;
-        // ADR-0068 D1（Phase 114）: 委譲（LLM）が書いた担当は使わない。担当は matching が決めるので、
+        // ADR-0069 D1（Phase 114）: 委譲（LLM）が書いた担当は使わない。担当は matching が決めるので、
         // 部をまたぐ認可（下の split）も担当を名指しした提案には起きなくなる。捨てた事実は進行に残す。
         let stripped: Vec<DelegateTask> = tasks
             .iter()
@@ -930,7 +930,7 @@ impl StoreSink {
                 let mut t = t.clone();
                 if let Some(a) = t.assignee.take().filter(|a| !a.trim().is_empty()) {
                     self.note(format!(
-                        "delegate: 担当の指定 {a} は使わない（「{}」の担当は celeris が skills と harness から決定的に選ぶ。ADR-0068 D1）",
+                        "delegate: 担当の指定 {a} は使わない（「{}」の担当は celeris が skills と harness から決定的に選ぶ。ADR-0069 D1）",
                         t.title
                     ));
                 }
@@ -4297,7 +4297,7 @@ impl Dispatcher {
                 task.budget.max_wall_secs = KNOWLEDGE_FALLBACK_MAX_WALL_SECS;
                 tracing::info!(task_id = %task.id, %reason, ?tier, "knowledge: falling back to a generic harness");
             }
-            // ADR-0068 D3 / D6（Phase 114）: `routing` を持つ execute タスクは、lane を決定的な policy
+            // ADR-0069 D3 / D6（Phase 114）: `routing` を持つ execute タスクは、lane を決定的な policy
             // （TaskFeatures → 規則表 → 組織の天井）とリトライのエスカレーションで決める。人の明示・
             // System の tier はそのまま（記録だけ）。残量による調整はこの後の `select_tier`（別の層）。
             let lane_decision = self.decide_lane(&task)?;
@@ -4400,7 +4400,7 @@ impl Dispatcher {
                     task_role: task.role.clone(),
                 },
             )?;
-            // ADR-0068 D5: この run の routing の監査記録（担当・harness・lane・model・features・規則）。
+            // ADR-0069 D5: この run の routing の監査記録（担当・harness・lane・model・features・規則）。
             if let Some(mut decision) = lane_decision {
                 if task_core::model_policy::lane_rank(task.worker_hint.tier)
                     < task_core::model_policy::lane_rank(decision.lane)
@@ -5410,11 +5410,11 @@ impl Dispatcher {
         ) {
             tracing::warn!(task_id = %task.id, "{note}");
         }
-        // ADR-0068 D1（Phase 114）: 計画（LLM）が書いた担当は使わない（子の `routing.dropped_assignee`
+        // ADR-0069 D1（Phase 114）: 計画（LLM）が書いた担当は使わない（子の `routing.dropped_assignee`
         // に残り、担当は matching が決める）。捨てた事実をここで 1 行ずつ残す。
         for (index, t) in plan.tasks.iter().enumerate() {
             if let Some(a) = t.assignee.as_deref().filter(|a| !a.trim().is_empty()) {
-                tracing::info!(task_id = %task.id, index, dropped_assignee = %a, "plan-supplied assignee ignored; matching decides (ADR-0068 D1)");
+                tracing::info!(task_id = %task.id, index, dropped_assignee = %a, "plan-supplied assignee ignored; matching decides (ADR-0069 D1)");
             }
         }
     }
@@ -6649,7 +6649,7 @@ impl Dispatcher {
     /// ADR-0043 D4: レビュー担当の `Check::Command` の既定になる検査コマンド
     /// （タスクに `acceptance` が明示されていればそれが勝つ。決めるのはここではなく `review.rs` の
     /// 呼び出し側）。**先頭のリポジトリの** `[commands] check` だけを使う。
-    /// ADR-0068 D3 / D6（Phase 114）: このタスクの lane を決める（`routing` を持つ execute タスクだけ。
+    /// ADR-0069 D3 / D6（Phase 114）: このタスクの lane を決める（`routing` を持つ execute タスクだけ。
     /// それ以外は `None` で従来どおり `worker_hint.tier`）。担当の実効 profile の天井（`allowed_tiers` /
     /// `budget.max_lane`）で丸め、やり直し（`attempts > 0`）ならイベントの履歴から
     /// `EscalationPolicy` で 1 段まで上げる。LLM は使わない（DESIGN 原則 1）。
@@ -6689,7 +6689,7 @@ impl Dispatcher {
             }
             decision.lane = next.lane();
             decision.escalation = Some(next.describe());
-            tracing::info!(task_id = %task.id, attempts = task.attempts, decision = %next.describe(), "retry lane decided (ADR-0068 D6)");
+            tracing::info!(task_id = %task.id, attempts = task.attempts, decision = %next.describe(), "retry lane decided (ADR-0069 D6)");
         }
         Ok(Some(decision))
     }
@@ -14433,7 +14433,7 @@ mod tests {
         );
     }
 
-    /// ADR-0033 D4 / SPEC §3.1 → ADR-0068 D1（Phase 114）: 委譲（LLM）が別の部の課を `assignee` に
+    /// ADR-0033 D4 / SPEC §3.1 → ADR-0069 D1（Phase 114）: 委譲（LLM）が別の部の課を `assignee` に
     /// 書いても、その担当は使わない（捨てて進行に残す）。担当を名指ししないので部をまたぐ認可の質問も
     /// 起きず、子はその場で作られ、担当は matching が決める。以前はここで子を作らずに秘書へ質問し、
     /// 人が `once` / `standing` で認めると次の run で通っていた（その 2 本のテストはこの挙動変更で
@@ -14500,7 +14500,7 @@ mod tests {
         }
     }
 
-    /// 同じ部の中の委譲は、これまでどおり子タスクになる（規則が効きすぎないこと）。ADR-0068 D1 以降、
+    /// 同じ部の中の委譲は、これまでどおり子タスクになる（規則が効きすぎないこと）。ADR-0069 D1 以降、
     /// 委譲が書いた担当は子に残らない。
     #[tokio::test]
     async fn a_delegation_inside_the_same_department_still_creates_children() {
@@ -14534,7 +14534,7 @@ mod tests {
             .filter(|c| c.kind == TaskKind::Execute)
             .collect();
         assert_eq!(children.len(), 1, "同じ部の中なら子ができる");
-        // ADR-0068 D1: 委譲が書いた担当は使わない（matching が決める）。
+        // ADR-0069 D1: 委譲が書いた担当は使わない（matching が決める）。
         assert_eq!(children[0].assignee, None);
         assert_eq!(children[0].title, "任せたい仕事");
     }
@@ -17946,7 +17946,7 @@ mod tests {
         assert!(events.iter().any(|(_, e)| matches!(e, Event::WorkerProgress { msg, .. } if msg.contains("unverified executable ID"))));
     }
 
-    /// ADR-0068（Phase 114）テスト用: 3 lane の束縛を持つ TieredAdapter（cheap だけ reasoning effort 付き）。
+    /// ADR-0069（Phase 114）テスト用: 3 lane の束縛を持つ TieredAdapter（cheap だけ reasoning effort 付き）。
     fn three_lane_adapter() -> Arc<dyn WorkerAdapter> {
         use task_core::model_routing::ModelBinding;
         Arc::new(task_worker::tiered::TieredAdapter {
@@ -17986,7 +17986,7 @@ mod tests {
         })
     }
 
-    /// ADR-0068 D3 / D5: `routing` を持つ execute タスクは、LLM のヒント（frontier）ではなく
+    /// ADR-0069 D3 / D5: `routing` を持つ execute タスクは、LLM のヒント（frontier）ではなく
     /// TaskFeatures の規則表で lane が決まり（機械的・検証可能・戻せる → cheap）、その lane の model が
     /// 走り、`RoutingDecided` に features・規則・版・reasoning effort が残る。
     #[tokio::test]
@@ -18071,7 +18071,7 @@ mod tests {
         assert!(routing_record(&l).is_none());
     }
 
-    /// ADR-0068 D6: 同じ lane でレビュー不合格が 2 回続いたタスクのやり直しは 1 段だけ上がり
+    /// ADR-0069 D6: 同じ lane でレビュー不合格が 2 回続いたタスクのやり直しは 1 段だけ上がり
     /// （cheap → standard）、理由が `RoutingDecided.decision.escalation` に残る。
     #[tokio::test]
     async fn repeated_review_failures_escalate_the_retry_lane_one_step() {

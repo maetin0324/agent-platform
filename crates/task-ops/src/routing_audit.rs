@@ -1,4 +1,4 @@
-//! ADR-0068 D5（Phase 114）: タスク 1 件の routing の監査を、ストアのイベントから組み立てる
+//! ADR-0069 D5（Phase 114）: タスク 1 件の routing の監査を、ストアのイベントから組み立てる
 //! （集計そのものは純粋関数 `task_core::routing_audit::routing_audit`）。GUI / API の表示は別 Phase。
 
 use task_core::{RoutingAudit, TaskId, TaskStore};

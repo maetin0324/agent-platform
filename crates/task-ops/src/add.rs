@@ -163,16 +163,16 @@ pub struct NewTaskSpec {
     #[serde(default)]
     pub status: Option<Status>,
     // ---- ADR-0044 D1/D3（Phase 53）: ここまで ----
-    /// ADR-0068 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。
+    /// ADR-0069 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。
     #[serde(default)]
     pub features: Option<task_core::TaskFeatureHints>,
-    /// ADR-0068 D1: この spec の出自。**API の JSON からは入らない**（`serde(skip)`。偽装できない）。
+    /// ADR-0069 D1: この spec の出自。**API の JSON からは入らない**（`serde(skip)`。偽装できない）。
     /// 既定は人（`POST /tasks` / `celerisctl add`）。LLM の経路（CoS の actions）はコードが `Agent` を立てる。
     #[serde(skip)]
     pub provenance: SpecProvenance,
 }
 
-/// ADR-0068 D1: `NewTaskSpec` を誰が書いたか。
+/// ADR-0069 D1: `NewTaskSpec` を誰が書いたか。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SpecOrigin {
     /// 人（API / CLI）。`tier` / `assignee` は人の明示として従う。
@@ -184,7 +184,7 @@ pub enum SpecOrigin {
     System,
 }
 
-/// ADR-0068 D1: spec の出自と、LLM 経路で捨てた値（`Task.routing` に写す）。
+/// ADR-0069 D1: spec の出自と、LLM 経路で捨てた値（`Task.routing` に写す）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpecProvenance {
     pub origin: SpecOrigin,
@@ -202,7 +202,7 @@ impl SpecProvenance {
         }
     }
 
-    /// ADR-0068 D1: `tier` を誰が決めたか。
+    /// ADR-0069 D1: `tier` を誰が決めたか。
     pub fn tier_source(&self, tier_given: bool) -> task_core::TierSource {
         use task_core::TierSource;
         // celeris のコードが作るタスク（計画 run・報告・知識整理）は lane policy の対象にしない。
@@ -584,7 +584,7 @@ fn build_task(
         max_retries: spec.max_retries,
     };
 
-    // ADR-0068 D1 / D3: routing の出自（tier を誰が決めたか・捨てた担当・features の上書き）。
+    // ADR-0069 D1 / D3: routing の出自（tier を誰が決めたか・捨てた担当・features の上書き）。
     let routing = task_core::TaskRouting {
         tier_source: spec.provenance.tier_source(spec.tier.is_some()),
         assignee_explicit: spec.assignee.is_some(),
@@ -876,7 +876,7 @@ mod tests {
         assert_eq!(task.role, None, "assignee does not invent a role name");
     }
 
-    /// ADR-0068 D1（Phase 114）: 人の経路（API / CLI。`SpecOrigin::Human` が既定）の `assignee` / `tier` は
+    /// ADR-0069 D1（Phase 114）: 人の経路（API / CLI。`SpecOrigin::Human` が既定）の `assignee` / `tier` は
     /// 人の明示として従い、`routing` に出自が残る。`provenance` は API の JSON からは偽装できない。
     #[test]
     fn human_spec_records_explicit_provenance_and_cannot_be_spoofed() {

@@ -519,14 +519,14 @@ pub struct Task {
     /// **DB の列は増やさない**（`json` 列の中だけ。導入前のタスクには無いので任意）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<crate::message::MessageId>,
-    /// ADR-0068（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。
+    /// ADR-0069（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。
     /// **これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。
     /// 導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<TaskRouting>,
 }
 
-/// ADR-0068 D1: `worker_hint.tier` を誰が決めたか。
+/// ADR-0069 D1: `worker_hint.tier` を誰が決めたか。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TierSource {
@@ -548,7 +548,7 @@ impl TierSource {
     }
 }
 
-/// ADR-0068 D1 / D3: タスクの routing の出自（`Task.routing`）。
+/// ADR-0069 D1 / D3: タスクの routing の出自（`Task.routing`）。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct TaskRouting {
     #[serde(default)]
@@ -556,10 +556,10 @@ pub struct TaskRouting {
     /// 担当（`assignee`）を人が明示したか（false なら matching が決めた／これから決める）。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub assignee_explicit: bool,
-    /// LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0068 D1）。
+    /// LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0069 D1）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_assignee: Option<String>,
-    /// TaskFeatures の明示の上書き（ADR-0068 D3）。
+    /// TaskFeatures の明示の上書き（ADR-0069 D3）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<crate::model_policy::TaskFeatureHints>,
 }
@@ -1013,7 +1013,7 @@ pub enum Event {
         /// 消したパス（作業場所〈`<workspace_root>/<task_id>`〉からの相対。例: `repos/benchfs/target`）。
         removed: Vec<String>,
     },
-    /// ADR-0068 D5（Phase 114）: この run の routing の監査記録（担当・harness・lane・model・features・
+    /// ADR-0069 D5（Phase 114）: この run の routing の監査記録（担当・harness・lane・model・features・
     /// 当たった規則・policy の版・エスカレーション）。同じ `run_id` の `WorkerStarted` の直後に 1 件。
     /// 状態は変えない（`replay` は無視する）。
     RoutingDecided {

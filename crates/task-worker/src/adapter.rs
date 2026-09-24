@@ -141,7 +141,7 @@ pub trait WorkerAdapter: Send + Sync {
     fn model_for_tier(&self, _tier: task_core::Tier) -> Result<Option<String>, String> {
         Ok(None)
     }
-    /// ADR-0068 D4（Phase 114）: その lane の設定上の reasoning effort（監査記録用。既定は無し）。
+    /// ADR-0069 D4（Phase 114）: その lane の設定上の reasoning effort（監査記録用。既定は無し）。
     fn reasoning_effort_for_tier(&self, _tier: task_core::Tier) -> Option<String> {
         None
     }

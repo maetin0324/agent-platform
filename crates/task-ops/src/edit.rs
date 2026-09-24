@@ -324,7 +324,7 @@ pub fn edit_task(
         && tier != task.worker_hint.tier
     {
         task.worker_hint.tier = tier;
-        // ADR-0068 D1: 人が編集した tier は人の明示（lane policy は触らない）。
+        // ADR-0069 D1: 人が編集した tier は人の明示（lane policy は触らない）。
         if let Some(routing) = task.routing.as_mut() {
             routing.tier_source = task_core::TierSource::Human;
         }

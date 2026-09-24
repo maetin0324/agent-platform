@@ -1,4 +1,4 @@
-//! ADR-0068 D5: `GET /tasks/{id}/routing`（run ごとの routing の監査と、タスクの routing の出自）。
+//! ADR-0069 D5: `GET /tasks/{id}/routing`（run ごとの routing の監査と、タスクの routing の出自）。
 
 mod common;
 

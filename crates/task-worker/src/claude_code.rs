@@ -347,7 +347,7 @@ fn assignee_instructions_for_plan(context: &RunContext) -> String {
      - `mode`: `prototype`（動くことを最短で示す）/ `production`（既定。テストと lint を通す）/ \
      `research`（主張に出典か計測を付ける）\n\
      - `repos` と、仕事の制約（検証方法・戻せるか・失敗したときの損失）は objective と acceptance に書け。\n\
-     **担当（`assignee`）とモデル（`tier`）は選ぶな。** 書いても使われない（ADR-0068: 担当は matching、\n\
+     **担当（`assignee`）とモデル（`tier`）は選ぶな。** 書いても使われない（ADR-0069: 担当は matching、\n\
      lane は仕事の性質から celeris が決定的に決める）。\n\n"
         .to_string()
 }
@@ -359,7 +359,7 @@ fn assignee_instructions_for_delegation(context: &RunContext) -> String {
         return String::new();
     }
     "委譲する子には goal（title / objective）・受け入れ条件・`genre`（harness）を書け。**担当（`assignee`）と\n\
-     モデル（`tier`）は選ぶな**。書いても使われない（ADR-0068: 担当は celeris が skills と harness から決定的に\n\
+     モデル（`tier`）は選ぶな**。書いても使われない（ADR-0069: 担当は celeris が skills と harness から決定的に\n\
      選び、lane は仕事の性質から決める）。上の組織図は「どんな担当がいるか」を知るためだけに使え。\n\n"
         .to_string()
 }
@@ -421,7 +421,7 @@ fn delegation_instructions(artifacts: &str) -> String {
          \"genre\":\"<optional>\",\
          \"depends_on\":[<index into this array, or an existing task id>]}}]}}`. \
          Do not choose an assignee or a model tier: celeris assigns the owner deterministically and picks the \
-         model lane from the task's nature (ADR-0068). Describe the work, its acceptance checks, and constraints instead.\n\
+         model lane from the task's nature (ADR-0069). Describe the work, its acceptance checks, and constraints instead.\n\
          `check` may also be \
          `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, `{{\"type\":\"reviewer\"}}`, or `{{\"type\":\"human\"}}`. \
          celeris will validate this after this run ends and insert whatever proposals pass validation as child \
@@ -539,7 +539,7 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
          \"mode\":\"prototype\"|\"production\"|\"research\" (optional), \
          \"repos\":[\"<repo name>\"] (optional)}}]}}\n\
          ```\n\
-         Do not write `assignee` or `tier`: the owner and the model lane are decided by celeris (ADR-0068).\n\
+         Do not write `assignee` or `tier`: the owner and the model lane are decided by celeris (ADR-0069).\n\
          `check` may also be `{{\"type\":\"artifact_exists\",\"name\":\"...\"}}`, \
          `{{\"type\":\"knowledge_page\",\"path\":\"...\"}}` (a page in the knowledge base), \
          `{{\"type\":\"reviewer\"}}`, or `{{\"type\":\"human\"}}`. Unknown fields are rejected, so do not \
@@ -2161,7 +2161,7 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         let execute = build_prompt(&task, &context, "run-o1", "artifacts");
         assert!(execute.contains("## 組織図 (who you can assign work to)"));
         assert!(execute.contains("- research-survey [課] 関連研究調査課 (親: research, 分野: literature) — 関連研究を洗う"));
-        // ADR-0068 D1（Phase 114）: 委譲でも担当とモデルは選ばせない（書いても使われない）。
+        // ADR-0069 D1（Phase 114）: 委譲でも担当とモデルは選ばせない（書いても使われない）。
         assert!(execute.contains("**担当（`assignee`）と"), "{execute}");
         assert!(!execute.contains("\"assignee\":\"<optional org node id>\""));
 

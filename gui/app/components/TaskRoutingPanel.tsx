@@ -17,7 +17,7 @@ import {
 } from "~/lib/task-routing";
 
 /**
- * 「なぜこの担当・harness・lane・model か」（celeris ADR-0068 D5、`GET /tasks/{id}/routing`）。
+ * 「なぜこの担当・harness・lane・model か」（celeris ADR-0069 D5、`GET /tasks/{id}/routing`）。
  * 閉じた状態は 1 行（`org / harness / lane / model`）、開くと features・当たった規則と policy の版・
  * 理由・コスト等・レビュー結果を出す。値は celeris の監査記録をそのまま並べるだけ（GUI では再計算しない）。
  * run が無く、捨てた担当も無いタスクでは何も出さない。

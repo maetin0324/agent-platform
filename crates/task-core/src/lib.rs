@@ -138,7 +138,7 @@ pub use store::{
 pub use transition::{InvalidTransition, Outcome, StateView, Trigger, transition};
 
 pub mod model_routing;
-// ---- ADR-0068（Phase 114）: routing の 4 層（lane policy・retry/escalation・監査）----
+// ---- ADR-0069（Phase 114）: routing の 4 層（lane policy・retry/escalation・監査）----
 pub mod model_policy;
 pub mod retry_policy;
 pub mod routing_audit;

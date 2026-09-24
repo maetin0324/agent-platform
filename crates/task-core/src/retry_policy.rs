@@ -1,4 +1,4 @@
-//! ADR-0068 D6（Phase 114）: やり直し（retry）と lane のエスカレーションの決定的な policy。
+//! ADR-0069 D6（Phase 114）: やり直し（retry）と lane のエスカレーションの決定的な policy。
 //!
 //! 純粋関数だけを置く（I/O・LLM 呼び出しはしない）。タスクを最終的に `failed` にするのは従来どおり
 //! 状態機械（`transition` の `max_retries`）で、ここは「次の試行をどの lane で走らせるか」だけを決める。
@@ -104,7 +104,7 @@ pub const DEFAULT_MAX_ATTEMPTS_PER_LANE: u32 = 2;
 /// 既定: 全体の試行回数の上限。
 pub const DEFAULT_MAX_TOTAL_ATTEMPTS: u32 = 4;
 
-/// ADR-0068 D6: fallback / retry / escalation policy。
+/// ADR-0069 D6: fallback / retry / escalation policy。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EscalationPolicy {
     pub max_attempts_per_lane: u32,
@@ -262,7 +262,7 @@ fn is_budget_outcome(outcome: &str) -> bool {
     .any(|w| o.contains(w))
 }
 
-/// ADR-0068 D6: イベント列（古い順）から試行の履歴を作る。`reopen` で履歴はリセットする。
+/// ADR-0069 D6: イベント列（古い順）から試行の履歴を作る。`reopen` で履歴はリセットする。
 pub fn attempt_history(task: &Task, events: &[Event]) -> Vec<AttemptRecord> {
     let mut out: Vec<AttemptRecord> = Vec::new();
     let mut lane: Option<Tier> = None;

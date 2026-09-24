@@ -519,7 +519,7 @@
           "type": "array"
         },
         "max_attempts": {
-          "description": "ADR-0068 D2: 継いだ試行回数の上限（根→葉の最小）。",
+          "description": "ADR-0069 D2: 継いだ試行回数の上限（根→葉の最小）。",
           "format": "uint32",
           "minimum": 0,
           "type": [
@@ -536,7 +536,7 @@
               "type": "null"
             }
           ],
-          "description": "ADR-0068 D2: 継いだ lane の上限（根→葉の最小）。"
+          "description": "ADR-0069 D2: 継いだ lane の上限（根→葉の最小）。"
         },
         "node_id": {
           "description": "対象のノード（知らない id なら空文字列）。",
@@ -549,7 +549,7 @@
           "type": "array"
         },
         "review_escalate_on_fail": {
-          "description": "ADR-0068 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。",
+          "description": "ADR-0069 D6: レビュー不合格で lane を上げてよいか（子が勝つ。`None` は上げてよい）。",
           "type": [
             "boolean",
             "null"
@@ -1795,7 +1795,7 @@
               "type": "null"
             }
           ],
-          "description": "ADR-0068（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。\n**これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。\n導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。"
+          "description": "ADR-0069（Phase 114）: routing の出自（tier を誰が決めたか・捨てた LLM の担当・features の上書き）。\n**これを持つ execute タスクだけ**が lane policy（`model_policy`）とエスカレーションの対象になる。\n導入前のタスクには無い（従来どおり `worker_hint.tier` のまま走る）。DB の列は増やさない。"
         },
         "skills": {
           "description": "ADR-0046 D2: このタスクに必要な能力タグ（`org_nodes` の実効 `skills` と突き合わせて担当を決める。\nADR-0046 D5 の matching）。導入前のタスクには無いので既定は空。",
@@ -1852,7 +1852,7 @@
       "type": "string"
     },
     "TaskFeatureHints": {
-      "description": "ADR-0068 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の\n`create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。",
+      "description": "ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の\n`create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。",
       "properties": {
         "ambiguity": {
           "anyOf": [
@@ -1982,14 +1982,14 @@
       ]
     },
     "TaskRouting": {
-      "description": "ADR-0068 D1 / D3: タスクの routing の出自（`Task.routing`）。",
+      "description": "ADR-0069 D1 / D3: タスクの routing の出自（`Task.routing`）。",
       "properties": {
         "assignee_explicit": {
           "description": "担当（`assignee`）を人が明示したか（false なら matching が決めた／これから決める）。",
           "type": "boolean"
         },
         "dropped_assignee": {
-          "description": "LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0068 D1）。",
+          "description": "LLM が書いたが、人の明示ではないので捨てた担当（監査用。ADR-0069 D1）。",
           "type": [
             "string",
             "null"
@@ -2004,7 +2004,7 @@
               "type": "null"
             }
           ],
-          "description": "TaskFeatures の明示の上書き（ADR-0068 D3）。"
+          "description": "TaskFeatures の明示の上書き（ADR-0069 D3）。"
         },
         "tier_source": {
           "$ref": "#/$defs/TierSource",
@@ -2023,7 +2023,7 @@
       "type": "string"
     },
     "TierSource": {
-      "description": "ADR-0068 D1: `worker_hint.tier` を誰が決めたか。",
+      "description": "ADR-0069 D1: `worker_hint.tier` を誰が決めたか。",
       "oneOf": [
         {
           "const": "human",

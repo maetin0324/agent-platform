@@ -878,7 +878,7 @@ fn actions_instructions() -> String {
      - `{\"type\": \"add_milestone\", \"project\": \"<案件の id>\", \"title\": \"…\", \"description\": \"…\"}`\n\
      - `{\"type\": \"ask_human\", \"text\": \"…\"}`\n\
      **あなた（CoS）は goal / harness / skills / mode / repos / 制約を定義し、担当（`assignee`）とモデル（`tier`）は\
-     選びません**（ADR-0068）。担当は celeris が skills と harness から決定的に選び、モデルの lane は仕事の性質から\
+     選びません**（ADR-0069）。担当は celeris が skills と harness から決定的に選び、モデルの lane は仕事の性質から\
      決めます。仕事の性質を伝えたいときは任意の `\"features\": {\"judgment\": \"high\", \"verifiability\": \"low\"}` \
      （各軸 low / medium / high。judgment, ambiguity, verifiability, reversibility, consequence, context_size, \
      tool_intensity, expected_length, cross_cutting）を書けます。人が発言で `@<担当 id>` や `tier:<lane>` と明示した\
@@ -1450,7 +1450,7 @@ mod tests {
         assert!(out.contains("add_milestone"), "{out}");
         assert!(out.contains("ask_human"), "{out}");
         assert!(out.contains("mode: \"production\""), "{out}");
-        // ADR-0068 D1（Phase 114）: CoS は担当とモデルを選ばない。
+        // ADR-0069 D1（Phase 114）: CoS は担当とモデルを選ばない。
         assert!(
             out.contains("担当（`assignee`）とモデル（`tier`）は"),
             "{out}"

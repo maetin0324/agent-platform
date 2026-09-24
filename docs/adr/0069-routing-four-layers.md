@@ -1,4 +1,4 @@
-# ADR-0068: routing を 4 層（Ownership / Harness / Model / Review）に分け、CoS から人選とモデル選択を外す（Phase 114、Model/Org routing 再設計 Phase 1）
+# ADR-0069: routing を 4 層（Ownership / Harness / Model / Review）に分け、CoS から人選とモデル選択を外す（Phase 114、Model/Org routing 再設計 Phase 1）
 
 - 日付: 2026-09-24
 - 状態: **Accepted**（人間の依頼「Model/Org routing redesign Phase 1」。CoS の責務を減らし、組織を継承の名前空間として
