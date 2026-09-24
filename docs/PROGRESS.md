@@ -17165,7 +17165,7 @@ resume run は codex の既定の（読み取り専用の）承認・サンド�
 - CoS 経由で作られた GUI 修正の子タスク 01M38AJZ5QD9E88ZD6FDDWG968 は done。
 - DB 移設: in-flight 0 で `relocate-db.sh /var/lib/celeris/celeris.sqlite3 --dry-run` は計画（stop → VACUUM INTO → integrity → config 書き換え → 旧ファイル rename → start → /config 確認）を出して通過。本番実行は auto mode の分類（Production Deploy）で拒否されたため人が実行する（P-113-6: `promote.sh` / `migrate-to-celeris.sh` と同様に許可リストへ）。
 
-## Phase 115 — routing を 4 層に分け、CoS から人選とモデル選択を外す（Model/Org routing 再設計 Phase 1、2026-09-24）
+## Phase 117 — routing を 4 層に分け、CoS から人選とモデル選択を外す（Model/Org routing 再設計 Phase 1、2026-09-24）
 
 ADR-0069（`docs/adr/0069-routing-four-layers.md`）。Ownership（TaskSpec → OrgNode）/ Harness / Model（lane →
 provider/model）/ Review の 4 層。組織木は継承の名前空間（命令の中継ではない）。`Tier` の直列化名は変えず、
@@ -17568,3 +17568,11 @@ drain timeout で run を abort → lease 失効の reclaim が 3 回 attempts �
   したい。
 - P-116-6: ディスク不足の分類（D1 追記）は文言だけで、残量の事前チェックや自動対処は範囲外。
   `/home` が再び満杯になる事故を防ぐには、別 Phase でチェック・警告の仕組みを検討する。
+
+### Phase 117 の main（Phase 116）への再統合の検証（2026-09-24）
+
+- `celeris/01M38J4X53P1Y684FS42Z6R0VZ` の routing 4 層実装（ADR-0069）を main cb230f1 にマージ。衝突なし。Phase 116 が足した `NewTaskSpec` 初期化（dispatcher.rs のテスト）へ `features`/`provenance` を補って再びコンパイル可能にした。
+- `cargo test --workspace --no-fail-fast`: exit 0、passed 2105 / failed 0。
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0。
+- gui: `pnpm typecheck` / `pnpm lint` exit 0、`pnpm test` 70 files / 1080 passed。
+- 未解決: `cargo fmt --check` はこの環境の rustfmt で既存ファイル（celeris-mcp 等 70 ファイル）に差分が出る（本件由来ではない）。実機確認 P-114-5、effort の CLI 渡し P-114-1、Phase 2 は ADR-0069 §5。

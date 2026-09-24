@@ -17833,6 +17833,8 @@ mod tests {
             skills: Vec::new(),
             mode: None,
             category: None,
+            features: None,
+            provenance: Default::default(),
             status: None,
         };
         let task = task_ops::add::create_support_task(
