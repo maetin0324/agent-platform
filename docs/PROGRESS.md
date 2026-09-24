@@ -18070,3 +18070,9 @@ GUI の画面（Execution 節・runs 表の `end` バッジ等）は E5 の範�
   使うだけでよい）。
 - `docs/protocol/checkpoint.schema.json` と `Checkpoint`/`WorkerCheckpointInput` は WorkUnit の
   `work_unit` 欄をすでに持っているが、E1 では常に `null`。E2 で実際に埋めること。
+
+## Phase E1 の本番反映（2026-09-24 17:47Z）
+
+- 統合 2ec8a69（PROGRESS.md 衝突のみ）+ clippy 1 件（テストの `expect_err`）を 93076d0 で修正。ゲート: fmt 0、cargo test FAILED 0、clippy 0、GUI typecheck / lint / test 1086 件 / gen:types 差分ゼロ。release `93076d0f4c76`、verify 全 true（schema は 25 のまま、migration 無し）、in-flight 0 でライブ切替（from 2f1fcc0a6227 = Celeris の自己改善配送「GUI recovery」）。
+- これで本番は: `error_max_turns` と wall-clock 打ち切りが `BudgetExhausted` → `Continue`（attempts 不変、usage 保持）、checkpoint の合成・保存（`CheckpointSaved`、16 KiB）、続きの run は checkpoint だけを載せて新しい context で開始、result.json の `yield`、上限（continuation 3 / 進捗なし 2）で blocked + 質問、`[execution] continuation = false` で従来挙動。既存タスクは暗黙の 1 WorkUnit。
+- 申し送り: P-E0-2（claude-code で result.json 不在のとき attempts を消費）は E1 で未修正のまま。E2 で直す。E1b（wrap-up run、ACP の真の yield）は未着手（任意）。実機の文言（U1）と peak_context_tokens（U2）は E6 で確認。
