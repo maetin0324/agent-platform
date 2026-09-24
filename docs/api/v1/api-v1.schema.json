@@ -4914,6 +4914,88 @@
             "checkpoint"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0072 D5/D14/D17（Phase E2）: 計画の採用（新規または replan）。`supersedes` は replan\nのときの旧 `execution_plans.id`（E2 では常に `None`。replan は E4）。状態は変えない\n（`replay` の attempts 計算は無視する）。",
+          "properties": {
+            "origin": {
+              "$ref": "#/$defs/PlanOrigin"
+            },
+            "plan": {
+              "$ref": "#/$defs/ExecutionPlanSpec"
+            },
+            "plan_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "supersedes": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "execution_planned",
+              "type": "string"
+            },
+            "version": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "type",
+            "plan_id",
+            "version",
+            "origin",
+            "plan"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0072 D5/D6（Phase E2）: WorkUnit の状態遷移。`run_id` はこの遷移のきっかけになった run\n（無ければ `None`。例: 依存先の失敗による `dependency_failed`）。状態は変えない\n（`replay` の attempts 計算は無視する）。",
+          "properties": {
+            "from": {
+              "$ref": "#/$defs/WorkUnitStatus"
+            },
+            "key": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "to": {
+              "$ref": "#/$defs/WorkUnitStatus"
+            },
+            "type": {
+              "const": "work_unit_transitioned",
+              "type": "string"
+            },
+            "work_unit_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "work_unit_id",
+            "key",
+            "from",
+            "to",
+            "reason"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -4999,6 +5081,30 @@
       },
       "required": [
         "criterion"
+      ],
+      "type": "object"
+    },
+    "ExecutionPlanSpec": {
+      "additionalProperties": false,
+      "description": "D14: Planner の出力（または人が `PUT`/`POST` で書く計画）そのもの。",
+      "properties": {
+        "rationale": {
+          "type": "string"
+        },
+        "schema": {
+          "type": "string"
+        },
+        "work_units": {
+          "items": {
+            "$ref": "#/$defs/WorkUnitSpec"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema",
+        "rationale",
+        "work_units"
       ],
       "type": "object"
     },
@@ -7847,6 +7953,16 @@
       },
       "type": "object"
     },
+    "PlanOrigin": {
+      "description": "D5: `execution_plans.origin`。",
+      "enum": [
+        "planner",
+        "human",
+        "repair",
+        "fixture"
+      ],
+      "type": "string"
+    },
     "PriorityInput": {
       "anyOf": [
         {
@@ -10361,6 +10477,13 @@
         "resolution": {
           "$ref": "#/$defs/LaneResolution",
           "description": "Model 層（lane → provider / model）。"
+        },
+        "work_unit_id": {
+          "description": "ADR-0072 D21（Phase E2）: この run が属する WorkUnit（計画のある Task の WU の run だけ。\n暗黙の WorkUnit・導入前のイベントには無い）。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -12928,6 +13051,184 @@
         "ts"
       ],
       "type": "object"
+    },
+    "WorkUnitBudget": {
+      "additionalProperties": false,
+      "description": "D14/D18: WU ごとの予算（任意。書かなければ D18 の既定を使う）。",
+      "properties": {
+        "max_turns": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_wall_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WorkUnitCheck": {
+      "additionalProperties": false,
+      "description": "D14: `checks` は決定的な検査だけ（`Command`。E4 で実行する。E2 は schema と検証のみ）。",
+      "properties": {
+        "cmd": {
+          "type": "string"
+        },
+        "expect_exit": {
+          "default": 0,
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cmd"
+      ],
+      "type": "object"
+    },
+    "WorkUnitContext": {
+      "additionalProperties": false,
+      "description": "D14: WU が読むべき context のヒント。",
+      "properties": {
+        "from_work_units": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "knowledge": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
+    "WorkUnitKind": {
+      "description": "D14: WorkUnit の種類。",
+      "enum": [
+        "investigate",
+        "design",
+        "implement",
+        "test",
+        "release",
+        "repair",
+        "other"
+      ],
+      "type": "string"
+    },
+    "WorkUnitSpec": {
+      "additionalProperties": false,
+      "description": "D14: 計画の中の 1 WorkUnit の spec。**`assignee` / `tier` / `model` の欄は持たない**\n（`deny_unknown_fields` により、書かれていれば schema 違反になる。D14）。",
+      "properties": {
+        "budget": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkUnitBudget"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checks": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/WorkUnitCheck"
+          },
+          "type": "array"
+        },
+        "context": {
+          "$ref": "#/$defs/WorkUnitContext",
+          "default": {
+            "from_work_units": [],
+            "knowledge": [],
+            "paths": []
+          }
+        },
+        "depends_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "done_when": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "features": {
+          "description": "D21: `TaskFeatures` の上書きヒント（任意の JSON。E3 以降の routing が読む）。"
+        },
+        "harness": {
+          "description": "`[[genres]]` にある id だけを許す（D14。検証は担当の profile を知る呼び出し側が行う。\nここでは形だけ見る）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "`[a-z0-9-]{1,32}`。計画の中で一意（D14）。",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkUnitKind"
+        },
+        "objective": {
+          "type": "string"
+        },
+        "outputs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "title",
+        "objective"
+      ],
+      "type": "object"
+    },
+    "WorkUnitStatus": {
+      "enum": [
+        "pending",
+        "ready",
+        "needs_continuation",
+        "running",
+        "done",
+        "failed",
+        "blocked",
+        "superseded",
+        "cancelled"
+      ],
+      "type": "string"
     },
     "WorkerHint": {
       "properties": {

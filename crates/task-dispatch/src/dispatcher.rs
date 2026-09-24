@@ -4873,6 +4873,7 @@ impl Dispatcher {
                     },
                     quota_reason: Some(routing_reason.clone()),
                     decision,
+                    work_unit_id: None,
                 };
                 self.store.append_event(
                     task.id,
@@ -6522,6 +6523,7 @@ impl Dispatcher {
                 reasoning_effort: review_reasoning_effort,
             },
             quota_reason: None,
+            work_unit_id: None,
         };
         let _ = self.store.append_event(
             task.id,
@@ -19215,6 +19217,7 @@ mod tests {
                     ..Default::default()
                 },
                 quota_reason: None,
+                work_unit_id: None,
             };
             for event in [
                 Event::RoutingDecided {

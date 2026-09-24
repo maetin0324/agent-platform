@@ -12,6 +12,8 @@ pub mod console_action;
 pub mod delegate;
 /// ADR-0072（Phase E1）: Run lifecycle / checkpoint / continuation の純粋な型と関数。
 pub mod execution;
+/// ADR-0072（Phase E2）: ExecutionPlan / WorkUnit のデータモデルと決定的な scheduler の純粋な型と関数。
+pub mod execution_plan;
 /// ADR-0046 D3（Phase 59）: ハーネス = 実行契約（`[[harnesses]]`。旧 `[[genres]]` + `[[roles]]`）。
 pub mod harness;
 /// ADR-0040 D4（Phase 47）: celeris のインスタンスの役割（`daemon_instances`）。
@@ -147,6 +149,13 @@ pub use execution::{
     CheckpointTestRun, ContinueWhy, HarnessErrorClass, MechanicalCheckpoint, RepoState, RunEnd,
     WorkerCheckpointInput, checkpoint_shows_progress, looks_like_context_exceeded,
     merge_checkpoint, parse_worker_checkpoint, truncate_checkpoint,
+};
+pub use execution_plan::{
+    EXECUTION_PLAN_SCHEMA, ExecutionLimits, ExecutionPlanRow, ExecutionPlanSpec, NextStep,
+    PlanOrigin, PlanStatus, PlanValidationError, RunIndexRole, RunIndexStatus, RunRow,
+    ValidatedPlan, WorkUnitBlockedReason, WorkUnitBudget, WorkUnitCheck, WorkUnitContext,
+    WorkUnitKind, WorkUnitRow, WorkUnitSpec, WorkUnitStatus, dependents_to_block, newly_ready,
+    next_work_unit, validate,
 };
 
 pub mod model_routing;

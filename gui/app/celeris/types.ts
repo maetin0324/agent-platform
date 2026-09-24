@@ -442,6 +442,24 @@ export type Event =
        * E1 では常に `None`（暗黙の WorkUnit）。E2 以降で WorkUnit の id を持つ。
        */
       work_unit_id?: string | null;
+    }
+  | {
+      origin: PlanOrigin;
+      plan: ExecutionPlanSpec;
+      plan_id: string;
+      reason?: string | null;
+      supersedes?: string | null;
+      type: "execution_planned";
+      version: number;
+    }
+  | {
+      from: WorkUnitStatus;
+      key: string;
+      reason: string;
+      run_id?: string | null;
+      to: WorkUnitStatus;
+      type: "work_unit_transitioned";
+      work_unit_id: string;
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -554,6 +572,16 @@ export type CheckpointEnd = "completed" | "yielded" | "budget_exhausted";
  * checkpoint を合成した出所（D8）。
  */
 export type CheckpointSource = "worker" | "yield" | "mechanical" | "merged";
+/**
+ * D5: `execution_plans.origin`。
+ */
+export type PlanOrigin = "planner" | "human" | "repair" | "fixture";
+/**
+ * D14: WorkUnit の種類。
+ */
+export type WorkUnitKind = "investigate" | "design" | "implement" | "test" | "release" | "repair" | "other";
+export type WorkUnitStatus =
+  "pending" | "ready" | "needs_continuation" | "running" | "done" | "failed" | "blocked" | "superseded" | "cancelled";
 export type RunOutcomeKind =
   ("done" | "question" | "error" | "requeue" | "lease_expired") | "interrupted" | "continued";
 export type AttentionItem =
@@ -2742,6 +2770,11 @@ export interface RoutingRecord {
    */
   quota_reason?: string | null;
   resolution: LaneResolution;
+  /**
+   * ADR-0072 D21（Phase E2）: この run が属する WorkUnit（計画のある Task の WU の run だけ。
+   * 暗黙の WorkUnit・導入前のイベントには無い）。
+   */
+  work_unit_id?: string | null;
 }
 /**
  * Model 層（lane）。
@@ -2901,6 +2934,66 @@ export interface CheckpointTestRun {
   command: string;
   exit?: number | null;
   summary?: string | null;
+}
+/**
+ * D14: Planner の出力（または人が `PUT`/`POST` で書く計画）そのもの。
+ */
+export interface ExecutionPlanSpec {
+  rationale: string;
+  schema: string;
+  work_units: WorkUnitSpec[];
+}
+/**
+ * D14: 計画の中の 1 WorkUnit の spec。**`assignee` / `tier` / `model` の欄は持たない**
+ * （`deny_unknown_fields` により、書かれていれば schema 違反になる。D14）。
+ */
+export interface WorkUnitSpec {
+  budget?: WorkUnitBudget | null;
+  checks?: WorkUnitCheck[];
+  context?: WorkUnitContext;
+  depends_on?: string[];
+  done_when?: string[];
+  /**
+   * D21: `TaskFeatures` の上書きヒント（任意の JSON。E3 以降の routing が読む）。
+   */
+  features?: {
+    [k: string]: unknown;
+  };
+  /**
+   * `[[genres]]` にある id だけを許す（D14。検証は担当の profile を知る呼び出し側が行う。
+   * ここでは形だけ見る）。
+   */
+  harness?: string | null;
+  /**
+   * `[a-z0-9-]{1,32}`。計画の中で一意（D14）。
+   */
+  key: string;
+  kind: WorkUnitKind;
+  objective: string;
+  outputs?: string[];
+  title: string;
+}
+/**
+ * D14/D18: WU ごとの予算（任意。書かなければ D18 の既定を使う）。
+ */
+export interface WorkUnitBudget {
+  max_turns?: number | null;
+  max_wall_secs?: number | null;
+}
+/**
+ * D14: `checks` は決定的な検査だけ（`Command`。E4 で実行する。E2 は schema と検証のみ）。
+ */
+export interface WorkUnitCheck {
+  cmd: string;
+  expect_exit?: number;
+}
+/**
+ * D14: WU が読むべき context のヒント。
+ */
+export interface WorkUnitContext {
+  from_work_units?: string[];
+  knowledge?: string[];
+  paths?: string[];
 }
 export interface Graph {
   edges: GraphEdge[];
