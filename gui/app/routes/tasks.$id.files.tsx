@@ -2,9 +2,11 @@ import { isRouteErrorResponse, Link } from "react-router";
 import { getCelerisClient } from "~/celeris/client.server";
 import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
 import { loadTaskFiles, readTaskFilesQuery, type TaskFilesData } from "~/celeris/task-files";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { TaskFiles } from "~/components/task-files";
 import { Icon } from "~/components/ui/Icon";
 import { Alert, PageHeader } from "~/components/ui/misc";
+import { isTransientStatus } from "~/lib/recovery";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/tasks.$id.files";
 
@@ -55,6 +57,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -65,6 +68,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
         </h1>
         {/* celeris の文言をそのまま出す（403 `path_forbidden` / 404 `file_not_found`）。 */}
         <Alert tone="danger">{data.detail}</Alert>
+        {isTransientStatus(data.status) && <RouteRecovery />}
       </main>
     );
   }
@@ -72,6 +76,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="mx-auto max-w-2xl space-y-3 p-6">
       <h1 className="text-xl font-semibold text-fg">エラー</h1>
       <Alert tone="danger">予期しないエラーが起きました。</Alert>
+      <RouteRecovery />
     </main>
   );
 }

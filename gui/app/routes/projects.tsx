@@ -9,6 +9,7 @@ import type { Clusters, ClusterView, Project, ProjectDetail, ProjectList, Projec
 import { ErrorFlash, FieldErrors } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { RepoFields } from "~/components/RepoFields";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -32,6 +33,7 @@ import type { Tone } from "~/components/ui/tone";
 import { WorkspaceFields } from "~/components/WorkspaceFields";
 import { ARCHIVED_BADGE_LABEL, projectStatusLabel, SHOW_ARCHIVED_LABEL } from "~/lib/labels";
 import { archivedQuery, projectIsArchived, readArchivedParam } from "~/lib/lifecycle";
+import { isTransientStatus } from "~/lib/recovery";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { CelerisBanner } from "~/root";
@@ -423,6 +425,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -430,6 +433,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       <main className="p-4">
         <h1 className="text-xl font-semibold">エラー {data.status}</h1>
         <p className="mt-2 text-sm text-fg-muted">{data.detail}</p>
+        {isTransientStatus(data.status) && <RouteRecovery />}
       </main>
     );
   }
@@ -437,6 +441,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
       <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
+      <RouteRecovery />
     </main>
   );
 }

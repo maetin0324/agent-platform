@@ -55,6 +55,7 @@ import { MarkdownViewer } from "~/components/MarkdownViewer";
 import { ProjectIntegrations } from "~/components/ProjectIntegrations";
 import { ProjectRepos } from "~/components/ProjectRepos";
 import { ReportsList } from "~/components/ReportsList";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -116,6 +117,7 @@ import {
   projectLifecycleButtons,
 } from "~/lib/lifecycle";
 import { milestoneDecisionValid, milestoneIsStalled } from "~/lib/milestone-review";
+import { isTransientStatus } from "~/lib/recovery";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { projectTasksToGraph, visibleWorkTasks } from "~/lib/work-tree";
@@ -1498,6 +1500,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -1507,6 +1510,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           {data.status === 404 ? "案件が見つかりません" : `エラー ${data.status}`}
         </h1>
         <p className="mt-2 text-sm text-fg-muted">{data.detail}</p>
+        {isTransientStatus(data.status) && <RouteRecovery />}
       </main>
     );
   }
@@ -1514,6 +1518,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
       <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
+      <RouteRecovery />
     </main>
   );
 }

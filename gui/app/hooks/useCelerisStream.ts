@@ -1,5 +1,6 @@
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRevalidator } from "react-router";
+import { useResumeRevalidate } from "~/hooks/useResumeRevalidate";
 
 /**
  * SSE クライアント（docs/DESIGN.md §6.3 の 3、docs/adr/0004-g1-decisions.md D2）。
@@ -8,6 +9,7 @@ import { useRevalidator } from "react-router";
  */
 
 const DEFAULT_DEBOUNCE_MS = 250;
+const RECONNECT_MS = 5_000;
 const STREAM_EVENT_TYPES = ["task.event", "daemon", "reset"] as const;
 
 export interface StreamController {
@@ -59,13 +61,28 @@ export function useCelerisStream(options?: UseCelerisStreamOptions): void {
   const taskId = options?.taskId;
 
   const enabled = options?.enabled ?? true;
+  // 接続を張り直すたびに増やす。バックグラウンドから戻ったとき、ブラウザに止められた／閉じた EventSource を捨てて張り直す。
+  const [epoch, setEpoch] = useState(0);
+  const revalidate = revalidator.revalidate;
+  const onResume = useCallback(() => {
+    setEpoch((n) => n + 1);
+    revalidate();
+  }, [revalidate]);
+  useResumeRevalidate(onResume, enabled);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `epoch` は本体では読まず、変わったら接続を張り直すための合図。
   useEffect(() => {
     // 未認証（/login 描画中）は `/events` が 401 になるだけなので張らない（docs/adr/0008 D1）
     if (!enabled) return;
     const url = taskId ? `/events?task_id=${encodeURIComponent(taskId)}` : "/events";
     const eventSource = new EventSource(url);
     const controller = createStreamController(() => revalidator.revalidate());
+    // サーバが 200 以外で切った等で EventSource が CLOSED になると自動再接続されない。少し待って張り直す。
+    let reconnect: ReturnType<typeof setTimeout> | null = null;
+    eventSource.onerror = () => {
+      if (eventSource.readyState !== EventSource.CLOSED || reconnect !== null) return;
+      reconnect = setTimeout(() => setEpoch((n) => n + 1), RECONNECT_MS);
+    };
 
     const listeners = STREAM_EVENT_TYPES.map((eventType) => {
       const listener = () => controller.notify(eventType);
@@ -77,9 +94,11 @@ export function useCelerisStream(options?: UseCelerisStreamOptions): void {
       for (const { eventType, listener } of listeners) {
         eventSource.removeEventListener(eventType, listener);
       }
+      if (reconnect !== null) clearTimeout(reconnect);
+      eventSource.onerror = null;
       eventSource.close();
       controller.dispose();
     };
     // `revalidator` は `useRevalidator()` が返す安定した参照ではないため依存から外す（再接続は `taskId` の変化だけで十分）。
-  }, [taskId, enabled, revalidator.revalidate]);
+  }, [taskId, enabled, epoch, revalidator.revalidate]);
 }

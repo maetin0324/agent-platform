@@ -14,6 +14,7 @@ import type { KnowledgeCandidate } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { KnowledgeMeta } from "~/components/KnowledgeMeta";
 import { MarkdownViewer } from "~/components/MarkdownViewer";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge } from "~/components/ui/badge";
 import { Button, buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -42,6 +43,7 @@ import {
   KNOWLEDGE_UNINITIALIZED_TITLE,
   knowledgeErrorHint,
 } from "~/lib/labels";
+import { isTransientStatus } from "~/lib/recovery";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/knowledge.inbox";
 
@@ -324,6 +326,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={problem.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -331,6 +334,8 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       <main className="mx-auto max-w-2xl space-y-3 p-6">
         <h1 className="text-xl font-semibold text-fg">エラー {problem.status}</h1>
         <Alert tone="danger">{problem.detail}</Alert>
+        {isTransientStatus(problem.status) && <RouteRecovery />}
+        {isTransientStatus(problem.status) && <RouteRecovery />}
       </main>
     );
   }
@@ -338,6 +343,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="mx-auto max-w-2xl space-y-3 p-6">
       <h1 className="text-xl font-semibold text-fg">エラー</h1>
       <Alert tone="danger">予期しないエラーが起きました。</Alert>
+      <RouteRecovery />
     </main>
   );
 }

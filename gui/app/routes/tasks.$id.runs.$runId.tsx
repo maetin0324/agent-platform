@@ -4,11 +4,13 @@ import { type CelerisClient, getCelerisClient } from "~/celeris/client.server";
 import { type CelerisRouteErrorData, celerisErrorResponse } from "~/celeris/errors";
 import type { RunList, RunSummary } from "~/celeris/types";
 import { CodeViewer } from "~/components/CodeViewer";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge } from "~/components/ui/badge";
 import { buttonClass } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { Icon } from "~/components/ui/Icon";
 import { Alert } from "~/components/ui/misc";
+import { isTransientStatus } from "~/lib/recovery";
 import { classifyStreamJsonLine, type FormattedLine } from "~/lib/stream-json";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/tasks.$id.runs.$runId";
@@ -313,6 +315,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -322,6 +325,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
           {data.status === 404 ? "run が見つかりません" : `エラー ${data.status}`}
         </h1>
         <Alert tone="danger">{data.detail}</Alert>
+        {isTransientStatus(data.status) && <RouteRecovery />}
       </main>
     );
   }
@@ -329,6 +333,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="mx-auto max-w-2xl space-y-3 p-6">
       <h1 className="text-xl font-semibold text-fg">エラー</h1>
       <Alert tone="danger">予期しないエラーが起きました。</Alert>
+      <RouteRecovery />
     </main>
   );
 }

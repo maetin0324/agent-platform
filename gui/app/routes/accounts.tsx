@@ -34,6 +34,7 @@ import type {
 import { AccountActionFlash, ErrorFlash, SecretActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
 import { LocalTime } from "~/components/LocalTime";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -57,6 +58,7 @@ import {
   tierResolutionReasonLabel,
 } from "~/lib/llm-sources";
 import { mcpAuthKindWord, mcpClientStatusWord, mcpConnectionUrlHint, mcpScopeLabel, sortMcpScopes } from "~/lib/mcp";
+import { isTransientStatus } from "~/lib/recovery";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/accounts";
@@ -1487,6 +1489,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={errorData.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -1494,6 +1497,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       <main className="p-4">
         <h1 className="text-xl font-semibold">エラー {errorData.status}</h1>
         <p className="mt-2 text-sm text-fg-muted">{errorData.detail}</p>
+        {isTransientStatus(errorData.status) && <RouteRecovery />}
       </main>
     );
   }
@@ -1502,6 +1506,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
       <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
+      <RouteRecovery />
     </main>
   );
 }

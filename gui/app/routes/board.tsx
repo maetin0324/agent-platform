@@ -17,6 +17,7 @@ import type {
 } from "~/celeris/types";
 import { ErrorFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge, StatusBadge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody } from "~/components/ui/card";
@@ -54,6 +55,7 @@ import {
 } from "~/lib/labels";
 import { milestoneIsPaused, projectIsPaused } from "~/lib/lifecycle";
 import { isLiveStatusScreen } from "~/lib/live-status";
+import { isTransientStatus } from "~/lib/recovery";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { cn } from "~/lib/utils";
 import { isSupportTask } from "~/lib/work-tree";
@@ -723,6 +725,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={errorData.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -730,6 +733,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       <main className="mx-auto max-w-2xl space-y-3 p-6">
         <h1 className="text-xl font-semibold text-fg">エラー {errorData.status}</h1>
         <EmptyState icon="alert" title={errorData.detail ?? "読み込めませんでした"} />
+        {isTransientStatus(errorData.status) && <RouteRecovery />}
       </main>
     );
   }
@@ -737,6 +741,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="mx-auto max-w-2xl space-y-3 p-6">
       <h1 className="text-xl font-semibold text-fg">エラー</h1>
       <EmptyState icon="alert" title="予期しないエラーが起きました。" />
+      <RouteRecovery />
     </main>
   );
 }

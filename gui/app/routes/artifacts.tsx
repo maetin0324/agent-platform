@@ -4,6 +4,7 @@ import { CelerisError, type CelerisRouteErrorData, celerisErrorResponse } from "
 import type { ArtifactList, OrgList, Project, ProjectDetail, ProjectList, TaskDetail, TaskId } from "~/celeris/types";
 import { ArtifactsList } from "~/components/ArtifactsList";
 import { HelpLink } from "~/components/HelpLink";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
 import { labelClass, selectClass } from "~/components/ui/form";
@@ -15,6 +16,7 @@ import {
   type TaskArtifactBundle,
   workspacePlace,
 } from "~/lib/artifacts";
+import { isTransientStatus } from "~/lib/recovery";
 import { CelerisBanner } from "~/root";
 import type { Route } from "./+types/artifacts";
 
@@ -189,6 +191,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -196,6 +199,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       <main className="p-4">
         <h1 className="text-xl font-semibold">エラー {data.status}</h1>
         <p className="mt-2 text-sm text-fg-muted">{data.detail}</p>
+        {isTransientStatus(data.status) && <RouteRecovery />}
       </main>
     );
   }
@@ -203,6 +207,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
       <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
+      <RouteRecovery />
     </main>
   );
 }

@@ -15,6 +15,7 @@ import {
 import type { Providers, ProviderView, Tier } from "~/celeris/types";
 import { ProviderActionFlash } from "~/components/Flash";
 import { HelpLink } from "~/components/HelpLink";
+import { RouteRecovery } from "~/components/RouteRecovery";
 import { Badge } from "~/components/ui/badge";
 import { Button } from "~/components/ui/button";
 import { Card, CardBody, CardHeader } from "~/components/ui/card";
@@ -22,6 +23,7 @@ import { checkboxClass, chipLabelClass, hintClass, inputClass, labelClass, selec
 import { Icon } from "~/components/ui/Icon";
 import { Alert, DataItem, EmptyState, Mono, PageHeader, SectionTitle } from "~/components/ui/misc";
 import type { Tone } from "~/components/ui/tone";
+import { isTransientStatus } from "~/lib/recovery";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
 import { formatDuration, secondsBetween } from "~/lib/time-delta";
 import { CelerisBanner } from "~/root";
@@ -478,6 +480,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       return (
         <main className="p-4">
           <CelerisBanner celerisApiUrl={data.baseUrl ?? ""} problem={null} />
+          <RouteRecovery />
         </main>
       );
     }
@@ -485,6 +488,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
       <main className="p-4">
         <h1 className="text-xl font-semibold">エラー {data.status}</h1>
         <p className="mt-2 text-sm text-fg-muted">{data.detail}</p>
+        {isTransientStatus(data.status) && <RouteRecovery />}
       </main>
     );
   }
@@ -493,6 +497,7 @@ export function ErrorBoundary({ error }: Route.ErrorBoundaryProps) {
     <main className="p-4">
       <h1 className="text-xl font-semibold">エラー</h1>
       <p className="mt-2 text-sm text-fg-muted">予期しないエラーが起きました。</p>
+      <RouteRecovery />
     </main>
   );
 }

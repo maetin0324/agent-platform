@@ -17703,3 +17703,17 @@ frontier=`gpt-6-astra`(high) / standard=`gpt-6-sol`(medium) / cheap=`gpt-6-luna`
 
 - P-118-4: `celerisctl routing show` の出力を JSON でも出せるようにする（人が読む表だけでなく、
   他のスクリプトが読める形。今回はテキスト表のみ）。
+### 2026-09-23: GUI 離脱→復帰のエラー画面の修正（ADR-0071）
+
+- 原因と決定は ADR-0071。変更: `gui/app/lib/recovery.ts`、`hooks/useResumeRevalidate.ts`、`components/RouteRecovery.tsx`、
+  `hooks/useCelerisStream.ts`（復帰で再接続）、`entry.client.tsx`（チャンク 404 で 1 回再読み込み）、全 ErrorBoundary に `RouteRecovery`。
+- 実ブラウザ検査 `gui/scripts/check-resume-recovery.mjs`（モック celeris、393×851 / 1280×800）: 修正前ビルド 6/9（接続断からの復帰・チャンク再読み込みが FAIL）、修正後 9/9。
+- 未確認: 実際のスマホ実機での長時間バックグラウンド（ADR-0009 P-34）。本番反映は未実施。
+
+### 2026-09-23: 離脱→復帰の修正 追補（一時 5xx の構造化エラーにも復帰導線）
+
+- レビュー指摘: loader が投げる構造化エラー（`celerisErrorResponse` 由来の `unavailable` / 503 problem+json）の分岐は早期 return で `RouteRecovery` が出ず、復旧後も固まっていた。
+  全 21 ルートの ErrorBoundary で `unavailable` と一時ステータス（`isTransientStatus`: 5xx/408/429）に `RouteRecovery` を追加（404 等は対象外）。
+- 検査 `check-resume-recovery.mjs` にシナリオ C（モック celeris が `/tasks/:id` を 503 problem+json → 復旧）を追加。修正前ビルド 9/13（C の 4 件 FAIL）、修正後 13/13（3 回連続）。
+- `pnpm` 相当: biome check exit 0、tsc -b exit 0、react-router build 成功、vitest 69 files / 1067 tests 成功。
+- 未確認: スマホ実機での長時間バックグラウンド、実デプロイ更新（チャンク 404 は `vite:preloadError` の発火で代替）。
