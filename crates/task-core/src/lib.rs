@@ -154,8 +154,8 @@ pub use execution_plan::{
     EXECUTION_PLAN_SCHEMA, ExecutionLimits, ExecutionPlanRow, ExecutionPlanSpec, NextStep,
     PlanOrigin, PlanStatus, PlanValidationError, RunIndexRole, RunIndexStatus, RunRow,
     ValidatedPlan, WorkUnitBlockedReason, WorkUnitBudget, WorkUnitCheck, WorkUnitContext,
-    WorkUnitKind, WorkUnitRow, WorkUnitSpec, WorkUnitStatus, dependents_to_block, newly_ready,
-    next_work_unit, validate,
+    WorkUnitKind, WorkUnitRow, WorkUnitSpec, WorkUnitStatus, dependents_to_block, new_id,
+    newly_ready, next_work_unit, validate,
 };
 
 pub mod model_routing;

@@ -765,7 +765,7 @@ fn build_continuation_context(events: &[(u64, Event)]) -> Option<task_worker::Co
     if consecutive_continuations(events) == 0 {
         return None;
     }
-    let checkpoint = latest_checkpoint(events)?;
+    let checkpoint = latest_checkpoint(events, None)?;
     let run_seq = current_run_seq(events);
     let previous_end = events
         .iter()
@@ -3282,13 +3282,13 @@ impl Dispatcher {
 
             if self.config.execution.continuation {
                 let continuations_so_far = consecutive_continuations(&events_so_far);
-                let prev_checkpoint = latest_checkpoint(&events_so_far);
+                let prev_checkpoint = latest_checkpoint(&events_so_far, None);
                 let progressed =
                     task_core::checkpoint_shows_progress(prev_checkpoint.as_ref(), &checkpoint);
                 let no_progress = if progressed {
                     0
                 } else {
-                    no_progress_streak(&events_so_far) + 1
+                    no_progress_streak(&events_so_far, None) + 1
                 };
                 checkpoint_event = Some(Event::CheckpointSaved {
                     run_id: run_id.clone(),

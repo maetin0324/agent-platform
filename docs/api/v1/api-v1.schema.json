@@ -5108,6 +5108,63 @@
       ],
       "type": "object"
     },
+    "ExecutionPlanView": {
+      "description": "`POST`/`GET /tasks/{id}/execution-plan` の応答。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/PlanOrigin"
+        },
+        "plan": {
+          "$ref": "#/$defs/ExecutionPlanSpec"
+        },
+        "planner_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/PlanStatus"
+        },
+        "superseded_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "work_units": {
+          "items": {
+            "$ref": "#/$defs/WorkUnitView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "task_id",
+        "version",
+        "origin",
+        "status",
+        "plan",
+        "created_at",
+        "work_units"
+      ],
+      "type": "object"
+    },
     "FailureClass": {
       "description": "ADR-0070 D1（Phase 116）: `failed` の分類。`infra` はレース・切替・供給側都合、`work` はレビュー\n不合格やワーカー自身の明示的な失敗（人が中身を見て判断すべきもの）。",
       "enum": [
@@ -7960,6 +8017,16 @@
         "human",
         "repair",
         "fixture"
+      ],
+      "type": "string"
+    },
+    "PlanStatus": {
+      "description": "D5: `execution_plans.status`。",
+      "enum": [
+        "active",
+        "superseded",
+        "completed",
+        "abandoned"
       ],
       "type": "string"
     },
@@ -13052,6 +13119,15 @@
       ],
       "type": "object"
     },
+    "WorkUnitBlockedReason": {
+      "description": "D6: `work_units.blocked_reason`。",
+      "enum": [
+        "question",
+        "dependency_failed",
+        "limit"
+      ],
+      "type": "string"
+    },
     "WorkUnitBudget": {
       "additionalProperties": false,
       "description": "D14/D18: WU ごとの予算（任意。書かなければ D18 の既定を使う）。",
@@ -13229,6 +13305,95 @@
         "cancelled"
       ],
       "type": "string"
+    },
+    "WorkUnitView": {
+      "description": "1 WorkUnit の現在の状態（`work_units` 行の写し）。",
+      "properties": {
+        "blocked_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkUnitBlockedReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "continuations": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkUnitKind"
+        },
+        "last_checkpoint_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seq": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "spec": {
+          "$ref": "#/$defs/WorkUnitSpec"
+        },
+        "status": {
+          "$ref": "#/$defs/WorkUnitStatus"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "key",
+        "seq",
+        "kind",
+        "status",
+        "depends_on",
+        "runs",
+        "continuations",
+        "retries",
+        "spec",
+        "created_at",
+        "updated_at"
+      ],
+      "type": "object"
     },
     "WorkerHint": {
       "properties": {
@@ -13469,6 +13634,13 @@
     },
     "events_page": {
       "$ref": "#/$defs/EventsPage"
+    },
+    "execution_plan": {
+      "$ref": "#/$defs/ExecutionPlanView",
+      "description": "ADR-0072 D14（Phase E2）: `POST`/`GET /tasks/{id}/execution-plan`。"
+    },
+    "execution_plan_create": {
+      "$ref": "#/$defs/ExecutionPlanSpec"
     },
     "graph": {
       "$ref": "#/$defs/Graph"
@@ -13861,7 +14033,9 @@
     "skill_detail",
     "skill_put",
     "skill_put_result",
-    "org_skill_mount"
+    "org_skill_mount",
+    "execution_plan",
+    "execution_plan_create"
   ],
   "title": "ApiV1Schema",
   "type": "object"

@@ -582,6 +582,14 @@ export type PlanOrigin = "planner" | "human" | "repair" | "fixture";
 export type WorkUnitKind = "investigate" | "design" | "implement" | "test" | "release" | "repair" | "other";
 export type WorkUnitStatus =
   "pending" | "ready" | "needs_continuation" | "running" | "done" | "failed" | "blocked" | "superseded" | "cancelled";
+/**
+ * D5: `execution_plans.status`。
+ */
+export type PlanStatus = "active" | "superseded" | "completed" | "abandoned";
+/**
+ * D6: `work_units.blocked_reason`。
+ */
+export type WorkUnitBlockedReason = "question" | "dependency_failed" | "limit";
 export type RunOutcomeKind =
   ("done" | "question" | "error" | "requeue" | "lease_expired") | "interrupted" | "continued";
 export type AttentionItem =
@@ -847,6 +855,8 @@ export interface ApiV1Schema {
   docs_init: DocsInitResult;
   docs_tree: DocsTree;
   events_page: EventsPage;
+  execution_plan: ExecutionPlanView;
+  execution_plan_create: ExecutionPlanSpec;
   graph: Graph;
   health: Health;
   inbox: Inbox;
@@ -2994,6 +3004,41 @@ export interface WorkUnitContext {
   from_work_units?: string[];
   knowledge?: string[];
   paths?: string[];
+}
+/**
+ * ADR-0072 D14（Phase E2）: `POST`/`GET /tasks/{id}/execution-plan`。
+ */
+export interface ExecutionPlanView {
+  created_at: string;
+  id: string;
+  origin: PlanOrigin;
+  plan: ExecutionPlanSpec;
+  planner_run_id?: string | null;
+  status: PlanStatus;
+  superseded_at?: string | null;
+  task_id: string;
+  version: number;
+  work_units: WorkUnitView[];
+}
+/**
+ * 1 WorkUnit の現在の状態（`work_units` 行の写し）。
+ */
+export interface WorkUnitView {
+  blocked_reason?: WorkUnitBlockedReason | null;
+  continuations: number;
+  created_at: string;
+  depends_on: string[];
+  id: string;
+  key: string;
+  kind: WorkUnitKind;
+  last_checkpoint_run_id?: string | null;
+  last_run_id?: string | null;
+  retries: number;
+  runs: number;
+  seq: number;
+  spec: WorkUnitSpec;
+  status: WorkUnitStatus;
+  updated_at: string;
 }
 export interface Graph {
   edges: GraphEdge[];
