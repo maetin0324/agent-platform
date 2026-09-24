@@ -3,8 +3,8 @@ import {
   AUTO_RETRY_DELAYS_MS,
   CHUNK_RELOAD_KEY,
   createResumeGate,
-  isTransientStatus,
   isChunkLoadError,
+  isTransientStatus,
   nextRetryDelay,
   shouldReloadForChunkError,
 } from "~/lib/recovery";
