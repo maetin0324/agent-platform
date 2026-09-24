@@ -108,7 +108,10 @@ async fn post_mcp(State(state): State<HttpState>, headers: HeaderMap, body: Byte
             Some(sid) => match state.mcp.session_client(sid) {
                 Some(owner) if owner == client.id => {}
                 Some(_) => {
-                    return json_error(StatusCode::BAD_REQUEST, "session belongs to another client");
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "session belongs to another client",
+                    );
                 }
                 None => return json_error(StatusCode::NOT_FOUND, "unknown or expired session"),
             },
