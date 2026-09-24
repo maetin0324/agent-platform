@@ -1099,3 +1099,74 @@ GUI を触る Phase では `pnpm typecheck` / `lint` / `test` / `gen:types` の�
 - **checkpoint の `run_seq`（WU 版）は `work_units.runs` 列をそのまま使う**（`CheckpointContext.run_seq:
   wu.runs`）。`start_work_unit_run` が dispatch 時に `runs` を先に +1 しているので、`on_worker_finished`
   で読み直した `wu.runs` の値がそのままこの run の番号になる。
+
+## Phase E2b 実装時の逸脱・明確化（2026-09-24）
+
+E2 の受け入れ条件 (g) 後半（`work_units`/`runs` の replay 再構築）を実装しながら見つかった、D5/D15 の
+記述とコードの食い違い・簡略化。
+
+- **発見: `runs` 索引は E2 の時点で WU 経由の worker run にしか書かれていなかった**。実装前に
+  `run_index_start` の呼び出し箇所を全数調査したところ（`grep -rn run_index_start crates/`）、
+  `crates/task-dispatch/src/dispatcher.rs::start_work_unit_run`（WU の dispatch）の 1 箇所だけだった。
+  `run_index_finish` は `on_worker_finished` の末尾で常に呼ばれる（PROGRESS.md の Phase E2 節の
+  「(g) `runs` の全件書き込み」はこれを指す）が、対応する `run_index_start` が無い run（暗黙の WU の
+  worker run、reviewer run）に対しては行が存在しないため `run_index_finish` は黙って `Ok(false)`
+  を返すだけで、`runs` 表に行は増えない。つまり本番の `runs` 表は現時点で「計画のある Task の WU
+  run」しか持っていない。`rebuild_work_units_and_runs`/`celerisctl replay --apply` は、この欠けている
+  行（暗黙の WU の worker run・reviewer run）も events（`WorkerStarted`/`WorkerFinished`）だけから
+  作るので、本番 DB へ初めて `--apply` したときは「新規」の `runs` 行が多数 `run_mismatches` として
+  出る（既存の行が壊れているのではなく、単に無かった行を埋める）。この欠落自体を dispatcher.rs 側で
+  埋める（`run_index_start` を暗黙 WU・reviewer run にも呼ぶよう配線する）のは本 Phase の範囲外
+  （`dispatcher.rs` は触らない指示。次の一手として記録する）。
+- **`rebuild_work_units_and_runs` の引数は `Event` ではなく `EventRow`（`ts` 付き）にした**。
+  PROGRESS.md の申し送りは `rebuild_work_units_and_runs(events: &[Event])` という形を提案していたが、
+  `work_units.created_at`/`updated_at`、`runs.started_at`/`finished_at` は文字列（`Option` ではない）
+  で、events だけから復元できる唯一の時刻情報は `EventRow::ts`（`event_rows_for` が返す）である。
+  `Event` のみでは復元できないため、`TaskStore::event_rows_for(task_id, None, usize::MAX)` を使う形に
+  変えた。
+- **`work_units.id` は最初に遷移した `WorkUnitTransitioned.work_unit_id` から復元する**。
+  `Event::ExecutionPlanned.plan.work_units` は `key` しか運ばない（`id` は `execution_plan_adopt` が
+  `new_id()` で発行し、DB にしか残らない）。実際にはほぼ全ての WU が最低 1 回は状態遷移する
+  （依存先の失敗で `dependency_failed` に遷移する等）ため、`WorkUnitTransitioned` の系列から
+  `key -> id` を復元できる。一度も遷移していない WU（理論上ありうるが、E2b のテストでは発生しない）
+  だけ `rebuilt-<task_id>-<key>` という仮の id にする（`diff_execution` は `id` そのものを比較しないので、
+  `--check`/`--apply` の結果には影響しない）。
+- **WU のカウンタ（`runs`/`continuations`/`retries`）は `WorkUnitTransitioned.reason` の静的文字列から
+  復元する**。event 自体は「結果（`to`）」しか運ばず「差分」を運ばないため、`dispatch`→`runs+=1`、
+  `continue`→`continuations+=1`、`retry`→`retries+=1`、それ以外（`completed`/`question`/`limit`/
+  `failed`/`harness_error`/`dependency_failed`/`dependency_ready`/`restart_reconcile`/`answer`）は
+  カウンタを動かさない、という対応表を `task-dispatch::execution_scheduler`/`dispatcher.rs` の実装から
+  読み取って `task_ops::replay` 側にも同じ表を持たせた（2 か所に同じ知識があるのは望ましくないが、
+  event の schema を変えずに済む範囲で最小の重複にとどめた。D5 の「reason は決定的な静的文字列」を
+  前提にできるのはこのため）。
+- **`work_units.updated_at` は `dispatch` の遷移でだけ更新する**。dispatcher.rs のコードを読むと、
+  `work_unit_transition` に渡す `WorkUnitRow` の `updated_at` を明示的に書き換えているのは
+  `start_work_unit_run`（dispatch 時）だけで、`execution_scheduler::decide`（`now_wu`）はステータスと
+  `blocked_reason` だけを変え、`updated_at` には触れない。`rebuild_work_units_and_runs` も同じ挙動
+  （`dispatch` の `WorkUnitTransitioned` のときだけ `updated_at = ts`）にして、実際の scheduler の書き方と
+  一致させた。
+- **`diff_execution` は `id`/`created_at`/`updated_at`/`started_at`/`finished_at`/`session_id` を比較しない**。
+  `work_units`/`runs` への書き込みは対応する `Event` の追記と**別トランザクション**（D5 の本文・
+  Phase E2 の「(g)」コメント参照）なので、scheduler が呼ぶ `OffsetDateTime::now_utc()` と、
+  `rebuild_work_units_and_runs` が使う `EventRow::ts`（イベントの追記時刻）は近いが一致する保証が無い。
+  この 5 欄を比較に含めると、events と索引が完全に整合していても「タイムスタンプが 1 ミリ秒ずれている」
+  だけで `--check` が誤検知する。業務上意味のある欄（`status`/`blocked_reason`/`runs`/`continuations`/
+  `retries`/`last_run_id`/`spec` など。`work_unit_id`/`role`/`seq`/`adapter`/`model`/`account`/
+  `checkpoint`/`usage`/`metrics`）だけを比較対象にした。
+- **`runs.session_id` と `work_units.last_checkpoint_run_id` は常に `None` にした**。本番の scheduler も
+  これらを一切書いていない（`session_id` は `start_work_unit_run` の唯一の呼び出しで常に `None`、
+  `last_checkpoint_run_id` へ代入している箇所はコード全体に無い）ことをコード検索で確認済みなので、
+  再構築側もそれに合わせた（events にも情報が無い）。
+- **reviewer run の `seq` は worker run と別の連番にした**（`current_run_seq` が reviewer を除外して
+  数えるのと対称）。本番の `runs` 索引は reviewer run を 1 件も持っていない（上記の発見）ため、
+  reviewer run の `seq` にどんな値を書くべきかという先例が無い。E2b では「reviewer run だけの
+  1 始まりの連番」という決定的で単純な規則を新設した。GUI・監査で reviewer run の `seq` を人が見る
+  用途が具体化したら、この規則は再検討してよい。
+- **`execution_plans` 表は本 Phase の再構築対象に含めない**。E2 の範囲では replan が無く、1 Task に
+  つき `ExecutionPlanned` イベントは高々 1 件（＝ `execution_plans` は高々 1 行）なので、
+  `execution_plan_adopt` が書く行と events の食い違いが起きる余地が小さい。E4 で replan
+  （`ExecutionPlanned.supersedes`）が入ったら、`execution_plans` の版の履歴も再構築対象に加えること
+  （次の一手として `docs/PROGRESS.md` にも記録する）。
+- **`celerisctl replay` の既定（フラグ無し）の出力は変えていない**（後方互換）。`work_units`/`runs` の
+  突き合わせは `--check`（読み取りのみ）または `--apply`（食い違ったタスクだけ書き戻す）を明示した
+  ときだけ行う。`--apply` は `--check` を含む。

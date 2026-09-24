@@ -1,4 +1,5 @@
 //! `celerisctl replay` — DESIGN.md §4.3 / §5.9, ADR-0002「結果」節, ADR-0004 D6。
+//! ADR-0072 D5/D15（Phase E2b）: `--check`/`--apply` で `work_units`/`runs` の再構築も行う。
 //!
 //! 出力整形と exit code だけをここで持つ。再構築ロジックは `task_ops::replay`（ADR-0013 D7）
 //! に移した。
@@ -7,15 +8,24 @@ use std::process::ExitCode;
 
 use clap::Args;
 use task_core::TaskStore;
-use task_ops::replay::replay;
+use task_ops::replay::{check_and_apply_execution, replay};
 
 use crate::error::CliError;
 use crate::outln;
 
-#[derive(Args, Debug)]
-pub struct ReplayArgs {}
+#[derive(Args, Debug, Default)]
+pub struct ReplayArgs {
+    /// events から `work_units`/`runs` を再構築し、現在の索引と突き合わせて差分を表示する
+    /// （`task_id`/`status`/`attempts` の突き合わせは既定で常に行う）。
+    #[arg(long)]
+    pub check: bool,
+    /// `--check` の差分があれば、`work_units`/`runs` の索引を再構築した結果で上書きする
+    /// （ADR-0072 D15: events が勝つ。`events` そのものは変えない。`--check` を暗黙に含む）。
+    #[arg(long)]
+    pub apply: bool,
+}
 
-pub fn run(store: &dyn TaskStore, _args: ReplayArgs) -> Result<ExitCode, CliError> {
+pub fn run(store: &dyn TaskStore, args: ReplayArgs) -> Result<ExitCode, CliError> {
     let report = replay(store)?;
 
     for m in &report.mismatches {
@@ -27,13 +37,47 @@ pub fn run(store: &dyn TaskStore, _args: ReplayArgs) -> Result<ExitCode, CliErro
             m.stored
         );
     }
+
+    let mut total_mismatches = report.mismatches.len();
+    if args.check || args.apply {
+        let (wu_mismatches, run_mismatches, applied) =
+            check_and_apply_execution(store, args.apply)?;
+        for m in &wu_mismatches {
+            outln!(
+                "WORK_UNIT_MISMATCH task={} key={} field={} replayed={} stored={}",
+                m.task_id,
+                m.key,
+                m.field,
+                m.replayed,
+                m.stored
+            );
+        }
+        for m in &run_mismatches {
+            outln!(
+                "RUN_MISMATCH task={} run_id={} field={} replayed={} stored={}",
+                m.task_id,
+                m.run_id,
+                m.field,
+                m.replayed,
+                m.stored
+            );
+        }
+        total_mismatches += wu_mismatches.len() + run_mismatches.len();
+        if args.apply {
+            outln!(
+                "replay: applied execution index fixes for {} task(s)",
+                applied
+            );
+        }
+    }
+
     outln!(
         "replay: {} mismatches across {} tasks",
-        report.mismatches.len(),
+        total_mismatches,
         report.tasks
     );
 
-    if report.mismatches.is_empty() {
+    if total_mismatches == 0 {
         Ok(ExitCode::SUCCESS)
     } else {
         Ok(ExitCode::FAILURE)
@@ -48,7 +92,7 @@ mod tests {
     #[test]
     fn run_reports_success_when_no_tasks() {
         let store = SqliteStore::open_in_memory().expect("open");
-        let result = run(&store, ReplayArgs {}).expect("run replay");
+        let result = run(&store, ReplayArgs::default()).expect("run replay");
         assert_eq!(result, ExitCode::SUCCESS);
     }
 
@@ -118,7 +162,7 @@ mod tests {
             )
             .expect("append transitioned");
 
-        let result = run(&store, ReplayArgs {}).expect("run replay");
+        let result = run(&store, ReplayArgs::default()).expect("run replay");
         assert_eq!(result, ExitCode::FAILURE);
     }
 }
