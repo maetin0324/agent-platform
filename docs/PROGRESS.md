@@ -17585,3 +17585,13 @@ drain timeout で run を abort → lease 失効の reclaim が 3 回 attempts �
 - gui: `pnpm typecheck` / `pnpm lint` exit 0、`pnpm test` 70 files / 1080 passed。
 - 更新（main fd2f109 取り込み後）: PROGRESS.md の衝突のみ手で解消。`cargo fmt --all --check` exit 0、test 2105 passed / 0 failed、clippy --all-targets exit 0、gui typecheck/lint/test（1080）exit 0。ログは run の artifacts/ 。ADR は 0069 のまま（main 側 0068=Knowledge GC、0070=失敗可視化と衝突なし）。
 - 未解決:実機確認 P-114-5、effort の CLI 渡し P-114-1、Phase 2 は ADR-0069 §5。
+
+## 自己改善タスク 2 件の再試行が完了、配送 0e20e1b2a058 を昇格（2026-09-24 11:25Z）
+
+- ルーティング再設計（retry 複製 01M39FGDAE9XQA3FGMCP5MCW0B）: main fd2f109 を取り込み、fmt / clippy / test / GUI を再検証して done（reviewer 全基準合格）。Knowledge GC（retry 複製 01M39FM70PTN0BE9BXRV4Q833M）: 既存成果が main に統合済みであることを確認して done。両方とも Phase 116 の retry（既定 ready）で 1 回で通った。
+- 配送（Phase 106）は origin/main を 0e20e1b（「phase 117: routing 4 層、ADR-0069」）まで進め、release `0e20e1b2a058`（gate ok、verify ok）を作った。in-flight 0 でライブ切替により昇格（from cb230f1678c3）。
+- 受信箱の `attention` には、retry で置き換えられた古い失敗（ENOSPC 起因 4 件、fmt 起因 1 件）がそのまま残る。
+
+### 提案
+- P-116-6: `attention` の failed 項目は、retry 複製が done になったものを「置き換え済み（→ <id>）」として畳むか出さない（`rewired` / retry 元の関係を使う）。
+- P-116-7: 実装エージェント（Fable 配下・Celeris 配下とも）は commit 前に `cargo fmt --all -- --check` を通す規約をプリアンブルに書く（release ゲートに追加済み、reviewer も見る）。
