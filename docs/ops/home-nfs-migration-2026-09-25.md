@@ -18,7 +18,7 @@
 ## 手順
 ### 0. 準備（ダウンタイムなし）
 - TrueNAS: dataset `tank/share_home`（既存。配下に `rmaeda/` を owner 1001:1001 で作る）（owner 1001:1001、mode 700）、NFS export（許可ホスト = Proxmox ホスト、NFSv4、`no_root_squash` は不要）。
-- Proxmox ホスト: `mkdir -p /mnt/truenas-home && echo '192.168.1.4:/mnt/tank/share_home /mnt/truenas-home nfs4 _netdev,hard,noatime,nconnect=4 0 0' >> /etc/fstab && mount /mnt/truenas-home`。`touch /mnt/truenas-home/rmaeda/.probe` で書けることと所有者を確認。
+- Proxmox ホスト: `192.168.1.4:/mnt/tank/share_home` は **PVE ストレージ `truenas` として `/mnt/pve/truenas` に既にマウント済み**（旧 loop の実体 `images/100/vm-100-disk-0.raw` もここ）。新しい fstab は不要で、同じ共有の中に `mkdir -p /mnt/pve/truenas/rmaeda && chown 1001:1001 /mnt/pve/truenas/rmaeda && chmod 700 /mnt/pve/truenas/rmaeda` を作る。`touch /mnt/pve/truenas/rmaeda/.probe` で書けること（root squash されていないこと）を確認。
 - Proxmox ホスト: `/etc/subuid` と `/etc/subgid` に `root:1001:1` を追記。CT 設定（`/etc/pve/lxc/100.conf`）に idmap を追加:
   ```
   lxc.idmap: u 0 100000 1001
@@ -41,9 +41,9 @@ rsync -aHAX --numeric-ids --info=progress2 \
   --exclude '.cargo/registry' --exclude 'workspace/agent-platform/target' --exclude '.claude/worktrees/*/target' \
   --exclude '.ssh/mux-*' --exclude '.cache' --exclude '.npm' \
   --exclude '.local/celeris/releases/.cargo-target' --exclude '.local/celeris/releases/.build' \
-  /var/lib/lxc/100/rootfs/home/rmaeda/ /mnt/truenas-home/rmaeda/
+  /var/lib/lxc/100/rootfs/home/rmaeda/ /mnt/pve/truenas/rmaeda/
 ```
-（rootfs のパスは `pct mount 100` で `/var/lib/lxc/100/rootfs` に出す。所有者は idmap 前なので 101001 で写る → 最後に `chown -R --from=101001:101001 1001:1001 /mnt/truenas-home/rmaeda`。）
+（rootfs のパスは `pct mount 100` で `/var/lib/lxc/100/rootfs` に出す。所有者は idmap 前なので 101001 で写る → 最後に `chown -R --from=101001:101001 1001:1001 /mnt/pve/truenas/rmaeda`。）
 
 ### 2. 停止
 - CT 内: `GET /api/v1/tasks?status=running|reviewing` が 0 であることを確認。`systemctl --user stop 'celeris@*' 'celeris-gui@*' 'celeris-ssh-master-*'`。実装エージェントは動かしていないことを確認。
@@ -51,7 +51,7 @@ rsync -aHAX --numeric-ids --info=progress2 \
 
 ### 3. 差分コピーと切替
 - Proxmox ホスト: `pct mount 100` → 同じ rsync をもう一度（`--delete` 付き）→ `chown` → `pct unmount 100`。
-- Proxmox ホスト: `pct set 100 -mp0 /mnt/truenas-home/rmaeda,mp=/home/rmaeda,backup=0`。旧 `/home` の loop ボリューム（`mp` か `rootfs` の別ディスク）は **まだ消さない**（`100.conf` の該当行をコメントアウトして保存）。
+- Proxmox ホスト: `pct set 100 -mp0 /mnt/pve/truenas/rmaeda,mp=/home/rmaeda,backup=0`。旧 `/home` の loop ボリューム（`mp` か `rootfs` の別ディスク）は **まだ消さない**（`100.conf` の該当行をコメントアウトして保存）。
 - `pct start 100` → CT 内で `findmnt /home /home/rmaeda`（nfs4 と表示されるはず）、`id`、`ls -ln ~ | head`（所有者 1001）、`sudo -n true`。
 - `chown -R 1001:1001 /var/lib/celeris`（idmap の変更で必要）。`ls -ln /var/lib/celeris`。
 
