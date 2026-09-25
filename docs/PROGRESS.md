@@ -19248,3 +19248,50 @@ Phase E4 統合（`751f973`）と同じ時点から分岐していたため `git
   `plan_issue` トリガー、(h) 配送の repair 等）は本 Phase では着手していない（引き続き E6 で検討）。
 - E6（end-to-end の dogfood）は本 Phase の範囲外。ADR §6 E6 の受け入れ条件どおり、認証が使える
   環境でエージェントが実行し証跡を残すか、使えなければ人に手順を渡す。
+
+## Phase E6「dogfood: 配送の局所修復・単価表・実行 metrics の集計性能」（完了日 2026-09-25）
+
+ADR-0072 D16 に沿って、配送の merge-base 不一致と `cargo-fmt-check` 不合格から
+`RepairClass::MergeBase` / `Format` の repair WorkUnit を作る。repair には対象ブランチ、
+main の SHA、失敗した check の出力だけを渡し、元の実装 run の context は再構築しない。
+偽 git リポジトリの E2E テストは merge-base のずれから repair WU、再検証、配送まで確認する。
+fmt 以外の release gate 失敗など、分類しない配送失敗は従来の Reopen を維持する。
+
+`pricing.rs` に現行 Claude 4 モデルの入力・出力・キャッシュ単価を追加し、
+`claude-fable-5-1` の費用推定を確認した。**P-118-1 は解決**。
+`gpt-6-astra` / `sol` / `luna` は単価の一次根拠がないため全欄を `None` とした。
+根拠と適用範囲は `docs/llm-source.md` の単価表に記録した。
+
+`GET /metrics/execution` は `tasks` / `work_units` / `execution_plans` / `runs` の索引集計行を使う。
+索引にない lane、`BudgetExhausted` の種類、atomic task の continuation / retry、旧履歴は
+該当タスクの events だけで補完する。8 種のタスクについて `since` の有無 × 4 `group_by` の
+全組み合わせで events 版との完全一致を確認した。2,000 タスク × 20 events の手元計測は
+索引版 95.90548 ms、events 版 369.711016 ms（性能閾値の assert は置かない）。
+
+E4/E5 の申し送りのうち、**(h) 配送の repair** と **`GET /metrics/execution` の全 events 走査**は
+本 Phase で解消した。E5 の「索引集計が遅ければ store に専用 query を足す」も実施済み。
+
+### 証拠コマンドと結果
+
+- `cargo fmt --all -- --check`: exit 0、差分なし。
+- `CARGO_TARGET_DIR=target/e6-metrics-api cargo test --workspace`: exit 0。81 個の
+  `test result:` ブロックで 2,289 passed、0 failed、5 ignored、`FAILED` 行なし。
+  共有 Cargo キャッシュは sandbox から `.cargo-lock` を開けず、ローカル target に切り替えた。
+  sandbox 内の初回実行では一時 loopback bind が拒否されたため、同一コマンドを sandbox 外で再実行した。
+- `CARGO_TARGET_DIR=target/e6-metrics-api cargo clippy --workspace --all-targets -- -D warnings`:
+  exit 0、warning 0。
+- 完全な検査ログと成果ごとの変更ファイルは run の `artifacts/finish/` と `artifacts/report.md`。
+
+### 未解決事項
+
+- GPT-6 3 モデルの単価は一次情報が揃うまで不明。0 USD とみなさない。
+- lane と `BudgetExhausted` の種類は runs 索引に無い。旧履歴や atomic task の continuation / retry も
+  対象タスクの events による局所補完を要する。
+- fmt 以外の release gate 失敗は Reopen のまま。repair 上限超過は人による判断が必要。
+- E4/E5 のその他の申し送り（`permission_mode` 実行時配線、repair lane、WU 単位の lane 集計、
+  replan 差分件数など）はこの 3 成果の対象外で、継続する。
+
+### 提案
+
+- runs 索引へ lane と run end の種類を保存し、旧履歴の再構築方式を決めた後に局所 events 補完を
+  さらに減らす。配送 gate の他の step は失敗ごとに修復可能性と最小 context を検討する。
