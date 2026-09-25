@@ -1275,6 +1275,35 @@ impl From<task_core::WorkUnitRow> for WorkUnitView {
     }
 }
 
+/// ADR-0072 D17（Phase E4）: `execution_plans` の 1 版（`GET /tasks/{id}/execution-plan` の
+/// `versions`。監査用の版の履歴。`ExecutionPlanView` 自身が現在の `active` な版）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExecutionPlanVersionView {
+    pub id: String,
+    pub version: u32,
+    pub origin: task_core::PlanOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_run_id: Option<String>,
+    pub status: task_core::PlanStatus,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<String>,
+}
+
+impl From<task_core::ExecutionPlanRow> for ExecutionPlanVersionView {
+    fn from(row: task_core::ExecutionPlanRow) -> Self {
+        ExecutionPlanVersionView {
+            id: row.id,
+            version: row.version,
+            origin: row.origin,
+            planner_run_id: row.planner_run_id,
+            status: row.status,
+            created_at: row.created_at,
+            superseded_at: row.superseded_at,
+        }
+    }
+}
+
 /// `POST`/`GET /tasks/{id}/execution-plan` の応答。
 #[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ExecutionPlanView {
@@ -1290,10 +1319,17 @@ pub struct ExecutionPlanView {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_at: Option<String>,
     pub work_units: Vec<WorkUnitView>,
+    /// ADR-0072 D17（Phase E4）: 版の履歴（`version` 昇順。superseded を含む。監査用）。
+    #[serde(default)]
+    pub versions: Vec<ExecutionPlanVersionView>,
 }
 
 impl ExecutionPlanView {
-    pub fn new(plan: task_core::ExecutionPlanRow, work_units: Vec<task_core::WorkUnitRow>) -> Self {
+    pub fn new(
+        plan: task_core::ExecutionPlanRow,
+        work_units: Vec<task_core::WorkUnitRow>,
+        versions: Vec<task_core::ExecutionPlanRow>,
+    ) -> Self {
         ExecutionPlanView {
             id: plan.id,
             task_id: plan.task_id,
@@ -1305,6 +1341,10 @@ impl ExecutionPlanView {
             created_at: plan.created_at,
             superseded_at: plan.superseded_at,
             work_units: work_units.into_iter().map(WorkUnitView::from).collect(),
+            versions: versions
+                .into_iter()
+                .map(ExecutionPlanVersionView::from)
+                .collect(),
         }
     }
 }

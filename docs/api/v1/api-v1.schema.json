@@ -5194,6 +5194,48 @@
       ],
       "type": "object"
     },
+    "ExecutionPlanVersionView": {
+      "description": "ADR-0072 D17（Phase E4）: `execution_plans` の 1 版（`GET /tasks/{id}/execution-plan` の\n`versions`。監査用の版の履歴。`ExecutionPlanView` 自身が現在の `active` な版）。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/PlanOrigin"
+        },
+        "planner_run_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/PlanStatus"
+        },
+        "superseded_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "origin",
+        "status",
+        "created_at"
+      ],
+      "type": "object"
+    },
     "ExecutionPlanView": {
       "description": "`POST`/`GET /tasks/{id}/execution-plan` の応答。",
       "properties": {
@@ -5231,6 +5273,14 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "versions": {
+          "default": [],
+          "description": "ADR-0072 D17（Phase E4）: 版の履歴（`version` 昇順。superseded を含む。監査用）。",
+          "items": {
+            "$ref": "#/$defs/ExecutionPlanVersionView"
+          },
+          "type": "array"
         },
         "work_units": {
           "items": {

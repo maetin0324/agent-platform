@@ -4,6 +4,8 @@
 //! 判断（D14 の検証・D15 の scheduler）はすべて `task_core::execution_plan` の純粋関数にあり、
 //! ここは I/O（store 呼び出し）と id・時刻の発行だけを行う（ADR-0001 D2）。
 
+use std::collections::BTreeSet;
+
 use task_core::execution_plan::{PlanValidationError, validate};
 use task_core::{
     Event, ExecutionLimits, ExecutionPlanRow, ExecutionPlanSpec, PlanOrigin, PlanStatus, TaskId,
@@ -97,6 +99,209 @@ pub fn adopt_plan(
     };
     store.execution_plan_adopt(task_id, plan.clone(), work_units, event)?;
     Ok(plan)
+}
+
+/// ADR-0072 D17（Phase E4）: [`replan`] が計算した差分（監査・GUI 用。版の履歴の「差分の件数」）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplanDiff {
+    /// 新しい key（新規の WorkUnit）。
+    pub added: Vec<String>,
+    /// 既存（未完了）の WorkUnit で spec または依存が変わったもの。
+    pub changed: Vec<String>,
+    /// 新しい版に無くなった未完了の WorkUnit（`superseded` にする）。
+    pub removed: Vec<String>,
+}
+
+/// D17: 計画を版更新する（旧 `active` な計画を `superseded` にし、新しい版を採用する）。
+///
+/// - `done` の WorkUnit は**保持する**（行に触れない。`validate` が key/spec 不変を検証済み）。
+/// - 未完了で新しい版にも残る key は、その場で spec・依存・状態（`ready`/`pending`。依存がすべて
+///   `done` なら `ready`）を更新する。
+/// - 未完了で新しい版に無い key は `superseded`（`WorkUnitTransitioned{reason: "replan v<n>"}`）。
+/// - 新しい key は新規の行として追加する。
+///
+/// - タスクが無ければ `OpsError::NotFound`。
+/// - `active` な計画が無ければ `OpsError::Validation`（replan は既存の計画の上でだけ行う）。
+/// - `spec` が D14 の検証（done 不変を含む）に落ちれば `OpsError::Validation`。
+/// - 新しい key が、過去に（superseded 含め）使われた key と衝突すれば `OpsError::Validation`
+///   （`work_units` の `UNIQUE(task_id, key)` を先に検査する）。
+/// - 旧版が並行に置き換わっていれば `OpsError::Store(StoreError::InUse)`。
+#[allow(clippy::too_many_arguments)]
+pub fn replan(
+    store: &dyn TaskStore,
+    task_id: TaskId,
+    spec: ExecutionPlanSpec,
+    reason: String,
+    origin: PlanOrigin,
+    planner_run_id: Option<String>,
+    limits: ExecutionLimits,
+    now: OffsetDateTime,
+) -> Result<(ExecutionPlanRow, ReplanDiff), OpsError> {
+    if store.get(task_id)?.is_none() {
+        return Err(OpsError::NotFound(task_id));
+    }
+    let Some(active) = store.execution_plan_active(task_id)? else {
+        return Err(OpsError::Validation(
+            "task has no active execution plan to replan".to_string(),
+        ));
+    };
+    let all_units = store.work_units_for(task_id)?;
+    let current: Vec<WorkUnitRow> = all_units
+        .iter()
+        .filter(|u| u.status.is_active())
+        .cloned()
+        .collect();
+    let done_work_units: Vec<(String, task_core::WorkUnitSpec)> = current
+        .iter()
+        .filter(|u| u.status == WorkUnitStatus::Done)
+        .map(|u| (u.key.clone(), u.spec.clone()))
+        .collect();
+    let validated = validate(&spec, limits, &done_work_units)
+        .map_err(|errors| OpsError::Validation(describe_validation_errors(&errors)))?;
+
+    let current_keys: BTreeSet<&str> = current.iter().map(|u| u.key.as_str()).collect();
+    let new_keys: BTreeSet<&str> = validated
+        .spec
+        .work_units
+        .iter()
+        .map(|w| w.key.as_str())
+        .collect();
+    // `work_units.key` は `UNIQUE(task_id, key)`。過去（superseded を含む）に使われた key を
+    // 「新しい」key として再利用しようとしたら拒否する（D5）。
+    let all_keys_ever: BTreeSet<&str> = all_units.iter().map(|u| u.key.as_str()).collect();
+    for key in new_keys.difference(&current_keys) {
+        if all_keys_ever.contains(key) {
+            return Err(OpsError::Validation(format!(
+                "work unit key {key:?} was used by a superseded work unit and cannot be reused"
+            )));
+        }
+    }
+
+    let new_plan_id = new_id();
+    let created_at = format_rfc3339(now)?;
+    let new_version = active.version + 1;
+    let done_keys: BTreeSet<&str> = done_work_units.iter().map(|(k, _)| k.as_str()).collect();
+
+    let mut diff = ReplanDiff::default();
+    let mut updated_work_units = Vec::new();
+    let mut extra_events = Vec::new();
+
+    // 削除: 現在アクティブだが新しい版に無い（done では起き得ない。validate が検証済み）。
+    for u in &current {
+        if u.status != WorkUnitStatus::Done && !new_keys.contains(u.key.as_str()) {
+            let mut row = u.clone();
+            let from = row.status;
+            row.status = WorkUnitStatus::Superseded;
+            row.blocked_reason = None;
+            row.updated_at = created_at.clone();
+            extra_events.push(Event::WorkUnitTransitioned {
+                work_unit_id: row.id.clone(),
+                key: row.key.clone(),
+                from,
+                to: WorkUnitStatus::Superseded,
+                reason: format!("replan v{new_version}"),
+                run_id: None,
+            });
+            diff.removed.push(u.key.clone());
+            updated_work_units.push(row);
+        }
+    }
+
+    let mut new_work_units = Vec::new();
+    for (seq, &idx) in validated.topological_order.iter().enumerate() {
+        let wu_spec = validated.spec.work_units[idx].clone();
+        if done_keys.contains(wu_spec.key.as_str()) {
+            // done は不変。行には触れない（`plan_id`/`seq` も元のまま）。
+            continue;
+        }
+        let all_deps_done = wu_spec
+            .depends_on
+            .iter()
+            .all(|d| done_keys.contains(d.as_str()));
+        let status = if all_deps_done {
+            WorkUnitStatus::Ready
+        } else {
+            WorkUnitStatus::Pending
+        };
+        match current.iter().find(|u| u.key == wu_spec.key) {
+            Some(existing) => {
+                let from = existing.status;
+                let spec_changed = existing.spec != wu_spec;
+                if spec_changed || from != status {
+                    diff.changed.push(wu_spec.key.clone());
+                }
+                let mut row = existing.clone();
+                row.plan_id = new_plan_id.clone();
+                row.seq = seq as u32;
+                row.depends_on = wu_spec.depends_on.clone();
+                row.spec = wu_spec;
+                row.status = status;
+                row.blocked_reason = None;
+                row.updated_at = created_at.clone();
+                // D17: 未完了で持ち越した WU は replan のたびに窓を作り直す（D18「回答の時点から
+                // 数え直す」と同じ考え方）。retries/continuations/runs を 0 に戻し、直前の run への
+                // 参照も落とす（新しい版の spec の下で最初から試す）。
+                row.runs = 0;
+                row.continuations = 0;
+                row.retries = 0;
+                row.last_run_id = None;
+                row.last_checkpoint_run_id = None;
+                if from != status {
+                    extra_events.push(Event::WorkUnitTransitioned {
+                        work_unit_id: row.id.clone(),
+                        key: row.key.clone(),
+                        from,
+                        to: status,
+                        reason: format!("replan v{new_version}"),
+                        run_id: None,
+                    });
+                }
+                updated_work_units.push(row);
+            }
+            None => {
+                diff.added.push(wu_spec.key.clone());
+                new_work_units.push(WorkUnitRow::new(
+                    new_id(),
+                    task_id.to_string(),
+                    new_plan_id.clone(),
+                    seq as u32,
+                    wu_spec,
+                    status,
+                    created_at.clone(),
+                ));
+            }
+        }
+    }
+
+    let new_plan = ExecutionPlanRow {
+        id: new_plan_id.clone(),
+        task_id: task_id.to_string(),
+        version: new_version,
+        origin,
+        planner_run_id,
+        status: PlanStatus::Active,
+        spec: validated.spec.clone(),
+        created_at: created_at.clone(),
+        superseded_at: None,
+    };
+    let plan_event = Event::ExecutionPlanned {
+        plan_id: new_plan_id,
+        version: new_version,
+        origin,
+        supersedes: Some(active.id.clone()),
+        reason: Some(reason),
+        plan: Box::new(validated.spec),
+    };
+    store.execution_plan_replan(
+        task_id,
+        active.id,
+        new_plan.clone(),
+        updated_work_units,
+        new_work_units,
+        extra_events,
+        plan_event,
+    )?;
+    Ok((new_plan, diff))
 }
 
 /// タスクの `active` な計画と WorkUnit（`GET`/`celerisctl execution plan show` が使う）。
@@ -310,5 +515,225 @@ mod tests {
         let task = sample_task();
         store.insert(&task).unwrap();
         assert!(active_plan(&store, task.id).unwrap().is_none());
+    }
+
+    // ---- ADR-0072 D17（Phase E4）: replan ----
+
+    fn adopt(store: &SqliteStore, task_id: TaskId) -> PlanView {
+        adopt_plan(
+            store,
+            task_id,
+            spec(),
+            PlanOrigin::Fixture,
+            None,
+            ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        active_plan(store, task_id).unwrap().unwrap()
+    }
+
+    fn mark_done(store: &SqliteStore, task_id: TaskId, key: &str) {
+        let view = active_plan(store, task_id).unwrap().unwrap();
+        let row = view.work_units.iter().find(|u| u.key == key).unwrap();
+        let mut updated = row.clone();
+        updated.status = task_core::WorkUnitStatus::Done;
+        store
+            .work_unit_transition(
+                task_id,
+                updated,
+                Event::WorkUnitTransitioned {
+                    work_unit_id: row.id.clone(),
+                    key: row.key.clone(),
+                    from: row.status,
+                    to: task_core::WorkUnitStatus::Done,
+                    reason: "completed".to_string(),
+                    run_id: None,
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn replan_rejects_when_there_is_no_active_plan() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task();
+        store.insert(&task).unwrap();
+        let err = replan(
+            &store,
+            task.id,
+            spec(),
+            "test".to_string(),
+            PlanOrigin::Planner,
+            None,
+            ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, OpsError::Validation(_)), "{err:?}");
+    }
+
+    /// D17 の人の依頼の例: A は done、M（migration）を追加、B は blocked by M
+    /// （`depends_on: ["m"]`）、C は blocked by B。
+    #[test]
+    fn replan_keeps_done_work_units_and_applies_the_human_request_example() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task();
+        store.insert(&task).unwrap();
+        let v1 = adopt(&store, task.id);
+        mark_done(&store, task.id, "a");
+
+        let mut v2_spec = spec();
+        v2_spec.work_units[1].depends_on = vec!["a".to_string(), "m".to_string()]; // b: blocked by m
+        v2_spec.work_units.insert(1, wu("m", &[])); // migration, no deps
+        let (new_plan, diff) = replan(
+            &store,
+            task.id,
+            v2_spec,
+            "human request: add migration m before b".to_string(),
+            PlanOrigin::Human,
+            None,
+            ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        assert_eq!(new_plan.version, 2);
+        assert_eq!(new_plan.origin, PlanOrigin::Human);
+        assert_eq!(diff.added, vec!["m".to_string()]);
+        assert_eq!(diff.changed, vec!["b".to_string()]);
+        assert!(diff.removed.is_empty(), "{diff:?}");
+
+        // 旧版は superseded、新版が active。
+        let plans = store.execution_plan_list(task.id).unwrap();
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].id, v1.plan.id);
+        assert_eq!(plans[0].status, PlanStatus::Superseded);
+        assert_eq!(plans[1].id, new_plan.id);
+        assert_eq!(plans[1].status, PlanStatus::Active);
+
+        let units = store.work_units_for(task.id).unwrap();
+        assert_eq!(units.len(), 4, "{units:?}"); // a, b, c（保持）+ m（追加）
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        assert_eq!(a.status, WorkUnitStatus::Done, "done の a は保持される");
+        assert_eq!(a.plan_id, v1.plan.id, "done の行は元の plan_id のまま");
+        let m = units.iter().find(|u| u.key == "m").unwrap();
+        assert_eq!(m.status, WorkUnitStatus::Ready, "依存が無い m はすぐ ready");
+        assert_eq!(m.plan_id, new_plan.id);
+        let b = units.iter().find(|u| u.key == "b").unwrap();
+        assert_eq!(
+            b.status,
+            WorkUnitStatus::Pending,
+            "m がまだ done でないので b は pending"
+        );
+        assert_eq!(b.depends_on, vec!["a".to_string(), "m".to_string()]);
+        let c = units.iter().find(|u| u.key == "c").unwrap();
+        assert_eq!(
+            c.status,
+            WorkUnitStatus::Pending,
+            "b 経由で m に依存 = pending"
+        );
+
+        let events = store.events_for(task.id).unwrap();
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::ExecutionPlanned { version: 2, supersedes: Some(s), .. } if *s == v1.plan.id
+            )),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn replan_supersedes_work_units_that_are_dropped_from_the_new_plan() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task();
+        store.insert(&task).unwrap();
+        adopt(&store, task.id);
+        mark_done(&store, task.id, "a");
+
+        // c を落とす（b で終わる 2 段の計画に縮める）。
+        let mut v2_spec = spec();
+        v2_spec.work_units.truncate(2); // a, b だけ
+        let (_, diff) = replan(
+            &store,
+            task.id,
+            v2_spec,
+            "drop c".to_string(),
+            PlanOrigin::Human,
+            None,
+            ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        assert_eq!(diff.removed, vec!["c".to_string()]);
+
+        let units = store.work_units_for(task.id).unwrap();
+        let c = units.iter().find(|u| u.key == "c").unwrap();
+        assert_eq!(c.status, WorkUnitStatus::Superseded);
+    }
+
+    #[test]
+    fn replan_rejects_a_changed_done_work_unit() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task();
+        store.insert(&task).unwrap();
+        adopt(&store, task.id);
+        mark_done(&store, task.id, "a");
+
+        let mut v2_spec = spec();
+        v2_spec.work_units[0].objective = "a completely different objective now".to_string();
+        let err = replan(
+            &store,
+            task.id,
+            v2_spec,
+            "test".to_string(),
+            PlanOrigin::Human,
+            None,
+            ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, OpsError::Validation(_)), "{err:?}");
+        // 何も書き込まれていない。
+        let units = store.work_units_for(task.id).unwrap();
+        assert_eq!(units.len(), 3);
+    }
+
+    #[test]
+    fn replan_rejects_reusing_a_superseded_key() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task();
+        store.insert(&task).unwrap();
+        adopt(&store, task.id);
+        mark_done(&store, task.id, "a");
+
+        let mut v2_spec = spec();
+        v2_spec.work_units.truncate(2); // c を落とす（superseded になる）
+        replan(
+            &store,
+            task.id,
+            v2_spec,
+            "drop c".to_string(),
+            PlanOrigin::Human,
+            None,
+            ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        // v3 で c を「新しい」key として使い回そうとすると拒否される（UNIQUE(task_id, key)）。
+        let v3_spec = spec(); // a, b, c 全部（c は superseded 済みの key）
+        let err = replan(
+            &store,
+            task.id,
+            v3_spec,
+            "reintroduce c".to_string(),
+            PlanOrigin::Human,
+            None,
+            ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, OpsError::Validation(_)), "{err:?}");
     }
 }
