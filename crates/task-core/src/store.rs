@@ -970,6 +970,15 @@ pub trait TaskStore:
     fn runs_for_task(&self, task_id: TaskId) -> Result<Vec<RunRow>, StoreError>;
     /// その WorkUnit の run（`started_at` 昇順）。
     fn runs_for_work_unit(&self, work_unit_id: &str) -> Result<Vec<RunRow>, StoreError>;
+
+    /// ADR-0072 D5/D15（Phase E2b）: `task_id` の `work_units` 行を、渡した集合でまるごと置き換える
+    /// （既存行を全て削除してから挿入。1 トランザクション）。`events` は変えない。
+    /// `celerisctl replay --apply`（`task_ops::replay::check_and_apply_execution`）が
+    /// `rebuild_work_units_and_runs` の再構築結果を書き戻すのに使う（events が正本、索引は派生。D5）。
+    fn work_units_replace(&self, task_id: TaskId, rows: Vec<WorkUnitRow>)
+    -> Result<(), StoreError>;
+    /// 同上。`task_id` の `runs` 行を渡した集合でまるごと置き換える。
+    fn runs_replace(&self, task_id: TaskId, rows: Vec<RunRow>) -> Result<(), StoreError>;
 }
 
 /// ADR-0059 D6（Phase 99）: `cluster_settings` の 1 行。`work_dir` は絶対パスか `~`/`~/…`
@@ -2418,6 +2427,41 @@ impl SqliteStore {
                 serde_json::to_string(&wu.spec)?,
                 wu.created_at,
                 wu.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// ADR-0072 D5（Phase E2/E2b）: `runs` へ 1 行挿入する共通ロジック（`run_index_start` と
+    /// `runs_replace` の両方から呼ぶ）。`tx` はトランザクションでも素の `Connection` でもよい
+    /// （`Transaction: Deref<Target = Connection>`）。
+    fn insert_run_row_tx(tx: &Connection, row: &RunRow) -> Result<(), StoreError> {
+        tx.execute(
+            "INSERT INTO runs (run_id, task_id, work_unit_id, role, seq, status, adapter, \
+             model, account, session_id, checkpoint_json, usage_json, metrics_json, \
+             started_at, finished_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            params![
+                row.run_id,
+                row.task_id,
+                row.work_unit_id,
+                row.role.as_str(),
+                row.seq,
+                row.status.as_str(),
+                row.adapter,
+                row.model,
+                row.account,
+                row.session_id,
+                row.checkpoint
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                row.usage.as_ref().map(serde_json::to_string).transpose()?,
+                row.metrics
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                row.started_at,
+                row.finished_at,
             ],
         )?;
         Ok(())
@@ -4509,35 +4553,7 @@ impl TaskStore for SqliteStore {
 
     fn run_index_start(&self, row: RunRow) -> Result<(), StoreError> {
         let conn = self.lock()?;
-        conn.execute(
-            "INSERT INTO runs (run_id, task_id, work_unit_id, role, seq, status, adapter, \
-             model, account, session_id, checkpoint_json, usage_json, metrics_json, \
-             started_at, finished_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-            params![
-                row.run_id,
-                row.task_id,
-                row.work_unit_id,
-                row.role.as_str(),
-                row.seq,
-                row.status.as_str(),
-                row.adapter,
-                row.model,
-                row.account,
-                row.session_id,
-                row.checkpoint
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()?,
-                row.usage.as_ref().map(serde_json::to_string).transpose()?,
-                row.metrics
-                    .as_ref()
-                    .map(serde_json::to_string)
-                    .transpose()?,
-                row.started_at,
-                row.finished_at,
-            ],
-        )?;
-        Ok(())
+        Self::insert_run_row_tx(&conn, &row)
     }
 
     fn run_index_finish(
@@ -4609,6 +4625,38 @@ impl TaskStore for SqliteStore {
             }
             Ok(out)
         })
+    }
+
+    fn work_units_replace(
+        &self,
+        task_id: TaskId,
+        rows: Vec<WorkUnitRow>,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM work_units WHERE task_id = ?1",
+            params![task_id.to_string()],
+        )?;
+        for wu in &rows {
+            Self::insert_work_unit_tx(&tx, wu)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn runs_replace(&self, task_id: TaskId, rows: Vec<RunRow>) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM runs WHERE task_id = ?1",
+            params![task_id.to_string()],
+        )?;
+        for r in &rows {
+            Self::insert_run_row_tx(&tx, r)?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 }
 

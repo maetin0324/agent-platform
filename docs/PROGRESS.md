@@ -18420,13 +18420,11 @@ run について書かれる」に反する）との指摘があった。`dispat
 
 | ゲート | 実行したコマンド | 出力の要点 |
 |---|---|---|
-| fmt | `cargo fmt --all -- --check` | exit 0（差分なし） |
-| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0。`clone_on_copy`〈`Option<Usage>` は `Copy`〉を修正） |
-| 全テスト（1 回目） | `cargo test --workspace --no-fail-fast` | task-api と task-worker の schema 一致テストのみ FAILED（想定どおり。他は全て ok）。task-core 295 passed、task-dispatch 276 passed |
-| schema（task-core） | 変更無し（`execution_gate.rs` は独自の schema を持たない） | — |
+| fmt | `cargo fmt --all -- --check` | exit 0（差分なし。E2b 統合後の再検証を含む） |
+| clippy | `cargo clippy -p task-worker -p task-core --all-targets -- -D warnings`（E2b 統合後、変更した 2 crate に絞って再検証） | exit 0（警告 0。`clone_on_copy`〈`Option<Usage>` は `Copy`〉を修正） |
+| 全テスト（最終） | `cargo test --workspace --no-fail-fast`（E2b 統合〈`git merge main`〉後の worktree で実行） | exit 0。81 個の test result ブロック全て `ok`（FAILED 0） |
 | schema（task-api） | `UPDATE_SCHEMA=1 cargo test -p task-api --lib` | exit 0、53 passed。`api-v1.schema.json` 更新（`ExecutionGateDecision`/`GateSignal`/`ExecutionHintSpec`/`Event::ExecutionGated`/`TaskRouting.execution*` 追加のみ） |
 | schema（task-worker） | `UPDATE_SCHEMA=1 cargo test -p task-worker --lib committed_schema_matches_generated` | exit 0、1 passed。`worker-protocol.schema.json` 更新（`RunContext.execution_planner`/`ExecutionPlannerContext` 追加のみ） |
-| 全テスト（2 回目、schema 再生成後） | `cargo test --workspace --no-fail-fast` | 実行中（システム負荷が高く完走に時間を要した。結果は本節末尾に追記） |
 | GUI gen:types | `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff | 2 回目が 1 回目と同一（差分ゼロ）。差分は `ExecutionGateDecision` 等の型追加のみ |
 | GUI typecheck | `cd gui && corepack pnpm@11.27.0 typecheck` | exit 0（エラーなし） |
 | GUI test | `cd gui && corepack pnpm@11.27.0 test` | exit 0。71 files / 1086 passed（画面は E5 の範囲なので型の追随だけ） |
@@ -18457,4 +18455,135 @@ run について書かれる」に反する）との指摘があった。`dispat
 - S4/S6 の実データ配線（org の部署またぎ判定、`runs` 索引からの直近 budget_exhausted 実績の集計）は
   shadow の記録（E5/E6）を見てから行う。
 - `[execution.planner].permission_mode` の実行時配線（`with_permission_mode` フックの追加）。
-- replay/`work_units`・`runs` の再構築（E2 からの申し送りのまま、E3 でも着手できず）。
+- replay/`work_units`・`runs` の再構築は E2b（下記）で実装済み。`execution_plans` の再構築（replan 導入後）は
+  E4 で対象に加えること（E2b の申し送り）。
+
+## Phase E2b「replay による work_units / runs の再構築と突合」（2026-09-24）
+
+ADR-0072 D5/D15（events が正本、`execution_plans`/`work_units`/`runs` は派生の索引）の E2 の受け入れ
+条件 (g) 後半（`work_units`/`runs` の replay 再構築）を実装した。触ったのは指示どおり
+`crates/task-ops/src/replay.rs`、`crates/celerisctl/src/commands/replay.rs`、
+`crates/task-core/src/store.rs`（索引の読み書き）の 3 ファイルのみ（`crates/task-dispatch/src/dispatcher.rs`
+は触っていない。E3 が並行して編集中の前提）。
+
+branch: `worktree-agent-a5eea4ba4e20f914e`。
+
+### 前提: worktree の同期
+
+この worktree は Phase E2 の main への merge（`1f663a8`）より前の commit（`f7338ad`）から分岐していた
+ため、`execution_plan.rs`/`execution_scheduler.rs`/migration 0026 などが存在しなかった。`git diff
+f7338ad main` のパッチを `patch -p1`（`git merge`/`git apply` は使わず、プレーンな patch コマンドで適用。
+「`git merge`/`git push` はしない」の制約を尊重した）で取り込み、`sync: bring worktree branch up to
+date with main (Phase E2 merged)` として先頭に 1 commit した（このタスク固有の事情なので、他の Phase
+の作業には影響しない）。
+
+### 発見: `runs` 索引は E2 の時点で WU 経由の worker run にしか書かれていない
+
+実装前に `run_index_start` の呼び出し箇所を数えたところ、本番コード（`dispatcher.rs`）では
+`start_work_unit_run`（WU の dispatch）の 1 箇所だけだった。`run_index_finish` は run の終了時に
+常に呼ばれるが、対応する `run_index_start` が無い run（暗黙の WU の worker run、reviewer run）には
+行が無いので何もしない。つまり本番 DB の `runs` 表は現状「計画のある Task の WU run」しか持っていない。
+詳細は ADR-0072「Phase E2b 実装時の逸脱・明確化」に記録した。
+
+### 受け入れ条件ごとの証跡
+
+**条件: `task_ops::replay` に純粋関数 `rebuild_work_units_and_runs(events) -> (Vec<WorkUnitRow>,
+Vec<RunRow>)` を足す（events だけから `ExecutionPlanned`/`WorkUnitTransitioned`/`WorkerStarted`/
+`WorkerFinished`/`CheckpointSaved` の列を畳み込んで再構築する）**
+- 実装: `crates/task-ops/src/replay.rs`（`rebuild_work_units_and_runs`。引数は `EventRow`〈`ts` 付き〉。
+  理由は ADR 追記参照）。I/O 無しの純粋関数（`TaskStore` を引数に取らない）。
+- 実行したコマンド: `cargo test -p task-ops --lib replay::`
+- 出力の要点: exit 0、9 passed（既存 6 件 + 新規 3 件）、FAILED 0。
+
+**条件: `celerisctl replay` に統合し、`--check` で現在の索引と突合して差分を出し、`--apply` で索引を
+events に合わせる（events が勝つ）**
+- 実装: `crates/celerisctl/src/commands/replay.rs`。`ReplayArgs` に `--check`/`--apply`
+  （`bool`、`clap::Args`）を追加。フラグ無しの既定は従来どおり `tasks.status`/`attempts` の突合のみ
+  （後方互換）。`--check`/`--apply` のどちらかがあれば `task_ops::replay::check_and_apply_execution`
+  を呼び、`WORK_UNIT_MISMATCH`/`RUN_MISMATCH` 行を追加で出す。`--apply` は差分のあったタスクの
+  `work_units`/`runs` を再構築結果で上書きし（`work_units_replace`/`runs_replace`。events は変えない）、
+  `replay: applied execution index fixes for N task(s)` を出す。exit code は残った mismatch が 0 件なら
+  `SUCCESS`、1 件以上なら `FAILURE`。
+- 実行したコマンド: `cargo test -p celerisctl --bin celerisctl replay::`
+- 出力の要点: exit 0、2 passed（既存のまま。`ReplayArgs {}` → `ReplayArgs::default()` に更新しただけ
+  で挙動は不変）。
+- `task_core::store::SqliteStore` に `work_units_replace`/`runs_replace`（`TaskStore` トレイトへ追加。
+  実装は他に無いので破壊的変更ではない）を追加。既存の `run_index_start` の INSERT 文は
+  `insert_run_row_tx`（新設の private helper）へ切り出し、`runs_replace` と共有した。
+
+**条件: テスト (1) E2 の fixture（A → B → C、失敗 → blocked、question → answer、continuation）で
+scheduler が書いた索引と replay の再構築が一致する**
+- `rebuild_work_units_and_runs_matches_the_scheduler_written_index_for_the_e2_fixtures`
+  （`crates/task-ops/src/replay.rs`）。A（continuation 1 回 → 完了）→ B（依存先 A の完了で ready →
+  retryable failure で retry → 2 回目の dispatch で question → answer → 3 回目の dispatch で
+  非 retryable failure → failed）→ C（B の失敗で `dependency_failed` へ伝播）という 1 本の筋で、
+  ADR-0072 D6 の遷移理由（`dispatch`/`continue`/`retry`/`completed`/`question`/`answer`/`failed`/
+  `dependency_ready`/`dependency_failed`）を全て踏む。`store.work_unit_transition`/`run_index_start`/
+  `run_index_finish`/`append_event` を dispatcher.rs と同じ呼び方（同じ引数の組み合わせ）で手書きし
+  「scheduler が書いた索引」を模擬し、`rebuild_work_units_and_runs` の結果と `diff_execution` で
+  突き合わせて `Vec::new()`（差分ゼロ）を確認。counts（`a.runs=2`/`continuations=1`、`b.runs=3`/
+  `retries=1`、`c.status=Blocked(DependencyFailed)`）も個別に確認した。
+- 実行したコマンド: `cargo test -p task-ops --lib replay::tests::rebuild_work_units_and_runs_matches_the_scheduler_written_index_for_the_e2_fixtures`
+- 出力の要点: exit 0、1 passed。
+
+**条件: テスト (2) 索引を故意に壊しても replay が直す**
+- `check_and_apply_execution_fixes_a_corrupted_index`（同ファイル）。1 WU（`a`、dispatch→completed）の
+  正しい index を作った後、`work_units_replace`/`runs_replace`（events を経由しない直接の書き込み）で
+  `a` を `Blocked(Question)`、その run を `Failed` に壊す。`--check`（`apply=false`）では
+  `work_unit_mismatches`/`run_mismatches` が非空で、DB はまだ壊れたまま（`applied == 0`）であることを
+  確認。`--apply`（`apply=true`）で `applied == 1`、mismatch がゼロになり、DB が `Done`/`Completed`
+  （events が示す本来の値）に戻ることを確認。さらにもう一度 `--check` して差分ゼロが安定することも
+  確認した。
+- 実行したコマンド: `cargo test -p task-ops --lib replay::tests::check_and_apply_execution_fixes_a_corrupted_index`
+- 出力の要点: exit 0、1 passed。
+
+**条件: テスト (3) 計画の無い Task では work_units は空、runs は全 run 分**
+- `rebuild_work_units_and_runs_is_empty_for_a_task_without_a_plan_and_covers_every_run`（同ファイル）。
+  `ExecutionPlanned` の無いタスクに worker run 2 件（1 件失敗・1 件完了）+ reviewer run 1 件
+  （`role: Some(Reviewer)`、`end: None` の run。本番でも reviewer run に `end` が付かないことが
+  ある想定の安全網 — `end` が無ければ `RunIndexStatus::HarnessError` にフォールバックすることも
+  合わせて確認）を積み、`rebuild_work_units_and_runs` が `work_units == []`、`runs.len() == 3`
+  （worker 2 + reviewer 1、全て `work_unit_id: None`）、worker/reviewer それぞれ独立した 1 始まりの
+  `seq` を持つことを確認した。
+- 実行したコマンド: `cargo test -p task-ops --lib replay::tests::rebuild_work_units_and_runs_is_empty_for_a_task_without_a_plan_and_covers_every_run`
+- 出力の要点: exit 0、1 passed。
+
+### ゲート（本 Phase 完了時点）
+
+| ゲート | 実行したコマンド | 出力の要点 |
+|---|---|---|
+| fmt | `cargo fmt --all -- --check` | exit 0（差分なし） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0。`clone_on_copy` 2 件を `Option<Usage>`/`Option<RunMetrics>` の直接代入に修正） |
+| 全テスト | `cargo test --workspace --no-fail-fast` | exit 0。81 個の test binary が全て `test result: ok`（FAILED 0）。集計 2205 passed / 0 failed（`task-ops`: replay 系 9 passed を含む、`celerisctl`: replay 系 2 passed を含む、`task-core`: store 系を含む） |
+
+### 未解決事項
+
+- **`runs` 索引の欠落そのものは直していない**: `--apply` は既存の `runs`/`work_units` の不整合を events
+  に合わせて直すが、`dispatcher.rs::start_work_unit_run` 以外の場所（暗黙 WU の worker run、reviewer
+  run、将来の planner/wrap-up run）が `run_index_start` を呼んでいないという欠落そのものは
+  `dispatcher.rs` を触らない制約のため残した。本番でこの Phase を有効にするには、初回 `celerisctl
+  replay --apply` で欠けていた行を一括で埋めてから、別 Phase（触ってよいことになったとき）で
+  `dispatcher.rs` 側にも `run_index_start` を配線するのが筋。
+- **`execution_plans` の再構築は対象外**（E2 は replan 無しで 1 Task 1 版のため実害が小さいと判断。
+  E4 で replan が入ったら対象に加えること。ADR 追記参照）。
+- `diff_execution` は `created_at`/`updated_at`/`started_at`/`finished_at`/`session_id` を比較しない
+  （scheduler の書き込みと events の追記が別トランザクションなので厳密には一致しない。理由は ADR
+  追記に詳述）。運用で「索引の書き込み時刻そのもの」まで監査したくなったら、`EventRow::ts` と
+  `runs.started_at` 等の許容誤差つき比較を別途検討すること。
+- reviewer run の `seq` の連番規則（本 Phase の新設）は先例が無いので、GUI・監査での実際の使われ方を
+  見て再検討してよい。
+
+### 提案
+
+- `dispatcher.rs::start_work_unit_run` に相当する「run 開始の索引書き込み」を、暗黙 WU の worker run・
+  reviewer run にも一般化して配線する（E3 以降、`dispatcher.rs` を触ってよい Phase で）。そうすれば
+  本番の `runs` 表が最初から完全になり、`replay --apply` は「本物の drift」だけを検出する道具に戻る。
+- `celerisctl replay --apply` を selfdeploy の定期ジョブ（cron 等）に組み込み、`runs`/`work_units` の
+  drift を自動修復する運用も検討に値する（今回は手動実行のみを実装。自動化は範囲外）。
+
+## 障害: drain 後に旧デーモンが終了せず、E2 の停止→起動昇格が失敗（2026-09-24 19:33〜）
+
+- release `1f663a83ff6c`（Phase E2、schema 26）は verify ok（live_ok=false は N-1 が schema 26 を読めない想定どおり）。`promote.sh 1f663a83ff6c` の停止→起動が「old celeris (pid 2385468) is still serving after 300s; refusing to start a second daemon」で失敗。`current` は f7338ad123bb（Celeris の自己改善配送「UI/UX 課の追加、ADR-0073」、19:08Z に昇格）のまま。
+- 原因: 過去 4 世代（0e20e1b2a058 / 2f1fcc0a6227 / 6566ad486acd / 93076d0f4c76）の `celeris@` unit が active running のまま残っていた。journal には「drained; exiting 0」「celeris stopped, exit: Drained」が出ているのにプロセスが終了しない（tick は止まっている、SIGTERM も効かない）。最初に残ったのは 0e20e1b2a058（Phase 116 / 117 を含む最初の release）。promote.sh は旧 pid を pgrep 相当で決めるため最も古い無関係の pid（0e20e1b）を対象にして待った。93076d0f4c76 の cgroup には `sleep 3600` が 3 つ（ワーカー run の子孫）、現行 unit には `[codex] <defunct>`。
+- 対処: `systemctl --user stop` を 4 unit に発行（TimeoutStopSec=3900 なので SIGKILL まで最大 65 分）。`kill -9` は auto mode で拒否されたため人に依頼。Phase 119（Sonnet）で終了経路（背景スレッド / Runtime の shutdown_timeout / process::exit）、孤児プロセスの掃除、promote.sh の停止対象（`current` の unit MainPID）と stale 一覧、監視を修正する。
+- 19:57Z: 旧 unit 4 つは `systemctl --user stop` で終了（failed 状態で残ったので reset-failed）。`promote.sh 1f663a83ff6c` の停止→起動が完了し、本番は **release `1f663a83ff6c`（Phase E2、schema 26）**。in-flight 0、停止時間 1 分未満。
