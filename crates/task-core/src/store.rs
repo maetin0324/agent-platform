@@ -560,6 +560,12 @@ pub struct ExecutionMetricsTaskRow {
     pub runs_count: u32,
     pub budget_exhausted_runs: u32,
     pub latest_run: Option<ExecutionMetricsLatestRun>,
+    /// 索引が無い旧タスクでも実行履歴があるか。Created だけのタスクは false。
+    pub has_execution_events: bool,
+    /// WorkerFinished.end の BudgetExhausted。runs.status と異なる場合も events が正。
+    pub has_budget_events: bool,
+    /// atomic の continue/retry は work_units に記録されない。
+    pub has_transition_metrics: bool,
 }
 
 /// ADR-0033 D3: 報告（`reports`）の読み書きは `crate::report::ReportStore` にあり、`TaskStore` はそれを
@@ -4794,7 +4800,18 @@ impl TaskStore for SqliteStore {
                         COALESCE(run_counts.runs_count, 0), COALESCE(run_counts.budget_exhausted_runs, 0), \
                         latest.run_id, latest.role, latest.status, latest.adapter, latest.model, \
                         latest.metrics_json, latest.usage_json, \
-                        t.updated_at \
+                        t.updated_at, \
+                        EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND \
+                          json_extract(e.json, '$.type') IN \
+                          ('execution_planned', 'work_unit_transitioned', 'worker_started', \
+                           'worker_finished', 'transitioned', 'routing_decided') LIMIT 1), \
+                        EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND \
+                          json_extract(e.json, '$.type') = 'worker_finished' AND \
+                          json_extract(e.json, '$.end.type') = 'budget_exhausted' LIMIT 1), \
+                        EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND \
+                          json_extract(e.json, '$.type') = 'transitioned' AND \
+                          json_extract(e.json, '$.reason') IN \
+                          ('continue', 'work_unit_retry', 'worker_error') LIMIT 1) \
                  FROM eligible t \
                  LEFT JOIN wu ON wu.task_id = t.id \
                  LEFT JOIN plans ON plans.task_id = t.id \
@@ -4815,14 +4832,16 @@ impl TaskStore for SqliteStore {
                     row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?,
                     row.get::<_, Option<String>>(14)?, row.get::<_, Option<String>>(15)?,
                     row.get::<_, Option<String>>(16)?, row.get::<_, Option<String>>(17)?,
-                    row.get::<_, String>(18)?,
+                    row.get::<_, String>(18)?, row.get::<_, bool>(19)?, row.get::<_, bool>(20)?,
+                    row.get::<_, bool>(21)?,
                 ))
             })?;
             let mut out = Vec::new();
             for row in rows {
                 let (id, status, genre, assignee, routing_json, repairs, replans,
                     continuations, retries, runs_count, budget_exhausted_runs, run_id,
-                    role, run_status, adapter, model, metrics_json, usage_json, updated_at) = row?;
+                    role, run_status, adapter, model, metrics_json, usage_json, updated_at,
+                    has_execution_events, has_budget_events, has_transition_metrics) = row?;
                 // SQLite julianday has millisecond resolution. Keep a 1 ms candidate margin in
                 // SQL, then apply the original OffsetDateTime comparison exactly here.
                 if let Some(since) = since && parse_rfc3339(&updated_at)? < since {
@@ -4845,7 +4864,8 @@ impl TaskStore for SqliteStore {
                     task_id: id.parse().map_err(|_| StoreError::Invalid(format!("invalid tasks.id: {id}")))?,
                     status: parse_status(&status)?, genre, assignee, routing_json,
                     repairs, replans, continuations, retries, runs_count,
-                    budget_exhausted_runs, latest_run,
+                    budget_exhausted_runs, latest_run, has_execution_events, has_budget_events,
+                    has_transition_metrics,
                 });
             }
             Ok(out)

@@ -5,7 +5,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use task_core::{Event, EventRow, Status, StoreError, Task, TaskStore, Tier};
+#[cfg(test)]
+use task_core::Task;
+use task_core::{Event, EventRow, Status, StoreError, TaskStore, Tier};
 use task_ops::view::RunOutcomeKind;
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, UtcOffset};
@@ -319,6 +321,7 @@ fn tier_key(t: Tier) -> &'static str {
 
 /// `group_by = "genre" | "assignee" | "gate_mode"` のグループキー（`"lane"` は run 単位の情報が
 /// 要るので呼び出し側〈[`execution_metrics_summary`]〉が別に扱う）。
+#[cfg(test)]
 fn execution_group_key(
     task: &Task,
     metrics: &task_core::ExecutionMetrics,
@@ -334,11 +337,106 @@ fn execution_group_key(
     }
 }
 
+/// D19: `GET /metrics/execution?since=&group_by=`。索引行を集約する。
+/// `runs` に lane と BudgetExhausted の種類は無いので、その値を必要とするタスクだけ
+/// events を補完する。索引が存在しない旧タスクも同様に補完する。
+pub(crate) fn execution_metrics_summary(
+    store: &dyn TaskStore,
+    since: Option<OffsetDateTime>,
+    group_by: &str,
+) -> Result<ExecutionMetricsSummary, StoreError> {
+    let rows = store.execution_metrics_task_rows(since)?;
+    let mut groups: BTreeMap<String, ExecutionGroupAcc> = BTreeMap::new();
+    for row in &rows {
+        let routing: Option<task_core::TaskRouting> = row
+            .routing_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?;
+        let gate = routing
+            .as_ref()
+            .and_then(|r| r.execution.as_ref())
+            .map(|d| d.mode.as_str().to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let needs_events = (group_by == "lane" && row.has_execution_events)
+            || row.has_budget_events
+            || row.has_transition_metrics
+            || (row.has_execution_events
+                && row.runs_count == 0
+                && row.continuations == 0
+                && row.repairs == 0
+                && row.replans == 0);
+        let events = if needs_events {
+            Some(store.events_for(row.task_id)?)
+        } else {
+            None
+        };
+        let event_list: Vec<Event> = events
+            .as_ref()
+            .map(|events| events.iter().map(|(_, e)| e.clone()).collect())
+            .unwrap_or_default();
+        let fallback = if needs_events {
+            let task = store
+                .get(row.task_id)?
+                .ok_or_else(|| StoreError::Invalid(format!("missing task {}", row.task_id)))?;
+            Some((
+                task_core::summarize_execution_metrics(&task, &event_list),
+                task,
+            ))
+        } else {
+            None
+        };
+        let key = match group_by {
+            "genre" => row.genre.clone().unwrap_or_else(|| "none".to_string()),
+            "assignee" => row.assignee.clone().unwrap_or_else(|| "none".to_string()),
+            "lane" => fallback
+                .as_ref()
+                .and_then(|(_, task)| {
+                    task_core::routing_audit(task, &event_list)
+                        .iter()
+                        .rev()
+                        .find_map(|a| a.lane)
+                })
+                .map(tier_key)
+                .unwrap_or("none")
+                .to_string(),
+            _ => gate,
+        };
+        let acc = groups.entry(key).or_default();
+        acc.tasks += 1;
+        match row.status {
+            Status::Done => acc.done += 1,
+            Status::Failed => acc.failed += 1,
+            _ => acc.other += 1,
+        }
+        acc.continuations += u64::from(
+            fallback
+                .as_ref()
+                .map_or(row.continuations, |(m, _)| m.continuations),
+        );
+        acc.max_turn_failures +=
+            u64::from(fallback.as_ref().map_or(0, |(m, _)| m.max_turn_failures));
+        acc.repairs += u64::from(
+            fallback
+                .as_ref()
+                .map_or(row.repairs, |(m, _)| m.repairs_total),
+        );
+        acc.replans += u64::from(fallback.as_ref().map_or(row.replans, |(m, _)| m.replans));
+    }
+    Ok(execution_metrics_from_groups(
+        group_by,
+        since,
+        rows.len() as u64,
+        groups,
+    ))
+}
+
 /// D19: `GET /metrics/execution?since=&group_by=`。events からタスクごとに
 /// `task_core::summarize_execution_metrics` を求め、`group_by` の値でまとめる（`runs` の索引の
 /// 代わりに、E1〜E4 の events をタスクごとに 1 回ずつ読む素朴な全走査。`StatsState` のような
 /// カーソル付きの増分キャッシュは持たない。分析用の低頻度な問い合わせという想定。ADR の逸脱節参照）。
-pub(crate) fn execution_metrics_summary(
+#[cfg(test)]
+pub(crate) fn execution_metrics_summary_from_events(
     store: &dyn TaskStore,
     since: Option<OffsetDateTime>,
     group_by: &str,
@@ -381,6 +479,20 @@ pub(crate) fn execution_metrics_summary(
         acc.replans += u64::from(metrics.replans);
     }
 
+    Ok(execution_metrics_from_groups(
+        group_by,
+        since,
+        total_tasks,
+        groups,
+    ))
+}
+
+fn execution_metrics_from_groups(
+    group_by: &str,
+    since: Option<OffsetDateTime>,
+    total_tasks: u64,
+    groups: BTreeMap<String, ExecutionGroupAcc>,
+) -> ExecutionMetricsSummary {
     let groups = groups
         .into_iter()
         .map(|(key, acc)| {
@@ -404,12 +516,12 @@ pub(crate) fn execution_metrics_summary(
         })
         .collect();
 
-    Ok(ExecutionMetricsSummary {
+    ExecutionMetricsSummary {
         group_by: group_by.to_string(),
         since: since.map(|t| t.format(&Rfc3339).unwrap_or_default()),
         total_tasks,
         groups,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -724,5 +836,322 @@ mod tests {
 
         let b = stats.view("claude-code", "b");
         assert_eq!((b.runs, b.done, b.error), (4, 0, 1));
+    }
+}
+
+#[cfg(test)]
+mod execution_metrics_comparison_tests {
+    use super::*;
+    use task_core::{
+        Budget, Check, Criterion, RunIndexRole, RunIndexStatus, RunRow, SqliteStore, TaskId,
+        TaskKind, WorkerHint, WorkspaceSpec,
+    };
+
+    fn task(status: Status, genre: &str, age: i64) -> Task {
+        let id = TaskId::new();
+        let now = OffsetDateTime::now_utc() - time::Duration::seconds(age);
+        Task {
+            id,
+            parent_id: None,
+            kind: TaskKind::Execute,
+            title: genre.into(),
+            objective: "exercise metrics".into(),
+            acceptance: vec![Criterion {
+                text: "done".into(),
+                check: Check::Human,
+            }],
+            inputs: vec![],
+            depends_on: vec![],
+            status,
+            priority: 0,
+            worker_hint: WorkerHint {
+                tier: Tier::Standard,
+                adapter: None,
+            },
+            workspace: WorkspaceSpec::local(id.to_string()),
+            budget: Budget {
+                max_turns: 10,
+                max_wall_secs: 600,
+                max_retries: 2,
+            },
+            attempts: 0,
+            lease: None,
+            created_at: now,
+            updated_at: now,
+            role: None,
+            genre: Some(genre.into()),
+            aggregate: false,
+            project_id: None,
+            milestone_id: None,
+            assignee: Some("engineering".into()),
+            conversation: None,
+            labels: vec![],
+            category: Default::default(),
+            mode: Default::default(),
+            skills: vec![],
+            repos: vec![],
+            routing: None,
+        }
+    }
+
+    fn started(id: &str) -> Event {
+        Event::WorkerStarted {
+            run_id: id.into(),
+            adapter: "codex".into(),
+            model: "gpt-6-sol".into(),
+            provider: None,
+            account: None,
+            role: None,
+            task_role: None,
+        }
+    }
+
+    fn run(store: &SqliteStore, task: &Task, id: &str, status: RunIndexStatus) {
+        let at = task.updated_at.format(&Rfc3339).unwrap();
+        store
+            .run_index_start(RunRow {
+                run_id: id.into(),
+                task_id: task.id.to_string(),
+                work_unit_id: None,
+                role: RunIndexRole::Worker,
+                seq: 1,
+                status: RunIndexStatus::Running,
+                adapter: Some("codex".into()),
+                model: Some("gpt-6-sol".into()),
+                account: None,
+                session_id: None,
+                checkpoint: None,
+                usage: None,
+                metrics: None,
+                started_at: at,
+                finished_at: None,
+            })
+            .unwrap();
+        store
+            .run_index_finish(id, status, None, None, None, task.updated_at)
+            .unwrap();
+    }
+
+    fn fixture() -> SqliteStore {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let atomic_done = task(Status::Done, "atomic-done", 120);
+        store.create_task(&atomic_done, vec![]).unwrap();
+        let atomic_failed = task(Status::Failed, "atomic-failed", 110);
+        store.create_task(&atomic_failed, vec![]).unwrap();
+
+        let plan: task_core::ExecutionPlanSpec = serde_json::from_value(serde_json::json!({
+            "schema": "celeris.execution-plan/1", "rationale": "test",
+            "work_units": [{"key":"a","kind":"implement","title":"A","objective":"do A"}]
+        }))
+        .unwrap();
+        let planned = task(Status::Running, "compound", 100);
+        store.create_task(&planned, vec![]).unwrap();
+        task_ops::execution::adopt_plan(
+            &store,
+            planned.id,
+            plan.clone(),
+            task_core::PlanOrigin::Fixture,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        let mut unit = store.work_units_for(planned.id).unwrap().remove(0);
+        let from = unit.status;
+        unit.status = task_core::WorkUnitStatus::Done;
+        store
+            .work_unit_transition(
+                planned.id,
+                unit.clone(),
+                Event::WorkUnitTransitioned {
+                    work_unit_id: unit.id,
+                    key: unit.key,
+                    from,
+                    to: task_core::WorkUnitStatus::Done,
+                    reason: "completed".into(),
+                    run_id: None,
+                },
+            )
+            .unwrap();
+
+        let repair = task(Status::Reviewing, "repair", 90);
+        store.create_task(&repair, vec![]).unwrap();
+        let repair_plan: task_core::ExecutionPlanSpec = serde_json::from_value(serde_json::json!({
+            "schema": "celeris.execution-plan/1", "rationale": "repair",
+            "work_units": [{"key":"repair-1","kind":"repair","title":"repair (format): fix","objective":"fix"}]
+        })).unwrap();
+        task_ops::execution::adopt_plan(
+            &store,
+            repair.id,
+            repair_plan,
+            task_core::PlanOrigin::Fixture,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        // review_repair の WorkUnitTransitioned でも同じ repair key を数える。
+        let repair_unit = store.work_units_for(repair.id).unwrap().remove(0);
+        store
+            .work_unit_transition(
+                repair.id,
+                repair_unit.clone(),
+                Event::WorkUnitTransitioned {
+                    work_unit_id: repair_unit.id,
+                    key: repair_unit.key,
+                    from: repair_unit.status,
+                    to: repair_unit.status,
+                    reason: "review_repair".into(),
+                    run_id: None,
+                },
+            )
+            .unwrap();
+
+        let replanned = task(Status::Running, "replan", 80);
+        store.create_task(&replanned, vec![]).unwrap();
+        task_ops::execution::adopt_plan(
+            &store,
+            replanned.id,
+            plan.clone(),
+            task_core::PlanOrigin::Fixture,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        task_ops::execution::replan(
+            &store,
+            replanned.id,
+            plan,
+            "retry plan".into(),
+            task_core::PlanOrigin::Planner,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let mut continued = task(Status::Ready, "continue", 70);
+        continued.routing = Some(task_core::TaskRouting::default());
+        let decision =
+            task_core::decide_for_task(&continued, &task_core::LaneCeiling::default()).unwrap();
+        store
+            .create_task(
+                &continued,
+                vec![
+                    started("continued-run"),
+                    Event::RoutingDecided {
+                        run_id: "continued-run".into(),
+                        record: Box::new(task_core::RoutingRecord {
+                            org_node: Some("engineering".into()),
+                            harness: Some("coding".into()),
+                            decision,
+                            resolution: task_core::model_routing::LaneResolution {
+                                lane: Some(Tier::Standard),
+                                ..Default::default()
+                            },
+                            quota_reason: None,
+                            work_unit_id: None,
+                        }),
+                    },
+                    Event::WorkerFinished {
+                        run_id: "continued-run".into(),
+                        outcome: "continue: budget".into(),
+                        usage: None,
+                        role: None,
+                        metrics: None,
+                        end: Some(task_core::RunEnd::BudgetExhausted {
+                            kind: task_core::BudgetKind::Turns,
+                        }),
+                    },
+                    Event::Transitioned {
+                        from: Status::Running,
+                        to: Status::Ready,
+                        reason: "continue".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        // 古い索引では status が Failed でも events の end が BudgetExhausted になり得る。
+        run(&store, &continued, "continued-run", RunIndexStatus::Failed);
+
+        let yielded = task(Status::Ready, "yielded", 65);
+        store
+            .create_task(
+                &yielded,
+                vec![
+                    started("yielded-run"),
+                    Event::WorkerFinished {
+                        run_id: "yielded-run".into(),
+                        outcome: "continue: yielded".into(),
+                        usage: None,
+                        role: None,
+                        metrics: None,
+                        end: Some(task_core::RunEnd::Yielded),
+                    },
+                    Event::Transitioned {
+                        from: Status::Running,
+                        to: Status::Ready,
+                        reason: "continue".into(),
+                    },
+                ],
+            )
+            .unwrap();
+        run(&store, &yielded, "yielded-run", RunIndexStatus::Completed);
+
+        let retried = task(Status::Ready, "retry", 60);
+        store
+            .create_task(
+                &retried,
+                vec![Event::Transitioned {
+                    from: Status::Running,
+                    to: Status::Ready,
+                    reason: "work_unit_retry".into(),
+                }],
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn indexed_summary_matches_event_reference_for_all_groups_and_since() {
+        let store = fixture();
+        let since = OffsetDateTime::now_utc() - time::Duration::seconds(95);
+        for since in [None, Some(since)] {
+            for group in EXECUTION_METRICS_GROUP_BY {
+                let indexed = execution_metrics_summary(&store, since, group).unwrap();
+                let events = execution_metrics_summary_from_events(&store, since, group).unwrap();
+                assert_eq!(indexed, events, "since={since:?}, group={group}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual timing evidence; no latency threshold"]
+    fn indexed_summary_timing_2000_tasks_20_events() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        for i in 0..2000 {
+            let task = task(Status::Done, "timing", 0);
+            let run_id = format!("timing-{i}");
+            let mut events = vec![started(&run_id)];
+            // create_task が Created を 1 件付けるので、合計 20 events。
+            for _ in 0..18 {
+                events.push(Event::Transitioned {
+                    from: Status::Running,
+                    to: Status::Running,
+                    reason: "progress".into(),
+                });
+            }
+            store.create_task(&task, events).unwrap();
+            run(&store, &task, &run_id, RunIndexStatus::Completed);
+        }
+        let start = std::time::Instant::now();
+        let indexed = execution_metrics_summary(&store, None, "genre").unwrap();
+        let indexed_time = start.elapsed();
+        let start = std::time::Instant::now();
+        let events = execution_metrics_summary_from_events(&store, None, "genre").unwrap();
+        let event_time = start.elapsed();
+        assert_eq!(indexed, events);
+        println!("indexed={indexed_time:?} events={event_time:?}");
     }
 }

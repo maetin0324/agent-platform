@@ -171,8 +171,8 @@ fn bad_group_by(group_by: &str) -> ApiProblem {
 }
 
 /// ADR-0072 D19（Phase E5）: `GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`。
-/// 集計そのものは `crate::stats::execution_metrics_summary`（`runs`/events の全走査。低頻度な分析用
-/// クエリという想定。stats.rs の逸脱節参照）。
+/// 集計は `crate::stats::execution_metrics_summary` が索引行から行い、索引にない情報だけ
+/// 該当タスクの events で補完する。
 async fn get_execution_metrics(
     axum::extract::State(state): axum::extract::State<ApiState>,
     axum::extract::RawQuery(raw): axum::extract::RawQuery,
