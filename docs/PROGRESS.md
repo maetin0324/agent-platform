@@ -18266,6 +18266,15 @@ ADR-0072 §6 E3 の受け入れ条件 (a)〜(h) を実装した。区切りは A
 分岐していたため、まず `git merge --ff-only main` で E2 の内容を取り込んでから着手した
 （fast-forward。worktree に固有のコミットは無かったので安全）。
 
+実装・検証を終えて `e6c1691`（phase E3 の commit）を作った後、main が E2b（`crates/task-ops/src/replay.rs`
+と `crates/task-core/src/store.rs` の `work_units_replace`/`runs_replace`、`celerisctl replay --check/--apply`）
+の統合で `f81d58d` まで進んでいたため、`git merge main` で取り込んだ（`1af0736`）。コンフリクトは
+`docs/PROGRESS.md` と本 ADR の「Phase E3」節と「Phase E2b」節の隣接部分（どちらも E2 の続きに追記していた
+ため）だけで、コードは 1 バイトも衝突しなかった（E2b は指示どおり `replay.rs`/`store.rs`/
+`celerisctl/commands/replay.rs` の 3 ファイルだけを触り、`dispatcher.rs` には触れていない）。マージ後に
+`cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets -- -D warnings`・
+`cargo test --workspace --no-fail-fast` を再実行し、いずれも問題無いことを確認した（下記ゲート参照）。
+
 ### 受け入れ条件ごとの証跡
 
 **(a) D13 の規則表の単体テスト（信号ごと、閾値の境目、強制規則、対象外、人の明示 > 規則 > ヒント）。
@@ -18421,7 +18430,7 @@ run について書かれる」に反する）との指摘があった。`dispat
 | ゲート | 実行したコマンド | 出力の要点 |
 |---|---|---|
 | fmt | `cargo fmt --all -- --check` | exit 0（差分なし。E2b 統合後の再検証を含む） |
-| clippy | `cargo clippy -p task-worker -p task-core --all-targets -- -D warnings`（E2b 統合後、変更した 2 crate に絞って再検証） | exit 0（警告 0。`clone_on_copy`〈`Option<Usage>` は `Copy`〉を修正） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings`（`git merge main` で E2b の変更を取り込んだ後に再検証） | exit 0（警告 0。`clone_on_copy`〈`Option<Usage>` は `Copy`〉を修正） |
 | 全テスト（最終） | `cargo test --workspace --no-fail-fast`（E2b 統合〈`git merge main`〉後の worktree で実行） | exit 0。81 個の test result ブロック全て `ok`（FAILED 0） |
 | schema（task-api） | `UPDATE_SCHEMA=1 cargo test -p task-api --lib` | exit 0、53 passed。`api-v1.schema.json` 更新（`ExecutionGateDecision`/`GateSignal`/`ExecutionHintSpec`/`Event::ExecutionGated`/`TaskRouting.execution*` 追加のみ） |
 | schema（task-worker） | `UPDATE_SCHEMA=1 cargo test -p task-worker --lib committed_schema_matches_generated` | exit 0、1 passed。`worker-protocol.schema.json` 更新（`RunContext.execution_planner`/`ExecutionPlannerContext` 追加のみ） |
