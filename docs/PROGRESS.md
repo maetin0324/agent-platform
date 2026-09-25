@@ -19284,6 +19284,9 @@ E4/E5 の申し送りのうち、**(h) 配送の repair** と **`GET /metrics/ex
 
 ### 未解決事項
 
+- レビューの deterministic check は worktree の `target/` を使う。finish で別 target にビルドすると
+  cold compile が 600 秒の timeout を消費する。仕上げの WU はレビューと同じ target
+  （`CARGO_TARGET_DIR` 未設定、sandbox 外）で最後に `cargo test --workspace` を通しておく。
 - GPT-6 3 モデルの単価は一次情報が揃うまで不明。0 USD とみなさない。
 - lane と `BudgetExhausted` の種類は runs 索引に無い。旧履歴や atomic task の continuation / retry も
   対象タスクの events による局所補完を要する。
@@ -19293,5 +19296,9 @@ E4/E5 の申し送りのうち、**(h) 配送の repair** と **`GET /metrics/ex
 
 ### 提案
 
+- テスト時間の候補: `tests/e2e/tests/scenarios.rs` は `--until-idle` が
+  `idle_timeout_secs=30` を待つため 4 テストで約 30 秒。今回の実測では
+  `task_ops` lib の 324 テストも約 30 秒（`task_dispatch` lib の 286 テストは約 4 秒）。
+  評価器の負荷を見て縮めるか判断する。
 - runs 索引へ lane と run end の種類を保存し、旧履歴の再構築方式を決めた後に局所 events 補完を
   さらに減らす。配送 gate の他の step は失敗ごとに修復可能性と最小 context を検討する。
