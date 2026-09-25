@@ -1,7 +1,9 @@
 # ADR-0072: Task の下に内部の実行層（ExecutionPlan / WorkUnit / Run）を置き、session の予算切れを Task の失敗にしない
 
 - 日付: 2026-09-24
-- 状態: **Accepted**（Phase E0 = 調査と設計。Phase E1 で着手し Accepted にした。2026-09-24）
+- 状態: **Implemented (E0〜E6, 2026-09-25)**（Phase E0 = 調査と設計。Phase E1 で着手し Accepted に
+  した。Phase E6 で dogfood の分析まで完了。詳細は `docs/execution-decomposition-report-2026-09-25.md`
+  と本文末尾「E6 の結果と閾値の見直し」節）
 - 関連:
   - ADR-0002（状態機械）、ADR-0003 / 0006（ワーカープロトコルと結果ファイル規約）
   - ADR-0007（Planner / Reviewer）、ADR-0016 / 0021（委譲と子の失敗）
@@ -1526,3 +1528,43 @@ E5（GUI と metrics）を実装しながら見つかった、D19/D20 の記述�
 - D16 の `merge_base` は配送の `MergeQueued` から `Blocked` になった技術的失敗を対象にする。承認時の head/base が移動した場合や `merge-base --is-ancestor` が不成立の場合、対象ブランチと既定ブランチの現在の SHA、失敗した git 検査の出力だけを repair WorkUnit に渡す。修復後は現在の両 ref で配送を再検証する。
 - 配送の準備ゲートで `gate.json.failed_step = cargo-fmt-check` の場合も `format` repair WorkUnit にする。失敗した check の出力はリリース内の `.gate-cargo-fmt-check.log` の末尾から得る。元の実装 run の transcript、outcome、plan 全体は渡さない。
 - `cargo-test` や `pnpm-*` を含むその他の gate 失敗は E6 の局所修復対象外で、従来の Reopen を保つ。配送の局所修復も設定の `max_repairs` と `max_repairs_per_class` を超えた場合は `[needs-human]` として止める。
+
+## E6 の結果と閾値の見直し（分析、2026-09-25）
+
+E6 の受け入れ条件（§6 E6）どおり、dogfood タスク 01M3C33KW8YH336QDD0QAV45H8（`execution: compound`
+を人が明示、gate=on）を比較対象 2 件（01M38J4X53P1Y684FS42Z6R0VZ = 巨大 1 session の失敗例、
+01M39FGDAE9XQA3FGMCP5MCW0B = その retry 複製）と比較した。詳細な比較表・時系列・根拠は
+`docs/execution-decomposition-report-2026-09-25.md`、要約は `docs/PROGRESS.md` の
+「Phase E6（分析）」節。本節は ADR 自身の記述との整合性の観点で結果をまとめる（**閾値そのものは
+変更しない**。変更は提案として書く）。
+
+- **D1〜D12（層の分離、budget 切れの非失敗化）は dogfood で実際に機能した**: Task が done で
+  終わり、`ExecutionPlan` の 3 版がいずれも done の WU を保持したまま採用された。一方 before の
+  巨大 session（同種の失敗が起きた実例）は `failed` で終わっている。
+- **D13（Complexity Gate）は今回 1 度も規則表を経由していない**: `human_execution` が
+  `Some` のときの早期リターン（`execution_gate.rs:199-210`）により `gate.score: 0` は
+  「未評価」を意味し、規則表の精度検証にはなっていない。**U10（gate の閾値調整）は実質未着手の
+  まま**。
+- **D16（reviewer repair）は今回発火していない**: 2 回の最終レビュー不合格はどちらも D16 の
+  5 分類（`format`/`lint`/`test_small`/`reviewer_local`/`merge_base`）に当たらず、
+  `substantive`（`ReviewFail` + replan）を経由した。**提案**: D16 に「review timeout」class を
+  追加し、決定的検査（`checks`/reviewer の deterministic check）がタイムアウトで終わった不合格を
+  repair 対象にする（cargo のビルドキャッシュ不一致のような環境要因は、コードの再実装ではなく
+  検査環境の再現で直る性質のものであり、`test_small` とは別の class として扱うのが筋）。
+  併せて `merge_base` の repair 分類を、配送段階の `[delivery-repair]` だけでなく Task 内部の
+  最終レビュー段階（`git merge-base --is-ancestor` 不成立）でも使えるようにすることを提案する。
+- **D19（metrics）の欠損が 2 件見つかった**: (1) `gpt-6-sol`/`gpt-6-astra`/`gpt-6-luna` が
+  `pricing.rs` の `PRICE_TABLE` で全欄 `None` のため、これらのモデルを使った run の費用が
+  `ExecutionMetrics.cost_usd` から欠損ではなく「暗黙に $0」として合算され、集計を読む側には
+  過小評価と分からない。**提案**: `cost_usd_complete: bool` を足す。(2) `WorkerFinished.role`
+  は Phase E3 で追加されたフィールドで、それ以前のタスクの run は `runs_by_role` に数えられない
+  （後方互換は壊れていないが、履歴比較の際に過小に出る）。
+- **D13/D17 に関連する運用判断**: `[execution] gate` の既定（`shadow`）を `on` に切り替えるかは、
+  ADR は「E6 の dogfood の結果を見て、人が切り替える」としていたが、上記のとおりサンプルが
+  事実上 1 件（それも規則表を経由しない人の強制）のため、**既定を `on` にする根拠としては不十分
+  と判断する**。本番設定は E6 のために手動で `gate = "on"` に上書きされているが（Phase E4/E4b/E5
+  の本番反映節）、この分析の結論として `shadow` へ戻すことを提案する（実施は人の判断）。
+  段階導入（部署・genre 単位）の案は `docs/execution-decomposition-report-2026-09-25.md` §5 参照。
+- **未解決のまま残ったもの**: ADR §7 の U1・U2・U3・U4・U5・U7・U8・U9 は、dogfood で
+  `budget_exhausted`/`peak_context_tokens`/WU 並列/部署またぎ等の状況自体が発生しなかったため、
+  検証の機会が無いまま持ち越し。詳細は報告書 §6。
