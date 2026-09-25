@@ -682,12 +682,27 @@ pub enum ProviderFailure {
     Exhausted,
 }
 
+/// ADR-0072 D16（Phase E4）: `review.json` の verdict に添える repair のヒント。reviewer が
+/// 「これは局所的に修復できる不合格だ」と申告するための任意欄（`scope = "local"` だけを認識する。
+/// それ以外の `scope` は `task_core::execution::classify_review_failure` が substantive として扱う）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ReviewRepairHint {
+    pub scope: String,
+    /// `"format" | "lint" | "test" | "doc" | "other"`。
+    pub class: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
 /// `artifacts/review.json` の 1 判定（ADR-0007 D1/D5）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct ReviewVerdictOut {
     pub criterion: usize,
     pub pass: bool,
     pub reason: String,
+    /// ADR-0072 D16（Phase E4）: `pass = false` のときだけ意味を持つ、局所的な修復のヒント（任意）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<ReviewRepairHint>,
 }
 
 /// `Review` run がワークスペース直下 `artifacts/review.json` に書く出力（ADR-0007 D1/D5）。

@@ -3076,7 +3076,24 @@ export interface ExecutionPlanView {
   superseded_at?: string | null;
   task_id: string;
   version: number;
+  /**
+   * ADR-0072 D17（Phase E4）: 版の履歴（`version` 昇順。superseded を含む。監査用）。
+   */
+  versions?: ExecutionPlanVersionView[];
   work_units: WorkUnitView[];
+}
+/**
+ * ADR-0072 D17（Phase E4）: `execution_plans` の 1 版（`GET /tasks/{id}/execution-plan` の
+ * `versions`。監査用の版の履歴。`ExecutionPlanView` 自身が現在の `active` な版）。
+ */
+export interface ExecutionPlanVersionView {
+  created_at: string;
+  id: string;
+  origin: PlanOrigin;
+  planner_run_id?: string | null;
+  status: PlanStatus;
+  superseded_at?: string | null;
+  version: number;
 }
 /**
  * 1 WorkUnit の現在の状態（`work_units` 行の写し）。

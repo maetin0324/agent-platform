@@ -1228,3 +1228,132 @@ E2 の受け入れ条件 (g) 後半（`work_units`/`runs` の replay 再構築�
 - **`celerisctl replay` の既定（フラグ無し）の出力は変えていない**（後方互換）。`work_units`/`runs` の
   突き合わせは `--check`（読み取りのみ）または `--apply`（食い違ったタスクだけ書き戻す）を明示した
   ときだけ行う。`--apply` は `--check` を含む。
+
+## Phase E4 実装時の逸脱・明確化（2026-09-25）
+
+E4（reviewer repair・replanning）を実装しながら見つかった、D11〜D18 の記述とコードの食い違い・簡略化。
+黙って逸脱せず、ここに記録する。
+
+- **触るファイルが ADR §6 E4 の表より広い**。表は `execution.rs`・`execution_plan.rs`・`protocol.rs`
+  （`ReviewOutput.repair`）・`review.rs`・`dispatcher.rs`（`on_review_finished`）・任意で
+  `delivery.rs` を挙げているが、実装のために以下も触った（理由を添える）。
+  - `crates/task-core/src/store.rs`: `review_repair_apply`/`execution_plan_replan` の 2 メソッドを
+    `TaskStore` に追加した。repair・replan はいずれも「`Event::Transitioned` の適用」と
+    「`execution_plans`/`work_units` の書き込み」を**同じトランザクション**で行う必要があり（D5 の
+    「派生索引は対応する Event と同じトランザクションで書く」という不変条件）、既存の
+    `execution_plan_adopt`/`apply_transition_with_events` だけでは組み合わせられなかった。
+  - `crates/task-dispatch/src/dispatcher.rs` の `on_worker_finished`（`on_review_finished` だけでなく）:
+    D17 の replan トリガー 1./2.（WU の failed・進捗なし/継続の上限）は最終レビューではなく WU の
+    run の終わり方そのものから起きる（`execution_scheduler::decide` の結果を見て `Trigger` を決める
+    場所）。ADR 表の「`dispatcher.rs`（`on_review_finished`）」だけでは D17 1./2. を実装できない。
+    合わせて `on_worker_finished` を `finish_worker_result`（後段の共通処理）に分割し、E4 (g) の
+    WU checks 用の非同期分岐（`spawn_work_unit_checks`/`on_work_unit_checks_finished`）を追加した。
+  - `crates/task-ops/src/execution.rs`: `replan`（D17 の diff・検証・採用）を追加した。`adopt_plan` と
+    対になる ops 層の関数で、E2 の `adopt_plan` と同じ置き場が自然だった。
+  - `crates/celeris/src/config.rs`: `[execution] max_repairs`/`max_repairs_per_class`/`max_replans`
+    （D18 の上限。既存の `[execution]` 節に足すのが素直だった）。
+  - `crates/task-api/src/{execution.rs,types.rs}`: `GET /tasks/{id}/execution-plan` に `versions`
+    （版の履歴。(f)）を足した。E4 の受け入れ条件 (f) が名指ししている API なので、範囲内と判断した。
+  - これらはすべて ADR 表が想定していなかった配線先だが、D16/D17 を実際に動かすには避けられなかった。
+
+- **D16「lane（cheap/standard）」は強制しない**。E3 の `permission_mode` と同じ理由（ADR-0072
+  「Phase E3 実装時の逸脱・明確化」参照）: dispatcher が worker_hint を直接上書きする仕組みは
+  planner run 専用（`is_planner_dispatch` 分岐）にしかなく、WU の lane は
+  `model_policy::decide_for_work_unit`（policy が決める）が握っている。repair WU の `max_turns`/
+  `max_wall_secs`（D16 の表の budget 列）はそのまま `WorkUnitSpec.budget` に反映したが、lane
+  （cheap/standard）は強制のフックを新設せず、既存の policy にそのまま委ねた（repair の
+  objective が短く判断も軽いので、既定の判定でも大きく外れない想定）。
+
+- **repair の「同じ class は 2 回まで」カウンタは、WU の `title` の接頭辞
+  （`"repair (<bucket>): …"`）から復元する**。`WorkUnitSpec` に repair 専用の欄を足すと、
+  planner が書く同じ schema（`deny_unknown_fields`）に影響するため避け、`kind = repair` の WU の
+  `title` を決定的な形式で書いて、次の repair 判定時にそこから bucket を読み戻す（
+  `Dispatcher::repair_bucket_of_title`）。
+
+- **repair WU の `checks` は空のまま**。D16 は「直した後に同じコマンドを実行して exit を確かめよ」と
+  プロンプトに書くだけで、`WorkUnitCheck`（決定的な自動検証。(g)）は repair WU には自動で付けない。
+  repair の合否は最終レビュー（`Check::Command`/`Check::Reviewer` の再判定）に委ねる設計のままにした
+  （D16 の「repair の run が done になったら Reviewing に戻り、再判定する」という記述どおり）。
+
+- **D17 3.（checkpoint の `plan_issue`）は replan のトリガーとして配線していない**。
+  `Checkpoint.plan_issue`（D8、E1 で既に存在）自体は読めるが、これを Task レベルの
+  `Trigger::Continue{why: Replan}` に昇格させるには、WU の状態（`decision.updated.status`）も
+  同時に書き換える必要があり（`NeedsContinuation`/`Ready` のままだと `next_work_unit` が
+  `RunWorkUnit` を返してしまい、replan の Stuck 判定に一度も到達しない）、かつ既存の
+  `WorkUnitBlockedReason::{Question,Limit}` を流用すると `wu_dispatch_gate` の「人の回答直後だけ
+  再開する」判定（下記）を誤動作させかねない。安全な設計（新しい `WorkUnitBlockedReason` 変種を
+  足すか、専用の判定を分ける）を詰め切れなかったため、E4 では実装を見送った。D17 1.（WU failed）・
+  2.（進捗なし/継続の上限）・4.（実質的な review 不合格）の 3 経路は実装・テスト済み。plan_issue は
+  E5/E6 で改めて設計すること（次の一手）。
+
+- **replan run のプロンプトに「今の計画・WU の状態・checkpoint」を渡す配線はしていない**。E3 の
+  `permission_mode` と同じ理由（`claude_code.rs` は触らない指示）。`ExecutionPlannerContext.replan`
+  （既に E3 が用意していた bool）だけを `true` にして渡す。実 LLM が意味のある replan 案を作るには
+  `claude_code.rs::build_execution_plan_prompt` 側で「現在の計画」「WU ごとの状態」「起こした理由」を
+  レンダリングする追加が要る（E5 以降）。テストは偽の planner アダプタ（`PlannerScriptAdapter`）で
+  検証しているので、この配線が無くても E4 の受け入れ条件（採用・diff・上限）自体は確かめられている。
+
+- **`give_up_or_retry_planner`（E3）の attempts のカウント方式を修正した**。E3 の実装は
+  `Event::WorkerStarted{role: Planner}` を**タスクの生涯全部**で数えていたため、E4 で replan
+  （2 回目以降の planner run）を導入すると、fresh planning で既に 2 回使っていた場合に replan の
+  1 回目が即座に「使い果たした」扱いになってしまう不具合があった。**直近の `Event::ExecutionPlanned`
+  （無ければ Task の最初）から数える**よう変更した（D14 の「1 回だけ再試行」は 1 回の計画作成試行の
+  中の話で、fresh planning と各 replan はそれぞれ別の「試行の窓」を持つべき、という解釈）。
+
+- **`give_up_or_retry_planner` の「諦めた」ときの振る舞いを、`active` な計画の有無で分岐した**。
+  E3 は常に atomic フォールバック（`Task.routing.execution.mode = Atomic`）だったが、これは
+  replan の give-up（既に WU の履歴がある計画を持つ Task）には適用できない（実行済みの WU を
+  「無かったこと」にしてしまう）。`execution_plan_active(task_id).is_some()` なら
+  `Trigger::WorkerQuestion`（blocked。D12「失敗にしないもの」）に倒し、無ければ従来どおり atomic に
+  倒す。
+
+- **`wu_dispatch_gate` の「人の回答直後だけ `blocked(question|limit)` を再開する」判定を、直前の
+  `Event::Transitioned.reason` が実際に `"answer"` かどうかで見るよう変更した**（E2 の実装は
+  `next_work_unit` が `Stuck` を返すたびに無条件で再開していた。実害が無かった理由は
+  「Stuck のまま Task が Ready に戻るのは Answer の直後だけ」という前提だったが、E4 の
+  `Trigger::Continue{why: Replan}`（WU の failed/limit から Task を Running → Ready に戻す）が
+  この前提を崩す。人の回答ではなく replan で Ready に戻った Task の `Blocked(Limit)` の WU を、
+  人が答えてもいないのに機械的に再開してしまうと、replan が一度も起きずに同じ壁に当たり続ける）。
+
+- **`wu_dispatch_gate` の `NextStep::AllDone`/`Stuck` の扱いを変えた**。E2/E3 は「`AllDone` は
+  理論上到達しない（`plan_complete` は即座に `WorkerDone` へ遷移するため）」という前提で `Skip` に
+  倒していたが、E4 で repair の上限を使い切った後の `ReviewFail`、または実質的な review 不合格
+  （D17 4.）が Task を「計画は全 WU done のまま `Ready`」の状態に戻すようになったため、この前提が
+  崩れる。`AllDone`（すべて done なのに Ready）・`Stuck` で `Failed`/`Blocked(dependency_failed|limit)`
+  の WU が残っている場合は、`replan_gate`（`max_replans` を見て `RunPlanner{replan:true}` か `Skip`
+  かを返す）に倒すようにした。
+
+- **D12 3. と D18 の「blocked」の適用範囲の整理**: D12 3. は「WU が failed（retry の上限）になり、
+  かつ replan できない（上限に到達…）場合、Task は failed」と明記している。一方 D18 の上限の表は
+  「`max_replans` を超えたら blocked」とだけ書いており、一見矛盾する。D12 の「失敗にしないもの」の
+  一覧（進捗なし・継続の上限到達は失敗にしない、を明記）と合わせて読み、**WU failed からの replan
+  が尽きた場合は D12 3. のとおり `failed`**、**進捗なし/継続の上限（"limit"）からの replan が尽きた
+  場合は D18 のとおり `blocked`**、という 2 段構えで実装した（`finish_worker_result` の
+  `matches!(decision.reason, "failed" | "limit")` の分岐。replan できないときは元の
+  `decision.trigger`（"failed" → `WorkerError{retryable:false}`、"limit" →
+  `WorkerQuestion`）にそのまま戻すだけで、この 2 段構えは自然に実現される）。
+
+- **replan で持ち越す（`done` ではない）WU の `runs`/`continuations`/`retries` はリセットする**。
+  D17 の本文には明記が無いが、D18 の「（人の回答は）最後の `answer` 以降の events を数える」と同じ
+  発想で、replan も「窓を作り直す」機会だと解釈した。リセットしない場合、retries を使い切った直後の
+  WU が replan でそのまま持ち越されても、次の 1 回の失敗で即座にまた「上限に到達」してしまい、
+  replan の意味が薄れる。
+
+- **`execution_plans` に `supersedes`/`reason` の列は追加していない**。この 2 つは既に
+  `Event::ExecutionPlanned` に持たせてある（E2 の時点で用意済み）ので、DB の行に重複させず、
+  `GET /tasks/{id}/execution-plan` の `versions`（(f)）は `id`/`version`/`origin`/`planner_run_id`/
+  `status`/`created_at`/`superseded_at` だけを返す。`supersedes`/`reason` を監査したい場合は
+  events を読む（GUI での表示は E5 の範囲）。
+
+- **E2b の申し送り「`execution_plans` の版の履歴の再構築（replan 導入後）も replay の対象に加える」
+  は E4 でも見送った**。`task_ops::replay::rebuild_work_units_and_runs` と
+  `celerisctl replay --check/--apply` は今回変更していない（触るファイルの範囲外。`replay.rs` は
+  ADR 表にも今回の指示にも含まれていない）。replan 後に `--apply` を伴わない状況で
+  `execution_plans` が events と食い違うケースの検出は、次の一手として記録する。
+
+- **(h)（配送の repair を merge_base の repair WU に置き換える）は未実装**。ADR 自身が「任意。
+  時間があれば」としている項目で、E4 の必須の受け入れ条件 (a)〜(g) の実装・検証を優先し、時間の
+  制約により見送った。`RepairClass::MergeBase` の型・budget は用意済み（`classify_review_failure`
+  自体からは返らない設計。ADR 本文の該当コメント参照）なので、E5 以降で
+  `crates/celeris/src/delivery.rs` 側から直接 `RepairClass::MergeBase` を使って repair WU を組み立てる
+  実装を足すのは比較的小さい追加になる見込み。

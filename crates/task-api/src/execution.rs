@@ -46,7 +46,13 @@ async fn get_execution_plan(
             match task_ops::execution::active_plan(store, task_id)
                 .map_err(|e| ops_problem(store, e, Some("execution_plan_get")))?
             {
-                Some(view) => Ok(ExecutionPlanView::new(view.plan, view.work_units)),
+                Some(view) => {
+                    // ADR-0072 D17（Phase E4）: 版の履歴（`versions`）も添える（監査用）。
+                    let versions = store
+                        .execution_plan_list(task_id)
+                        .map_err(crate::problem::store_problem)?;
+                    Ok(ExecutionPlanView::new(view.plan, view.work_units, versions))
+                }
                 None => Err(no_active_plan(&task_id.to_string())),
             }
         })
@@ -80,7 +86,10 @@ async fn post_execution_plan(
             let work_units = store
                 .work_units_for(task_id)
                 .map_err(crate::problem::store_problem)?;
-            Ok(ExecutionPlanView::new(plan, work_units))
+            let versions = store
+                .execution_plan_list(task_id)
+                .map_err(crate::problem::store_problem)?;
+            Ok(ExecutionPlanView::new(plan, work_units, versions))
         })
         .await?;
     tracing::info!(who = "admin", op = "execution_plan_adopt", task_id = %task_id, plan_id = %view.id, work_units = view.work_units.len(), "admin: execution plan adopted");

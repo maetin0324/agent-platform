@@ -1459,6 +1459,29 @@
       ],
       "type": "object"
     },
+    "ReviewRepairHint": {
+      "description": "ADR-0072 D16（Phase E4）: `review.json` の verdict に添える repair のヒント。reviewer が\n「これは局所的に修復できる不合格だ」と申告するための任意欄（`scope = \"local\"` だけを認識する。\nそれ以外の `scope` は `task_core::execution::classify_review_failure` が substantive として扱う）。",
+      "properties": {
+        "class": {
+          "description": "`\"format\" | \"lint\" | \"test\" | \"doc\" | \"other\"`。",
+          "type": "string"
+        },
+        "hint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "class"
+      ],
+      "type": "object"
+    },
     "ReviewRequest": {
       "description": "`Reviewer` check のための `context.review`（ADR-0007 D5）。`RunRequest.task` は合成した `Review` kind の\nタスクで、対象タスクの `run` の `done` の内容と、判定すべき条件のインデックスを渡す。",
       "properties": {
@@ -1503,6 +1526,17 @@
         },
         "reason": {
           "type": "string"
+        },
+        "repair": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewRepairHint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0072 D16（Phase E4）: `pass = false` のときだけ意味を持つ、局所的な修復のヒント（任意）。"
         }
       },
       "required": [

@@ -580,6 +580,12 @@ pub struct ExecutionConfig {
     pub gate: task_core::GateMode,
     /// ADR-0072 D14（Phase E3）: `[execution.planner]`。
     pub planner: task_core::PlannerConfig,
+    /// ADR-0072 D16/D18（Phase E4）: Task ごとの repair の上限（既定 3）。
+    pub max_repairs: u32,
+    /// ADR-0072 D16/D18（Phase E4）: 同じ `RepairClass::bucket()` の repair の上限（既定 2）。
+    pub max_repairs_per_class: u32,
+    /// ADR-0072 D17/D18（Phase E4）: Task ごとの replan（計画の版の更新）の上限（既定 3）。
+    pub max_replans: u32,
 }
 
 impl Default for ExecutionConfig {
@@ -590,6 +596,9 @@ impl Default for ExecutionConfig {
             no_progress_limit: 2,
             gate: task_core::GateMode::default(),
             planner: task_core::PlannerConfig::default(),
+            max_repairs: 3,
+            max_repairs_per_class: 2,
+            max_replans: 3,
         }
     }
 }
@@ -690,6 +699,20 @@ enum Completion {
         task_id: TaskId,
         run_id: String,
         outcome: ReviewOutcome,
+    },
+    /// ADR-0072 D14/D6・E4 (g): WU の決定的な `checks`（`Command`）の実行が終わった。`on_worker_finished`
+    /// が「run は `Terminal::Done` で終わったが、この WU にはまだ確かめていない `checks` がある」と
+    /// 判定したときだけ起きる（`checks` が無ければ従来どおり `Completion::Worker` の経路をそのまま通る）。
+    WorkUnitChecks {
+        task_id: TaskId,
+        run_id: String,
+        account: Option<String>,
+        account_adapter: Option<AccountAdapter>,
+        run_since: Option<OffsetDateTime>,
+        provider: ProviderId,
+        result: Box<Result<RunOutcome, AdapterError>>,
+        /// `(pass, reason)` の 1 件ずつ（`review::run_work_unit_checks` の結果そのまま）。
+        check_results: Vec<(bool, String)>,
     },
 }
 
@@ -974,7 +997,11 @@ enum WuDispatchGate {
     Atomic,
     /// この WorkUnit の run を起こす。
     RunWorkUnit(Box<task_core::WorkUnitRow>),
-    /// この tick では何もしない（`Stuck`／`AllDone`／`RunPlanner`。E2 に planner は無い）。
+    /// ADR-0072 D17（Phase E4）: 最初の計画作成（E3。`current_wu` が無い gate/replan 前の分岐）とは
+    /// 別に、replan の planner run を起こす（`replan` は常に `true`。既存の `is_planner_dispatch` と
+    /// 同じ扱いで dispatch する）。
+    RunPlanner { replan: bool },
+    /// この tick では何もしない（`Stuck`（replan の余地なし）／replan の上限に到達）。
     Skip,
 }
 
@@ -3078,6 +3105,28 @@ impl Dispatcher {
                     self.on_review_finished(task_id, run_id, outcome)?;
                     reviewed += 1;
                 }
+                Completion::WorkUnitChecks {
+                    task_id,
+                    run_id,
+                    account,
+                    account_adapter,
+                    run_since,
+                    provider,
+                    result,
+                    check_results,
+                } => {
+                    self.on_work_unit_checks_finished(
+                        task_id,
+                        run_id,
+                        account,
+                        account_adapter,
+                        run_since,
+                        provider,
+                        *result,
+                        check_results,
+                    )?;
+                    finished += 1;
+                }
             }
         }
         Ok((finished, reviewed))
@@ -3130,7 +3179,175 @@ impl Dispatcher {
                     .on_planner_finished(task_id, &task, run_id, run_since, provider, result);
             }
         }
+        // ADR-0072 D14/D6・E4 (g): この WU に決定的な `checks`（`Command`）があり、run が
+        // `Terminal::Done` で終わったのなら、WU を `done` にする前にそれらを実行する（`review.rs` の
+        // Command 実行を再利用）。checks が無い WU・atomic な run はこれまでどおり即座に
+        // `finish_worker_result` へ進む。
+        if let Some(wu) = &current_wu
+            && !wu.spec.checks.is_empty()
+            && matches!(
+                &result,
+                Ok(RunOutcome {
+                    terminal: Terminal::Done { .. },
+                    ..
+                })
+            )
+        {
+            return self.spawn_work_unit_checks(
+                task_id,
+                run_id,
+                wu.clone(),
+                account,
+                account_adapter,
+                run_since,
+                provider,
+                result,
+            );
+        }
+        self.finish_worker_result(
+            task,
+            current_wu,
+            run_id,
+            account,
+            account_adapter,
+            run_since,
+            provider,
+            result,
+        )
+    }
 
+    /// ADR-0072 D14/D6・E4 (g): `wu.spec.checks` を `review::run_work_unit_checks`（review.rs の
+    /// `Check::Command` 実行を再利用）で実行し、終わったら `Completion::WorkUnitChecks` を送る。
+    /// `self.running` からは既に取り除かれている（`on_worker_finished` の冒頭）ので、ここでは
+    /// lease の維持や snapshot への影響は無い（review run の Command 実行と同じ扱い）。
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_work_unit_checks(
+        &mut self,
+        task_id: TaskId,
+        run_id: String,
+        wu: task_core::WorkUnitRow,
+        account: Option<String>,
+        account_adapter: Option<AccountAdapter>,
+        run_since: Option<OffsetDateTime>,
+        provider: ProviderId,
+        result: Result<RunOutcome, AdapterError>,
+    ) -> Result<(), DispatchError> {
+        let Some(task) = self.store.get(task_id)? else {
+            return Ok(());
+        };
+        let Some(dir) = self.task_dir(&task) else {
+            // リモートの workspace は E4 の範囲外（review.rs の Command 実行も同様、remote_review
+            // 経由の別経路を持つ。ここでは checks を飛ばして通常どおり `Done` として扱う）。
+            return self.finish_worker_result(
+                task,
+                Some(wu),
+                run_id,
+                account,
+                account_adapter,
+                run_since,
+                provider,
+                result,
+            );
+        };
+        let work_dir = self.work_dir_for(&task);
+        let ws: task_worker::LocalWorkspace = match work_dir {
+            Some(w) if w.is_dir() => task_worker::LocalWorkspace::new(&dir).with_work_dir(w),
+            _ => task_worker::LocalWorkspace::new(&dir),
+        };
+        let checks = wu.spec.checks.clone();
+        let timeout = self.config.review_timeout;
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let check_results = crate::review::run_work_unit_checks(&ws, &checks, timeout).await;
+            let _ = tx.send(Completion::WorkUnitChecks {
+                task_id,
+                run_id,
+                account,
+                account_adapter,
+                run_since,
+                provider,
+                result: Box::new(result),
+                check_results,
+            });
+        });
+        Ok(())
+    }
+
+    /// ADR-0072 D14/D6・E4 (g): `spawn_work_unit_checks` の結果を受けて、`finish_worker_result` に
+    /// 引き継ぐ。1 つでも `pass = false` があれば、この run を `Terminal::Error{retryable: true}`
+    /// （WU の retry。`execution_scheduler::decide` が `RunEnd::Failed{retryable:true}` として扱う）に
+    /// すり替える。全部 pass なら元の `result`（`Terminal::Done`）をそのまま使う。
+    #[allow(clippy::too_many_arguments)]
+    fn on_work_unit_checks_finished(
+        &mut self,
+        task_id: TaskId,
+        run_id: String,
+        account: Option<String>,
+        account_adapter: Option<AccountAdapter>,
+        run_since: Option<OffsetDateTime>,
+        provider: ProviderId,
+        result: Result<RunOutcome, AdapterError>,
+        check_results: Vec<(bool, String)>,
+    ) -> Result<(), DispatchError> {
+        let Some(task) = self.store.get(task_id)? else {
+            tracing::warn!(%task_id, %run_id, "work unit checks finished for unknown task");
+            return Ok(());
+        };
+        // ADR-0002 D9 / ADR-0005 D4: checks の実行中にリースが失効・タスクが cancel されていたら、
+        // stale worker result と同じ扱いで捨てる。
+        let lease_matches = task.status == Status::Running
+            && task.lease.as_ref().map(|l| l.worker_run_id.as_str()) == Some(run_id.as_str());
+        if !lease_matches {
+            tracing::warn!(%task_id, %run_id, status = ?task.status, "stale work unit check result discarded");
+            return Ok(());
+        }
+        let current_wu = self.store.work_units_for(task_id)?.into_iter().find(|u| {
+            u.status == task_core::WorkUnitStatus::Running
+                && u.last_run_id.as_deref() == Some(run_id.as_str())
+        });
+        let failed: Vec<&str> = check_results
+            .iter()
+            .filter(|(pass, _)| !pass)
+            .map(|(_, reason)| reason.as_str())
+            .collect();
+        let result = if failed.is_empty() {
+            result
+        } else {
+            Ok(RunOutcome {
+                terminal: Terminal::Error {
+                    message: format!("work unit checks failed: {}", failed.join("; ")),
+                    retryable: true,
+                },
+                exit_code: None,
+            })
+        };
+        self.finish_worker_result(
+            task,
+            current_wu,
+            run_id,
+            account,
+            account_adapter,
+            run_since,
+            provider,
+            result,
+        )
+    }
+
+    /// `on_worker_finished`（checks が無い、または atomic な run）と `on_work_unit_checks_finished`
+    /// （WU の checks が終わった後）の共通の後段。`task`/`current_wu` は呼び出し側が確定させたもの。
+    #[allow(clippy::too_many_arguments)]
+    fn finish_worker_result(
+        &mut self,
+        task: Task,
+        current_wu: Option<task_core::WorkUnitRow>,
+        run_id: String,
+        account: Option<String>,
+        account_adapter: Option<AccountAdapter>,
+        run_since: Option<OffsetDateTime>,
+        provider: ProviderId,
+        result: Result<RunOutcome, AdapterError>,
+    ) -> Result<(), DispatchError> {
+        let task_id = task.id;
         let mut subject = ReviewSubject::default();
         // ADR-0013 D9: 供給側失敗なら種別（ProviderThrottled.reason）を、result を消費する前に取っておく。
         let failure_reason = result.as_ref().err().and_then(provider_failure_reason);
@@ -3461,6 +3678,29 @@ impl Dispatcher {
                             );
                         }
                         _ => {}
+                    }
+                    // ADR-0072 D17（Phase E4）: WU が failed、または進捗なし/continuation の上限
+                    // （"limit"）に達したら、replan の余地（`max_replans`）があれば Task を
+                    // failed/blocked にする代わりに replan の planner run を起こす
+                    // （`ContinueWhy::Replan`）。D12「失敗にしないもの」: 進捗なし・継続の上限到達は
+                    // 元々失敗にしない。D12 3.: WU failed は「replan できない」ときだけ failed にする。
+                    if matches!(decision.reason, "failed" | "limit") {
+                        let replans_so_far = self
+                            .store
+                            .execution_plan_list(task_id)?
+                            .len()
+                            .saturating_sub(1) as u32;
+                        if replans_so_far < self.config.execution.max_replans {
+                            let why = if decision.reason == "failed" {
+                                format!("work unit {} failed", wu.key)
+                            } else {
+                                format!("work unit {} made no progress", wu.key)
+                            };
+                            trigger = Trigger::Continue {
+                                why: task_core::ContinueWhy::Replan,
+                            };
+                            outcome_str = format!("replan: {why}");
+                        }
                     }
                     if decision.plan_complete {
                         // D15: Task の完了。`ReviewSubject.summary` は WU ごとの最終 checkpoint の
@@ -3933,6 +4173,20 @@ impl Dispatcher {
             Err(e) => (None, format!("infra error: {e}"), None),
         };
 
+        // ADR-0072 D17（Phase E4）: この run が replan（既に `active` な計画がある）なら、done の
+        // WU の key/spec が変わっていないことも検証する（D14「replan のときは done の WU の key と
+        // spec が変わっていないこと」）。
+        let active_plan = self.store.execution_plan_active(task_id)?;
+        let done_work_units: Vec<(String, task_core::WorkUnitSpec)> = if active_plan.is_some() {
+            self.store
+                .work_units_for(task_id)?
+                .into_iter()
+                .filter(|u| u.status == task_core::WorkUnitStatus::Done)
+                .map(|u| (u.key, u.spec))
+                .collect()
+        } else {
+            Vec::new()
+        };
         // D14: 計画の検証は run が `Terminal::Done` で終わったときだけ試みる（それ以外は無条件に
         // 「不正な試行」として扱う）。
         let validation: Result<task_core::execution_plan::ValidatedPlan, String> = if matches!(
@@ -3957,7 +4211,7 @@ impl Dispatcher {
                         Ok(()) => task_core::execution_plan::validate(
                             &spec,
                             task_core::ExecutionLimits::default(),
-                            &[],
+                            &done_work_units,
                         )
                         .map_err(|errors| task_ops::execution::describe_validation_errors(&errors)),
                     },
@@ -3997,15 +4251,31 @@ impl Dispatcher {
                     metrics,
                     end: run_end,
                 };
-                match task_ops::execution::adopt_plan(
-                    self.store.as_ref(),
-                    task_id,
-                    validated.spec,
-                    task_core::PlanOrigin::Planner,
-                    Some(run_id.clone()),
-                    task_core::ExecutionLimits::default(),
-                    now,
-                ) {
+                let adopted = if active_plan.is_some() {
+                    // ADR-0072 D17（Phase E4）: replan。done の WU は保持し、旧版を supersede する。
+                    task_ops::execution::replan(
+                        self.store.as_ref(),
+                        task_id,
+                        validated.spec,
+                        "replan (planner run)".to_string(),
+                        task_core::PlanOrigin::Planner,
+                        Some(run_id.clone()),
+                        task_core::ExecutionLimits::default(),
+                        now,
+                    )
+                    .map(|(plan, _diff)| plan)
+                } else {
+                    task_ops::execution::adopt_plan(
+                        self.store.as_ref(),
+                        task_id,
+                        validated.spec,
+                        task_core::PlanOrigin::Planner,
+                        Some(run_id.clone()),
+                        task_core::ExecutionLimits::default(),
+                        now,
+                    )
+                };
+                match adopted {
                     Ok(_) => {
                         self.store.apply_transition_with_events(
                             task_id,
@@ -4045,10 +4315,14 @@ impl Dispatcher {
         Ok(())
     }
 
-    /// ADR-0072 D14（Phase E3）: planner の出力が不正だった（または run が異常終了した）ときの、
-    /// 「1 回だけ再試行、それでも駄目なら atomic に倒す」の判断。過去の `Event::WorkerStarted{role:
-    /// Planner}` の件数（この run 自身を含む）で attempt 数を数える（events から純粋に導出。D5 と
-    /// 同じ考え方）。Task は失敗させない。
+    /// ADR-0072 D14（Phase E3）/ D17（Phase E4）: planner の出力が不正だった（または run が異常終了
+    /// した）ときの、「1 回だけ再試行、それでも駄目なら諦める」の判断。**この「試行」の窓は直近の
+    /// `Event::ExecutionPlanned`（無ければ Task の最初）から数える**（E4 の注記: 最初の gate 判定の
+    /// planner 試行と、後の replan の planner 試行を混同しない。`Event::WorkerStarted{role: Planner}`
+    /// の件数〈この run 自身を含む〉を events から純粋に導出する。D5 と同じ考え方）。
+    /// 諦めたときの振る舞いは呼び出し時点の状態で決める: 既に `active` な計画が無ければ fresh
+    /// planning の give up（atomic に倒す。D14）、既に `active` な計画があれば replan の give up
+    /// （`blocked`。D12「失敗にしないもの」、D17/D18）。Task を `failed` にはしない。
     fn give_up_or_retry_planner(
         &self,
         task_id: TaskId,
@@ -4058,18 +4332,22 @@ impl Dispatcher {
         reason: String,
         now: OffsetDateTime,
     ) -> Result<(), DispatchError> {
-        let attempts_so_far = self
-            .store
-            .events_for(task_id)?
+        let events = self.store.events_for(task_id)?;
+        let since_idx = events
             .iter()
-            .filter(|(_, e)| {
-                matches!(
-                    e,
-                    Event::WorkerStarted {
-                        role: Some(RunRole::Planner),
-                        ..
-                    }
-                )
+            .rposition(|(_, e)| matches!(e, Event::ExecutionPlanned { .. }));
+        let attempts_so_far = events
+            .iter()
+            .enumerate()
+            .filter(|(i, (_, e))| {
+                since_idx.is_none_or(|s| *i > s)
+                    && matches!(
+                        e,
+                        Event::WorkerStarted {
+                            role: Some(RunRole::Planner),
+                            ..
+                        }
+                    )
             })
             .count();
         const MAX_PLANNER_ATTEMPTS: usize = 2;
@@ -4085,6 +4363,29 @@ impl Dispatcher {
                 },
                 vec![finished, progress],
             )?;
+        } else if self.store.execution_plan_active(task_id)?.is_some() {
+            // ADR-0072 D17（Phase E4）: これは replan の planner run（既に `active` な計画がある）。
+            // 2 回とも不正だったので、直せないまま突き進まず人に聞く（`blocked`。D12「失敗にしない
+            // もの」の一つ。atomic への書き換えはしない — 既に WU の履歴がある計画を捨てるのは
+            // 安全ではない）。
+            let question = format!(
+                "計画を直せませんでした（{reason}）。予算を増やして続ける／人が計画を書き直す
+（PUT /tasks/{{id}}/execution-plan）／中止のいずれかを選んでください。"
+            );
+            let progress = Event::worker_progress(run_id, question.clone());
+            self.store.apply_transition_with_events(
+                task_id,
+                Trigger::WorkerQuestion,
+                vec![finished, progress],
+            )?;
+            if let Err(e) = crate::approvals::record_question_approval(
+                self.store.as_ref(),
+                task,
+                &question,
+                now,
+            ) {
+                tracing::warn!(%task_id, error = %e, "failed to record the approval for the replan question");
+            }
         } else {
             // D14: それでも不正なら atomic に倒す（暗黙の WU で実行する）。gate の判定を Atomic に
             // 書き換えて監査に残す（`Task.routing.execution` を書き換えないと、次の dispatch でまた
@@ -4457,6 +4758,7 @@ impl Dispatcher {
                         criterion_idx: idx,
                         pass: false,
                         reason: limit_message.clone(),
+                        repair_hint: None,
                     });
                 }
             }
@@ -4565,6 +4867,17 @@ impl Dispatcher {
             if self.needs_aggregate_run(&task)? {
                 return self.schedule_aggregate_run(task_id, &run_id, events);
             }
+        }
+        // ADR-0072 D16（Phase E4）: 修復できる不合格（class が揃っていて、repair の上限内）なら、
+        // `ReviewFail` の代わりに `ReviewRepair`（attempts 据え置き）+ 最小の context の repair WU で
+        // 直す。上限を超えている・修復できない種類が混ざっていれば `None`（従来どおり `ReviewFail` へ）。
+        if !all_pass
+            && task.kind == TaskKind::Execute
+            && let Some(repair_outcome) =
+                self.try_review_repair(&task, &outcome.verdicts, &mut events)?
+        {
+            tracing::info!(%task_id, %run_id, next = ?repair_outcome.next, "review failed but repaired locally (ADR-0072 D16)");
+            return Ok(());
         }
         // ADR-0007 D3/D4: Plan が全 pass なら子タスクの挿入と ReviewPass を同一トランザクションで行う。
         let result = match (all_pass, task.kind, outcome.plan) {
@@ -4675,6 +4988,202 @@ impl Dispatcher {
             Err(e) => return Err(e.into()),
         }
         Ok(())
+    }
+
+    /// `work_units.spec.title` の `"repair (<bucket>): …"` から bucket 名を読む（repair の per-class
+    /// カウンタ用。D16 は `WorkUnitSpec` に専用の欄を足さない設計なので、`try_review_repair` が書いた
+    /// title を決定的に読み戻す）。
+    fn repair_bucket_of_title(title: &str) -> Option<&str> {
+        title.strip_prefix("repair (")?.split(')').next()
+    }
+
+    /// ADR-0072 D16（Phase E4）: 最終レビューの不合格を分類し、修復できて上限内なら repair WU を
+    /// 実体化して `Trigger::ReviewRepair` を適用する（`Some` を返す）。修復できない・上限を超えて
+    /// いれば `events` に触れずに `None` を返す（呼び出し側が従来どおり `ReviewFail` へ進む）。
+    fn try_review_repair(
+        &self,
+        task: &Task,
+        verdicts: &[Verdict],
+        events: &mut Vec<Event>,
+    ) -> Result<Option<task_core::Outcome>, DispatchError> {
+        let task_id = task.id;
+        let failing: Vec<task_core::FailedCheck> = verdicts
+            .iter()
+            .filter(|v| !v.pass)
+            .map(|v| {
+                let check = task
+                    .acceptance
+                    .get(v.criterion_idx)
+                    .map(|c| c.check.clone())
+                    // 暗黙の条件（Plan/aggregate/repo_checks/research）は task.acceptance に無く、
+                    // D16 の分類表にも無いので修復できない（`Check::Human` と同じ扱いに倒す）。
+                    .unwrap_or(task_core::Check::Human);
+                task_core::FailedCheck {
+                    check,
+                    reason: v.reason.clone(),
+                    repair_hint: v.repair_hint.clone(),
+                }
+            })
+            .collect();
+        if failing.is_empty() {
+            return Ok(None);
+        }
+        let class = match task_core::classify_review_failure(&failing) {
+            task_core::RepairDecision::Repairable(c) => c,
+            task_core::RepairDecision::Substantive => return Ok(None),
+        };
+
+        let units = self.store.work_units_for(task_id)?;
+        let repairs: Vec<&task_core::WorkUnitRow> = units
+            .iter()
+            .filter(|u| u.kind == task_core::WorkUnitKind::Repair)
+            .collect();
+        if repairs.len() as u32 >= self.config.execution.max_repairs {
+            return Ok(None);
+        }
+        let same_class = repairs
+            .iter()
+            .filter(|u| Self::repair_bucket_of_title(&u.spec.title) == Some(class.bucket()))
+            .count();
+        if same_class as u32 >= self.config.execution.max_repairs_per_class {
+            return Ok(None);
+        }
+
+        let (max_turns, max_wall_secs) = class.budget();
+        let failing_details: Vec<String> = failing.iter().map(|f| f.reason.clone()).collect();
+        let workspaces = self.task_workspaces_for(task);
+        let cwd = workspaces.as_ref().and_then(|w| w.cwd());
+        let branch = workspaces
+            .as_ref()
+            .and_then(|w| w.repos.first())
+            .and_then(|r| r.branch())
+            .unwrap_or_default();
+        let diff_stat = crate::checkpoint::gather_repo_facts(cwd, branch)
+            .0
+            .map(|r| r.diff_stat);
+        let objective = task_core::build_repair_objective(
+            class,
+            &failing_details,
+            &task.title,
+            &task.objective,
+            diff_stat.as_deref(),
+        );
+        let n = repairs.len() + 1;
+        let spec = task_core::WorkUnitSpec {
+            key: format!("repair-{n}"),
+            kind: task_core::WorkUnitKind::Repair,
+            title: format!("repair ({}): 修復", class.bucket()),
+            objective,
+            depends_on: vec![],
+            done_when: vec![],
+            checks: vec![],
+            context: Default::default(),
+            harness: None,
+            features: None,
+            budget: Some(task_core::WorkUnitBudget {
+                max_turns: Some(max_turns),
+                max_wall_secs: Some(max_wall_secs),
+            }),
+            outputs: vec![],
+        };
+
+        let now = rfc3339(OffsetDateTime::now_utc());
+        let active_plan = self.store.execution_plan_active(task_id)?;
+        let (new_plan, work_units, extra) = match active_plan {
+            Some(plan) => {
+                // D6: 計画のある Task は最終レビューまでに全 WU が done なので、既存の seq の続き。
+                let seq = units.iter().map(|u| u.seq).max().unwrap_or(0) + 1;
+                let row = task_core::WorkUnitRow::new(
+                    task_core::new_id(),
+                    task_id.to_string(),
+                    plan.id.clone(),
+                    seq,
+                    spec,
+                    task_core::WorkUnitStatus::Ready,
+                    now.clone(),
+                );
+                let ev = Event::WorkUnitTransitioned {
+                    work_unit_id: row.id.clone(),
+                    key: row.key.clone(),
+                    from: task_core::WorkUnitStatus::Pending,
+                    to: task_core::WorkUnitStatus::Ready,
+                    reason: "review_repair".to_string(),
+                    run_id: None,
+                };
+                (None, vec![row], vec![ev])
+            }
+            None => {
+                // D5: atomic な Task は、初めての WorkUnit で暗黙の WU を `main`（done）として実体化する。
+                let plan_id = task_core::new_id();
+                let main_spec = task_core::WorkUnitSpec {
+                    key: "main".to_string(),
+                    kind: task_core::WorkUnitKind::Implement,
+                    title: task.title.clone(),
+                    objective: task.objective.clone(),
+                    depends_on: vec![],
+                    done_when: vec![],
+                    checks: vec![],
+                    context: Default::default(),
+                    harness: None,
+                    features: None,
+                    budget: None,
+                    outputs: vec![],
+                };
+                let main_row = task_core::WorkUnitRow::new(
+                    task_core::new_id(),
+                    task_id.to_string(),
+                    plan_id.clone(),
+                    0,
+                    main_spec.clone(),
+                    task_core::WorkUnitStatus::Done,
+                    now.clone(),
+                );
+                let repair_row = task_core::WorkUnitRow::new(
+                    task_core::new_id(),
+                    task_id.to_string(),
+                    plan_id.clone(),
+                    1,
+                    spec.clone(),
+                    task_core::WorkUnitStatus::Ready,
+                    now.clone(),
+                );
+                let plan_spec = task_core::ExecutionPlanSpec {
+                    schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
+                    rationale: "reviewer repair: 暗黙の WorkUnit を実体化".to_string(),
+                    work_units: vec![main_spec, spec],
+                };
+                let plan_row = task_core::ExecutionPlanRow {
+                    id: plan_id.clone(),
+                    task_id: task_id.to_string(),
+                    version: 1,
+                    origin: task_core::PlanOrigin::Repair,
+                    planner_run_id: None,
+                    status: task_core::PlanStatus::Active,
+                    spec: plan_spec.clone(),
+                    created_at: now.clone(),
+                    superseded_at: None,
+                };
+                let ev = Event::ExecutionPlanned {
+                    plan_id,
+                    version: 1,
+                    origin: task_core::PlanOrigin::Repair,
+                    supersedes: None,
+                    reason: Some("review_repair".to_string()),
+                    plan: Box::new(plan_spec),
+                };
+                (Some(plan_row), vec![main_row, repair_row], vec![ev])
+            }
+        };
+
+        let mut all_events = std::mem::take(events);
+        all_events.extend(extra);
+        match self
+            .store
+            .review_repair_apply(task_id, all_events, new_plan, work_units)
+        {
+            Ok(outcome) => Ok(Some(outcome)),
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// ADR-0016 M4: `aggregate = true` で、Approval 以外の子が 1 件以上あり、まだ集約遷移をしていないか。
@@ -5285,41 +5794,56 @@ impl Dispatcher {
             return Ok(WuDispatchGate::Atomic);
         }
         let mut units = self.store.work_units_for(task_id)?;
-        // ADR-0072 D18（Phase E2）: 人の回答（`Trigger::Answer` で Task が `Blocked` から `Ready` に
-        // 戻った）で、`blocked(question|limit)` の WU を再開する（窓は 0 に戻る。`Ready`/
-        // `NeedsContinuation` が無い = `next_work_unit` が `Stuck` を返すときだけ試す）。
+        // ADR-0072 D18（Phase E2）/ D17（Phase E4）: 人の回答（`Trigger::Answer` で Task が
+        // `Blocked` から `Ready` に戻った）で、`blocked(question|limit)` の WU を再開する（窓は 0 に
+        // 戻る。`Ready`/`NeedsContinuation` が無い = `next_work_unit` が `Stuck` を返すときだけ試す）。
+        // E4: `Continue{why: Replan}`（WU の failed/limit から replan する。下）でも Task は
+        // `running → ready` に戻るので、**直前の `Transitioned.reason` が実際に `"answer"` のとき
+        // だけ**再開する（`replan` を誤って人の回答扱いにしない）。
         if matches!(
             task_core::next_work_unit(&units),
             task_core::NextStep::Stuck(_)
         ) {
-            let resumable: Vec<task_core::WorkUnitRow> = units
+            let just_answered = self
+                .store
+                .events_for(task_id)?
                 .iter()
-                .filter(|u| {
-                    u.status == task_core::WorkUnitStatus::Blocked
-                        && matches!(
-                            u.blocked_reason,
-                            Some(task_core::WorkUnitBlockedReason::Question)
-                                | Some(task_core::WorkUnitBlockedReason::Limit)
-                        )
+                .rev()
+                .find_map(|(_, e)| match e {
+                    Event::Transitioned { reason, .. } => Some(reason.clone()),
+                    _ => None,
                 })
-                .cloned()
-                .collect();
-            for wu in resumable {
-                let resumed = crate::execution_scheduler::resume_after_answer(&wu);
-                self.store.work_unit_transition(
-                    task_id,
-                    resumed.clone(),
-                    Event::WorkUnitTransitioned {
-                        work_unit_id: wu.id.clone(),
-                        key: wu.key.clone(),
-                        from: task_core::WorkUnitStatus::Blocked,
-                        to: resumed.status,
-                        reason: "answer".to_string(),
-                        run_id: None,
-                    },
-                )?;
+                == Some("answer".to_string());
+            if just_answered {
+                let resumable: Vec<task_core::WorkUnitRow> = units
+                    .iter()
+                    .filter(|u| {
+                        u.status == task_core::WorkUnitStatus::Blocked
+                            && matches!(
+                                u.blocked_reason,
+                                Some(task_core::WorkUnitBlockedReason::Question)
+                                    | Some(task_core::WorkUnitBlockedReason::Limit)
+                            )
+                    })
+                    .cloned()
+                    .collect();
+                for wu in resumable {
+                    let resumed = crate::execution_scheduler::resume_after_answer(&wu);
+                    self.store.work_unit_transition(
+                        task_id,
+                        resumed.clone(),
+                        Event::WorkUnitTransitioned {
+                            work_unit_id: wu.id.clone(),
+                            key: wu.key.clone(),
+                            from: task_core::WorkUnitStatus::Blocked,
+                            to: resumed.status,
+                            reason: "answer".to_string(),
+                            run_id: None,
+                        },
+                    )?;
+                }
+                units = self.store.work_units_for(task_id)?;
             }
-            units = self.store.work_units_for(task_id)?;
         }
         match task_core::next_work_unit(&units) {
             task_core::NextStep::RunWorkUnit(id) => {
@@ -5329,16 +5853,47 @@ impl Dispatcher {
                     None => Ok(WuDispatchGate::Skip),
                 }
             }
-            // E2 に planner は無い。`AllDone` は `on_worker_finished` が最後の WU の完了で
-            // 既に `WorkerDone` に遷移させているはずなので、ここに来るのは再起動直後の一瞬の
-            // 不整合くらい（次 tick の `reconcile_work_unit_runs` が直す）。
-            task_core::NextStep::AllDone | task_core::NextStep::RunPlanner { .. } => {
-                Ok(WuDispatchGate::Skip)
-            }
+            // ADR-0072 D17（Phase E4）: 正常完了（`plan_complete`）は `on_worker_finished` が即座に
+            // `WorkerDone` へ遷移させるので、`Ready` の Task をこの状態（全 WU done）で見るのは、
+            // repair の上限を使い切った後の `ReviewFail`、または実質的な review 不合格の後の再
+            // dispatch（D17 4.）だけ（理論上の一瞬の不整合を除く）。replan の余地があれば試す。
+            task_core::NextStep::AllDone => self.replan_gate(task_id),
+            task_core::NextStep::RunPlanner { replan } => Ok(WuDispatchGate::RunPlanner { replan }),
             task_core::NextStep::Stuck(reason) => {
-                tracing::warn!(task_id = %task_id, %reason, "execution plan stuck; not dispatching this tick");
-                Ok(WuDispatchGate::Skip)
+                // ADR-0072 D17（Phase E4）: WU が failed、または blocked(dependency_failed/limit) の
+                // ままで進められる WU が無いなら replan の対象（D17 1./2.）。
+                let has_unresolved_failure = units.iter().any(|u| {
+                    u.status == task_core::WorkUnitStatus::Failed
+                        || (u.status == task_core::WorkUnitStatus::Blocked
+                            && matches!(
+                                u.blocked_reason,
+                                Some(task_core::WorkUnitBlockedReason::DependencyFailed)
+                                    | Some(task_core::WorkUnitBlockedReason::Limit)
+                            ))
+                });
+                if has_unresolved_failure {
+                    self.replan_gate(task_id)
+                } else {
+                    tracing::warn!(task_id = %task_id, %reason, "execution plan stuck; not dispatching this tick");
+                    Ok(WuDispatchGate::Skip)
+                }
             }
+        }
+    }
+
+    /// ADR-0072 D17/D18（Phase E4）: replan の余地（`max_replans`）があれば `RunPlanner{replan:
+    /// true}`、無ければ `Skip`（進められる WU が無いまま何もしない。呼び出し元が既に上限を見て
+    /// `Continue{why: Replan}` を避けていれば通常ここには来ない防御的フォールバック）。
+    fn replan_gate(&self, task_id: TaskId) -> Result<WuDispatchGate, DispatchError> {
+        let replans_so_far = self
+            .store
+            .execution_plan_list(task_id)?
+            .len()
+            .saturating_sub(1) as u32;
+        if replans_so_far < self.config.execution.max_replans {
+            Ok(WuDispatchGate::RunPlanner { replan: true })
+        } else {
+            Ok(WuDispatchGate::Skip)
         }
     }
 
@@ -5536,6 +6091,7 @@ impl Dispatcher {
         &self,
         task: &Task,
         original_budget: task_core::Budget,
+        replan: bool,
     ) -> task_worker::protocol::ExecutionPlannerContext {
         let decision = task.routing.as_ref().and_then(|r| r.execution.clone());
         let limits = task_core::ExecutionLimits::default();
@@ -5559,7 +6115,7 @@ impl Dispatcher {
             work_unit_max_wall_secs: limits.work_unit_max_wall_secs,
             default_max_turns: original_budget.max_turns.max(30),
             default_max_wall_secs: original_budget.max_wall_secs.max(1800),
-            replan: false,
+            replan,
         }
     }
 
@@ -5607,21 +6163,32 @@ impl Dispatcher {
             // ADR-0072 D6/D15（Phase E2）: 計画のある Task は、次に走らせる WorkUnit を
             // 決定的な scheduler（`task_core::next_work_unit`）で選ぶ。計画が無ければ従来どおり
             // （`current_wu = None`。プロンプト・遷移は E1 までと 1 バイトも変わらない。(i)）。
+            let mut replan_dispatch = false;
             let current_wu = match self.wu_dispatch_gate(task.id)? {
                 WuDispatchGate::Atomic => None,
                 WuDispatchGate::RunWorkUnit(wu) => Some(*wu),
+                // ADR-0072 D17（Phase E4）: replan の planner run。既存の `is_planner_dispatch` の
+                // 配線（budget/lane/role の上書き）をそのまま使うが、`ExecutionPlannerContext.replan`
+                // を `true` にする（下）。
+                WuDispatchGate::RunPlanner { replan } => {
+                    replan_dispatch = replan;
+                    None
+                }
                 WuDispatchGate::Skip => continue,
             };
-            // ADR-0072 D14（Phase E3）: gate が compound と判定し、`gate = "on"` で、まだ計画が無い
-            // （`current_wu` が None = atomic 経路）なら、この run は task-local な planner run にする。
-            let is_planner_dispatch = current_wu.is_none()
-                && self.config.execution.gate == task_core::GateMode::On
-                && task
-                    .routing
-                    .as_ref()
-                    .and_then(|r| r.execution.as_ref())
-                    .map(|d| d.mode)
-                    == Some(task_core::ExecutionMode::Compound);
+            // ADR-0072 D14（Phase E3）/ D17（Phase E4）: gate が compound と判定し、`gate = "on"` で、
+            // まだ計画が無い（`current_wu` が None = atomic 経路）なら、この run は task-local な
+            // planner run にする。`replan_dispatch` は既に計画がある Task の replan（`wu_dispatch_gate`
+            // が上限まで確認済み）。
+            let is_planner_dispatch = replan_dispatch
+                || (current_wu.is_none()
+                    && self.config.execution.gate == task_core::GateMode::On
+                    && task
+                        .routing
+                        .as_ref()
+                        .and_then(|r| r.execution.as_ref())
+                        .map(|d| d.mode)
+                        == Some(task_core::ExecutionMode::Compound));
             // D18/D14: 上書きする前の Task の予算（WU/planner の既定の計算に使う。ADR-0072 D14）。
             let original_task_budget = task.budget;
             if is_planner_dispatch {
@@ -6059,8 +6626,11 @@ impl Dispatcher {
             // `node_sessions` は resume しない（対話タスクではないので、そもそも継続セッションの
             // 判定に掛からない。D9/D14）。
             if is_planner_dispatch {
-                extras.execution_planner =
-                    Some(self.execution_planner_context(&task, original_task_budget));
+                extras.execution_planner = Some(self.execution_planner_context(
+                    &task,
+                    original_task_budget,
+                    replan_dispatch,
+                ));
                 // ADR-0072 D5（Phase E3）: `runs` 索引に planner run の行を作る（WU の
                 // `start_work_unit_run` と同じ役目。`role = planner`、`work_unit_id = None`）。
                 let planner_seq = self
@@ -21535,6 +22105,502 @@ mod tests {
         );
     }
 
+    // ========== ADR-0072（Phase E4）: reviewer repair ==========
+
+    /// 完了した WU の run の後、`key` が `repair-` で始まる repair run のときだけ `.repair-done` を
+    /// 作る（`Check::Command` の再実行が通るようにする）。それ以外は内側の `WuScriptAdapter` そのまま。
+    struct RepairFsAdapter(WuScriptAdapter);
+
+    #[async_trait]
+    impl WorkerAdapter for RepairFsAdapter {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            run_id: &str,
+            limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            let is_repair = req
+                .context
+                .work_unit
+                .as_ref()
+                .is_some_and(|w| w.key.starts_with("repair-"));
+            let cwd = req.cwd().to_path_buf();
+            let result = self.0.run(req, run_id, limits, sink).await;
+            if is_repair {
+                std::fs::write(cwd.join(".repair-done"), "x").expect("write .repair-done");
+            }
+            result
+        }
+    }
+
+    /// ADR-0072 §6 E4 (b): 大きな実装の後に「`cargo fmt --check` 相当」だけが不合格になった atomic な
+    /// Task が `ReviewRepair` → repair WU（最小の context）→ 再レビュー → `done` になる。attempts は
+    /// 不変で、repair WU の objective に元の（長い）objective の全文が含まれない。
+    #[tokio::test]
+    async fn a_format_only_review_failure_is_repaired_without_consuming_attempts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let long_tail = "ORIGINAL_OBJECTIVE_TAIL_MARKER_".repeat(30); // 960 文字。600 文字の上限より長い。
+        let mut task = new_task(
+            dir.path(),
+            Check::Command {
+                // 実行される内容は `test -f .repair-done` だけ（`echo` は /dev/null に捨てる）。
+                // cmd の文字列に "cargo fmt --check" を含めておき、classify_review_failure の
+                // 分類（D16 の Format）に載せる。
+                cmd: "echo 'cargo fmt --check' >/dev/null; test -f .repair-done".into(),
+                expect_exit: 0,
+            },
+            2,
+        );
+        task.objective = format!(
+            "{}{}",
+            "big multi-step implementation. ".repeat(20),
+            long_tail
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+
+        let adapter = Arc::new(RepairFsAdapter(WuScriptAdapter::new(HashMap::new())));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+        assert_eq!(stored.attempts, 0, "repair must not consume Task.attempts");
+
+        let units = store.work_units_for(task_id).unwrap();
+        assert_eq!(units.len(), 2, "{units:?}");
+        let main = units.iter().find(|u| u.key == "main").expect("main wu");
+        assert_eq!(main.status, task_core::WorkUnitStatus::Done);
+        let repair = units
+            .iter()
+            .find(|u| u.key == "repair-1")
+            .expect("repair wu");
+        assert_eq!(repair.status, task_core::WorkUnitStatus::Done);
+        assert_eq!(repair.kind, task_core::WorkUnitKind::Repair);
+        // request.json 相当（WU の objective）に元の objective の全文は無い（最小の context、D16）。
+        assert!(
+            !repair.spec.objective.contains(&long_tail),
+            "{}",
+            repair.spec.objective
+        );
+        assert!(repair.spec.objective.contains("cargo fmt --check"));
+
+        let active = store.execution_plan_active(task_id).unwrap().unwrap();
+        assert_eq!(active.origin, task_core::PlanOrigin::Repair);
+
+        let events = store.events_for(task_id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == "review_repair")),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::ExecutionPlanned {
+                    origin: task_core::PlanOrigin::Repair,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+    }
+
+    /// ADR-0072 §6 E4 (c): repair の上限（`max_repairs_per_class` = 2）を超えると、修復を試みずに
+    /// 従来の `ReviewFail`（attempts を消費する）に戻る。
+    #[tokio::test]
+    async fn exceeding_the_per_class_repair_limit_falls_back_to_review_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        // このコマンドは常に失敗する（`.repair-done` を作っても、次に必要な `.repair-done-2` は
+        // 作られないので repair 後も不合格のまま = 何度でも repair が起きようとする）。
+        // `max_retries = 0`: repair が尽きた後の `ReviewFail` 1 回で即 `failed` になる（scheduler の
+        // 既知の制約 — repair で実体化した計画は全 WU が done のまま Task だけ `ready` に戻っても
+        // 次に走らせる WU が無い。ADR の「Phase E4 実装時の逸脱・明確化」に記録した）。
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "echo 'cargo fmt --check' >/dev/null; false".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+
+        let adapter = Arc::new(WuScriptAdapter::new(HashMap::new()));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.max_repairs_per_class = 2;
+        d.config.execution.max_repairs = 5;
+        let report = run_until_idle(&mut d, 800).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            Status::Failed,
+            "repairs are exhausted; must fall back to review_fail: {stored:?}"
+        );
+        assert_eq!(stored.attempts, 1, "{stored:?}");
+
+        let units = store.work_units_for(task_id).unwrap();
+        let repairs: Vec<_> = units
+            .iter()
+            .filter(|u| u.kind == task_core::WorkUnitKind::Repair)
+            .collect();
+        assert_eq!(
+            repairs.len(),
+            2,
+            "no more than max_repairs_per_class repair work units: {units:?}"
+        );
+
+        let events = store.events_for(task_id).unwrap();
+        let repair_reasons = events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == "review_repair"))
+            .count();
+        assert_eq!(repair_reasons, 2, "{events:?}");
+        assert!(
+            events.iter().any(
+                |(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == "review_fail")
+            ),
+            "{events:?}"
+        );
+    }
+
+    /// 2 回目以降の呼び出しでだけ `.checked` を作る（`WorkUnitCheck` を最初は失敗させ、retry で直させる）。
+    struct ChecksAdapter {
+        wu: WuScriptAdapter,
+        calls: StdMutex<HashMap<String, u32>>,
+    }
+
+    impl ChecksAdapter {
+        fn new() -> Self {
+            ChecksAdapter {
+                wu: WuScriptAdapter::new(HashMap::new()),
+                calls: StdMutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for ChecksAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            run_id: &str,
+            limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            let key = req
+                .context
+                .work_unit
+                .as_ref()
+                .map(|w| w.key.clone())
+                .unwrap_or_default();
+            let cwd = req.cwd().to_path_buf();
+            let call_n = {
+                let mut calls = self.calls.lock().unwrap();
+                let n = calls.entry(key).or_insert(0);
+                *n += 1;
+                *n
+            };
+            if call_n >= 2 {
+                std::fs::write(cwd.join(".checked"), "x").expect("write .checked");
+            }
+            self.wu.run(req, run_id, limits, sink).await
+        }
+    }
+
+    /// ADR-0072 §6 E4 (g): WU の決定的な `checks`（`Command`）が WU の完了前に走る。最初の run は
+    /// `Terminal::Done` を返すが `checks` は失敗するので `retry`（WU の retries を消費、Task の
+    /// attempts は不変）、2 回目の run で checks が通ってようやく `done` になる。
+    #[tokio::test]
+    async fn a_failing_work_unit_check_retries_the_work_unit_then_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            2,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+
+        let mut a = wu_spec("a", &[]);
+        a.checks = vec![task_core::WorkUnitCheck {
+            cmd: "test -f .checked".into(),
+            expect_exit: 0,
+        }];
+        let spec = task_core::ExecutionPlanSpec {
+            schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
+            rationale: "single WU with a deterministic check".to_string(),
+            work_units: vec![a],
+        };
+        task_ops::execution::adopt_plan(
+            store.as_ref(),
+            task_id,
+            spec,
+            task_core::PlanOrigin::Fixture,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+
+        let adapter = Arc::new(ChecksAdapter::new());
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+        assert_eq!(
+            stored.attempts, 0,
+            "checks の retry は Task.attempts を消費しない"
+        );
+
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        assert_eq!(a.status, task_core::WorkUnitStatus::Done, "{a:?}");
+        assert_eq!(a.retries, 1, "1 回失敗して 1 回 retry した: {a:?}");
+        assert_eq!(a.runs, 2, "{a:?}");
+
+        let events = store.events_for(task_id).unwrap();
+        let reasons: Vec<&str> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::WorkUnitTransitioned { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(reasons.contains(&"retry"), "{reasons:?}");
+        assert!(reasons.contains(&"completed"), "{reasons:?}");
+    }
+
+    // ========== ADR-0072（Phase E4）: replanning ==========
+
+    /// ADR-0072 §6 E4 (d): WU（`b`）が retry の上限で `failed` になっても、replan の余地
+    /// （既定 `max_replans = 3`）があれば Task を `failed` にせず replan の planner run を起こし、
+    /// `done` の WU（`a`）を保持した v2 を採用する。v2 で `b` は最初から（retries もリセットして）
+    /// やり直し、そのまま `c` まで完了する。
+    #[tokio::test]
+    async fn a_failed_work_unit_triggers_a_replan_instead_of_failing_the_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1, // max_retries: 初回 + 1 回の retry で使い切る
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        adopt_three_step_plan(&store, task_id);
+
+        let mut wu_script = HashMap::new();
+        wu_script.insert(
+            "b".to_string(),
+            vec![
+                Terminal::Error {
+                    message: "boom".into(),
+                    retryable: true,
+                },
+                Terminal::Error {
+                    message: "boom again".into(),
+                    retryable: true,
+                },
+                // replan 後（retries はリセットされる）の 1 回目で成功する。
+                Terminal::Done {
+                    summary: "b fixed".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
+            ],
+        );
+        // 現在の計画をそのまま出し直すだけの replan（`a` は done のまま変わらないので validate を通る）。
+        let replanned = plan_json(vec![
+            wu_spec("a", &[]),
+            wu_spec("b", &["a"]),
+            wu_spec("c", &["b"]),
+        ]);
+        let adapter = Arc::new(PlannerScriptAdapter::new(vec![Some(replanned)], wu_script));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.planner.adapter = "instant".to_string();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+        assert_eq!(stored.attempts, 0, "replan は Task.attempts を消費しない");
+
+        let plans = store.execution_plan_list(task_id).unwrap();
+        assert_eq!(plans.len(), 2, "{plans:?}");
+        assert_eq!(plans[0].status, task_core::PlanStatus::Superseded);
+        assert_eq!(plans[1].status, task_core::PlanStatus::Active);
+        assert_eq!(plans[1].origin, task_core::PlanOrigin::Planner);
+
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        assert_eq!(a.status, task_core::WorkUnitStatus::Done);
+        assert_eq!(a.plan_id, plans[0].id, "done の a は元の版のまま");
+        let b = units.iter().find(|u| u.key == "b").unwrap();
+        assert_eq!(b.status, task_core::WorkUnitStatus::Done);
+        assert_eq!(
+            b.plan_id, plans[1].id,
+            "replan で持ち越した b は新しい版に属する"
+        );
+        assert_eq!(
+            b.runs, 1,
+            "replan で retries の窓がリセットされている: {b:?}"
+        );
+        let c = units.iter().find(|u| u.key == "c").unwrap();
+        assert_eq!(c.status, task_core::WorkUnitStatus::Done);
+
+        let events = store.events_for(task_id).unwrap();
+        assert!(
+            events.iter().any(
+                |(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == "replan")
+            ),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::ExecutionPlanned {
+                    version: 2,
+                    supersedes: Some(_),
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        // planner run は lead の実効 profile・システム固定の lane で走る（D14 と同じ扱い）。
+        let planner_calls = adapter
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.execution_planner.as_ref().is_some_and(|p| p.replan))
+            .count();
+        assert_eq!(planner_calls, 1, "{:?}", adapter.seen.lock().unwrap());
+    }
+
+    /// ADR-0072 §6 E4 (e): replan の上限（`max_replans`）を超えると、進捗なしの WU は従来どおり
+    /// `blocked`（質問 + 承認）のまま止まる。人の回答で再開できる。
+    #[tokio::test]
+    async fn exceeding_the_replan_limit_blocks_with_a_question_that_a_human_can_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            5,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        adopt_three_step_plan(&store, task_id);
+
+        // `a` は budget_exhausted を繰り返すだけ（進捗なし）。checkpoint を書かないので
+        // `checkpoint_shows_progress` は常に false。`no_progress_streak` は `work_unit_id` の
+        // events 全体（replan では区切られない。「回答」だけが窓を区切る。D18）を見るので、
+        // 1〜3 回目で limit に達し（1 回目は「最初の checkpoint」なので進捗ありから始まる）、
+        // replan（v2）の後は 4 回目の budget_exhausted で即座にまた limit に達する
+        // （`no_progress_streak` が replan をまたいで引き継ぐため）。`max_replans = 1` なので
+        // 2 回目の limit は replan できず `blocked` になる。
+        let mut wu_script = HashMap::new();
+        wu_script.insert(
+            "a".to_string(),
+            vec![
+                Terminal::BudgetExhausted {
+                    kind: task_core::BudgetKind::Turns,
+                    message: "no progress 1".into(),
+                    usage: None,
+                },
+                Terminal::BudgetExhausted {
+                    kind: task_core::BudgetKind::Turns,
+                    message: "no progress 2".into(),
+                    usage: None,
+                },
+                Terminal::BudgetExhausted {
+                    kind: task_core::BudgetKind::Turns,
+                    message: "no progress 3 (hits the limit; replans)".into(),
+                    usage: None,
+                },
+                Terminal::BudgetExhausted {
+                    kind: task_core::BudgetKind::Turns,
+                    message: "no progress 4 (limit again; replans exhausted)".into(),
+                    usage: None,
+                },
+            ],
+        );
+        let replanned = plan_json(vec![
+            wu_spec("a", &[]),
+            wu_spec("b", &["a"]),
+            wu_spec("c", &["b"]),
+        ]);
+        let adapter = Arc::new(PlannerScriptAdapter::new(vec![Some(replanned)], wu_script));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.planner.adapter = "instant".to_string();
+        d.config.execution.max_continuations_per_work_unit = 100; // "limit" は進捗なしだけで起こす
+        d.config.execution.no_progress_limit = 2;
+        d.config.execution.max_replans = 1;
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            Status::Blocked,
+            "replan の上限に達したら blocked（質問）: {stored:?}"
+        );
+
+        let plans = store.execution_plan_list(task_id).unwrap();
+        assert_eq!(plans.len(), 2, "1 回だけ replan できた: {plans:?}");
+
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        assert_eq!(a.status, task_core::WorkUnitStatus::Blocked, "{a:?}");
+        assert_eq!(
+            a.blocked_reason,
+            Some(task_core::WorkUnitBlockedReason::Limit)
+        );
+
+        // 人の回答で再開する（承認〈`approvals`〉の作成自体は ADR-0008 D2 の既存機構。この
+        // fixture は org/secretary を持たないので `record_question_approval` は何も作らないが、
+        // `Trigger::Answer` そのものは通常どおり受け付ける）。
+        store
+            .apply_transition_with_events(task_id, Trigger::Answer, vec![])
+            .unwrap();
+        let report2 = run_until_idle(&mut d, 200).await;
+        assert!(report2.idle, "{report2:?}");
+        let units_after = store.work_units_for(task_id).unwrap();
+        let a_after = units_after.iter().find(|u| u.key == "a").unwrap();
+        assert_ne!(
+            a_after.status,
+            task_core::WorkUnitStatus::Blocked,
+            "人の回答で再開する: {a_after:?}"
+        );
+    }
+
     /// ADR-0072 D5（E2b の指摘、Phase E3 で配線）: 計画の無い Task（暗黙の WorkUnit）の worker run と
     /// reviewer run の両方が `runs` 索引に行を書く（(g)「全タスクの run について書かれる」は WU の run
     /// だけでなく atomic/reviewer にも及ぶ）。
@@ -21584,7 +22650,9 @@ mod tests {
     }
 
     /// ADR-0072 §6 E2 (d): WU の失敗 → retry → 上限で `failed`。依存先は `blocked(dependency_failed)`。
-    /// planner の無い E2 では replan できないので Task は `failed`。
+    /// ADR-0072 D12 3.（Phase E4 で明確化）: replan の余地が無ければ（ここでは `max_replans = 0` で
+    /// 明示的に閉じる）Task は `failed`。replan できる場合の振る舞いは
+    /// `a_failed_work_unit_triggers_a_replan_instead_of_failing_the_task` を見る。
     #[tokio::test]
     async fn a_work_unit_failure_at_the_retry_limit_fails_the_task_and_blocks_dependents() {
         let dir = tempfile::tempdir().unwrap();
@@ -21620,6 +22688,7 @@ mod tests {
         );
         let adapter = Arc::new(WuScriptAdapter::new(script));
         let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.execution.max_replans = 0;
         let report = run_until_idle(&mut d, 400).await;
         assert!(report.idle, "{report:?}");
 

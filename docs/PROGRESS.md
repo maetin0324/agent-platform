@@ -18719,3 +18719,197 @@ API 型（`task-api`/`task-core` の public 型）は変更していないので
 - release `a2968d1b7477`、verify 全 true（schema 26、N-1 = 1f663a83ff6c は読める）、in-flight 0 でライブ切替。本番は E3（gate は既定 shadow: 判定と記録だけ、実行は atomic のまま）と 119 を含む。
 - 旧デーモン 1f663a83ff6c は 119 以前のコードなので予想どおり「celeris stopped」の後もプロセスが残った → `systemctl --user stop` で片付け（最後の該当個体。以後の切替は 119 の shutdown_timeout + process::exit で自動終了するはず。次回の切替で確認する）。
 - クラスタ（pegasus / sirius）は E2 の停止→起動以降、未接続のまま（人の TOTP 再接続待ち）。
+
+## Phase E4「reviewer repair と replanning」（2026-09-25）
+
+ADR-0072 §6 E4 の受け入れ条件 (a)〜(g) を実装した（(h) は任意・時間の制約により未実装）。作業の前提:
+worktree のブランチが main の Phase E3 統合（`3dafac5`）より前（`f81d58d`）から分岐していたため、
+まず `git merge main`（fast-forward、コンフリクト無し）で E3 の内容を取り込んでから着手した。
+branch: `worktree-agent-ab52da02cf647ed97`。
+
+指示どおり区切って進めた: (a)(b)(c) repair + (g) WU checks（1 コミット）→ (d)(e)(f) replan（別途
+最終コミットへまとめる）。
+
+### 受け入れ条件ごとの証跡
+
+**(a) `classify_review_failure` の分類表のテスト（format / lint / test_small / reviewer_local /
+merge_base / substantive。混在なら substantive）**
+- 新規: `crates/task-core/src/execution.rs::classify_review_failure`（純粋関数）、`RepairClass`
+  （`Format`/`Lint`/`TestSmall`/`ReviewerLocal(ReviewerRepairKind)`/`MergeBase`）、`RepairDecision`。
+- 実行したコマンド: `cargo test -p task-core --lib execution::tests`
+- 出力の要点: exit 0、22 passed。format/lint コマンドの分類、test_small（失敗 1〜3 件）と非該当
+  （4 件以上・失敗数が読めない）、無関係なコマンドの substantive、reviewer の明示 `repair` ヒント
+  （`scope=local`）と字句フォールバック（fmt/clippy の語だけ）、`scope` が `local` 以外は substantive、
+  `Check::Human` は常に substantive、修復できる不合格と修復できない不合格の混在・**異なる
+  修復できるクラスの混在**（両方とも substantive）を確認。`merge_base` はこの関数からは返らない
+  設計（配送〈`delivery.rs`〉自身の技術的失敗から直接組み立てる。ADR 本文と「Phase E4 実装時の
+  逸脱・明確化」に記載）。
+
+**(b) `cargo fmt --check` 相当だけが不合格の Task が `ReviewRepair` → repair WU（最小の context。
+request.json に元の objective の全文が無い）→ 再レビュー → `done`。attempts 不変、人の承認は再利用**
+- 新規: `task_core::execution::build_repair_objective`（先頭 600 文字のみの Task 目的プレビュー +
+  失敗した検査の詳細 + git diff --stat。元の Run の履歴・計画・全文の objective は載せない）。
+- `Trigger::ReviewRepair`（`transition.rs`。Reviewing → Ready、attempts 据え置き）。
+- `TaskStore::review_repair_apply`（`store.rs`。atomic な Task では `execution_plans`
+  〈origin=repair〉+ `main`（done）+ `repair-N`（ready）の 2 行を、計画済み Task では `repair-N`
+  の 1 行だけを、`Trigger::ReviewRepair` の適用と同一トランザクションで書く）。
+- `Dispatcher::try_review_repair`（`dispatcher.rs`。`on_review_finished` の `ReviewFail` 分岐の手前
+  で分類・上限を確認し、repairable なら repair WU を実体化する）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- a_format_only_review_failure_is_repaired_without_consuming_attempts`
+- 出力の要点: exit 0、1 passed。長い objective（960 文字、600 文字の上限より長い一意なマーカー付き）
+  を持つ atomic な Task が、`cmd` に "cargo fmt --check" を含む `Check::Command` の不合格から
+  `ReviewRepair` → `main`（done）+ `repair-1`（`WorkUnitKind::Repair`）を実体化 → repair WU が
+  `.repair-done` を作って `Done` → 再レビューが通って Task `Done` になることを確認。
+  `repair.spec.objective` に元の 960 文字の objective（マーカー含む）が**含まれない**ことを直接
+  assert（最小の context）。`stored.attempts == 0`（repair は attempts を消費しない）。
+
+**(c) repair の上限（`max_repairs`/`max_repairs_per_class`）を超えると従来の `ReviewFail`**
+- `ExecutionConfig.max_repairs`（既定 3）・`max_repairs_per_class`（既定 2）。`[execution]` の TOML
+  にも追加（`crates/celeris/src/config.rs`）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- exceeding_the_per_class_repair_limit_falls_back_to_review_fail`
+- 出力の要点: exit 0、1 passed。常に不合格になる format 系の Command 検査を持つ Task が、
+  `max_repairs_per_class = 2` ちょうど 2 回 repair を試みた後（`work_units` の `kind=repair` が
+  2 件）、3 回目は repair せず `review_fail` の `Event::Transitioned` が記録され、
+  `Status::Failed`（`max_retries = 0` で即失敗。理由は下記「未解決事項」参照）になることを確認。
+
+**(g) WU の決定的な `checks`（Command）が WU の完了前に走り、失敗なら WU を retry する
+（review.rs の checks 実行を再利用）**
+- 新規: `review::run_work_unit_checks`（`review_task` の `Check::Command` 分岐と同じ判定
+  〈`workspace.exec` で実際に再実行し exit を比較〉を関数として切り出し、`WorkUnitCheck` の列に
+  適用する）。
+- `Dispatcher::on_worker_finished` を `finish_worker_result`（共通の後段）に分割し、
+  `current_wu.spec.checks` が非空かつ run が `Terminal::Done` のときだけ
+  `spawn_work_unit_checks`（非同期。`Completion::WorkUnitChecks` を送る）に分岐する。1 つでも
+  `pass = false` があれば `Terminal::Error{retryable:true}` にすり替えて `finish_worker_result` に
+  渡す（既存の WU retry 経路〈`execution_scheduler::failed`〉にそのまま乗る）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- work_unit_checks_pass_and_fail_like_command_criteria work_unit_checks_time_out a_failing_work_unit_check_retries_the_work_unit_then_completes`
+- 出力の要点: exit 0、3 passed。`review.rs` レベルで checks の pass/fail/timeout を確認
+  （2 テスト）。`dispatcher.rs` レベルで、`checks` を持つ WU が 1 回目 `Terminal::Done` でも
+  checks 失敗で `retry`（`retries += 1`、Task の `attempts` は不変）、2 回目で checks が通って
+  `done` になることを確認（`a.runs == 2`、`WorkUnitTransitioned.reason` に `"retry"` と
+  `"completed"` の両方）。
+
+**(d) WU の failed・進捗なし・実質的な不合格で replan の planner run が起き、`done` の WU を保持した
+v2 が採用される。人の依頼の例（A done / M 追加 / B blocked by M / C blocked by B）**
+- 新規: `task_ops::execution::replan`（旧 `active` な計画を `superseded` にし、新版を採用。`done`
+  の WU は行を触らない、未完了で残る key は spec・依存・状態を更新（`runs`/`continuations`/
+  `retries` をリセット）、消えた未完了の key は `superseded`、新しい key は新規行）。
+- `TaskStore::execution_plan_replan`（同一トランザクションで旧版 supersede + 新版挿入 + WU 更新 +
+  events）。
+- `wu_dispatch_gate`: `NextStep::Stuck` で `Failed`/`Blocked(dependency_failed|limit)` の WU が
+  残っていれば、`NextStep::AllDone`（全 WU done のまま `Ready`。repair 枯渇後の `ReviewFail` や
+  実質的な review 不合格の後の再 dispatch）も、`replan_gate`（`max_replans` を見て
+  `RunPlanner{replan:true}` を返す）に倒す。`dispatch_ready` は既存の `is_planner_dispatch`
+  （E3）の配線をそのまま使い、`replan_dispatch` のときも同じ budget/lane/role の上書きをする。
+  `on_planner_finished` は `execution_plan_active` の有無で `adopt_plan`/`replan` を切り替える。
+- `finish_worker_result`: WU が `"failed"`/`"limit"` になったとき、`max_replans` の余地があれば
+  Task を failed/blocked にする代わりに `Trigger::Continue{why: Replan}` にする。
+- 実行したコマンド: `cargo test -p task-ops --lib execution::tests`
+- 出力の要点: exit 0、10 passed（既存の `adopt_plan` 系 4 件 + 新規 `replan` 系 6 件）。
+  `replan_keeps_done_work_units_and_applies_the_human_request_example` が D17 の人の依頼の例
+  （A done、M 追加、B が `depends_on: ["a","m"]` に変わり `pending`〈M がまだ done でない〉、
+  C も `pending`、M は依存無しで即 `ready`）をそのまま検証している。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- a_failed_work_unit_triggers_a_replan_instead_of_failing_the_task`
+- 出力の要点: exit 0、1 passed。3 WU（A→B→C）の計画で B が retry の上限で `failed` になった後、
+  Task が `failed` にならず replan の planner run（偽アダプタ）が起き、A は `done` のまま
+  （元の版の `plan_id`）、v2（`origin=planner`、`supersedes=Some(v1)`）が採用され、B は
+  リセットされた状態からやり直して `done`、最終的に Task が `done`（`attempts == 0`）になることを
+  確認。
+
+**(e) replan の上限で blocked（質問 + 承認、人の回答で再開）**
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- exceeding_the_replan_limit_blocks_with_a_question_that_a_human_can_answer`
+- 出力の要点: exit 0、1 passed。進捗なしを繰り返す WU が `no_progress_limit` で `limit` に達し、
+  `max_replans = 1` の 1 回目は replan（v2 採用）、2 回目の `limit`（`no_progress_streak` は
+  replan をまたいで引き継ぐ。「回答」だけが窓を区切る〈D18〉）は replan せず
+  `Status::Blocked`・`WorkUnitBlockedReason::Limit` になることを確認。`Trigger::Answer` を直接
+  適用して再開し、WU が `Blocked` でなくなることも確認（`record_question_approval` は org/秘書を
+  持たない fixture では何も作らないため、承認〈`approvals`〉行そのものの検証は割愛。仕組み自体は
+  ADR-0008 D2 の既存機構）。
+
+**(f) 版の履歴（`ExecutionPlanned.supersedes`、`GET /tasks/{id}/execution-plan` に版一覧）が
+監査できる**
+- `Event::ExecutionPlanned.supersedes`/`reason` は E2 の時点で既に持っていたフィールドで、replan の
+  たびに `Some(旧 plan_id)`/`Some("replan (planner run)" 等)` を書く（上記 (d) のテストで確認済み）。
+- `task-api::types::ExecutionPlanView.versions: Vec<ExecutionPlanVersionView>`（`id`/`version`/
+  `origin`/`planner_run_id`/`status`/`created_at`/`superseded_at`。`store.execution_plan_list`
+  から。`GET`/`POST /tasks/{id}/execution-plan` の両方の応答に載る）。
+- 実行したコマンド: `cargo test -p task-api --lib`
+- 出力の要点: exit 0、53 passed（既存のハンドラテストが `ExecutionPlanView` の新シグネチャ
+  〈第 3 引数 `versions`〉を経由しても壊れていないことを含む）。専用の HTTP レベルテストは
+  時間の制約で追加していない（`task_ops::execution::replan` 側の 6 テストと `execution_plan_list`
+  の単体テストで下地は確認済み。次の一手）。
+
+**(h)（任意）配送の `[delivery-repair]` を `merge_base` の repair WU に置き換える**
+- 未実装。ADR 自身が「任意。時間があれば」としている項目で、時間の制約により (a)〜(g) を優先した。
+  `RepairClass::MergeBase` の型・budget は用意済み。
+
+### ゲート（本 Phase 完了時点）
+
+| ゲート | 実行したコマンド | 出力の要点 |
+|---|---|---|
+| fmt | `cargo fmt --all -- --check` | exit 0（差分なし） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| 全テスト | `cargo test --workspace --no-fail-fast` | exit 0。81 個の `test result:` ブロック全て `ok`（FAILED 0、計 2,246 tests passed） |
+| schema（task-worker） | `UPDATE_SCHEMA=1 cargo test -p task-worker --lib committed_schema_matches_generated` | exit 0、1 passed。`worker-protocol.schema.json` 更新（`ReviewVerdictOut.repair`/`ReviewRepairHint` 追加のみ） |
+| schema（task-api） | `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::` | exit 0、2 passed。`api-v1.schema.json` 更新（`ExecutionPlanVersionView` 追加、`ExecutionPlanView.versions` 追加のみ） |
+| GUI gen:types | `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff | 2 回目が 1 回目と同一（差分ゼロ） |
+| GUI typecheck | `cd gui && corepack pnpm@11.27.0 typecheck` | exit 0（エラーなし） |
+| GUI test | `cd gui && corepack pnpm@11.27.0 test` | exit 0。71 files / 1086 passed（画面は E5 の範囲なので型の追随だけ） |
+
+### ADR との差分
+
+`docs/adr/0072-task-execution-decomposition.md` の「Phase E4 実装時の逸脱・明確化」に詳細を記載。要点:
+
+1. 触るファイルが ADR §6 E4 の表より広い（`store.rs` に 2 メソッド追加、`on_worker_finished` の分割、
+   `task-ops/execution.rs::replan`、`celeris/config.rs`、`task-api` の `versions`）。D16/D17 の実装に
+   必要だった（理由は ADR 参照）。
+2. D16 の repair lane（cheap/standard）は強制しない（budget だけ反映、lane は既存 policy に委ねる）。
+3. repair の per-class カウンタは WU の `title` の接頭辞から復元する（`WorkUnitSpec` に専用欄を足す
+   と planner の schema に影響するため）。
+4. D17 3.（`checkpoint.plan_issue`）は replan のトリガーとして配線していない（WU 状態の扱いを
+   詰め切れなかった。E5/E6 で再設計）。D17 1./2./4. は実装・テスト済み。
+5. replan run のプロンプトに現在の計画・WU 状態を渡す配線（`claude_code.rs`）はしていない
+   （`ExecutionPlannerContext.replan` フラグのみ。E3 の `permission_mode` と同じ理由）。
+6. E3 の `give_up_or_retry_planner` の attempts カウントを「直近の `ExecutionPlanned` 以降」に
+   修正（replan 導入で fresh planning との窓を混同するバグを防ぐため必須の修正）。
+7. `give_up_or_retry_planner` の give-up 時の振る舞いを、`active` な計画の有無で分岐
+   （fresh planning は atomic フォールバック、replan は `blocked`）。
+8. `wu_dispatch_gate` の「人の回答直後だけ再開する」判定を、直前の `Transitioned.reason` を見るよう
+   厳密化（`Continue{why: Replan}` による誤爆を防ぐため必須の修正）。
+9. `wu_dispatch_gate` の `AllDone`/`Stuck` の扱いを拡張し、`replan_gate` に倒す経路を追加
+   （E2/E3 の「理論上到達しない」という前提を E4 が崩すため）。
+10. D12 3.（WU failed の replan 枯渇 → failed）と D18（limit の replan 枯渇 → blocked）を、
+    `decision.reason` で分けて実装した（詳細は ADR 参照）。
+11. replan で持ち越す未完了 WU は `runs`/`continuations`/`retries` をリセットする（明記は無いが
+    D18「回答の時点から数え直す」と同じ発想の拡張）。
+12. `execution_plans` に `supersedes`/`reason` の列は追加していない（`Event::ExecutionPlanned` に
+    既にある。`GET .../execution-plan` の `versions` はそれ以外の欄だけを返す）。
+13. E2b の申し送り（`execution_plans` の版の履歴の replay 再構築）は E4 でも見送り（`replay.rs` は
+    触るファイルの範囲外）。次の一手として記録。
+14. (h)（配送の merge_base repair）は未実装（任意項目、時間の制約）。
+
+### 未解決事項・E5 への申し送り
+
+- **D17 3.（plan_issue トリガー）**: `Checkpoint.plan_issue` を replan の起点にする設計・実装
+  （`WorkUnitBlockedReason` の新設または別の判定方式）。
+- **replan run のプロンプト**: `claude_code.rs::build_execution_plan_prompt` に「現在の計画・WU の
+  状態・起こした理由」を渡す配線（`ExecutionPlannerContext` にフィールドを足す必要あり）。
+- **`[execution.planner].permission_mode` の実行時配線**（E3 からの持ち越し。`with_permission_mode`
+  フックが無い）。
+- **task-api の execution.rs に専用テストが無い**（`versions` の HTTP レベル検証。時間の制約。
+  `task_ops::execution::replan` と `execution_plan_list` の単体テストで下地は確認済み）。
+- **(h) 配送の repair**（`crates/celeris/src/delivery.rs`）: `RepairClass::MergeBase` を使った
+  repair WU の組み立て。
+- **`celerisctl replay`/`rebuild_work_units_and_runs` の `execution_plans` 対応**（E2b からの持ち越し。
+  replan で複数版になった `execution_plans` を events から再構築・突合できるようにする）。
+- **repair の lane（cheap/standard）の強制**: 現状は budget だけ反映し、lane は policy 任せ。
+  実運用（E6 dogfood）で repair が高すぎる lane に流れていないか確認し、必要なら
+  `with_permission_mode` と同様のフックを検討する。
+- E1〜E3 からの申し送り（S4/S6 の実データ配線、`permission_mode` の実行時配線など）は本 Phase では
+  着手していない（引き続き E5/E6 で検討）。
+
+### 次のコミット（分割の記録）
+
+このセッションは "checkpoint" を切らずに完走したため、`git commit` は最終的に 2 回
+（`phase E4 (1/3)`: (a)(b)(c)(g)、`phase E4 (2/3)` または統合コミット: (d)(e)(f) + ADR/PROGRESS）
+に分けて記録する。詳細な commit sha は本セクションの末尾（完了報告）を参照。
