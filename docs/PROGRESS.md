@@ -19315,3 +19315,87 @@ E4/E5 の申し送りのうち、**(h) 配送の repair** と **`GET /metrics/ex
   評価器の負荷を見て縮めるか判断する。
 - runs 索引へ lane と run end の種類を保存し、旧履歴の再構築方式を決めた後に局所 events 補完を
   さらに減らす。配送 gate の他の step は失敗ごとに修復可能性と最小 context を検討する。
+
+## Phase E6（分析、完了日 2026-09-25）
+
+ADR-0072 §6 E6 の受け入れ条件どおり、dogfood タスク 01M3C33KW8YH336QDD0QAV45H8（compound、
+gate=human 明示）と比較対象 2 件（01M38J4X53P1Y684FS42Z6R0VZ = 巨大 1 session の routing 再設計、
+01M39FGDAE9XQA3FGMCP5MCW0B = その retry 複製）を、本番 API から取得済みの読み取り専用 JSON
+コピーで分析した。コードは変更していない（`docs/` のみ）。成果物:
+`docs/execution-decomposition-report-2026-09-25.md`（章立てはそちらを参照）。
+
+### 比較表の要約（詳細は報告書 §2）
+
+| 指標 | dogfood（after） | 巨大 session（before） | retry 複製 |
+|---|---|---|---|
+| 最終状態 | done | **failed** | done |
+| 壁時計 | 4h6m4s | 1h48m19s | 24m39s |
+| run 数（役割別） | 14（planner3/worker8/reviewer3） | 5（worker3/reviewer2） | 4（worker2/reviewer2） |
+| replan 数 | 2 | 0（仕組みなし） | 0 |
+| repair 数 | 1（`repairs_by_class: unknown`） | 0 | 0 |
+| attempts（推測。§2注2） | 推測2 | 推測3（`max_retries`超過で failed） | 推測1 |
+| cost_usd（注: 過小評価。§4） | $11.21 | $1.76（lease失効runのusage喪失込み） | $1.67 |
+| peak context | 未計測（全タスク共通。U2 のまま） | 未計測 | 未計測 |
+
+### 主な発見
+
+1. before の失敗は「89 分 run をライブ切替の drain で lease 失効・usage 喪失」+「review 不合格 2 回」
+   の組み合わせで、E1（budget_exhausted の非失敗化）と Phase 119（drain 後にプロセスが終了しない
+   障害の修正）の両方が直接効く種類の失敗だったことを実データで確認した。
+2. dogfood で実際に発火した repair・replan は、D16/D17 が想定する「典型的な不合格」（fmt/lint/
+   小さなテスト失敗）ではなく、(a) レビュー環境のビルドキャッシュ不一致による 600 秒タイムアウト、
+   (b) 4 時間の実行中に main が先行したことによる merge-base のずれ、の 2 件で、どちらも D16 の
+   5 分類のどれにも当たらず `substantive`（`ReviewFail` で attempts 消費）+ 重い replan を経由した。
+   `repairs_by_class: unknown` は、replan が新設した `kind: repair` の WU が D16 の title 接頭辞
+   規約に従っていないために class を復元できない、既知の設計限界の実例。
+3. `GET /tasks/{id}/artifacts` は `{"items":[]}`（27 個のファイルが実在するのに空）。
+   `crates/task-api/src/files.rs:234-246` が `Event::ArtifactProduced` だけを見る実装のため。
+4. 入力トークン 65.1M の 99.9% は codex（`gpt-6-sol`）worker run で、これらは `cache_read_tokens`
+   フィールド自体を持たない。Claude 系 run の cache_read 合計は 5.3M（総入力の 8%）で、
+   「入力の大半が cache read」という前提は実測と食い違う（訂正として記録）。
+5. `gpt-6-sol` は `pricing.rs` の `PRICE_TABLE` が全欄 `None` のため、8 件の worker run
+   （総入力トークンの 99.9%）の費用が `cost_usd` から丸ごと除外されている。`$11.21` は
+   実装作業の費用をほとんど含まない過小評価。
+6. shadow 計測は実質機能していない: `metrics-execution.json`（`since=2026-09-24`、46 タスク）で
+   `gate_mode=compound` は dogfood の 1 件のみ、かつ `source=human`（規則表は未評価、
+   `execution_gate.rs:199-210` の早期リターン）。gate の閾値・重みは E0 時点の推測値のまま
+   実質未検証。
+
+### gate の推奨
+
+**既定を `on` にしない。`shadow` を維持する。** 根拠は上記6（サンプル N=1、かつ規則表を経由して
+いない）。先に (a) 問題1（review 不合格の分類の弱さ、特に「レビュー環境要因のタイムアウト」の
+repair 化）と (b) 問題5（モデル単価欠損の費用集計への影響の可視化）を直し、(c) `shadow` のまま
+2〜4 週間分の `ExecutionGated` 実績（人の明示に頼らないもの）を溜めてから、全面 `on` ではなく
+部署・genre 単位の段階導入を検討する。本番設定は E6 dogfood 実行のために `gate = "on"` に
+手動で上書きしていた（Phase E4/E4b/E5 の本番反映節）。この分析の結論に従い、**`shadow` に
+戻すことを提案する**（実施は人の判断）。
+
+### 提案（報告書 §4〜6 の要約）
+
+- P-E6a-1: D16 に「review timeout」class を追加し、決定的検査のタイムアウトを repair 対象にする。
+- P-E6a-2: `merge_base` の repair 分類を、配送段階だけでなく Task 内部の最終レビュー段階でも
+  使えるようにする。
+- P-E6a-3: `GET /tasks/{id}/artifacts` が `report.md` 等の既知ファイルを拾えるよう、
+  worker 側にプロンプトで `ArtifactProduced` 相当の登録を促すか、API 側にベストエフォートの
+  フォールバックを足す。
+- P-E6a-4: codex アダプタが prompt cache の usage を報告できるか確認し、できなければ
+  `docs/llm-source.md`/ADR-0072 に「codex は現状キャッシュ非対応」と明記する。
+- P-E6a-5: `ExecutionMetrics` に `cost_usd_complete: bool`（単価不明モデルを含めば `false`）を
+  足し、費用が過小評価であることを GUI・報告で明示する。
+- U3（WU 並列）の優先度を上げる: dogfood の 3 成果は依存グラフ上独立だったが直列実行のため
+  壁時計 4h6m のうち大半を消費した。
+
+### 未解決事項
+
+- ADR §7 の U1〜U10 は本分析では 1 件も新規に解消していない（dogfood で `budget_exhausted`
+  ・`peak_context_tokens` が 1 件も発生/計測されなかったため検証機会が無かった）。詳細は
+  報告書 §6 の表。
+- reviewer run の `runs` 索引に `finished_at`/`usage`/`end` が欠落する経路を 1 件観測した
+  （`01M3CDS6K0JPYT0GRDJ97Z986T`）。原因は本分析の範囲では特定できていない。次の一手として
+  `celerisctl replay --check` を実機で当該タスクに対して実行すること。
+- 01M3C33KW8YH336QDD0QAV45H8 の release `5cc1610938f5` は gate_ok=true・verify.ok=true・
+  live_ok=true だが、分析用に取得した `releases.json` のスナップショットでは `promoted_at: null`・
+  `is_current: false`（本番の `current` は E6 より前の `a1194588b417` のまま）だった。
+  「15:03Z に昇格済み」という前提と食い違うため、事実として記録する（本番の実際の昇格状況は
+  このエージェントの環境からは確認できない。人による確認を推奨）。
