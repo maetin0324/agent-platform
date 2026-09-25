@@ -19315,3 +19315,9 @@ E4/E5 の申し送りのうち、**(h) 配送の repair** と **`GET /metrics/ex
   評価器の負荷を見て縮めるか判断する。
 - runs 索引へ lane と run end の種類を保存し、旧履歴の再構築方式を決めた後に局所 events 補完を
   さらに減らす。配送 gate の他の step は失敗ごとに修復可能性と最小 context を検討する。
+
+## E6 dogfood の完了と配送の昇格（2026-09-25 15:03Z）
+
+- dogfood タスク 01M3C33KW8YH336QDD0QAV45H8 は 10:51Z 投入 → 14:58Z done（壁時計 4h06m）。gate は人の明示で compound、planner v1（14 分）→ WU 6 つを直列に完走 → 最終レビュー不合格 → replan v2 → 追加 WU → レビュー → replan v3 → 追加 WU → 最終レビュー合格。8 WU / 8 done、run は planner 3 / worker 8 / reviewer 3、continuation 0、budget_exhausted 0、retry 0、repair 1、replan 2、費用 11.21 USD、attempts 2（最終レビュー不合格が ReviewFail 扱い）。
+- 成果（配送の repair WU、pricing の fable / gpt-6 単価、`GET /metrics/execution` の索引化）は Celeris の配送で origin/main（5cc1610）に入り、release `5cc1610938f5`（gate ok、verify ok）を in-flight 0 でライブ昇格。**本番は Celeris 自身が compound として分解・実行した成果で動いている。**
+- 比較と提案の分析は Phase E6（分析）として Sonnet に委譲（`docs/execution-decomposition-report-2026-09-25.md`）。
