@@ -524,6 +524,239 @@ pub fn schema_value() -> serde_json::Value {
     serde_json::to_value(schema).unwrap_or(serde_json::Value::Null)
 }
 
+// ---------------------------------------------------------------------------
+// ADR-0072 D16（Phase E4）: reviewer repair（不合格を局所的に修復する）
+// ---------------------------------------------------------------------------
+
+/// D16: 最終レビューで不合格になった 1 条件の、分類に要る最小限の情報。`pass = false` の
+/// `Verdict` だけを渡す想定（呼び出し側が `task.acceptance[criterion_idx].check` を添える）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedCheck {
+    pub check: crate::model::Check,
+    pub reason: String,
+    /// `Check::Reviewer` の不合格に添えられた `review.json` の `repair` ヒント（D16: `{"scope":"local",
+    /// "class":"format|lint|test|doc|other","hint":"…"}`）。それ以外の `check` では常に `None`。
+    pub repair_hint: Option<ReviewRepairHint>,
+}
+
+/// `review.json` の `repair` ヒント（`scope`/`class` だけを使う。`hint` の自由記述は呼び出し側の
+/// ログ用で分類には使わない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewRepairHint {
+    pub scope: String,
+    pub class: String,
+}
+
+/// D16: `reviewer_local` の repair WU の予算を決めるための、内側の（サブ）分類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewerRepairKind {
+    Format,
+    Lint,
+    Test,
+    Other,
+}
+
+impl ReviewerRepairKind {
+    fn parse(class: &str) -> Self {
+        match class {
+            "format" => ReviewerRepairKind::Format,
+            "lint" => ReviewerRepairKind::Lint,
+            "test" => ReviewerRepairKind::Test,
+            _ => ReviewerRepairKind::Other,
+        }
+    }
+}
+
+/// D16 の分類表: `format` / `lint` / `test_small` / `reviewer_local` / `merge_base`。この 5 つが
+/// `repairs` の「同じ class」カウンタ（既定 2 回まで）のバケットにもなる。**`merge_base` はこの
+/// 関数からは返らない**（配送〈`crates/celeris/src/delivery.rs`〉自身の技術的な失敗から直接組み立てる。
+/// D16 の表の条件が review の verdict ではなく配送の失敗そのものを指しているため）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairClass {
+    Format,
+    Lint,
+    TestSmall,
+    ReviewerLocal(ReviewerRepairKind),
+    MergeBase,
+}
+
+impl RepairClass {
+    /// `repairs` の「同じ class は 2 回まで」の集計に使うキー（`reviewer_local` はサブ分類を問わず
+    /// 1 つのバケット）。
+    pub fn bucket(self) -> &'static str {
+        match self {
+            RepairClass::Format => "format",
+            RepairClass::Lint => "lint",
+            RepairClass::TestSmall => "test_small",
+            RepairClass::ReviewerLocal(_) => "reviewer_local",
+            RepairClass::MergeBase => "merge_base",
+        }
+    }
+
+    /// D16 の表の repair WU の予算（`max_turns`, `max_wall_secs`）。
+    pub fn budget(self) -> (u32, u64) {
+        match self {
+            RepairClass::Format => (12, 600),
+            RepairClass::Lint => (20, 1200),
+            RepairClass::TestSmall | RepairClass::MergeBase => (30, 1800),
+            RepairClass::ReviewerLocal(kind) => match kind {
+                ReviewerRepairKind::Format => (12, 600),
+                ReviewerRepairKind::Lint => (20, 1200),
+                ReviewerRepairKind::Test | ReviewerRepairKind::Other => (30, 1800),
+            },
+        }
+    }
+}
+
+/// D16: 修復できる不合格かどうかの判定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairDecision {
+    Repairable(RepairClass),
+    /// 修復できない不合格が 1 つでもある、または修復できる種類が混在している
+    /// （`Check::Human` の不合格を含む場合も、この列挙値になる）。
+    Substantive,
+}
+
+const FMT_COMMAND_WORDS: [&str; 7] = [
+    "cargo fmt",
+    "rustfmt",
+    "prettier",
+    "biome format",
+    "gofmt",
+    "black",
+    "ruff format",
+];
+const LINT_COMMAND_WORDS: [&str; 7] = [
+    "clippy",
+    "eslint",
+    "biome check",
+    "biome lint",
+    "ruff check",
+    "tsc",
+    "typecheck",
+];
+const TEST_COMMAND_WORDS: [&str; 5] = ["cargo test", "pnpm test", "vitest", "pytest", "go test"];
+
+/// `reason`（コマンドの stdout/stderr tail を含む）から、失敗したテストの件数を読む。
+/// `test result: FAILED. N passed; M failed`、`M failed` のような字句を探す（決定的な字句判定。
+/// D16）。見つからなければ `None`（test_small と判定できない = substantive に倒れる）。
+fn failed_test_count(reason: &str) -> Option<u32> {
+    let bytes = reason.as_bytes();
+    let needle = b" failed";
+    let mut best: Option<u32> = None;
+    let mut i = 0;
+    while i + needle.len() <= bytes.len() {
+        if &bytes[i..i + needle.len()] == needle {
+            // needle の直前にある数字の連続を後ろ向きに読む。
+            let mut j = i;
+            while j > 0 && bytes[j - 1].is_ascii_digit() {
+                j -= 1;
+            }
+            if j < i
+                && let Ok(n) = reason[j..i].parse::<u32>()
+            {
+                best = Some(n);
+            }
+        }
+        i += 1;
+    }
+    best
+}
+
+fn classify_command(cmd: &str, reason: &str) -> Option<RepairClass> {
+    let c = cmd.to_lowercase();
+    if FMT_COMMAND_WORDS.iter().any(|w| c.contains(w)) {
+        return Some(RepairClass::Format);
+    }
+    if LINT_COMMAND_WORDS.iter().any(|w| c.contains(w)) {
+        return Some(RepairClass::Lint);
+    }
+    if TEST_COMMAND_WORDS.iter().any(|w| c.contains(w)) {
+        return match failed_test_count(reason) {
+            Some(n) if (1..=3).contains(&n) => Some(RepairClass::TestSmall),
+            _ => None,
+        };
+    }
+    None
+}
+
+/// D16「reason が fmt / clippy の語だけを指す（字句の予備判定）」: 明示の `repair` ヒントが無い
+/// `Check::Reviewer` の不合格に対する、決定的な字句フォールバック。
+fn classify_reviewer_reason(reason: &str) -> Option<RepairClass> {
+    let r = reason.to_lowercase();
+    let mentions_fmt = r.contains("fmt") || r.contains("format");
+    let mentions_lint = r.contains("clippy") || r.contains("lint");
+    if mentions_fmt && !mentions_lint {
+        return Some(RepairClass::ReviewerLocal(ReviewerRepairKind::Format));
+    }
+    if mentions_lint && !mentions_fmt {
+        return Some(RepairClass::ReviewerLocal(ReviewerRepairKind::Lint));
+    }
+    None
+}
+
+fn classify_one(f: &FailedCheck) -> Option<RepairClass> {
+    match &f.check {
+        crate::model::Check::Command { cmd, .. } => classify_command(cmd, &f.reason),
+        crate::model::Check::Reviewer => match &f.repair_hint {
+            Some(hint) if hint.scope == "local" => Some(RepairClass::ReviewerLocal(
+                ReviewerRepairKind::parse(&hint.class),
+            )),
+            Some(_) => None,
+            None => classify_reviewer_reason(&f.reason),
+        },
+        // ArtifactExists / KnowledgePage / Human: D16 の表に無い = 修復できない。
+        _ => None,
+    }
+}
+
+/// D16: 不合格の verdict をすべて見て、**全部が同じ修復できる class** のときだけ
+/// `RepairDecision::Repairable` にする（1 つでも修復できない、または class が混在すれば
+/// `Substantive`）。`failing` は空を渡さない（呼び出し側は不合格が無ければそもそも呼ばない）。
+pub fn classify_review_failure(failing: &[FailedCheck]) -> RepairDecision {
+    let mut classes = failing.iter().map(classify_one);
+    let Some(Some(first)) = classes.next() else {
+        return RepairDecision::Substantive;
+    };
+    for c in classes {
+        match c {
+            Some(c) if c.bucket() == first.bucket() => {}
+            _ => return RepairDecision::Substantive,
+        }
+    }
+    RepairDecision::Repairable(first)
+}
+
+/// D16: repair WU の objective（**最小の context**。元の実装の context は作り直さない）。決定的な
+/// 文字列合成のみ（I/O は無い）。`failing_details` は `Verdict.reason`（cmd / exit / stdout・stderr の
+/// tail をそのまま含む）を 1 件 1 行ずつ渡す。`diff_stat`（`git diff --stat` の要約）は任意。
+pub fn build_repair_objective(
+    class: RepairClass,
+    failing_details: &[String],
+    task_title: &str,
+    task_objective: &str,
+    diff_stat: Option<&str>,
+) -> String {
+    let objective_preview: String = task_objective.chars().take(600).collect();
+    let mut s = String::new();
+    s.push_str(
+        "次の検査が失敗した。失敗を直すことだけをせよ。設計や他のコードは変えるな。\
+直した後に同じコマンドを実行して exit を確かめよ。\n\n",
+    );
+    s.push_str(&format!("## 分類\n{}\n\n", class.bucket()));
+    s.push_str("## 失敗した検査\n");
+    for d in failing_details {
+        s.push_str(&format!("- {d}\n"));
+    }
+    s.push_str(&format!(
+        "\n## 対象タスク（参考。全文ではない）\n- title: {task_title}\n- objective（先頭 600 文字）: {objective_preview}\n"
+    ));
+    if let Some(stat) = diff_stat {
+        s.push_str(&format!("\n## git diff --stat\n{stat}\n"));
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,6 +1056,171 @@ mod tests {
             "Error: context_length_exceeded"
         ));
         assert!(!looks_like_context_exceeded("wall clock exceeded"));
+    }
+
+    // ADR-0072 D16（Phase E4）: classify_review_failure の分類表。
+
+    fn command(cmd: &str, reason: &str) -> FailedCheck {
+        FailedCheck {
+            check: crate::model::Check::Command {
+                cmd: cmd.to_string(),
+                expect_exit: 0,
+            },
+            reason: reason.to_string(),
+            repair_hint: None,
+        }
+    }
+
+    fn reviewer(reason: &str, hint: Option<(&str, &str)>) -> FailedCheck {
+        FailedCheck {
+            check: crate::model::Check::Reviewer,
+            reason: reason.to_string(),
+            repair_hint: hint.map(|(scope, class)| ReviewRepairHint {
+                scope: scope.to_string(),
+                class: class.to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn classifies_a_fmt_check_command_as_format() {
+        let d = classify_review_failure(&[command(
+            "cargo fmt --all -- --check",
+            "cmd=\"cargo fmt --all -- --check\" exit=Some(1) expected=0",
+        )]);
+        assert_eq!(d, RepairDecision::Repairable(RepairClass::Format));
+        assert_eq!(RepairClass::Format.bucket(), "format");
+        assert_eq!(RepairClass::Format.budget(), (12, 600));
+    }
+
+    #[test]
+    fn classifies_a_clippy_command_as_lint() {
+        let d = classify_review_failure(&[command(
+            "cargo clippy --workspace -- -D warnings",
+            "cmd=... exit=Some(1)",
+        )]);
+        assert_eq!(d, RepairDecision::Repairable(RepairClass::Lint));
+        assert_eq!(RepairClass::Lint.budget(), (20, 1200));
+    }
+
+    #[test]
+    fn classifies_a_small_test_failure_as_test_small() {
+        let d = classify_review_failure(&[command(
+            "cargo test --workspace",
+            "stdout_tail=\"test result: FAILED. 12 passed; 3 failed; 0 ignored\"",
+        )]);
+        assert_eq!(d, RepairDecision::Repairable(RepairClass::TestSmall));
+        assert_eq!(RepairClass::TestSmall.budget(), (30, 1800));
+    }
+
+    #[test]
+    fn a_large_test_failure_is_not_test_small() {
+        let d = classify_review_failure(&[command(
+            "cargo test --workspace",
+            "stdout_tail=\"test result: FAILED. 2 passed; 40 failed; 0 ignored\"",
+        )]);
+        assert_eq!(d, RepairDecision::Substantive);
+    }
+
+    #[test]
+    fn a_test_command_without_a_failed_count_is_substantive() {
+        let d = classify_review_failure(&[command(
+            "cargo test --workspace",
+            "exec failed: no such file or directory",
+        )]);
+        assert_eq!(d, RepairDecision::Substantive);
+    }
+
+    #[test]
+    fn classifies_an_unrelated_command_as_substantive() {
+        let d = classify_review_failure(&[command("./scripts/deploy.sh", "exit=Some(1)")]);
+        assert_eq!(d, RepairDecision::Substantive);
+    }
+
+    #[test]
+    fn classifies_a_reviewer_repair_hint_as_reviewer_local() {
+        let d = classify_review_failure(&[reviewer(
+            "reviewer(r1): fmt is off",
+            Some(("local", "format")),
+        )]);
+        assert_eq!(
+            d,
+            RepairDecision::Repairable(RepairClass::ReviewerLocal(ReviewerRepairKind::Format))
+        );
+        assert_eq!(
+            RepairClass::ReviewerLocal(ReviewerRepairKind::Format).bucket(),
+            "reviewer_local"
+        );
+    }
+
+    #[test]
+    fn classifies_a_reviewer_reason_lexically_when_no_hint_is_given() {
+        let d = classify_review_failure(&[reviewer(
+            "reviewer(r1): please run cargo fmt before merging",
+            None,
+        )]);
+        assert_eq!(
+            d,
+            RepairDecision::Repairable(RepairClass::ReviewerLocal(ReviewerRepairKind::Format))
+        );
+    }
+
+    #[test]
+    fn a_reviewer_hint_with_a_non_local_scope_is_substantive() {
+        let d = classify_review_failure(&[reviewer(
+            "reviewer(r1): design is wrong",
+            Some(("design", "other")),
+        )]);
+        assert_eq!(d, RepairDecision::Substantive);
+    }
+
+    #[test]
+    fn a_human_check_failure_is_always_substantive() {
+        let d = classify_review_failure(&[FailedCheck {
+            check: crate::model::Check::Human,
+            reason: "rejected".to_string(),
+            repair_hint: None,
+        }]);
+        assert_eq!(d, RepairDecision::Substantive);
+    }
+
+    #[test]
+    fn mixing_a_repairable_and_a_substantive_failure_is_substantive() {
+        let d = classify_review_failure(&[
+            command("cargo fmt --all -- --check", "stdout_tail=\"diff\""),
+            FailedCheck {
+                check: crate::model::Check::Human,
+                reason: "needs a human call".to_string(),
+                repair_hint: None,
+            },
+        ]);
+        assert_eq!(d, RepairDecision::Substantive);
+    }
+
+    #[test]
+    fn build_repair_objective_does_not_include_the_full_original_objective() {
+        let long_objective = "x".repeat(3000);
+        let obj = build_repair_objective(
+            RepairClass::Format,
+            &["cmd=\"cargo fmt --check\" exit=Some(1)".to_string()],
+            "some task",
+            &long_objective,
+            Some("1 file changed"),
+        );
+        assert!(!obj.contains(&long_objective));
+        assert!(obj.contains(&"x".repeat(600)));
+        assert!(!obj.contains(&"x".repeat(601)));
+        assert!(obj.contains("cargo fmt --check"));
+        assert!(obj.contains("1 file changed"));
+    }
+
+    #[test]
+    fn mixing_two_different_repairable_classes_is_substantive() {
+        let d = classify_review_failure(&[
+            command("cargo fmt --all -- --check", "diff"),
+            command("cargo clippy -- -D warnings", "warning: ..."),
+        ]);
+        assert_eq!(d, RepairDecision::Substantive);
     }
 
     /// ADR-0072 D8 / ADR-0003 D6: 生成スキーマとコミット済みファイルの一致。`UPDATE_SCHEMA=1` で再生成。

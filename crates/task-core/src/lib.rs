@@ -148,9 +148,11 @@ pub use execution::{
     BudgetKind, CHECKPOINT_MAX_BYTES, CHECKPOINT_MAX_ITEMS, CHECKPOINT_MAX_STRING_CHARS,
     CHECKPOINT_SCHEMA, Checkpoint, CheckpointArtifactRef, CheckpointContext, CheckpointDecision,
     CheckpointEnd, CheckpointFileChange, CheckpointKnownFailure, CheckpointSource,
-    CheckpointTestRun, ContinueWhy, HarnessErrorClass, MechanicalCheckpoint, RepoState, RunEnd,
-    WorkerCheckpointInput, checkpoint_shows_progress, looks_like_context_exceeded,
-    merge_checkpoint, parse_worker_checkpoint, truncate_checkpoint,
+    CheckpointTestRun, ContinueWhy, FailedCheck, HarnessErrorClass, MechanicalCheckpoint,
+    RepairClass, RepairDecision, RepoState, ReviewRepairHint, ReviewerRepairKind, RunEnd,
+    WorkerCheckpointInput, build_repair_objective, checkpoint_shows_progress,
+    classify_review_failure, looks_like_context_exceeded, merge_checkpoint,
+    parse_worker_checkpoint, truncate_checkpoint,
 };
 pub use execution_plan::{
     EXECUTION_PLAN_SCHEMA, ExecutionLimits, ExecutionPlanRow, ExecutionPlanSpec, NextStep,

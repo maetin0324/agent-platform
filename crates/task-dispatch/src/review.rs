@@ -33,6 +33,9 @@ pub struct Verdict {
     pub criterion_idx: usize,
     pub pass: bool,
     pub reason: String,
+    /// ADR-0072 D16（Phase E4）: `Check::Reviewer` の不合格に reviewer 自身が添えた repair のヒント
+    /// （`review.json` の `repair`）。決定的条件（`Command`/`ArtifactExists`/…）の verdict では常に `None`。
+    pub repair_hint: Option<task_core::execution::ReviewRepairHint>,
 }
 
 /// 対象 run の `done` の内容（`Reviewer` run に `context.review` として渡す。ADR-0007 D5）。
@@ -346,6 +349,7 @@ pub async fn review_task(
             criterion_idx: idx,
             pass,
             reason,
+            repair_hint: None,
         });
     }
 
@@ -358,6 +362,7 @@ pub async fn review_task(
             criterion_idx: task.acceptance.len(),
             pass,
             reason,
+            repair_hint: None,
         });
     }
 
@@ -381,6 +386,7 @@ pub async fn review_task(
             criterion_idx: idx,
             pass,
             reason,
+            repair_hint: None,
         });
     }
 
@@ -416,6 +422,7 @@ pub async fn review_task(
                 criterion_idx: base + n,
                 pass,
                 reason,
+                repair_hint: None,
             });
         }
     }
@@ -439,6 +446,7 @@ pub async fn review_task(
             criterion_idx: idx,
             pass,
             reason,
+            repair_hint: None,
         });
     }
 
@@ -454,6 +462,7 @@ pub async fn review_task(
                     criterion_idx: idx,
                     pass: false,
                     reason: "not evaluated: a deterministic check failed".to_string(),
+                    repair_hint: None,
                 })
                 .collect()
         } else {
@@ -464,6 +473,7 @@ pub async fn review_task(
                         criterion_idx: idx,
                         pass: false,
                         reason: "not evaluated: no reviewer run was available".to_string(),
+                        repair_hint: None,
                     })
                     .collect(),
                 Some(run) => {
@@ -500,6 +510,47 @@ pub async fn review_task(
         provider_failure,
         reviewer_run,
     }
+}
+
+/// ADR-0072 D14/D6・E4 (g): WU の決定的な `checks`（`Check::Command` と同じ意味論の `Command` だけ）を
+/// 実行する。`review_task` の `Check::Command` 分岐と同じ判定（`workspace.exec` でワークスペースの中で
+/// 実際に再実行し、exit を比較する）を再利用する。呼び出し側（`dispatcher.rs`）は、1 つでも
+/// `pass = false` があれば、その run を `RunEnd::Failed{retryable: true}`（WU の retry）として扱う。
+pub async fn run_work_unit_checks(
+    workspace: &dyn Workspace,
+    checks: &[task_core::WorkUnitCheck],
+    command_timeout: Duration,
+) -> Vec<(bool, String)> {
+    let mut out = Vec::with_capacity(checks.len());
+    for c in checks {
+        let (pass, reason) = match workspace.exec(&c.cmd, command_timeout).await {
+            Err(e) => (false, format!("exec failed: {e}")),
+            Ok(r) if r.timed_out => (
+                false,
+                format!(
+                    "command timed out after {}s: {}",
+                    command_timeout.as_secs(),
+                    c.cmd
+                ),
+            ),
+            Ok(r) => {
+                let pass = r.exit == Some(c.expect_exit);
+                (
+                    pass,
+                    format!(
+                        "cmd={:?} exit={:?} expected={} stdout_tail={:?} stderr_tail={:?}",
+                        c.cmd,
+                        r.exit,
+                        c.expect_exit,
+                        tail(&r.stdout_tail, REASON_TAIL),
+                        tail(&r.stderr_tail, REASON_TAIL)
+                    ),
+                )
+            }
+        };
+        out.push((pass, reason));
+    }
+    out
 }
 
 fn check_plan_file(
@@ -629,6 +680,7 @@ async fn run_reviewer_inner(
                 criterion_idx: idx,
                 pass: false,
                 reason: reason.clone(),
+                repair_hint: None,
             })
             .collect())
     };
@@ -783,11 +835,20 @@ async fn run_reviewer_inner(
                     criterion_idx: idx,
                     pass: v.pass,
                     reason: format!("{tag}: {}", v.reason),
+                    // ADR-0072 D16（Phase E4）: reviewer 自身が申告した repair ヒントをそのまま写す
+                    // （`pass = true` のときは呼び出し側〈`classify_review_failure`〉が使わない）。
+                    repair_hint: v.repair.as_ref().map(|r| {
+                        task_core::execution::ReviewRepairHint {
+                            scope: r.scope.clone(),
+                            class: r.class.clone(),
+                        }
+                    }),
                 },
                 None => Verdict {
                     criterion_idx: idx,
                     pass: false,
                     reason: format!("{tag}: no verdict for criterion {idx} in {review_rel}"),
+                    repair_hint: None,
                 },
             },
         )
@@ -926,6 +987,48 @@ mod tests {
         );
         assert!(v[3].reason.contains("timed out"));
         assert_eq!(v[1].criterion_idx, 1);
+    }
+
+    // ADR-0072 D14/D6・E4 (g): WU の決定的な checks の実行（review.rs の Command 実行を再利用）。
+    #[tokio::test]
+    async fn work_unit_checks_pass_and_fail_like_command_criteria() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("present.txt"), "x").unwrap();
+        let ws = LocalWorkspace::new(dir.path());
+        let checks = vec![
+            task_core::WorkUnitCheck {
+                cmd: "test -f present.txt".into(),
+                expect_exit: 0,
+            },
+            task_core::WorkUnitCheck {
+                cmd: "test -f absent.txt".into(),
+                expect_exit: 0,
+            },
+            task_core::WorkUnitCheck {
+                cmd: "exit 7".into(),
+                expect_exit: 7,
+            },
+        ];
+        let results = run_work_unit_checks(&ws, &checks, Duration::from_secs(5)).await;
+        assert_eq!(
+            results.iter().map(|(pass, _)| *pass).collect::<Vec<_>>(),
+            vec![true, false, true]
+        );
+        assert!(results[1].1.contains("absent.txt"));
+    }
+
+    #[tokio::test]
+    async fn work_unit_checks_time_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = LocalWorkspace::new(dir.path());
+        let checks = vec![task_core::WorkUnitCheck {
+            cmd: "sleep 30".into(),
+            expect_exit: 0,
+        }];
+        let results = run_work_unit_checks(&ws, &checks, Duration::from_millis(300)).await;
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].0);
+        assert!(results[0].1.contains("timed out"));
     }
 
     #[tokio::test]

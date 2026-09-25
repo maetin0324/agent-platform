@@ -68,6 +68,10 @@ pub enum Trigger {
     Continue {
         why: crate::execution::ContinueWhy,
     },
+    /// ADR-0072 D16（Phase E4）: 最終レビューの修復できる不合格（D16 の分類表、repair の上限内）。
+    /// `Reviewing → Ready`、attempts は据え置き（同じ `Event::Transitioned{reason:"review_repair"}`
+    /// のトランザクションで、呼び出し側〈`task_ops::execution`〉が repair の WorkUnit を作る）。
+    ReviewRepair,
 }
 
 impl Trigger {
@@ -99,6 +103,7 @@ impl Trigger {
             Trigger::Unroutable => "unroutable",
             Trigger::InfraRequeue => "infra_requeue",
             Trigger::Continue { why } => why.name(),
+            Trigger::ReviewRepair => "review_repair",
         }
     }
 
@@ -397,6 +402,20 @@ pub fn transition(s: &StateView, t: &Trigger) -> Result<Outcome, InvalidTransiti
         Trigger::ReviewFail => {
             if s.status == Status::Reviewing {
                 Ok(retry_or_fail(s, t.name()))
+            } else {
+                Err(invalid(s, t))
+            }
+        }
+
+        // ADR-0072 D16（Phase E4）: repair は attempts を消費しない（`ReviewFail` と違い
+        // `retry_or_fail` を通さない）。
+        Trigger::ReviewRepair => {
+            if s.status == Status::Reviewing {
+                Ok(Outcome {
+                    next: Status::Ready,
+                    attempts: s.attempts,
+                    reason: t.name(),
+                })
             } else {
                 Err(invalid(s, t))
             }

@@ -979,6 +979,40 @@ pub trait TaskStore:
     -> Result<(), StoreError>;
     /// 同上。`task_id` の `runs` 行を渡した集合でまるごと置き換える。
     fn runs_replace(&self, task_id: TaskId, rows: Vec<RunRow>) -> Result<(), StoreError>;
+
+    /// ADR-0072 D16（Phase E4）: reviewer repair の採用。`Trigger::ReviewRepair`
+    /// （`Reviewing → Ready`、attempts 据え置き）と、`new_plan`（`Some` のときだけ挿入。atomic な
+    /// Task で暗黙の WorkUnit を初めて実体化するときの `execution_plans` 行、D5）・`work_units`
+    /// （repair WU。atomic なら `main`（done）も含む）・`extra_events`（`WorkerFinished{role:
+    /// reviewer}` / `ReviewVerdict` / repair WU の `WorkUnitTransitioned` 等）を同じトランザクションで
+    /// 書く。呼び出し側（`dispatcher.rs`）が D16 の上限（`max_repairs`/`max_repairs_per_class`）を
+    /// 検査済みであることが前提（ここでは検査しない）。
+    fn review_repair_apply(
+        &self,
+        task_id: TaskId,
+        extra_events: Vec<Event>,
+        new_plan: Option<ExecutionPlanRow>,
+        work_units: Vec<WorkUnitRow>,
+    ) -> Result<Outcome, StoreError>;
+
+    /// ADR-0072 D17（Phase E4）: replan の採用。旧 `active` な計画を `superseded` にし、新しい版
+    /// （`new_plan.version = old.version + 1`）を挿入する。`updated_work_units` は既存行の書き換え
+    /// （spec が変わった未完了 WU、または `superseded` にする削除された WU）、`new_work_units` は
+    /// 新しい key の追加。`extra_events`（削除された WU の `WorkUnitTransitioned` 等）→
+    /// `plan_event`（`Event::ExecutionPlanned{supersedes: Some(old_plan_id), ..}`）の順で同じ
+    /// トランザクションに追記する。旧版が `active` でなければ `StoreError::InUse`
+    /// （並行 replan の検出）。
+    #[allow(clippy::too_many_arguments)]
+    fn execution_plan_replan(
+        &self,
+        task_id: TaskId,
+        old_plan_id: String,
+        new_plan: ExecutionPlanRow,
+        updated_work_units: Vec<WorkUnitRow>,
+        new_work_units: Vec<WorkUnitRow>,
+        extra_events: Vec<Event>,
+        plan_event: Event,
+    ) -> Result<(), StoreError>;
 }
 
 /// ADR-0059 D6（Phase 99）: `cluster_settings` の 1 行。`work_dir` は絶対パスか `~`/`~/…`
@@ -4655,6 +4689,97 @@ impl TaskStore for SqliteStore {
         for r in &rows {
             Self::insert_run_row_tx(&tx, r)?;
         }
+        tx.commit()?;
+        Ok(())
+    }
+
+    // ---- ADR-0072 D16/D17（Phase E4）: reviewer repair / replan ----
+
+    fn review_repair_apply(
+        &self,
+        task_id: TaskId,
+        extra_events: Vec<Event>,
+        new_plan: Option<ExecutionPlanRow>,
+        work_units: Vec<WorkUnitRow>,
+    ) -> Result<Outcome, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(plan) = &new_plan {
+            tx.execute(
+                "INSERT INTO execution_plans (id, task_id, version, origin, planner_run_id, \
+                 status, json, created_at, superseded_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    plan.id,
+                    plan.task_id,
+                    plan.version,
+                    plan.origin.as_str(),
+                    plan.planner_run_id,
+                    plan.status.as_str(),
+                    serde_json::to_string(&plan.spec)?,
+                    plan.created_at,
+                    plan.superseded_at,
+                ],
+            )?;
+        }
+        for wu in &work_units {
+            Self::insert_work_unit_tx(&tx, wu)?;
+        }
+        let outcome = Self::apply_transition_tx(&tx, task_id, Trigger::ReviewRepair, extra_events)?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execution_plan_replan(
+        &self,
+        task_id: TaskId,
+        old_plan_id: String,
+        new_plan: ExecutionPlanRow,
+        updated_work_units: Vec<WorkUnitRow>,
+        new_work_units: Vec<WorkUnitRow>,
+        extra_events: Vec<Event>,
+        plan_event: Event,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let superseded_at = format_rfc3339(OffsetDateTime::now_utc())?;
+        let n = tx.execute(
+            "UPDATE execution_plans SET status = 'superseded', superseded_at = ?1 \
+             WHERE id = ?2 AND task_id = ?3 AND status = 'active'",
+            params![superseded_at, old_plan_id, task_id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(StoreError::InUse {
+                kind: "execution_plan",
+                id: old_plan_id,
+                detail: "no active execution plan to replan (changed concurrently?)".to_string(),
+            });
+        }
+        tx.execute(
+            "INSERT INTO execution_plans (id, task_id, version, origin, planner_run_id, \
+             status, json, created_at, superseded_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                new_plan.id,
+                new_plan.task_id,
+                new_plan.version,
+                new_plan.origin.as_str(),
+                new_plan.planner_run_id,
+                new_plan.status.as_str(),
+                serde_json::to_string(&new_plan.spec)?,
+                new_plan.created_at,
+                new_plan.superseded_at,
+            ],
+        )?;
+        for wu in &updated_work_units {
+            Self::update_work_unit_tx(&tx, wu)?;
+        }
+        for wu in &new_work_units {
+            Self::insert_work_unit_tx(&tx, wu)?;
+        }
+        for ev in &extra_events {
+            Self::append_event_tx(&tx, task_id, ev)?;
+        }
+        Self::append_event_tx(&tx, task_id, &plan_event)?;
         tx.commit()?;
         Ok(())
     }
@@ -8702,5 +8827,364 @@ mod tests {
                 )
                 .unwrap()
         );
+    }
+
+    // ---- ADR-0072 D16/D17（Phase E4）: review_repair_apply / execution_plan_replan ----
+
+    fn repair_spec(task: &Task) -> WorkUnitSpec {
+        WorkUnitSpec {
+            key: "repair-1".into(),
+            kind: WorkUnitKind::Repair,
+            title: "repair (format): 修復".into(),
+            objective: crate::execution::build_repair_objective(
+                crate::execution::RepairClass::Format,
+                &["cmd=\"cargo fmt --check\" exit=Some(1)".to_string()],
+                &task.title,
+                &task.objective,
+                None,
+            ),
+            depends_on: vec![],
+            done_when: vec![],
+            checks: vec![],
+            context: Default::default(),
+            harness: None,
+            features: None,
+            budget: None,
+            outputs: vec![],
+        }
+    }
+
+    /// (b)/(c) の下地: atomic な Task（計画無し）で repair WU を実体化すると、`main`（done）+
+    /// `repair-1`（ready）の 2 行を持つ `execution_plans`（`origin = repair`）が新設され、Task は
+    /// `Reviewing -> Ready`（attempts 据え置き）になる。
+    #[test]
+    fn review_repair_apply_materializes_main_and_the_repair_work_unit_for_an_atomic_task() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut task = sample_task(Status::Reviewing);
+        task.attempts = 1;
+        store.insert(&task).unwrap();
+
+        let now = "2026-09-25T00:00:00Z".to_string();
+        let plan_id = "plan-repair-1".to_string();
+        let main_spec = WorkUnitSpec {
+            key: "main".into(),
+            kind: WorkUnitKind::Implement,
+            title: task.title.clone(),
+            objective: task.objective.clone(),
+            depends_on: vec![],
+            done_when: vec![],
+            checks: vec![],
+            context: Default::default(),
+            harness: None,
+            features: None,
+            budget: None,
+            outputs: vec![],
+        };
+        let main_row = WorkUnitRow::new(
+            "wu-main".into(),
+            task.id.to_string(),
+            plan_id.clone(),
+            0,
+            main_spec.clone(),
+            WorkUnitStatus::Done,
+            now.clone(),
+        );
+        let repair_row = WorkUnitRow::new(
+            "wu-repair-1".into(),
+            task.id.to_string(),
+            plan_id.clone(),
+            1,
+            repair_spec(&task),
+            WorkUnitStatus::Ready,
+            now.clone(),
+        );
+        let plan = ExecutionPlanRow {
+            id: plan_id.clone(),
+            task_id: task.id.to_string(),
+            version: 1,
+            origin: PlanOrigin::Repair,
+            planner_run_id: None,
+            status: PlanStatus::Active,
+            spec: ExecutionPlanSpec {
+                schema: crate::execution_plan::EXECUTION_PLAN_SCHEMA.to_string(),
+                rationale: "repair materialization".to_string(),
+                work_units: vec![main_spec, repair_spec(&task)],
+            },
+            created_at: now.clone(),
+            superseded_at: None,
+        };
+        let plan_event = Event::ExecutionPlanned {
+            plan_id: plan_id.clone(),
+            version: 1,
+            origin: PlanOrigin::Repair,
+            supersedes: None,
+            reason: Some("review_repair".to_string()),
+            plan: Box::new(plan.spec.clone()),
+        };
+
+        let outcome = store
+            .review_repair_apply(
+                task.id,
+                vec![plan_event],
+                Some(plan),
+                vec![main_row, repair_row],
+            )
+            .unwrap();
+        assert_eq!(outcome.next, Status::Ready);
+        assert_eq!(outcome.attempts, 1, "repair は attempts を消費しない");
+
+        let active = store.execution_plan_active(task.id).unwrap().unwrap();
+        assert_eq!(active.origin, PlanOrigin::Repair);
+        let units = store.work_units_for(task.id).unwrap();
+        assert_eq!(units.len(), 2);
+        assert!(
+            units
+                .iter()
+                .any(|u| u.key == "main" && u.status == WorkUnitStatus::Done)
+        );
+        assert!(
+            units
+                .iter()
+                .any(|u| u.key == "repair-1" && u.status == WorkUnitStatus::Ready)
+        );
+        let events: Vec<Event> = store
+            .events_for(task.id)
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| e)
+            .collect();
+        assert!(matches!(
+            events.last(),
+            Some(Event::ExecutionPlanned {
+                origin: PlanOrigin::Repair,
+                ..
+            })
+        ));
+        assert!(
+            events.iter().any(
+                |e| matches!(e, Event::Transitioned { reason, .. } if reason == "review_repair")
+            )
+        );
+    }
+
+    /// 計画済みの Task（既に `active` な計画がある）に repair WU だけを追加する経路
+    /// （`new_plan = None`）。
+    #[test]
+    fn review_repair_apply_adds_a_repair_work_unit_to_an_already_planned_task() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let mut task = sample_task(Status::Reviewing);
+        task.attempts = 0;
+        store.insert(&task).unwrap();
+        let spec = sample_plan_spec();
+        let plan_id = "plan-1".to_string();
+        let plan = ExecutionPlanRow {
+            id: plan_id.clone(),
+            task_id: task.id.to_string(),
+            version: 1,
+            origin: PlanOrigin::Human,
+            planner_run_id: None,
+            status: PlanStatus::Active,
+            spec: spec.clone(),
+            created_at: "2026-09-25T00:00:00Z".to_string(),
+            superseded_at: None,
+        };
+        let mut units = sample_work_units(task.id, &plan_id);
+        for u in &mut units {
+            u.status = WorkUnitStatus::Done;
+        }
+        store
+            .execution_plan_adopt(
+                task.id,
+                plan,
+                units,
+                Event::ExecutionPlanned {
+                    plan_id: plan_id.clone(),
+                    version: 1,
+                    origin: PlanOrigin::Human,
+                    supersedes: None,
+                    reason: None,
+                    plan: Box::new(spec),
+                },
+            )
+            .unwrap();
+
+        let repair_row = WorkUnitRow::new(
+            "wu-repair-1".into(),
+            task.id.to_string(),
+            plan_id.clone(),
+            2,
+            repair_spec(&task),
+            WorkUnitStatus::Ready,
+            "2026-09-25T00:01:00Z".to_string(),
+        );
+        let wu_event = Event::WorkUnitTransitioned {
+            work_unit_id: "wu-repair-1".into(),
+            key: "repair-1".into(),
+            from: WorkUnitStatus::Pending,
+            to: WorkUnitStatus::Ready,
+            reason: "review_repair".to_string(),
+            run_id: None,
+        };
+        let outcome = store
+            .review_repair_apply(task.id, vec![wu_event], None, vec![repair_row])
+            .unwrap();
+        assert_eq!(outcome.next, Status::Ready);
+
+        let units = store.work_units_for(task.id).unwrap();
+        assert_eq!(units.len(), 3);
+        assert!(
+            units
+                .iter()
+                .any(|u| u.key == "repair-1" && u.status == WorkUnitStatus::Ready)
+        );
+    }
+
+    /// D17: replan は旧版を `superseded` にし、新しい版（`version = old + 1`）を `active` にする。
+    #[test]
+    fn execution_plan_replan_supersedes_the_old_version_and_activates_the_new_one() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task(Status::Ready);
+        store.insert(&task).unwrap();
+        let spec = sample_plan_spec();
+        let old_plan_id = "plan-1".to_string();
+        let old_plan = ExecutionPlanRow {
+            id: old_plan_id.clone(),
+            task_id: task.id.to_string(),
+            version: 1,
+            origin: PlanOrigin::Human,
+            planner_run_id: None,
+            status: PlanStatus::Active,
+            spec: spec.clone(),
+            created_at: "2026-09-25T00:00:00Z".to_string(),
+            superseded_at: None,
+        };
+        let units = sample_work_units(task.id, &old_plan_id);
+        store
+            .execution_plan_adopt(
+                task.id,
+                old_plan,
+                units.clone(),
+                Event::ExecutionPlanned {
+                    plan_id: old_plan_id.clone(),
+                    version: 1,
+                    origin: PlanOrigin::Human,
+                    supersedes: None,
+                    reason: None,
+                    plan: Box::new(spec.clone()),
+                },
+            )
+            .unwrap();
+
+        // v2: `c` を追加し、`b` が `c` にも依存するよう spec を変える。
+        let mut new_spec = spec.clone();
+        new_spec.work_units.push(WorkUnitSpec {
+            key: "c".into(),
+            kind: WorkUnitKind::Implement,
+            title: "C".into(),
+            objective: "do C, a brand new step added by replan".into(),
+            depends_on: vec![],
+            done_when: vec![],
+            checks: vec![],
+            context: Default::default(),
+            harness: None,
+            features: None,
+            budget: None,
+            outputs: vec![],
+        });
+        new_spec.work_units[1].depends_on = vec!["a".into(), "c".into()];
+
+        let new_plan_id = "plan-2".to_string();
+        let new_plan = ExecutionPlanRow {
+            id: new_plan_id.clone(),
+            task_id: task.id.to_string(),
+            version: 2,
+            origin: PlanOrigin::Planner,
+            planner_run_id: Some("run-planner-1".to_string()),
+            status: PlanStatus::Active,
+            spec: new_spec.clone(),
+            created_at: "2026-09-25T00:02:00Z".to_string(),
+            superseded_at: None,
+        };
+        let mut updated_b = units[1].clone();
+        updated_b.plan_id = new_plan_id.clone();
+        updated_b.spec = new_spec.work_units[1].clone();
+        updated_b.depends_on = new_spec.work_units[1].depends_on.clone();
+        let new_c = WorkUnitRow::new(
+            "wu-c".into(),
+            task.id.to_string(),
+            new_plan_id.clone(),
+            2,
+            new_spec.work_units[2].clone(),
+            WorkUnitStatus::Ready,
+            "2026-09-25T00:02:00Z".to_string(),
+        );
+        let plan_event = Event::ExecutionPlanned {
+            plan_id: new_plan_id.clone(),
+            version: 2,
+            origin: PlanOrigin::Planner,
+            supersedes: Some(old_plan_id.clone()),
+            reason: Some("replan".to_string()),
+            plan: Box::new(new_spec),
+        };
+        store
+            .execution_plan_replan(
+                task.id,
+                old_plan_id.clone(),
+                new_plan,
+                vec![updated_b],
+                vec![new_c],
+                vec![],
+                plan_event,
+            )
+            .unwrap();
+
+        let plans = store.execution_plan_list(task.id).unwrap();
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans[0].version, 1);
+        assert_eq!(plans[0].status, PlanStatus::Superseded);
+        assert!(plans[0].superseded_at.is_some());
+        assert_eq!(plans[1].version, 2);
+        assert_eq!(plans[1].status, PlanStatus::Active);
+        assert_eq!(plans[1].origin, PlanOrigin::Planner);
+
+        let active = store.execution_plan_active(task.id).unwrap().unwrap();
+        assert_eq!(active.id, new_plan_id);
+
+        let all_units = store.work_units_for(task.id).unwrap();
+        assert_eq!(all_units.len(), 3, "{all_units:?}");
+        let b = all_units.iter().find(|u| u.key == "b").unwrap();
+        assert_eq!(b.depends_on, vec!["a".to_string(), "c".to_string()]);
+        assert!(all_units.iter().any(|u| u.key == "c"));
+
+        // 並行 replan の検出: 旧版はもう active ではないので 2 回目は失敗する。
+        let err = store
+            .execution_plan_replan(
+                task.id,
+                old_plan_id,
+                ExecutionPlanRow {
+                    id: "plan-3".into(),
+                    task_id: task.id.to_string(),
+                    version: 3,
+                    origin: PlanOrigin::Human,
+                    planner_run_id: None,
+                    status: PlanStatus::Active,
+                    spec: sample_plan_spec(),
+                    created_at: "2026-09-25T00:03:00Z".to_string(),
+                    superseded_at: None,
+                },
+                vec![],
+                vec![],
+                vec![],
+                Event::ExecutionPlanned {
+                    plan_id: "plan-3".into(),
+                    version: 3,
+                    origin: PlanOrigin::Human,
+                    supersedes: None,
+                    reason: None,
+                    plan: Box::new(sample_plan_spec()),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, StoreError::InUse { .. }));
     }
 }

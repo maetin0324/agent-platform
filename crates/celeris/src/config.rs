@@ -1136,6 +1136,15 @@ pub struct ExecutionTomlConfig {
     /// ADR-0072 D14（Phase E3）: `[execution.planner]`。
     #[serde(default)]
     pub planner: ExecutionPlannerTomlConfig,
+    /// ADR-0072 D16/D18（Phase E4）: Task ごとの reviewer repair の上限（既定 3）。
+    #[serde(default = "default_max_repairs")]
+    pub max_repairs: u32,
+    /// ADR-0072 D16/D18（Phase E4）: 同じ class の repair の上限（既定 2）。
+    #[serde(default = "default_max_repairs_per_class")]
+    pub max_repairs_per_class: u32,
+    /// ADR-0072 D17/D18（Phase E4）: Task ごとの replan（計画の版の更新）の上限（既定 3）。
+    #[serde(default = "default_max_replans")]
+    pub max_replans: u32,
 }
 
 impl Default for ExecutionTomlConfig {
@@ -1146,6 +1155,9 @@ impl Default for ExecutionTomlConfig {
             no_progress_limit: default_no_progress_limit(),
             gate: default_execution_gate(),
             planner: ExecutionPlannerTomlConfig::default(),
+            max_repairs: default_max_repairs(),
+            max_repairs_per_class: default_max_repairs_per_class(),
+            max_replans: default_max_replans(),
         }
     }
 }
@@ -1161,6 +1173,15 @@ fn default_no_progress_limit() -> u32 {
 }
 fn default_execution_gate() -> String {
     "shadow".to_string()
+}
+fn default_max_repairs() -> u32 {
+    3
+}
+fn default_max_repairs_per_class() -> u32 {
+    2
+}
+fn default_max_replans() -> u32 {
+    3
 }
 
 /// `[execution.planner]`（ADR-0072 D14, Phase E3）: task-local な計画 run の harness と上限。
@@ -2906,6 +2927,9 @@ impl Config {
                     max_turns: self.execution.planner.max_turns,
                     max_wall_secs: self.execution.planner.max_wall_secs,
                 },
+                max_repairs: self.execution.max_repairs,
+                max_repairs_per_class: self.execution.max_repairs_per_class,
+                max_replans: self.execution.max_replans,
             },
         }
     }
