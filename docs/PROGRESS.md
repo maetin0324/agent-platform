@@ -18558,6 +18558,103 @@ scheduler が書いた索引と replay の再構築が一致する**
 - 出力の要点: exit 0、1 passed。
 
 ### ゲート（本 Phase 完了時点）
+## Phase 119「drain 後にプロセスが終了しない障害の修正と、promote.sh の停止対象の特定」（2026-09-25）
+
+branch: `worktree-agent-a948af7a87d94c483`（base `1f663a8`、Phase E2 の統合直後）。commit 4 つ:
+`06cac89`（D1）/ `32e58dd`（D2）/ `3e849fc`（D3）/ `c4a2ec4`（D4、ADR-0040 追記込み）。
+
+### 背景と原因の特定（実機 2026-09-24 の観測から）
+
+- ライブ切替で draining になった旧デーモンが「drained; exiting 0」「celeris stopped, exit: Drained」
+  まで journal に出した**後もプロセスが終了しない**（SIGTERM も効かない）。過去 4 世代の
+  `celeris@<sha>.service` が active running のまま溜まり、`promote.sh` の停止→起動が最も古い
+  無関係な pid に SIGTERM を送って 300 秒待ち失敗していた。
+- **D1 の原因（推定。実機のスタックトレースは取れていない）**: `main.rs` の `#[tokio::main]` が
+  組む `Runtime` は `async fn main` が返った**後**に暗黙に drop され、`spawn_blocking` のブロッキング
+  スレッドが空になるまで**無期限に**待つ。アプリケーション自身（`run()`）は正しく `Ok(Exit::Drained)`
+  を返しログも出ているので、`Runtime::drop` が何らかの未完了タスク（Phase 110a のチェックポイント/
+  バックアップの `spawn_blocking` が busy_timeout の間ブロックしている等）を待ち続けていたと推定した。
+  `tokio::signal::unix::signal(SIGTERM)` は OS のデフォルトの終了動作を「チャネルへ転送するだけ」に
+  置き換えるため、そのチャネルを汲むイベントループ（tick）が止まった後は SIGTERM が効かなくなる
+  ——「SIGTERM も効かない」という観測と一致する。
+- **D2 の実装は 1 回撤回した**: 最初は `Drop for ProcessGroup` に SIGTERM → grace 後 SIGKILL を
+  持たせたが、`cargo test -p task-worker --lib paperqa::` で 6 テストが断続的に失敗した
+  （`literature search returned nothing`）。`ProcessGroup` の guard は `child.wait()` を終えた後
+  いくつかの `await` を挟んで関数が戻るときに drop されるため、reap 済みで空いた pid を高い並列度
+  （`cargo test` の既定並列）で**別の run が拾ってしまい**、無関係な生きているプロセスへ SIGTERM が
+  飛んでいた。変更前の HEAD からの使い捨て worktree（`git worktree add --detach`）で
+  `cargo test -p task-worker --lib paperqa::` が 57/57 通ることを確認して原因を切り分けた
+  （詳細は ADR-0040 追記）。
+
+### D1: 終了経路の修正（`crates/celeris/src/main.rs`）
+
+- 条件: drain（または通常の SIGTERM 終了）後、プロセスが確実に終了する。
+- 実行したコマンド: `cargo test -p celeris --bin celeris`
+- 出力の要点: exit 0、2 passed
+  （`help_exits_zero_and_missing_config_exits_two` と新規
+  `tests::shutdown_timeout_gives_up_within_its_bound_even_with_a_stuck_background_task`）。
+- 後者は stop シグナルを見ない・600 秒眠り続ける `spawn_blocking` を持つ Runtime に対して
+  `shutdown_timeout(3s)` を呼び、5 秒未満で制御が戻ることを確認（実プロセスを終わらせる
+  `std::process::exit` 自体はテストプロセスごと終わるので確認できないが、そこに至る前の
+  `shutdown_timeout` が無期限に待たないことがこの Phase の core fix）。
+- `#[tokio::main]` をやめて runtime を手で組み、`run()` の後は
+  `runtime.shutdown_timeout(Duration::from_secs(10))` → `std::process::exit(code)`。
+
+### D2: 孤児プロセスの掃除（`crates/task-worker/src/{process_group,subprocess}.rs`）
+
+- 条件: run の終了時（done/error/budget/yield/kill）に process group ごと SIGTERM → 猶予 →
+  SIGKILL して `sleep` のような子孫を残さない。ゾンビは `wait` で回収する。
+- 実行したコマンド: `cargo test -p task-worker --lib`
+- 出力の要点: exit 0、**517 passed**（1 ignored、0 failed）。`--test-threads=32` で 3 回連続実行し
+  非決定性が無いことを確認。
+- 新規テスト:
+  - `subprocess::a_normally_finished_run_reaps_a_background_grandchild`
+    （`sh -c "sleep 300 & ...; echo done"` で正常終了させ、`run_subprocess` が返った後に孫が
+    片付くことを確認。これが D2 の「偽の sleep 子プロセス」テスト）
+  - `process_group::sweep_signals_the_group_and_is_a_no_op_when_nothing_is_left`
+  - `process_group::reap_finished_children_collects_an_unwaited_zombie`
+    （`kill_on_drop` の非同期 reap が shutdown に間に合わなかった場合のゾンビ回収）
+- 実装: `subprocess::reap_after_terminal` のリーダーが自分から終わった枝で、`await` を挟まず
+  `process_group::sweep(pid, grace)` を呼ぶ（登録テーブルを経由しない、新鮮な pid で `killpg`）。
+  ほぼ全アダプタ（claude-code / codex / aider / langmem / local_deep_research / paperqa / acp /
+  汎用 subprocess）がこの共有関数を通るので一律にカバーされる。タイムアウト側（`kill_now`）は
+  既に `killpg`（グループ全体）を送っているので変更不要。
+
+### D3: `promote.sh` の停止対象の特定（`scripts/selfdeploy/{lib.sh,promote.sh,status.sh}`）
+
+- 条件: 停止→起動のとき、旧デーモンは `current` の release の unit MainPID を対象にする。他に
+  残っている draining unit があれば一覧を出し、`--stop-stale` で SIGKILL できる。
+- 実行したコマンド: `bash -n scripts/selfdeploy/{lib.sh,promote.sh,status.sh,tests/pid_resolution_test.sh}`
+- 出力の要点: 4 ファイルとも exit 0（構文エラー無し）。
+- 実行したコマンド: `bash scripts/selfdeploy/tests/pid_resolution_test.sh`
+- 出力の要点: **6/6 ok**（exit 0）。本物の `systemctl`・`/proc` には触れない（偽スタブと一時
+  ディレクトリ）。特に「systemd が current の release を知っていれば、無関係な最古の pid が
+  `/proc` に混じっていてもその MainPID だけを返す」テストは、実機の事故をそのまま再現する条件で
+  書いた。
+- `sd_resolve_old_daemon_pid`（新設。`current` の release の `celeris@<sha>` unit の MainPID を
+  優先し、systemd がまだ知らない release〈初回の移行〉だけ従来の `/proc` 完全一致走査
+  `sd_find_old_celeris_pid` にフォールバック）と `sd_list_stale_celeris_units`（新設。
+  `current`/`new` 以外に active な `celeris@*` の一覧）を `lib.sh` に追加。`promote.sh` は
+  旧 pid の決定にこれを使うよう変更し、昇格前に stale unit を一覧表示（既定）、`--stop-stale` で
+  SIGKILL。`status.sh` にも `stale_instances`（`current`/`previous` 以外に active な `celeris@*`
+  の sha12 と pid）を追加。
+
+### D4: 監視（`crates/celeris/src/instance.rs`）
+
+- 条件: `GET /health`/`GET /releases` の instances か WARN ログで「drained なのにプロセスが生きて
+  いる」旧インスタンスが分かる。
+- 実行したコマンド: `cargo test -p celeris --lib instance::`
+- 出力の要点: exit 0、12 passed（新規
+  `stale_but_alive_rows_finds_only_drained_rows_whose_pid_is_still_running` を含む）。
+- 実装: `Supervisor::step` が `daemon_instances` の `drained_at` が付いた他インスタンスの行を
+  **削除する直前**に `stale_but_alive_rows`（純粋関数）で pid 生存を確認し、生きていれば WARN
+  ログを残す。**API 型は増やしていない**: `daemon_instances` の行は ADR-0040 D4 の設計どおり
+  `drained_at` が付いたら同じ tick で削除されるため（ここは変更していない）、`GET /health`/
+  `GET /releases` から安定して観測することはできない。journal の WARN と D3 の `status.sh` の
+  `stale_instances`（systemd を直接見るので削除タイミングに左右されない）で実運用上は足りると
+  判断した（未解決事項に記録。設計変更が要るなら次の Phase で）。
+
+### D5: ゲート（全体）
 
 | ゲート | 実行したコマンド | 出力の要点 |
 |---|---|---|
@@ -18596,3 +18693,22 @@ scheduler が書いた索引と replay の再構築が一致する**
 - 原因: 過去 4 世代（0e20e1b2a058 / 2f1fcc0a6227 / 6566ad486acd / 93076d0f4c76）の `celeris@` unit が active running のまま残っていた。journal には「drained; exiting 0」「celeris stopped, exit: Drained」が出ているのにプロセスが終了しない（tick は止まっている、SIGTERM も効かない）。最初に残ったのは 0e20e1b2a058（Phase 116 / 117 を含む最初の release）。promote.sh は旧 pid を pgrep 相当で決めるため最も古い無関係の pid（0e20e1b）を対象にして待った。93076d0f4c76 の cgroup には `sleep 3600` が 3 つ（ワーカー run の子孫）、現行 unit には `[codex] <defunct>`。
 - 対処: `systemctl --user stop` を 4 unit に発行（TimeoutStopSec=3900 なので SIGKILL まで最大 65 分）。`kill -9` は auto mode で拒否されたため人に依頼。Phase 119（Sonnet）で終了経路（背景スレッド / Runtime の shutdown_timeout / process::exit）、孤児プロセスの掃除、promote.sh の停止対象（`current` の unit MainPID）と stale 一覧、監視を修正する。
 - 19:57Z: 旧 unit 4 つは `systemctl --user stop` で終了（failed 状態で残ったので reset-failed）。`promote.sh 1f663a83ff6c` の停止→起動が完了し、本番は **release `1f663a83ff6c`（Phase E2、schema 26）**。in-flight 0、停止時間 1 分未満。
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| 全テスト | `cargo test --workspace --no-fail-fast` | exit 0（`TEST_EXIT=0`）。全 test result 行が `ok`、**2207 passed**、FAILED 0 |
+
+API 型（`task-api`/`task-core` の public 型）は変更していないので、スキーマ再生成・
+`gui gen:types`/`typecheck` は対象外（`docs/api/v1/api-v1.schema.json` に差分なし）。
+
+### 未解決事項（詳細は ADR-0040「Phase 119 追記」）
+
+- D1 の根本原因（どの `spawn_blocking` が詰まっていたか）は実機のスタックトレースが無いため未確定。
+  対処自体（`shutdown_timeout` + `process::exit`）はこの種のあらゆる「止まらない背景タスク」を
+  無害化するので実害は無いはずだが、次に同じ事故が起きたら `/proc/<pid>/task/*/stack` を取ってから
+  殺すこと。
+- D4 は `daemon_instances` の削除タイミングを変えていないので、API からの可視性はその tick に
+  限られる。安定した可視性が要るなら `drained_at` の削除猶予に関する設計変更（ADR-0040 D4 本文の
+  改訂）が要る。
+- `status.sh`/`promote.sh --stop-stale` は systemd に依存する（無い環境では `sd_list_stale_celeris_units`
+  が空を返すだけで壊れない）。
+- 実機での `promote.sh --stop-stale` の動作確認と、次回のライブ切替で「drain 後にプロセスが終了しない」
+  事故が再発しないかは、本番環境（このエージェントは触れない）での確認が必要。

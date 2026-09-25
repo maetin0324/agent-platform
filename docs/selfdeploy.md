@@ -348,6 +348,13 @@ scripts/selfdeploy/promote.sh <sha12>
   （`POST /releases/{sha12}/promote` が spawn の直前に消す）ので、古い失敗が残り続けることはない。
   `GET /releases` の `items[].promote_failed` と `status.sh` の `promote_failed` はこれを読む。
 - **git リポジトリには触れない。** `main` への反映は人がやる（次節）。
+- **停止→起動のとき、旧 celeris の pid は `current` の release の systemd unit（`celeris@<sha12>`）の
+  `MainPID` を対象にする**（Phase 119 D3。ADR-0040 追記）。systemd がまだその release を知らない
+  （初回の移行）ときだけ、`/proc` の `--config` 完全一致走査にフォールバックする。
+- 昇格の前に、`current`/`new` 以外に **active な `celeris@*` unit**（drain したまま終了しなかった
+  前回昇格の残骸）があれば一覧を出す。既定では出すだけ。`promote.sh <sha12> --stop-stale` を付けると
+  SIGKILL する（人が判断する操作なので既定はしない）。`status.sh` の `stale_instances` でも同じ一覧が
+  見える（`current`/`previous` 以外に active な `celeris@*` の sha12 と pid）。
 
 ### 4d. 昇格したら `main` に戻す（ADR-0041 D3）
 

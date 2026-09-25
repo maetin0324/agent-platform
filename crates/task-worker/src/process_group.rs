@@ -27,6 +27,27 @@
 //! 合流点はこの 1 関数だけで、呼ぶのは `Dispatcher::stop_run` である。
 //!
 //! I/O も LLM も持たない（シグナルを送るだけ）。
+//!
+//! ## Phase 119 D2: 正常終了（done / error / question / yield / budget）でも孤児を残さない
+//!
+//! Phase 54 まで直していたのは「タイムアウト・cancel・drain タイムアウトで打ち切られた run」だけだった。
+//! **run が自分から終わった**（アダプタの spawn した子が exit する）経路では誰もプロセスグループへ
+//! signal を送っていなかった。ワーカー自身の直接の子（`claude` / `codex` 本体）は `child.wait()` で
+//! reap されて消えるが、その子が**バックグラウンドジョブとして** `&` で起こした孫プロセスは、
+//! プロセスグループの長（＝直接の子）が死んでも生き残る。
+//!
+//! **最初の実装（`Drop for ProcessGroup` に SIGTERM を持たせる）は撤回した**: [`ProcessGroup`] の
+//! guard は、アダプタが `child.wait()` を終えてから（`stream_child` のさらに後始末や呼び出し元の
+//! 残りの処理を経て）関数が返るときに drop される。その `await` を挟む間に、reap 済みで**空いた
+//! pid** を（高い並列度で大量に子プロセスを spawn する）別の run が拾ってしまうことがあり、
+//! `Drop` から送った SIGTERM が**無関係な、まだ生きている別の run の子**に当たった（実機ではなく
+//! `cargo test -p task-worker --lib paperqa::` で 6 件の非決定的な失敗として顕在化。詳細は
+//! ADR-0040 追記の「Phase 119 D2 の撤回」）。
+//!
+//! 代わりに [`crate::subprocess::reap_after_terminal`] の**リーダーの `child.wait()` が返った直後、
+//! 一切 `await` を挟まずに**同じプロセスグループへ SIGTERM を送るようにした（[`sweep`]）。ここが
+//! `killpg` を送る全経路の中で**最も新鮮な**タイミングであり、pid 再利用の危険が最小になる
+//! （abort 系の `kill_tree`/`kill_tree_with` と同じ「レジストリから引いた直後に送る」規律に揃う）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -99,6 +120,36 @@ pub fn group_alive(run_id: &str) -> bool {
     }
 }
 
+/// Phase 119 D2: ゾンビ（`<defunct>`）になった子を回収する。
+///
+/// `tokio::process::Child` の `kill_on_drop(true)` は、drop 時に自分の runtime へ「後で reap する」
+/// タスクを投げる（Drop は同期なので、reap 自体は非同期にやるしかない）。その run の future が
+/// `JoinHandle::abort()` でちょうど shutdown の直前に落とされた等、runtime が reap の完了を待たずに
+/// 終わってしまうと、子は `wait(2)` されないまま zombie として残る（本番 2026-09-24 で
+/// `[codex] <defunct>` を確認）。
+///
+/// ここは `waitpid(-1, WNOHANG)` で「回収できる子がもう無い」（`ECHILD`）まで拾い切る決定的な掃除。
+/// **runtime が完全に止まった後にだけ呼ぶこと**: tokio は SIGCHLD 駆動で自分の追跡している子を
+/// `waitid`/`try_wait` しているので、runtime が動いている間にここを呼ぶと、まだ生きている run の
+/// `child.wait()` が受け取るはずの終了ステータスを横取りしてしまう（`main.rs` は
+/// `Runtime::shutdown_timeout` の**後**にだけ呼ぶ）。
+pub fn reap_finished_children() -> usize {
+    use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
+    let mut reaped = 0usize;
+    loop {
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => break,
+            Ok(_) => reaped += 1,
+            Err(Errno::ECHILD) => break,
+            Err(e) => {
+                warn!(error = %e, "reap_finished_children: waitpid failed");
+                break;
+            }
+        }
+    }
+    reaped
+}
+
 /// プロセスグループへ signal を送る。もう居なければ（`ESRCH`）`false`。
 pub fn signal_group(pgid: i32, sig: Signal) -> bool {
     match signal::killpg(Pid::from_raw(pgid), sig) {
@@ -158,37 +209,107 @@ pub fn kill_tree_with(
     if !signalled && container.is_none() {
         return false;
     }
-    // `grace` 後の SIGKILL（と `rm -f`）。tokio のランタイムに依らない（`tick()` は同期の関数から
-    // 呼ばれる）。pid の再利用は理論上あり得るが、`killpg` は「その pgid のグループ長」にしか届かず、
-    // Linux の pid は上限まで順に配られるので `grace`（既定 10 秒）の間に一周することはない。
+    spawn_group_reaper(pgid.unwrap_or(0), grace, container);
+    true
+}
+
+/// Phase 119 D2: リーダーが**自分から**終わった直後（`await` を挟まず、`child.id()` を取ってから
+/// `child.wait()` が返るまでの間だけ）に、`crate::subprocess::reap_after_terminal` から呼ぶ。
+/// `registry`（`run_id` の表）は経由しない — `pid` は呼び出し元がその場で `child.id()` から直接
+/// 取ったばかりの新鮮な値であることが前提（`kill_tree` 系のように後から表を引くと、その間の
+/// `await` で pid が再利用されているおそれがある。このモジュール先頭のコメント参照）。
+///
+/// プロセスグループが既に空（孤児が無い、ふつうのケース）なら `killpg` が `ESRCH` を返すので
+/// 無害な no-op（追加のスレッドも立てない）。孤児が残っていれば SIGTERM → `grace` 後 SIGKILL。
+pub fn sweep(pid: u32, grace: Duration) {
+    let pgid = pid as i32;
+    if signal_group(pgid, Signal::SIGTERM) {
+        spawn_group_reaper(pgid, grace, None);
+    }
+}
+
+/// `grace` 後に SIGKILL（と、あればコンテナの `rm -f`）を送る別スレッドを起こす。tokio のランタイムに
+/// 依らない（`Drop`・`tick()` どちらも同期の文脈から呼ばれる）。`pgid == 0` はコンテナだけを持つ
+/// （プロセスグループの登録が無い）呼び出しの印で、SIGKILL は送らない。
+///
+/// pid の再利用は理論上あり得るが、`killpg` は「その pgid のグループ長」にしか届かず、Linux の pid は
+/// 上限まで順に配られるので `grace`（既定 10 秒）の間に一周することはない。
+fn spawn_group_reaper(pgid: i32, grace: Duration, container: Option<Arc<dyn ContainerStopper>>) {
     std::thread::Builder::new()
         .name("celeris-killpg".to_string())
         .spawn(move || {
             std::thread::sleep(grace);
-            if let Some(pgid) = pgid {
+            if pgid != 0 {
                 signal_group(pgid, Signal::SIGKILL);
             }
             if let Some(stopper) = container {
                 stopper.stop_blocking();
             }
         })
-        .map_err(|e| warn!(?pgid, error = %e, "could not spawn the SIGKILL timer thread"))
+        .map_err(|e| warn!(pgid, error = %e, "could not spawn the SIGKILL timer thread"))
         .ok();
-    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Phase 119 D2: `reap_finished_children` は `waitpid(-1, WNOHANG)` — プロセス全体で共有された
+    /// 資源なので、他のテストが自分の子をまだ reap し切っていない一瞬に重なると、その子の終了ステータスを
+    /// 横取りしうる。すべての「本物の子プロセスを spawn するテスト」（`reap_finished_children` を呼ぶ
+    /// テストを含む）はこの lock を握ってから spawn する（cargo test はデフォルトでテストを並列に走らせる）。
+    /// `tokio::sync::Mutex` を使うのは、await をまたいでガードを持ち続ける `#[tokio::test]` が
+    /// `std::sync::Mutex` だと clippy（`await_holding_lock`）に落ちるため。
+    fn child_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// 非同期テスト（`#[tokio::test]`）用。
+    async fn serialize_child_process_tests() -> tokio::sync::MutexGuard<'static, ()> {
+        child_test_lock().lock().await
+    }
+
+    /// 同期テスト（`#[test]`。tokio runtime の外）用。
+    fn serialize_child_process_tests_blocking() -> tokio::sync::MutexGuard<'static, ()> {
+        child_test_lock().blocking_lock()
+    }
+
     #[test]
     fn registration_is_visible_until_it_is_dropped() {
         let run_id = format!("reg-{}", std::process::id());
         {
-            let _guard = ProcessGroup::register(&run_id, Some(4242));
-            assert_eq!(pgid_of(&run_id), Some(4242));
+            let _guard = ProcessGroup::register(&run_id, Some(4_000_000));
+            assert_eq!(pgid_of(&run_id), Some(4_000_000));
         }
         assert_eq!(pgid_of(&run_id), None);
+    }
+
+    /// Phase 119 D2: `sweep(pid, grace)` はそのプロセスグループへ SIGTERM を送る（登録テーブルは
+    /// 経由しない、`child.id()` から直接渡された pid で動く）。孤児が居なければ `killpg` が
+    /// `ESRCH` を返すだけの no-op であることも確認する（`spawn_group_reaper` の余計なスレッドを
+    /// 立てない）。
+    #[tokio::test]
+    async fn sweep_signals_the_group_and_is_a_no_op_when_nothing_is_left() {
+        let _serial = serialize_child_process_tests().await;
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("300").kill_on_drop(true);
+        command.process_group(0);
+        let mut child = command.spawn().unwrap_or_else(|e| panic!("spawn: {e}"));
+        let pid = child.id().expect("child pid");
+
+        sweep(pid, Duration::from_secs(10));
+        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+            .await
+            .unwrap_or_else(|_| panic!("the process should have exited after sweep's SIGTERM"))
+            .unwrap_or_else(|e| panic!("wait: {e}"));
+        assert!(
+            !status.success(),
+            "sleep should have been signalled, not exited on its own"
+        );
+
+        // 掃除対象が既に居ない（既に reap 済みの pid）なら no-op。
+        assert!(!signal_group(pid as i32, Signal::SIGTERM));
     }
 
     /// ADR-0070 D5（Phase 116）: 登録された偽の子プロセスが生きている間は `group_alive` が `true`、
@@ -196,6 +317,7 @@ mod tests {
     /// `self.running` を消す前に見る、まさにこの状況）`false` になる。未登録の run は常に `false`。
     #[tokio::test]
     async fn group_alive_reflects_whether_the_registered_process_is_still_running() {
+        let _serial = serialize_child_process_tests().await;
         assert!(!group_alive("no-such-run"));
 
         let mut command = tokio::process::Command::new("sleep");
@@ -234,9 +356,48 @@ mod tests {
         assert!(!kill_tree("no-such-run", Duration::from_millis(1)));
     }
 
+    /// Phase 119 D2: 本番の `[codex] <defunct>` を再現する — 子プロセスが終了したのに誰も `wait(2)`
+    /// していない（`tokio::process::Child` を drop も `.wait()` もせず leak させる）状態を作り、
+    /// `reap_finished_children` がそれを回収することを確かめる。
+    #[test]
+    fn reap_finished_children_collects_an_unwaited_zombie() {
+        let _serial = serialize_child_process_tests_blocking();
+        let child = std::process::Command::new("true")
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn: {e}"));
+        let pid = child.id();
+        // 終了するまで少し待つ（`wait()` は呼ばない — それを呼ぶと reap されてしまい、再現にならない）。
+        for _ in 0..200 {
+            if matches!(
+                std::fs::read_to_string(format!("/proc/{pid}/stat")),
+                Ok(s) if s.split(' ').nth(2) == Some("Z")
+            ) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let reaped = reap_finished_children();
+        assert!(reaped >= 1, "expected to reap at least the zombie we made");
+        // 本当に回収済みなら、同じ pid をもう一度 `waitpid` しても子として見つからない
+        // （`std::process::Child` の drop 自体は `wait()` を呼ばないので、二重 reap の心配は無い）。
+        assert!(
+            std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .map(|s| !s.success())
+                .unwrap_or(true),
+            "the zombie should be gone from /proc after reaping"
+        );
+        // `std::process::Child::drop` は `wait(2)` を呼ばない（呼ぶのはこのテストか
+        // `reap_finished_children` だけ）ので、既に reap 済みのここで drop しても二重 reap は起きない。
+        drop(child);
+    }
+
     /// 実プロセスで一族ごと止まることを見る（孫まで）。
     #[tokio::test]
     async fn kill_tree_terminates_the_whole_group_including_grandchildren() {
+        let _serial = serialize_child_process_tests().await;
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let pidfile = dir.path().join("grandchild.pid");
         let script = format!("sleep 300 & echo $! > {}; wait", pidfile.to_string_lossy());
@@ -275,6 +436,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_containerized_run_is_also_stopped_inside_the_container() {
+        let _serial = serialize_child_process_tests().await;
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let log = dir.path().join("argv.log");
         let runtime = write_fake_runtime(dir.path(), &log);
@@ -345,6 +507,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_container_is_stopped_even_when_the_process_group_is_already_gone() {
+        let _serial = serialize_child_process_tests().await;
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let log = dir.path().join("argv.log");
         let runtime = write_fake_runtime(dir.path(), &log);

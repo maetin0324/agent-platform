@@ -15,7 +15,8 @@ usage: status.sh
 
   JSON を標準出力に出す。何も変えない。
     current / previous / releases[] (gate.json / verify.json / promoted.json / changes.json の要約と
-    on_main) / health / gui_health / daemon_instances
+    on_main) / health / gui_health / daemon_instances / stale_instances（Phase 119 D3/D4: current/
+    previous 以外に active な celeris@* unit。drain したまま終了しなかった残骸）
 EOF
     exit 2
     ;;
@@ -33,6 +34,19 @@ if [ -r "$SD_DB" ]; then
     DAEMON_ROWS="${out:-[]}"
   fi
 fi
+
+# Phase 119 D3/D4: `current`/`previous` 以外に active な celeris@* unit（drain したまま終了しなかった
+# 前回昇格の残骸。ADR-0040 追記）を一覧に出す。systemd が無い環境では空のまま（クラッシュしない）。
+STALE_TSV="$(mktemp)"
+printf 'sha:s pid:i\n' >"$STALE_TSV"
+while IFS= read -r stale_sha; do
+  [ -n "$stale_sha" ] || continue
+  stale_pid="$(systemctl --user show -p MainPID --value "celeris@$stale_sha" 2>/dev/null || echo 0)"
+  printf '%s\t%s\n' "$stale_sha" "${stale_pid:-0}" >>"$STALE_TSV"
+done < <(sd_list_stale_celeris_units "$(sd_current_sha)" "$(sd_previous_sha)")
+SD_STATUS_STALE="$(sd_tsv_to_json "$STALE_TSV")"
+rm -f "$STALE_TSV"
+export SD_STATUS_STALE
 
 HEALTH_JSON='null'
 if [ "$(sd_http_status "$SD_PROD_API/api/v1/health")" = 200 ]; then
@@ -166,6 +180,9 @@ out = {
     "health": parse_env_json("SD_STATUS_HEALTH"),
     "gui_health": parse_env_json("SD_STATUS_GUI_HEALTH"),
     "daemon_instances": parse_env_json("SD_STATUS_DAEMON"),
+    # Phase 119 D3/D4: current/previous 以外に active な celeris@* unit（drain したまま終了しなかった
+    # 残骸）。空配列 = 正常。`promote.sh --stop-stale` で片付けられる。
+    "stale_instances": parse_env_json("SD_STATUS_STALE") or [],
     "releases": items,
     "backups": sorted(
         (f for f in os.listdir(os.environ["SD_BACKUPS"]) if f.endswith(".sqlite3"))

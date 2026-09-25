@@ -509,12 +509,24 @@ pub(crate) async fn kill_now(child: &mut Child, grace: Duration) -> std::io::Res
 }
 
 /// 終端メッセージ受信後の後始末: 最大 `grace` 待ち、まだ生きていれば kill する（仕様 6）。
+///
+/// Phase 119 D2: リーダーが**自分から**終わったとき（下の `Ok(status)` の枝。タイムアウトで
+/// `kill_now` に落ちる方は `send_signal_to_group` が既にグループ全体へ SIGTERM/SIGKILL を送っている
+/// ので対象外）も、そのプロセスグループに孤児（ワーカーが `&` で起こしたバックグラウンドジョブ）が
+/// 残っていないか掃除する。`child.id()` は `child.wait()` を呼ぶ**前**に取る（`await` を挟まず、
+/// 最も新鮮な pid で `process_group::sweep` を呼ぶため — 詳細はそのモジュール先頭のコメント）。
 pub(crate) async fn reap_after_terminal(
     child: &mut Child,
     grace: Duration,
 ) -> std::io::Result<ExitStatus> {
+    let pid = child.id();
     match tokio::time::timeout(grace, child.wait()).await {
-        Ok(status) => status,
+        Ok(status) => {
+            if let Some(pid) = pid {
+                crate::process_group::sweep(pid, grace);
+            }
+            status
+        }
         Err(_elapsed) => kill_now(child, grace).await,
     }
 }
@@ -636,6 +648,55 @@ mod tests {
         assert_eq!(parsed["type"], "run");
         assert_eq!(parsed["task"]["id"], req.task.id.to_string());
         assert!(request.contains('\n'), "人が読めるよう整形して書く");
+    }
+
+    /// Phase 119 D2: run が**自分から** `done` で終わっても（タイムアウトや cancel ではない）、
+    /// ワーカーが `&` で起こしたバックグラウンドジョブ（本番で見つかった `sleep 3600` の再現）は
+    /// `reap_after_terminal` の中の `process_group::sweep` が片付ける。孫がプロセスグループの長
+    /// （`sh` 自身）より長生きしても、`sh` が exit した瞬間に掃除されることを確認する。
+    #[tokio::test]
+    async fn a_normally_finished_run_reaps_a_background_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        let spec = sh_spec(&format!(
+            "cat >/dev/null; \
+             sleep 300 & echo $! > {pidfile}; \
+             echo '{{\"type\":\"done\",\"summary\":\"ok\",\"evidence\":[]}}'",
+            pidfile = pidfile.to_string_lossy()
+        ));
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = run_subprocess(&spec, &req, "run-grandchild", &default_limits(), &sink)
+            .await
+            .unwrap();
+        match outcome.terminal {
+            Terminal::Done { .. } => {}
+            other => panic!("expected done, got {other:?}"),
+        }
+
+        // 孫の pid が書かれるのを待つ（上限付き）。
+        let mut grandchild: Option<i32> = None;
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(&pidfile)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                grandchild = Some(pid);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let grandchild = grandchild.unwrap_or_else(|| panic!("grandchild pid was never written"));
+
+        // `run_subprocess` が返った時点で、正常終了経路の `sweep` が孫を片付けているはず。
+        for _ in 0..100 {
+            if !std::path::Path::new(&format!("/proc/{grandchild}")).exists() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!(
+            "the background grandchild {grandchild} is still alive after a normal `done` finish"
+        );
     }
 
     #[tokio::test]
