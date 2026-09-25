@@ -1074,6 +1074,11 @@ struct RunExtras {
     /// ADR-0072 D13/D14（Phase E3）: task-local な planner run にだけ `Some`
     /// （`RunContext.execution_planner` にそのまま乗る）。
     execution_planner: Option<task_worker::protocol::ExecutionPlannerContext>,
+    /// ADR-0072 D14（Phase E4b 項目3）: planner run にだけ `Some(self.config.execution.planner.
+    /// permission_mode)`。`RunContext` には乗らない（ワーカーへの文脈ではなく、`run_worker` が
+    /// `adapter.with_permission_mode` で実際の CLI 引数を上書きするためだけの、dispatcher 内部の
+    /// 配線）。
+    planner_permission_mode: Option<String>,
 }
 
 struct ReviewEntry {
@@ -6788,6 +6793,11 @@ impl Dispatcher {
                     original_task_budget,
                     replan_dispatch,
                 )?);
+                // ADR-0072 D14（Phase E4b 項目3）: `[execution.planner].permission_mode`
+                // （既定 `"plan"`）を、この run の実際の CLI 引数として `run_worker` に反映させる
+                // （`RunContext` には乗せない。プロンプトではなく実行そのものの配線）。
+                extras.planner_permission_mode =
+                    Some(self.config.execution.planner.permission_mode.clone());
                 // ADR-0072 D5（Phase E3）: `runs` 索引に planner run の行を作る（WU の
                 // `start_work_unit_run` と同じ役目。`role = planner`、`work_unit_id = None`）。
                 let planner_seq = self
@@ -7243,6 +7253,9 @@ impl Dispatcher {
             // ADR-0072 D13/D14（Phase E3）: planner run かどうかも `dispatch_ready` が判断し、
             // ここの返り値を上書きする（ここでは常に `None`）。
             execution_planner: None,
+            // ADR-0072 D14（Phase E4b 項目3）: 同上、`dispatch_ready` が planner run のときだけ
+            // 上書きする（ここでは常に `None`）。
+            planner_permission_mode: None,
         })
     }
 
@@ -9705,6 +9718,9 @@ async fn run_worker(
         .map_err(|e| AdapterError::Other(format!("store: {e}")))?
         .ok_or_else(|| AdapterError::Other("task vanished".into()))?;
     task.worker_hint.tier = execution_tier;
+    // ADR-0072 D14（Phase E4b 項目3）: `extras` は後段で複数のフィールドが個別に消費されるので、
+    // 使う値だけ先に取り出しておく。
+    let planner_permission_mode = extras.planner_permission_mode.clone();
     // ADR-0052 D2（Phase 64）: フォールバックした知識整理 run は、DB のタスクではなく**ワーカーに渡す
     // 写し**だけを書き換える（専用アダプタの固定を外し、予算を `max_turns = 8` / `max_wall_secs = 600` に）。
     if let Some(fallback) = &extras.knowledge_fallback {
@@ -10029,6 +10045,20 @@ async fn run_worker(
             }
         },
         None => adapter,
+    };
+    // ADR-0072 D14（Phase E4b 項目3）: planner run（`extras.planner_permission_mode` が `Some`）は
+    // `[execution.planner].permission_mode` を実際の CLI 引数として反映する。対応しないアダプタ
+    // （`with_permission_mode` が `None` を返す）はアダプタ既定の permission-mode のまま走る
+    // （E3 実装時の既定の動作と同じ。実害は無い）。
+    let adapter = match &planner_permission_mode {
+        Some(mode) if !mode.is_empty() => match adapter.with_permission_mode(mode) {
+            Some(wrapped) => wrapped,
+            None => {
+                tracing::debug!(task_id = %task_id, adapter = %adapter.id(), %mode, "adapter does not support with_permission_mode; planner permission_mode was not applied (ADR-0072 D14)");
+                adapter
+            }
+        },
+        _ => adapter,
     };
     // ADR-0054 D1（Phase 67）: `run_worker` を通る run で継続セッションを持てるのは CoS の対話 run
     // だけ（部門長のレビュー run は `review.rs` の別経路。`run_extras` の `is_cos_conversation` と同じ

@@ -106,6 +106,16 @@ impl WorkerAdapter for ClaudeCodeAdapter {
         config.container = Some(plan);
         Some(Arc::new(ClaudeCodeAdapter::new(config)))
     }
+
+    /// ADR-0072 D14（Phase E4b 項目3）: `--permission-mode` を上書きした複製。planner run に
+    /// `[execution.planner].permission_mode`（既定 `"plan"`）を実際の CLI 引数へ反映するために使う
+    /// （`with_model`/`with_env` と同じ形。ADR-0072「Phase E3 実装時の逸脱・明確化」で見送っていた
+    /// フック）。
+    fn with_permission_mode(&self, mode: &str) -> Option<Arc<dyn WorkerAdapter>> {
+        let mut config = self.config.clone();
+        config.permission_mode = mode.to_owned();
+        Some(Arc::new(ClaudeCodeAdapter::new(config)))
+    }
 }
 
 /// ADR-0006 Phase 115 D1（本番障害 01M3915FARENW8M0JM11XVF6W0 / 01M38T8N17MEWPTJQXGX1TNYJD）:
@@ -3463,6 +3473,48 @@ echo '{{"type":"result","subtype":"success","is_error":false}}'
         assert!(matches!(outcome.terminal, Terminal::Done { .. }));
         let seen = std::fs::read_to_string(&out_file).unwrap();
         assert_eq!(seen, "new-account-dir");
+    }
+
+    /// ADR-0072 D14（Phase E4b 項目3）: `with_permission_mode` の複製は `--permission-mode` の値を
+    /// 上書きする（`[execution.planner].permission_mode` を実際の CLI 引数に反映するための実行時配線。
+    /// E3 実装時に見送っていたフック）。既定のアダプタ（`bypassPermissions`）の CLI 引数には出ない。
+    #[tokio::test]
+    async fn with_permission_mode_overrides_the_permission_mode_argument() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("args-seen.txt");
+        let config = stub_claude(
+            dir.path(),
+            &format!(
+                r#"mkdir -p artifacts
+printf '%s' "$*" > {out}
+printf '%s' '{{"summary":"ok","evidence":[]}}' > artifacts/result.json
+echo '{{"type":"result","subtype":"success","is_error":false}}'
+"#,
+                out = out_file.display()
+            ),
+        );
+        assert_eq!(config.permission_mode, "bypassPermissions");
+        let base = ClaudeCodeAdapter::new(config);
+        let planner_mode = base
+            .with_permission_mode("plan")
+            .expect("claude-code supports with_permission_mode");
+
+        let req = sample_req(dir.path().to_path_buf());
+        let sink = RecordingSink::default();
+        let outcome = planner_mode
+            .run(req, "run-permission-1", default_limits(), &sink)
+            .await
+            .unwrap();
+        assert!(matches!(outcome.terminal, Terminal::Done { .. }));
+        let seen = std::fs::read_to_string(&out_file).unwrap();
+        assert!(
+            seen.contains("--permission-mode plan"),
+            "expected the overridden permission mode in the CLI args: {seen}"
+        );
+        assert!(
+            !seen.contains("bypassPermissions"),
+            "the adapter's default permission mode must not leak through: {seen}"
+        );
     }
     #[tokio::test]
     async fn tier_binding_reaches_cli_model_argument_and_preserves_account_env() {

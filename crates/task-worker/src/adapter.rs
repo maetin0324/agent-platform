@@ -165,6 +165,13 @@ pub trait WorkerAdapter: Send + Sync {
         None
     }
 
+    /// ADR-0072 D14（Phase E4b 項目3）: `mode`（例: `"plan"`）を CLI の permission-mode に使う複製を
+    /// 返す（`with_model` と同じ形）。既定は `None` = この経路を持たないアダプタ（呼び出し側は元の
+    /// アダプタのまま実行する。permission-mode の概念が無い研究系ハーネスなどはこの既定のまま）。
+    fn with_permission_mode(&self, _mode: &str) -> Option<Arc<dyn WorkerAdapter>> {
+        None
+    }
+
     /// ADR-0069 Phase 118 D1: このアダプタは reasoning effort を実際に CLI へ渡せるか
     /// （`with_reasoning_effort` が `Some` を返しうるか）。既定 `false`（対応する引数・環境変数が
     /// 無い。`claude-code` はこの既定のまま）。

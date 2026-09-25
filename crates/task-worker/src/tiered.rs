@@ -77,4 +77,14 @@ impl WorkerAdapter for TieredAdapter {
             credential_error: self.credential_error.clone(),
         }))
     }
+    /// ADR-0072 D14（Phase E4b 項目3）: `self.adapters` に登録された実体は `TieredAdapter` で
+    /// 包まれている（`with_model` と同じ理由）ので、基盤アダプタへそのまま中継する。
+    fn with_permission_mode(&self, mode: &str) -> Option<Arc<dyn WorkerAdapter>> {
+        Some(Arc::new(Self {
+            base: self.base.with_permission_mode(mode)?,
+            models: self.models.clone(),
+            account_id: self.account_id.clone(),
+            credential_error: self.credential_error.clone(),
+        }))
+    }
 }
