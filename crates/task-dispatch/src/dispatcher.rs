@@ -3677,24 +3677,43 @@ impl Dispatcher {
                                 wu.key, decision.updated.retries, limits.max_retries
                             );
                         }
+                        // ADR-0072 D17 3.（Phase E4b 項目2）: worker の checkpoint/result.json が
+                        // `plan_issue` を書いた。
+                        "plan_issue" => {
+                            let text = checkpoint_opt
+                                .as_ref()
+                                .and_then(|cp| cp.plan_issue.clone())
+                                .unwrap_or_default();
+                            outcome_str = format!(
+                                "question: WorkUnit {} が計画の問題を申告しました: {text}",
+                                wu.key
+                            );
+                        }
                         _ => {}
                     }
-                    // ADR-0072 D17（Phase E4）: WU が failed、または進捗なし/continuation の上限
-                    // （"limit"）に達したら、replan の余地（`max_replans`）があれば Task を
-                    // failed/blocked にする代わりに replan の planner run を起こす
-                    // （`ContinueWhy::Replan`）。D12「失敗にしないもの」: 進捗なし・継続の上限到達は
-                    // 元々失敗にしない。D12 3.: WU failed は「replan できない」ときだけ failed にする。
-                    if matches!(decision.reason, "failed" | "limit") {
+                    // ADR-0072 D17（Phase E4）/ D17 3.（Phase E4b 項目2）: WU が failed、または
+                    // 進捗なし/continuation の上限（"limit"）に達した、または `plan_issue` を
+                    // 申告したら、replan の余地（`max_replans`）があれば Task を failed/blocked に
+                    // する代わりに replan の planner run を起こす（`ContinueWhy::Replan`）。
+                    // D12「失敗にしないもの」: 進捗なし・継続の上限到達は元々失敗にしない。
+                    // D12 3.: WU failed は「replan できない」ときだけ failed にする。
+                    if matches!(decision.reason, "failed" | "limit" | "plan_issue") {
                         let replans_so_far = self
                             .store
                             .execution_plan_list(task_id)?
                             .len()
                             .saturating_sub(1) as u32;
                         if replans_so_far < self.config.execution.max_replans {
-                            let why = if decision.reason == "failed" {
-                                format!("work unit {} failed", wu.key)
-                            } else {
-                                format!("work unit {} made no progress", wu.key)
+                            let why = match decision.reason {
+                                "failed" => format!("work unit {} failed", wu.key),
+                                "limit" => format!("work unit {} made no progress", wu.key),
+                                _ => {
+                                    let text = checkpoint_opt
+                                        .as_ref()
+                                        .and_then(|cp| cp.plan_issue.clone())
+                                        .unwrap_or_default();
+                                    format!("work unit {} reported a plan issue: {text}", wu.key)
+                                }
                             };
                             trigger = Trigger::Continue {
                                 why: task_core::ContinueWhy::Replan,
@@ -5823,6 +5842,10 @@ impl Dispatcher {
                                 u.blocked_reason,
                                 Some(task_core::WorkUnitBlockedReason::Question)
                                     | Some(task_core::WorkUnitBlockedReason::Limit)
+                                    // ADR-0072 D17 3.（Phase E4b 項目2）: replan の上限を使い切った
+                                    // plan_issue も、人の回答で（Question と同じく `Ready` から
+                                    // やり直す形で）再開できる。
+                                    | Some(task_core::WorkUnitBlockedReason::PlanIssue)
                             )
                     })
                     .cloned()
@@ -5860,8 +5883,11 @@ impl Dispatcher {
             task_core::NextStep::AllDone => self.replan_gate(task_id),
             task_core::NextStep::RunPlanner { replan } => Ok(WuDispatchGate::RunPlanner { replan }),
             task_core::NextStep::Stuck(reason) => {
-                // ADR-0072 D17（Phase E4）: WU が failed、または blocked(dependency_failed/limit) の
-                // ままで進められる WU が無いなら replan の対象（D17 1./2.）。
+                // ADR-0072 D17（Phase E4）/ D17 3.（Phase E4b 項目2）: WU が failed、または
+                // blocked(dependency_failed/limit/plan_issue) のままで進められる WU が無いなら
+                // replan の対象（D17 1./2./3.）。plan_issue は通常この分岐に来る前に即
+                // `Continue{why: Replan}` で Ready に戻るので、ここに残るのは replan の上限を
+                // 使い切った直後の一瞬（`replan_gate` が `Skip` を返す）だけ。
                 let has_unresolved_failure = units.iter().any(|u| {
                     u.status == task_core::WorkUnitStatus::Failed
                         || (u.status == task_core::WorkUnitStatus::Blocked
@@ -5869,6 +5895,7 @@ impl Dispatcher {
                                 u.blocked_reason,
                                 Some(task_core::WorkUnitBlockedReason::DependencyFailed)
                                     | Some(task_core::WorkUnitBlockedReason::Limit)
+                                    | Some(task_core::WorkUnitBlockedReason::PlanIssue)
                             ))
                 });
                 if has_unresolved_failure {
@@ -22652,6 +22679,112 @@ mod tests {
                 .any(|s| s.starts_with("b (") && s.contains("status=failed")),
             "{:?}",
             planner_ctx.work_unit_summaries
+        );
+    }
+
+    /// ADR-0072 D17 3.（Phase E4b 項目2）: worker が checkpoint（ここでは result.json の `yield`）に
+    /// `plan_issue` を書くと、まだ retry/continuation の余地があっても即座に WU が
+    /// `blocked(plan_issue)` になり、replan の planner run が起きる。replan で採用された v2 では
+    /// `b` は変わらず、`b` の run は `plan_issue` を書かずに完了して Task が `done` になる。
+    #[tokio::test]
+    async fn a_plan_issue_checkpoint_triggers_a_replan_and_v2_is_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            2,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        adopt_three_step_plan(&store, task_id);
+
+        let mut wu_script = HashMap::new();
+        wu_script.insert(
+            "b".to_string(),
+            vec![
+                Terminal::Yielded {
+                    checkpoint: serde_json::json!({
+                        "plan_issue": "migration M must run before b",
+                        "next_action": "wait for migration M",
+                    }),
+                    usage: None,
+                },
+                // replan の後（同じ v2 の b をそのまま）1 回目で完了する。
+                Terminal::Done {
+                    summary: "b done after replan".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
+            ],
+        );
+        let replanned = plan_json(vec![
+            wu_spec("a", &[]),
+            wu_spec("b", &["a"]),
+            wu_spec("c", &["b"]),
+        ]);
+        let adapter = Arc::new(PlannerScriptAdapter::new(vec![Some(replanned)], wu_script));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.planner.adapter = "instant".to_string();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+        assert_eq!(
+            stored.attempts, 0,
+            "plan_issue の replan は attempts を消費しない"
+        );
+
+        let plans = store.execution_plan_list(task_id).unwrap();
+        assert_eq!(plans.len(), 2, "{plans:?}");
+        assert_eq!(plans[0].status, task_core::PlanStatus::Superseded);
+        assert_eq!(plans[1].status, task_core::PlanStatus::Active);
+
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        assert_eq!(a.status, task_core::WorkUnitStatus::Done);
+        assert_eq!(a.plan_id, plans[0].id, "done の a は元の版のまま");
+        let b = units.iter().find(|u| u.key == "b").unwrap();
+        assert_eq!(b.status, task_core::WorkUnitStatus::Done);
+        assert_eq!(
+            b.plan_id, plans[1].id,
+            "replan で持ち越した b は新しい版に属する"
+        );
+
+        let events = store.events_for(task_id).unwrap();
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::WorkUnitTransitioned {
+                    to: task_core::WorkUnitStatus::Blocked,
+                    reason,
+                    ..
+                } if reason == "plan_issue"
+            )),
+            "b が一度 blocked(plan_issue) を経由したことが監査できる: {events:?}"
+        );
+        assert!(
+            events.iter().any(
+                |(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == "replan")
+            ),
+            "{events:?}"
+        );
+        let seen = adapter.seen.lock().unwrap();
+        let replan_ctx = seen
+            .iter()
+            .find(|c| c.execution_planner.as_ref().is_some_and(|p| p.replan))
+            .and_then(|c| c.execution_planner.as_ref())
+            .expect("a replan planner run happened");
+        assert!(
+            replan_ctx
+                .replan_reason
+                .contains("migration M must run before b"),
+            "{:?}",
+            replan_ctx.replan_reason
         );
     }
 

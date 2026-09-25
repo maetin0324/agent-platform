@@ -64,6 +64,16 @@ pub fn decide(
     continuation_inputs: ContinuationInputs<'_>,
     limits: WuLimits,
 ) -> WuDecision {
+    // ADR-0072 D17 3.（Phase E4b 項目2）: `end` の種類に関わらず、合成した checkpoint が
+    // `plan_issue` を持っていれば最優先する（continuation の判定より前）。checkpoint はいまのところ
+    // `end.is_continuable()`（Yielded/BudgetExhausted）のときだけ合成される（D8/E2b の制約）ので、
+    // 実際にこの分岐に入るのはその 2 つの終わり方だけ。
+    if continuation_inputs
+        .checkpoint
+        .is_some_and(|cp| cp.plan_issue.is_some())
+    {
+        return blocked(wu, WorkUnitBlockedReason::PlanIssue);
+    }
     match end {
         RunEnd::Completed => complete(wu, run_id, all_units),
         RunEnd::Yielded | RunEnd::BudgetExhausted { .. } => continuation(
@@ -456,6 +466,40 @@ mod tests {
             recent_activity: vec![],
             created_at: "2026-09-24T00:00:00Z".into(),
         }
+    }
+
+    /// ADR-0072 D17 3.（Phase E4b 項目2）: checkpoint に `plan_issue` があれば、まだ continuation の
+    /// 上限に達していなくても（`continuations = 0`）`blocked(plan_issue)` になる。`limit`/`continue` の
+    /// 判定より優先される。
+    #[test]
+    fn a_plan_issue_in_the_checkpoint_blocks_the_work_unit_even_within_budget() {
+        let a = row("a", WorkUnitStatus::Running, &[]);
+        let units = vec![a.clone()];
+        let mut cp = checkpoint(1);
+        cp.plan_issue = Some("migration M is needed before this work unit".into());
+        let d = decide(
+            RunEnd::BudgetExhausted {
+                kind: task_core::BudgetKind::Turns,
+            },
+            "r1",
+            &a,
+            &units,
+            ContinuationInputs {
+                checkpoint: Some(&cp),
+                prev_checkpoint: None,
+                no_progress_before: 0,
+            },
+            limits(),
+        );
+        assert_eq!(d.updated.status, WorkUnitStatus::Blocked);
+        assert_eq!(
+            d.updated.blocked_reason,
+            Some(WorkUnitBlockedReason::PlanIssue)
+        );
+        assert_eq!(d.reason, "plan_issue");
+        assert_eq!(d.trigger, Trigger::WorkerQuestion);
+        // continuations は増えない（continuation の判定に入る前に分岐する）。
+        assert_eq!(d.updated.continuations, 0);
     }
 
     #[test]

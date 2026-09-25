@@ -603,7 +603,7 @@ export type PlanStatus = "active" | "superseded" | "completed" | "abandoned";
 /**
  * D6: `work_units.blocked_reason`。
  */
-export type WorkUnitBlockedReason = "question" | "dependency_failed" | "limit";
+export type WorkUnitBlockedReason = ("question" | "dependency_failed" | "limit") | "plan_issue";
 export type RunOutcomeKind =
   ("done" | "question" | "error" | "requeue" | "lease_expired") | "interrupted" | "continued";
 export type AttentionItem =

@@ -534,6 +534,11 @@ pub enum WorkUnitBlockedReason {
     Question,
     DependencyFailed,
     Limit,
+    /// ADR-0072 D17 3.（Phase E4b 項目2）: worker の checkpoint/result.json が `plan_issue`
+    /// （計画そのものが誤っているという 1 文の申告）を書いた。replan の余地があれば
+    /// `Trigger::Continue{why: Replan}` で即座に Task を Ready へ戻す（Blocked のままにはしない）ので、
+    /// この行が実際に `Task.status == Blocked` と一緒に残るのは replan の上限を使い切ったときだけ。
+    PlanIssue,
 }
 
 impl WorkUnitBlockedReason {
@@ -542,6 +547,7 @@ impl WorkUnitBlockedReason {
             WorkUnitBlockedReason::Question => "question",
             WorkUnitBlockedReason::DependencyFailed => "dependency_failed",
             WorkUnitBlockedReason::Limit => "limit",
+            WorkUnitBlockedReason::PlanIssue => "plan_issue",
         }
     }
 
@@ -550,6 +556,7 @@ impl WorkUnitBlockedReason {
             "question" => Some(WorkUnitBlockedReason::Question),
             "dependency_failed" => Some(WorkUnitBlockedReason::DependencyFailed),
             "limit" => Some(WorkUnitBlockedReason::Limit),
+            "plan_issue" => Some(WorkUnitBlockedReason::PlanIssue),
             _ => None,
         }
     }
