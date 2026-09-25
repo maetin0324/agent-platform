@@ -1520,3 +1520,9 @@ E5（GUI と metrics）を実装しながら見つかった、D19/D20 の記述�
   止まる現象を確認した（`UV_USE_IO_URING=0` を付けると即座に健全に起動する）。celeris-gui 側の
   コードやビルド成果物の問題ではなく、この特定のサンドボックスの制約と見られる。次にこの環境で
   `mobile-audit`/`e2e` を走らせる担当者への申し送り。
+
+## Phase E6 実装時の逸脱・明確化
+
+- D16 の `merge_base` は配送の `MergeQueued` から `Blocked` になった技術的失敗を対象にする。承認時の head/base が移動した場合や `merge-base --is-ancestor` が不成立の場合、対象ブランチと既定ブランチの現在の SHA、失敗した git 検査の出力だけを repair WorkUnit に渡す。修復後は現在の両 ref で配送を再検証する。
+- 配送の準備ゲートで `gate.json.failed_step = cargo-fmt-check` の場合も `format` repair WorkUnit にする。失敗した check の出力はリリース内の `.gate-cargo-fmt-check.log` の末尾から得る。元の実装 run の transcript、outcome、plan 全体は渡さない。
+- `cargo-test` や `pnpm-*` を含むその他の gate 失敗は E6 の局所修復対象外で、従来の Reopen を保つ。配送の局所修復も設定の `max_repairs` と `max_repairs_per_class` を超えた場合は `[needs-human]` として止める。

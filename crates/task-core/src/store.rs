@@ -1004,6 +1004,15 @@ pub trait TaskStore:
         work_units: Vec<WorkUnitRow>,
     ) -> Result<Outcome, StoreError>;
 
+    /// 配送の局所修復。Reopen と repair WU を同一トランザクションで保存する。
+    fn delivery_repair_apply(
+        &self,
+        task_id: TaskId,
+        extra_events: Vec<Event>,
+        new_plan: Option<ExecutionPlanRow>,
+        work_units: Vec<WorkUnitRow>,
+    ) -> Result<Outcome, StoreError>;
+
     /// ADR-0072 D17（Phase E4）: replan の採用。旧 `active` な計画を `superseded` にし、新しい版
     /// （`new_plan.version = old.version + 1`）を挿入する。`updated_work_units` は既存行の書き換え
     /// （spec が変わった未完了 WU、または `superseded` にする削除された WU）、`new_work_units` は
@@ -2147,6 +2156,41 @@ impl SqliteStore {
             ],
         )?;
         Ok(())
+    }
+
+    fn repair_apply(
+        &self,
+        task_id: TaskId,
+        trigger: Trigger,
+        extra_events: Vec<Event>,
+        new_plan: Option<ExecutionPlanRow>,
+        work_units: Vec<WorkUnitRow>,
+    ) -> Result<Outcome, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(plan) = &new_plan {
+            tx.execute(
+                "INSERT INTO execution_plans (id, task_id, version, origin, planner_run_id, \
+                 status, json, created_at, superseded_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    plan.id,
+                    plan.task_id,
+                    plan.version,
+                    plan.origin.as_str(),
+                    plan.planner_run_id,
+                    plan.status.as_str(),
+                    serde_json::to_string(&plan.spec)?,
+                    plan.created_at,
+                    plan.superseded_at
+                ],
+            )?;
+        }
+        for wu in &work_units {
+            Self::insert_work_unit_tx(&tx, wu)?;
+        }
+        let outcome = Self::apply_transition_tx(&tx, task_id, trigger, extra_events)?;
+        tx.commit()?;
+        Ok(outcome)
     }
 
     /// `apply_transition_with_events` の本体（ADR-0004 D1 / ADR-0005 D4）。`tx` 内で任意のトリガーを
@@ -4743,31 +4787,23 @@ impl TaskStore for SqliteStore {
         new_plan: Option<ExecutionPlanRow>,
         work_units: Vec<WorkUnitRow>,
     ) -> Result<Outcome, StoreError> {
-        let mut conn = self.lock()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(plan) = &new_plan {
-            tx.execute(
-                "INSERT INTO execution_plans (id, task_id, version, origin, planner_run_id, \
-                 status, json, created_at, superseded_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![
-                    plan.id,
-                    plan.task_id,
-                    plan.version,
-                    plan.origin.as_str(),
-                    plan.planner_run_id,
-                    plan.status.as_str(),
-                    serde_json::to_string(&plan.spec)?,
-                    plan.created_at,
-                    plan.superseded_at,
-                ],
-            )?;
-        }
-        for wu in &work_units {
-            Self::insert_work_unit_tx(&tx, wu)?;
-        }
-        let outcome = Self::apply_transition_tx(&tx, task_id, Trigger::ReviewRepair, extra_events)?;
-        tx.commit()?;
-        Ok(outcome)
+        self.repair_apply(
+            task_id,
+            Trigger::ReviewRepair,
+            extra_events,
+            new_plan,
+            work_units,
+        )
+    }
+
+    fn delivery_repair_apply(
+        &self,
+        task_id: TaskId,
+        extra_events: Vec<Event>,
+        new_plan: Option<ExecutionPlanRow>,
+        work_units: Vec<WorkUnitRow>,
+    ) -> Result<Outcome, StoreError> {
+        self.repair_apply(task_id, Trigger::Reopen, extra_events, new_plan, work_units)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -9005,6 +9041,90 @@ mod tests {
             events.iter().any(
                 |e| matches!(e, Event::Transitioned { reason, .. } if reason == "review_repair")
             )
+        );
+    }
+
+    #[test]
+    fn delivery_repair_apply_reopens_and_materializes_atomically() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task(Status::Done);
+        store.insert(&task).unwrap();
+        let stamp = "2026-09-25T00:00:00Z".to_string();
+        let plan_id = "delivery-plan".to_string();
+        let main = WorkUnitSpec {
+            key: "main".into(),
+            kind: WorkUnitKind::Implement,
+            title: task.title.clone(),
+            objective: task.objective.clone(),
+            depends_on: vec![],
+            done_when: vec![],
+            checks: vec![],
+            context: Default::default(),
+            harness: None,
+            features: None,
+            budget: None,
+            outputs: vec![],
+        };
+        let repair = repair_spec(&task);
+        let spec = ExecutionPlanSpec {
+            schema: crate::execution_plan::EXECUTION_PLAN_SCHEMA.into(),
+            rationale: "delivery repair".into(),
+            work_units: vec![main.clone(), repair.clone()],
+        };
+        let plan = ExecutionPlanRow {
+            id: plan_id.clone(),
+            task_id: task.id.to_string(),
+            version: 1,
+            origin: PlanOrigin::Repair,
+            planner_run_id: None,
+            status: PlanStatus::Active,
+            spec: spec.clone(),
+            created_at: stamp.clone(),
+            superseded_at: None,
+        };
+        let rows = vec![
+            WorkUnitRow::new(
+                "delivery-main".into(),
+                task.id.to_string(),
+                plan_id.clone(),
+                0,
+                main,
+                WorkUnitStatus::Done,
+                stamp.clone(),
+            ),
+            WorkUnitRow::new(
+                "delivery-repair".into(),
+                task.id.to_string(),
+                plan_id.clone(),
+                1,
+                repair,
+                WorkUnitStatus::Ready,
+                stamp,
+            ),
+        ];
+        let event = Event::ExecutionPlanned {
+            plan_id,
+            version: 1,
+            origin: PlanOrigin::Repair,
+            supersedes: None,
+            reason: Some("delivery_repair".into()),
+            plan: Box::new(spec),
+        };
+        let outcome = store
+            .delivery_repair_apply(task.id, vec![event], Some(plan), rows)
+            .unwrap();
+        assert_eq!(outcome.next, Status::Ready);
+        assert_eq!(
+            store
+                .execution_plan_active(task.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            PlanStatus::Active
+        );
+        let units = store.work_units_for(task.id).unwrap();
+        assert!(
+            matches!(crate::execution_plan::next_work_unit(&units), crate::execution_plan::NextStep::RunWorkUnit(id) if id == "delivery-repair")
         );
     }
 

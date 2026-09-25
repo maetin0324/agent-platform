@@ -7,8 +7,8 @@ use std::{
     time::Duration,
 };
 use task_core::{
-    Delivery, DeliveryState as State, Message, MessageId, MessageRole, Status, StoreError,
-    TaskStore,
+    Delivery, DeliveryState as State, Event, Message, MessageId, MessageRole, RepairClass, Status,
+    StoreError, TaskStore, WorkUnitKind, WorkUnitStatus,
 };
 use task_ops::changes::{git, git_with_env};
 use time::OffsetDateTime;
@@ -19,6 +19,25 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(120);
 /// 1度だけ再試行したがなお失敗した `push_error` の目印。通知文では外して見せる
 /// （[`push_error_display`]）。この目印が付いていたら以後は触らない。
 const PUSH_RETRIED_PREFIX: &str = "[retried] ";
+const MERGE_BASE_FAILURE: &str = "[merge-base] ";
+
+/// 配送で局所修復できる失敗だけを分類する。gate の他の step は従来の Reopen に残す。
+fn classify_delivery_failure(
+    state: State,
+    detail: &str,
+    failed_step: Option<&str>,
+) -> Option<RepairClass> {
+    if state != State::Blocked {
+        return None;
+    }
+    if detail.starts_with(MERGE_BASE_FAILURE) {
+        return Some(RepairClass::MergeBase);
+    }
+    if detail.starts_with("リリース準備に失敗") && failed_step == Some("cargo-fmt-check") {
+        return Some(RepairClass::Format);
+    }
+    None
+}
 
 fn git_text(repo: &Path, args: &[&str]) -> Result<String, String> {
     let out = git(repo, args, Duration::from_secs(20)).ok_or("git を起動できません")?;
@@ -144,11 +163,11 @@ fn validate_candidate(repo: &Path, d: &Delivery) -> Result<(), String> {
             "対象コミットまたは既定ブランチが変わりました。更新して再レビューが必要です".into(),
         );
     }
-    if git_text(repo, &["merge-base", "--is-ancestor", &d.base, &d.head]).is_err() {
-        return Err(
-            "既定ブランチの更新を取り込んでから再レビューしてください（自動rebaseは行いません）"
-                .into(),
-        );
+    if let Err(stderr) = git_text(repo, &["merge-base", "--is-ancestor", &d.base, &d.head]) {
+        return Err(format!(
+            "git merge-base --is-ancestor {} {} failed; stderr: {stderr}",
+            d.base, d.head
+        ));
     }
     Ok(())
 }
@@ -174,6 +193,165 @@ fn merge_reviewed(repo: &Path, d: &Delivery) -> Result<(), String> {
         return Err("取り込み後のSHAが一致しません".into());
     }
     Ok(())
+}
+
+fn make_repair(
+    store: &dyn TaskStore,
+    config: &Config,
+    d: &Delivery,
+    class: RepairClass,
+    now: OffsetDateTime,
+) -> Result<Option<String>, StoreError> {
+    let units = store.work_units_for(d.task_id)?;
+    let repairs: Vec<_> = units
+        .iter()
+        .filter(|u| u.kind == WorkUnitKind::Repair)
+        .collect();
+    let same_class = repairs
+        .iter()
+        .filter(|u| {
+            u.spec
+                .title
+                .starts_with(&format!("repair ({}):", class.bucket()))
+        })
+        .count();
+    if repairs.len() as u32 >= config.execution.max_repairs
+        || same_class as u32 >= config.execution.max_repairs_per_class
+    {
+        return Ok(None);
+    }
+    let branch_head = sha(&config.selfdeploy.repo, &format!("refs/heads/{}", d.branch))
+        .unwrap_or_else(|_| d.head.clone());
+    let main_head = sha(
+        &config.selfdeploy.repo,
+        &format!("refs/heads/{}", d.default_branch),
+    )
+    .unwrap_or_else(|_| d.base.clone());
+    let output = if class == RepairClass::Format {
+        let log = config
+            .selfdeploy
+            .releases_dir
+            .join(d.release.as_deref().unwrap_or(""))
+            .join(".gate-cargo-fmt-check.log");
+        std::fs::read_to_string(log)
+            .map(|s| tail_bytes(&s, 4000))
+            .unwrap_or_default()
+    } else {
+        tail_bytes(&d.detail, 4000)
+    };
+    let details = vec![
+        format!("対象ブランチ {}: {}", d.branch, branch_head),
+        format!("既定ブランチ {}: {}", d.default_branch, main_head),
+        format!("失敗した検査の出力:\n{output}"),
+    ];
+    let (max_turns, max_wall_secs) = class.budget();
+    let n = repairs.len() + 1;
+    let key = format!("repair-{n}");
+    let spec = task_core::WorkUnitSpec {
+        key: key.clone(),
+        kind: WorkUnitKind::Repair,
+        title: format!("repair ({}): 配送の局所修復", class.bucket()),
+        objective: task_core::build_repair_objective(class, &details, "配送", "", None),
+        depends_on: vec![],
+        done_when: vec![],
+        checks: vec![],
+        context: Default::default(),
+        harness: None,
+        features: None,
+        budget: Some(task_core::WorkUnitBudget {
+            max_turns: Some(max_turns),
+            max_wall_secs: Some(max_wall_secs),
+        }),
+        outputs: vec![],
+    };
+    let stamp = now
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|e| StoreError::Invalid(e.to_string()))?;
+    let active = store.execution_plan_active(d.task_id)?;
+    let (new_plan, rows, event) = if let Some(plan) = active {
+        let row = task_core::WorkUnitRow::new(
+            task_core::new_id(),
+            d.task_id.to_string(),
+            plan.id,
+            units.iter().map(|u| u.seq).max().unwrap_or(0) + 1,
+            spec,
+            WorkUnitStatus::Ready,
+            stamp,
+        );
+        let ev = Event::WorkUnitTransitioned {
+            work_unit_id: row.id.clone(),
+            key: key.clone(),
+            from: WorkUnitStatus::Pending,
+            to: WorkUnitStatus::Ready,
+            reason: "delivery_repair".into(),
+            run_id: None,
+        };
+        (None, vec![row], ev)
+    } else {
+        let task = store
+            .get(d.task_id)?
+            .ok_or_else(|| StoreError::Invalid("task missing".into()))?;
+        let plan_id = task_core::new_id();
+        let main = task_core::WorkUnitSpec {
+            key: "main".into(),
+            kind: WorkUnitKind::Implement,
+            title: task.title,
+            objective: task.objective,
+            depends_on: vec![],
+            done_when: vec![],
+            checks: vec![],
+            context: Default::default(),
+            harness: None,
+            features: None,
+            budget: None,
+            outputs: vec![],
+        };
+        let main_row = task_core::WorkUnitRow::new(
+            task_core::new_id(),
+            d.task_id.to_string(),
+            plan_id.clone(),
+            0,
+            main.clone(),
+            WorkUnitStatus::Done,
+            stamp.clone(),
+        );
+        let repair_row = task_core::WorkUnitRow::new(
+            task_core::new_id(),
+            d.task_id.to_string(),
+            plan_id.clone(),
+            1,
+            spec.clone(),
+            WorkUnitStatus::Ready,
+            stamp.clone(),
+        );
+        let plan_spec = task_core::ExecutionPlanSpec {
+            schema: task_core::EXECUTION_PLAN_SCHEMA.into(),
+            rationale: "delivery repair: 暗黙の WorkUnit を実体化".into(),
+            work_units: vec![main, spec],
+        };
+        let plan = task_core::ExecutionPlanRow {
+            id: plan_id.clone(),
+            task_id: d.task_id.to_string(),
+            version: 1,
+            origin: task_core::PlanOrigin::Repair,
+            planner_run_id: None,
+            status: task_core::PlanStatus::Active,
+            spec: plan_spec.clone(),
+            created_at: stamp,
+            superseded_at: None,
+        };
+        let ev = Event::ExecutionPlanned {
+            plan_id,
+            version: 1,
+            origin: task_core::PlanOrigin::Repair,
+            supersedes: None,
+            reason: Some("delivery_repair".into()),
+            plan: Box::new(plan_spec),
+        };
+        (Some(plan), vec![main_row, repair_row], ev)
+    };
+    store.delivery_repair_apply(d.task_id, vec![event], new_plan, rows)?;
+    Ok(Some(key))
 }
 
 fn advance(
@@ -204,9 +382,9 @@ fn advance(
                 .any(|r| task_ops::changes::is_dirty(Path::new(&r.dir)) != Some(false))
         {
             d.state = State::Blocked;
-            d.detail =
-                "実装の作業ツリーに未コミットの変更があります。コミット後に再レビューしてください"
-                    .into();
+            d.detail = format!(
+                "{MERGE_BASE_FAILURE}実装の作業ツリーに未コミットの変更があります。コミット後に再レビューしてください"
+            );
             store.delivery_save(Some(old), &d)?;
             return Ok(());
         }
@@ -250,7 +428,7 @@ fn advance(
                 }
                 Err(e) => {
                     d.state = State::Blocked;
-                    d.detail = e;
+                    d.detail = format!("{MERGE_BASE_FAILURE}{e}");
                 }
             }
             if !store.delivery_save(Some(&claimed), &d)? {
@@ -315,6 +493,53 @@ fn advance(
             if old.notification.is_some() {
                 return Ok(());
             }
+            // repair WU とそのレビューが終わったら、新しい ref で配送を再検証する。
+            let latest_repair = store
+                .work_units_for(old.task_id)?
+                .into_iter()
+                .filter(|u| u.kind == WorkUnitKind::Repair)
+                .max_by_key(|u| u.seq);
+            let repaired_and_not_requeued = latest_repair
+                .as_ref()
+                .is_some_and(|u| u.status == WorkUnitStatus::Done)
+                && !store.comments_for(old.task_id)?.iter().any(|c| {
+                    latest_repair
+                        .as_ref()
+                        .is_some_and(|u| c.body == format!("[delivery-repair-requeued] {}", u.key))
+                });
+            if old.state == State::Blocked
+                && old.decision == Some(true)
+                && store
+                    .get(old.task_id)?
+                    .is_some_and(|t| t.status == Status::Done)
+                && repaired_and_not_requeued
+            {
+                d.base = sha(repo, &format!("refs/heads/{}", d.default_branch))
+                    .unwrap_or_else(|_| old.base.clone());
+                d.head = sha(repo, &format!("refs/heads/{}", d.branch))
+                    .unwrap_or_else(|_| old.head.clone());
+                d.state = State::MergeQueued;
+                d.release = None;
+                d.prepare_pid = None;
+                d.detail = "局所修復後の配送を再検証します".into();
+                if store.delivery_save(Some(old), &d)?
+                    && let Some(u) = latest_repair
+                {
+                    store.comment_add(
+                        &task_core::TaskComment {
+                            id: task_core::CommentId::new(),
+                            task_id: old.task_id,
+                            author_kind: task_core::CommentAuthorKind::System,
+                            author: None,
+                            run_id: None,
+                            created_at: now,
+                            body: format!("[delivery-repair-requeued] {}", u.key),
+                        },
+                        None,
+                    )?;
+                }
+                return Ok(());
+            }
             let needs_user =
                 old.state == State::Ready || old.detail.trim_start().starts_with("[needs-human]");
             let node = if needs_user {
@@ -336,6 +561,40 @@ fn advance(
             }
             // マージ/ビルドの技術的な不備は実装担当へ一度だけ戻す。コメントと再開は同一transaction。
             const REPAIR: &str = "[delivery-repair]";
+            if !needs_user
+                && old.decision == Some(true)
+                && store
+                    .get(old.task_id)?
+                    .is_some_and(|t| t.status == Status::Done)
+            {
+                let rel = config
+                    .selfdeploy
+                    .releases_dir
+                    .join(old.release.as_deref().unwrap_or(""));
+                let gate = read_json(&rel.join("gate.json"));
+                let failed_step = gate
+                    .as_ref()
+                    .filter(|v| v["ok"] == false)
+                    .and_then(|v| v["failed_step"].as_str());
+                if let Some(class) = classify_delivery_failure(old.state, &old.detail, failed_step)
+                {
+                    if let Some(key) = make_repair(store, config, old, class, now)? {
+                        store.comment_add(&task_core::TaskComment {
+                            id: task_core::CommentId::new(), task_id: old.task_id,
+                            author_kind: task_core::CommentAuthorKind::System, author: None,
+                            run_id: None, created_at: now,
+                            body: format!("{REPAIR} {key} class={}。対象ブランチと既定ブランチ、失敗した検査だけを渡して局所修復します。", class.bucket()),
+                        }, None)?;
+                    } else {
+                        d.detail = format!(
+                            "[needs-human] 配送の局所修復が上限に達しました: {}",
+                            class.bucket()
+                        );
+                        store.delivery_save(Some(old), &d)?;
+                    }
+                    return Ok(());
+                }
+            }
             if !needs_user
                 && old.decision == Some(true)
                 && store
@@ -584,6 +843,41 @@ mod tests {
         (store, d)
     }
     #[test]
+    fn delivery_failure_classification_is_limited_to_merge_base_and_format() {
+        assert_eq!(
+            classify_delivery_failure(State::Blocked, "[merge-base] git failed", None),
+            Some(RepairClass::MergeBase)
+        );
+        assert_eq!(
+            classify_delivery_failure(
+                State::Blocked,
+                "リリース準備に失敗しました",
+                Some("cargo-fmt-check")
+            ),
+            Some(RepairClass::Format)
+        );
+        assert_eq!(
+            classify_delivery_failure(
+                State::Blocked,
+                "リリース準備に失敗しました",
+                Some("cargo-test")
+            ),
+            None
+        );
+        assert_eq!(
+            classify_delivery_failure(
+                State::Blocked,
+                "リリース準備に失敗しました",
+                Some("pnpm-e2e-mock")
+            ),
+            None
+        );
+        assert_eq!(
+            classify_delivery_failure(State::Ready, "[merge-base] git failed", None),
+            None
+        );
+    }
+    #[test]
     fn preparation_requires_all_gates_and_notifies_cos_only_when_ready() {
         use task_core::DeliveryStore;
         let (store, mut d) = stored_delivery();
@@ -630,7 +924,7 @@ mod tests {
         assert!(!tmp.path().join("current").exists());
     }
     #[test]
-    fn technical_failure_is_repaired_once_with_no_cos_review_or_message() {
+    fn other_gate_failure_keeps_legacy_reopen_once() {
         use task_core::{DeliveryStore, Trigger};
         let (store, mut d) = stored_delivery();
         let cfg: Config = toml::from_str("").unwrap();
@@ -659,6 +953,121 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn technical_failure_is_repaired_once_with_no_cos_review_or_message() {
+        use task_core::DeliveryStore;
+        let (store, mut d) = stored_delivery();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = cfg_for(tmp.path(), &tmp.path().join("releases"));
+        cfg.execution.max_repairs_per_class = 1;
+        d.state = State::Blocked;
+        d.detail = "リリース準備に失敗しました。ログ: prepare.log".into();
+        d.head = "a".repeat(40);
+        d.release = Some("a".repeat(12));
+        let rel = cfg
+            .selfdeploy
+            .releases_dir
+            .join(d.release.as_deref().unwrap());
+        fs::create_dir_all(&rel).unwrap();
+        fs::write(
+            rel.join("gate.json"),
+            r#"{"ok":false,"failed_step":"cargo-fmt-check"}"#,
+        )
+        .unwrap();
+        fs::write(
+            rel.join(".gate-cargo-fmt-check.log"),
+            "Diff in src/main.rs:1",
+        )
+        .unwrap();
+        store.delivery_save(None, &d).unwrap();
+        advance(&store, &cfg, &d, OffsetDateTime::now_utc()).unwrap();
+        assert_eq!(store.get(d.task_id).unwrap().unwrap().status, Status::Ready);
+        let units = store.work_units_for(d.task_id).unwrap();
+        assert_eq!(units.len(), 2);
+        assert_eq!(units[0].status, WorkUnitStatus::Done);
+        assert_eq!(units[1].status, WorkUnitStatus::Ready);
+        assert!(units[1].spec.objective.contains("Diff in src/main.rs:1"));
+        assert!(!units[1].spec.objective.contains("implement"));
+        assert_eq!(
+            task_core::next_work_unit(&units),
+            task_core::NextStep::RunWorkUnit(units[1].id.clone())
+        );
+        assert!(
+            store
+                .comments_for(d.task_id)
+                .unwrap()
+                .iter()
+                .any(|c| c.body.contains("repair-1 class=format"))
+        );
+
+        // 同じ class の上限に達した再失敗は人へ戻す。
+        for trigger in [
+            task_core::Trigger::Dispatch,
+            task_core::Trigger::WorkerDone,
+            task_core::Trigger::ReviewPass,
+        ] {
+            store.apply_transition(d.task_id, trigger, None).unwrap();
+        }
+        let mut completed = units[1].clone();
+        completed.status = WorkUnitStatus::Done;
+        store
+            .work_unit_transition(
+                d.task_id,
+                completed,
+                Event::WorkUnitTransitioned {
+                    work_unit_id: units[1].id.clone(),
+                    key: units[1].key.clone(),
+                    from: WorkUnitStatus::Ready,
+                    to: WorkUnitStatus::Done,
+                    reason: "test".into(),
+                    run_id: None,
+                },
+            )
+            .unwrap();
+        advance(&store, &cfg, &d, OffsetDateTime::now_utc()).unwrap();
+        let requeued = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert_eq!(requeued.state, State::MergeQueued);
+        let mut failed_again = requeued.clone();
+        failed_again.state = State::Blocked;
+        failed_again.detail = d.detail.clone();
+        failed_again.release = d.release.clone();
+        store.delivery_save(Some(&requeued), &failed_again).unwrap();
+        advance(&store, &cfg, &failed_again, OffsetDateTime::now_utc()).unwrap();
+        assert!(
+            store
+                .delivery_get(d.task_id)
+                .unwrap()
+                .unwrap()
+                .detail
+                .starts_with("[needs-human]")
+        );
+    }
+
+    #[test]
+    fn merge_base_failure_creates_repair_and_rechecks_new_head() {
+        use task_core::DeliveryStore;
+        let (store, dir, d) = merge_queued_delivery();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = cfg_for(dir.path(), &tmp.path().join("releases"));
+        git_text(dir.path(), &["commit", "--allow-empty", "-m", "main moved"]).unwrap();
+        advance(&store, &cfg, &d, OffsetDateTime::now_utc()).unwrap();
+        let blocked = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert!(blocked.detail.starts_with(MERGE_BASE_FAILURE));
+        advance(&store, &cfg, &blocked, OffsetDateTime::now_utc()).unwrap();
+        let units = store.work_units_for(d.task_id).unwrap();
+        assert_eq!(units.len(), 2);
+        assert!(units[1].spec.title.starts_with("repair (merge_base):"));
+        assert_eq!(
+            store
+                .execution_plan_active(d.task_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            task_core::PlanStatus::Active
+        );
+        assert!(units[1].spec.objective.contains(&d.head));
     }
 
     // ---- ADR-0051 Phase 106追記: merge直後・release前のpush。ここから ----
