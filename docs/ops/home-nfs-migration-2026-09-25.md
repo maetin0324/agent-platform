@@ -29,7 +29,7 @@
   lxc.idmap: g 1002 101002 64534
   ```
   （idmap を変えると CT 内の既存ファイルの所有者もずれる: rootfs 上の rmaeda 所有物は 101001 のまま残るので、切替後に `chown -R 1001:1001 /var/lib/celeris /home/rmaeda` 相当の修正が要る。`/var/lib/celeris` はこれに該当する。）
-- CT 内（rmaeda）: ホームを軽くする。`~/.local/celeris/workspaces` は終端タスクの `repos/*/target` 等を消す（`celerisctl workspace prune --older-than 1`、`repos/` 配下は手で）。`~/workspace/agent-platform/target` と `.claude/worktrees/*/target` を消す。`~/.cargo/registry` は再取得できるので除外可。目安: 438G → 100G 以下。
+- CT 内（rmaeda）: ホームを軽くする。`~/.local/celeris/workspaces` は終端タスクの `repos/*/target` 等を消す（`celerisctl workspace prune --older-than 1`、`repos/` 配下は手で）。`~/workspace/agent-platform/target` と `.claude/worktrees/*/target` を消す。`~/.cargo/registry` は再取得できるので除外可。目安: 438G → 100G 以下。（2026-09-25 実施済み: 114G。ssh の ControlPath も `/run/user/1001/` へ変更済み。）
 - CT 内: ssh の ControlPath を `/run/user/1001/ssh-mux-%r@%h:%p` に変える（`~/.ssh/config`。NFS にソケットは置けない）。Celeris の ssh master（`celeris-ssh-master-*`）も同じ設定を見る。
 
 ### 1. 初回コピー（サービスは動いたまま。差分は後で取る）
@@ -39,7 +39,8 @@ pct exec 100 -- bash -c 'true'   # 疎通
 rsync -aHAX --numeric-ids --info=progress2 \
   --exclude '.local/celeris/workspaces/*/repos/*/target' --exclude '.local/celeris/build-cache' \
   --exclude '.cargo/registry' --exclude 'workspace/agent-platform/target' --exclude '.claude/worktrees/*/target' \
-  --exclude '.ssh/mux-*' \
+  --exclude '.ssh/mux-*' --exclude '.cache' --exclude '.npm' \
+  --exclude '.local/celeris/releases/.cargo-target' --exclude '.local/celeris/releases/.build' \
   /var/lib/lxc/100/rootfs/home/rmaeda/ /mnt/truenas-home/rmaeda/
 ```
 （rootfs のパスは `pct mount 100` で `/var/lib/lxc/100/rootfs` に出す。所有者は idmap 前なので 101001 で写る → 最後に `chown -R --from=101001:101001 1001:1001 /mnt/truenas-home/rmaeda`。）
