@@ -12,52 +12,112 @@ use crate::model::Usage;
 /// 100 万トークンあたりの USD 単価。
 #[derive(Debug, Clone, Copy)]
 struct Price {
-    input_per_million: f64,
-    output_per_million: f64,
-    /// prompt cache の読み取り（無ければ `input_per_million` と同じ扱いにはしない。不明なら 0 として
-    /// 安全側〈過小評価〉に倒す設計もあり得るが、ここでは「載っているモデルは cache 価格まで載せる」
-    /// 方針で、載せていないモデルは cache_read/write tokens を無視〈0 扱い〉する）。
-    cache_read_per_million: f64,
-    cache_write_per_million: f64,
+    input_per_million: Option<f64>,
+    output_per_million: Option<f64>,
+    cache_read_per_million: Option<f64>,
+    cache_write_per_million: Option<f64>,
 }
 
 /// 前方一致で引く単価表（先に書いた行が優先。長い/具体的なプレフィックスを先に置く）。
 /// 2026-09 時点の公開価格からの概算スナップショット。
 const PRICE_TABLE: &[(&str, Price)] = &[
     (
+        "claude-fable-5-1",
+        Price {
+            input_per_million: Some(10.0),
+            output_per_million: Some(50.0),
+            cache_read_per_million: Some(0.25),
+            cache_write_per_million: Some(12.5),
+        },
+    ),
+    (
+        "claude-opus-5-5",
+        Price {
+            input_per_million: Some(4.0),
+            output_per_million: Some(20.0),
+            cache_read_per_million: Some(0.20),
+            cache_write_per_million: Some(5.0),
+        },
+    ),
+    (
+        "claude-sonnet-5",
+        Price {
+            input_per_million: Some(2.0),
+            output_per_million: Some(10.0),
+            cache_read_per_million: Some(0.2),
+            cache_write_per_million: Some(2.5),
+        },
+    ),
+    (
+        "claude-haiku-4-5",
+        Price {
+            input_per_million: Some(1.0),
+            output_per_million: Some(5.0),
+            cache_read_per_million: Some(0.1),
+            cache_write_per_million: Some(1.25),
+        },
+    ),
+    (
+        "gpt-6-astra",
+        Price {
+            input_per_million: None,
+            output_per_million: None,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    ),
+    (
+        "gpt-6-sol",
+        Price {
+            input_per_million: None,
+            output_per_million: None,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    ),
+    (
+        "gpt-6-luna",
+        Price {
+            input_per_million: None,
+            output_per_million: None,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
+        },
+    ),
+    (
         "claude-opus",
         Price {
-            input_per_million: 15.0,
-            output_per_million: 75.0,
-            cache_read_per_million: 1.5,
-            cache_write_per_million: 18.75,
+            input_per_million: Some(15.0),
+            output_per_million: Some(75.0),
+            cache_read_per_million: Some(1.5),
+            cache_write_per_million: Some(18.75),
         },
     ),
     (
         "claude-sonnet",
         Price {
-            input_per_million: 3.0,
-            output_per_million: 15.0,
-            cache_read_per_million: 0.3,
-            cache_write_per_million: 3.75,
+            input_per_million: Some(3.0),
+            output_per_million: Some(15.0),
+            cache_read_per_million: Some(0.3),
+            cache_write_per_million: Some(3.75),
         },
     ),
     (
         "claude-haiku",
         Price {
-            input_per_million: 0.8,
-            output_per_million: 4.0,
-            cache_read_per_million: 0.08,
-            cache_write_per_million: 1.0,
+            input_per_million: Some(0.8),
+            output_per_million: Some(4.0),
+            cache_read_per_million: Some(0.08),
+            cache_write_per_million: Some(1.0),
         },
     ),
     (
         "gpt-5",
         Price {
-            input_per_million: 1.25,
-            output_per_million: 10.0,
-            cache_read_per_million: 0.125,
-            cache_write_per_million: 0.0,
+            input_per_million: Some(1.25),
+            output_per_million: Some(10.0),
+            cache_read_per_million: Some(0.125),
+            cache_write_per_million: None,
         },
     ),
 ];
@@ -81,11 +141,18 @@ pub fn estimate_cost_usd(model: &str, usage: &Usage) -> Option<f64> {
         return None;
     }
     let price = price_for(model)?;
-    let cost = usage.input_tokens.unwrap_or(0) as f64 / 1_000_000.0 * price.input_per_million
-        + usage.output_tokens.unwrap_or(0) as f64 / 1_000_000.0 * price.output_per_million
-        + usage.cache_read_tokens.unwrap_or(0) as f64 / 1_000_000.0 * price.cache_read_per_million
-        + usage.cache_creation_tokens.unwrap_or(0) as f64 / 1_000_000.0
-            * price.cache_write_per_million;
+    fn part(tokens: Option<u64>, rate: Option<f64>) -> Option<f64> {
+        let tokens = tokens.unwrap_or(0);
+        if tokens == 0 {
+            Some(0.0)
+        } else {
+            Some(tokens as f64 / 1_000_000.0 * rate?)
+        }
+    }
+    let cost = part(usage.input_tokens, price.input_per_million)?
+        + part(usage.output_tokens, price.output_per_million)?
+        + part(usage.cache_read_tokens, price.cache_read_per_million)?
+        + part(usage.cache_creation_tokens, price.cache_write_per_million)?;
     Some(cost)
 }
 
@@ -103,8 +170,8 @@ mod tests {
             cost_usd: None,
         };
         let cost = estimate_cost_usd("claude-sonnet-5", &usage).expect("known model");
-        // 3.0*1 + 15.0*0.5 + 0.3*2 + 3.75*1 = 3 + 7.5 + 0.6 + 3.75 = 14.85
-        assert!((cost - 14.85).abs() < 1e-9, "{cost}");
+        // 2.0*1 + 10.0*0.5 + 0.2*2 + 2.5*1 = 9.9
+        assert!((cost - 9.9).abs() < 1e-9, "{cost}");
     }
 
     #[test]
@@ -124,6 +191,40 @@ mod tests {
             ..Usage::default()
         };
         assert_eq!(estimate_cost_usd("some-local-llm", &usage), None);
+    }
+
+    #[test]
+    fn default_claude_frontier_has_a_price() {
+        let usage = Usage {
+            input_tokens: Some(1_000_000),
+            ..Usage::default()
+        };
+        assert_eq!(estimate_cost_usd("claude-fable-5-1", &usage), Some(10.0));
+    }
+
+    #[test]
+    fn default_gpt_frontier_has_no_offline_price_source() {
+        // docs/ と config/ には gpt-6-astra の単価根拠がない。
+        let usage = Usage {
+            input_tokens: Some(1_000_000),
+            ..Usage::default()
+        };
+        assert_eq!(estimate_cost_usd("gpt-6-astra", &usage), None);
+    }
+
+    #[test]
+    fn nonzero_tokens_with_missing_price_are_unknown() {
+        let usage = Usage {
+            cache_creation_tokens: Some(1),
+            ..Usage::default()
+        };
+        assert_eq!(estimate_cost_usd("gpt-5-codex", &usage), None);
+        let zero = Usage {
+            cache_creation_tokens: Some(0),
+            input_tokens: Some(1_000_000),
+            ..Usage::default()
+        };
+        assert_eq!(estimate_cost_usd("gpt-5-codex", &zero), Some(1.25));
     }
 
     #[test]

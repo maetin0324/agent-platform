@@ -23,6 +23,31 @@ gpt は frontier=`gpt-6-astra` / standard=`gpt-6-sol` / cheap=`gpt-6-luna`。運
 契約で使えるモデルが違えば `[llm_proxy.models]` で上書きすること。
 Qwen は tier に関わらず `qwen3.8-27b`（ADR-0053 D1 で明記）。
 
+### 単価表
+
+`task_core::pricing` の USD / 100 万トークン。Claude の値はこのタスクの計画時に
+オフラインの `claude-api` skill（`SKILL.md` の「Current Models (cached 2026-06-24)」、
+`shared/models.md`、`shared/prompt-caching.md` の「Economics」）から確認した値を転記した。
+`*` は明示単価でなく、同 skill の一般則（cache read = 入力の 0.1 倍、
+5 分 TTL の cache write = 入力の 1.25 倍）からの導出値。fable と opus の
+cache read はモデル別の明示値を優先する。cache write は 5 分 TTL の概算であり、
+異なる TTL や契約単価には適用できない。
+
+| モデル | 入力 | 出力 | cache read | cache write | 出典 | 取得日 |
+|---|---:|---:|---:|---:|---|---|
+| `claude-fable-5-1` | 10.0 | 50.0 | 0.25 | 12.5* | claude-api: Current Models / models / prompt-caching | 2026-06-24 キャッシュ、2026-09-25 転記 |
+| `claude-opus-5-5` | 4.0 | 20.0 | 0.20 | 5.0* | 同上 | 同上 |
+| `claude-sonnet-5` | 2.0 | 10.0 | 0.2* | 2.5* | 同上 | 同上 |
+| `claude-haiku-4-5-20251001`（表の prefix は `claude-haiku-4-5`） | 1.0 | 5.0 | 0.1* | 1.25* | 同上 | 同上 |
+| `gpt-6-astra` | 不明 (`None`) | 不明 (`None`) | 不明 (`None`) | 不明 (`None`) | 一次情報が手元にない | 2026-09-25 確認 |
+| `gpt-6-sol` | 不明 (`None`) | 不明 (`None`) | 不明 (`None`) | 不明 (`None`) | 同上 | 同上 |
+| `gpt-6-luna` | 不明 (`None`) | 不明 (`None`) | 不明 (`None`) | 不明 (`None`) | 同上 | 同上 |
+
+GPT-6 の ID は `docs/` と `config/` にあるが、単価の根拠はない。このタスクでは外部ネットワーク・
+道具を使えないため推測値を入れず、全欄を `None` にした。`None` の単価に 0 より大きい
+トークンがある場合、推定額全体を `None` とする。旧 `gpt-5` 行の cache write も根拠のない
+0 USD をやめ、`None` とした。
+
 ## 2. 供給元（source）
 
 | source | 種類 | 資格情報 | 上流 |
