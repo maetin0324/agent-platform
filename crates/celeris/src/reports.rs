@@ -180,6 +180,7 @@ fn compaction_spec(
         category: None,
         status: None,
         features: None,
+        execution: None,
         provenance: task_ops::add::SpecProvenance::system(),
     }
 }

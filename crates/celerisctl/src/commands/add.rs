@@ -244,6 +244,7 @@ pub fn run(store: &dyn TaskStore, mut args: AddArgs) -> Result<ExitCode, CliErro
         mode: None,
         status: None,
         features: None,
+        execution: None,
         provenance: task_ops::add::SpecProvenance::default(),
     };
 

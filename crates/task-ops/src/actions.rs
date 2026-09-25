@@ -205,6 +205,7 @@ fn execute_one(
             milestone,
             assignee,
             workspace,
+            execution,
         } => create_task_action(
             store,
             org,
@@ -224,6 +225,7 @@ fn execute_one(
             workspace,
             *tier,
             *features,
+            *execution,
             human_text,
             now,
         ),
@@ -266,6 +268,7 @@ fn create_task_action(
     workspace: &Option<Box<WorkspaceSpec>>,
     tier: Option<task_core::Tier>,
     features: Option<task_core::TaskFeatureHints>,
+    execution: Option<task_core::ExecutionMode>,
     human_text: &str,
     now: OffsetDateTime,
 ) -> Result<ExecutedAction, String> {
@@ -387,6 +390,7 @@ fn create_task_action(
         // ADR-0048 D3: Console から（CoS の actions 経由で）作るタスクは人が Go 済みとして ready。
         status: Some(Status::Ready),
         features,
+        execution,
         provenance: crate::add::SpecProvenance {
             origin: crate::add::SpecOrigin::Agent,
             human_explicit_tier,

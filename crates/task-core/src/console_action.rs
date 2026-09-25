@@ -60,6 +60,11 @@ pub enum ConsoleAction {
         /// モデルの選択ではない。書いた軸だけが効く。
         #[serde(default)]
         features: Option<crate::model_policy::TaskFeatureHints>,
+        /// ADR-0072 D13（Phase E3）: 大きな依頼は `"compound"` のヒントを付けてよい（判定そのものは
+        /// Complexity Gate が決定的に行う。CoS の明示は signal `H` として +2 されるだけで、
+        /// gate をバイパスしない）。
+        #[serde(default)]
+        execution: Option<crate::execution_gate::ExecutionMode>,
     },
     ProposeProject {
         title: String,

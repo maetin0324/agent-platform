@@ -137,6 +137,11 @@ pub(crate) fn work_dir_note(
 /// `artifacts` は成果物ディレクトリの workspace 相対表記（`RunRequest::artifacts_rel`。ADR-0036 D3。
 /// 単独タスクでは `artifacts` なので、文面は Phase 34 までと 1 バイトも変わらない）。
 pub fn build_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts: &str) -> String {
+    // ADR-0072 D14（Phase E3）: task-local な planner run は `task.kind` に依らず（常に `Execute`）、
+    // `context.execution_planner` の有無で選ぶ。
+    if context.execution_planner.is_some() {
+        return build_execution_plan_prompt(task, context, run_id, artifacts);
+    }
     match task.kind {
         TaskKind::Plan => build_plan_prompt(task, context, run_id, artifacts),
         TaskKind::Review => build_review_prompt(task, context, run_id, artifacts),
@@ -676,6 +681,115 @@ fn build_plan_prompt(task: &Task, context: &RunContext, run_id: &str, artifacts:
     out.push_str(&available_genres_section_for_plan(context, artifacts));
     out.push_str(&workspace_section_for_plan(context));
     out.push_str(&harness_artifacts_section_for_plan(context));
+    out.push_str(&result_json_instructions(artifacts));
+    out
+}
+
+/// ADR-0072 D14（Phase E3）: task-local な planner run 用プロンプト。Complexity Gate が compound と
+/// 判定した Task を WorkUnit の集合に分解させ、`artifacts/execution-plan.json` に
+/// `ExecutionPlanSpec`（`celeris.execution-plan/1`）を書かせる。この run 自身は普通のワーカー run と
+/// 同じ `result.json` の契約（`summary`/`evidence`、または `question`）で終わる。計画の検証・採用・
+/// 不正なら 1 回だけ再試行・それでも駄目なら atomic に倒す判断は daemon（`task-dispatch`）が行う
+/// （このプロンプトの役目ではない）。
+fn build_execution_plan_prompt(
+    task: &Task,
+    context: &RunContext,
+    run_id: &str,
+    artifacts: &str,
+) -> String {
+    let mut out = prompt_header(task, context, run_id, artifacts);
+    out.push_str(
+        "## Instructions\n\
+         This task was judged too large or too broad for a single session (ADR-0072 Complexity Gate). \
+         Decompose it into a small number of WorkUnits, each of which fits comfortably in one context \
+         window (investigation, design, implementation, tests, release — whatever split makes sense for \
+         this goal). Prefer the smallest number of WorkUnits that keeps each one focused; do not split \
+         further than the goal actually requires. You are planning, not doing the work yourself: do not \
+         write code or run the actual implementation in this run.\n\n",
+    );
+    let planner_schema = task_core::EXECUTION_PLAN_SCHEMA;
+    let max_work_units = context
+        .execution_planner
+        .as_ref()
+        .map(|p| p.max_work_units)
+        .unwrap_or(8);
+    let work_unit_max_turns = context
+        .execution_planner
+        .as_ref()
+        .map(|p| p.work_unit_max_turns)
+        .unwrap_or(80);
+    let work_unit_max_wall_secs = context
+        .execution_planner
+        .as_ref()
+        .map(|p| p.work_unit_max_wall_secs)
+        .unwrap_or(3600);
+    let default_max_turns = context
+        .execution_planner
+        .as_ref()
+        .map(|p| p.default_max_turns)
+        .unwrap_or(30);
+    let default_max_wall_secs = context
+        .execution_planner
+        .as_ref()
+        .map(|p| p.default_max_wall_secs)
+        .unwrap_or(1800);
+    out.push_str(&format!(
+        "Write your plan to `{artifacts}/execution-plan.json` (create the `{artifacts}/` directory if it \
+         does not exist yet) as a single JSON object of exactly this shape:\n\
+         ```json\n\
+         {{\"schema\":\"{planner_schema}\",\"rationale\":\"...\",\"work_units\":[{{\"key\":\"survey\",\
+         \"kind\":\"investigate\"|\"design\"|\"implement\"|\"test\"|\"release\"|\"repair\"|\"other\",\
+         \"title\":\"...\",\"objective\":\"...\",\"depends_on\":[\"<key of another work unit>\"],\
+         \"done_when\":[\"...\"],\"checks\":[{{\"cmd\":\"...\",\"expect_exit\":0}}],\
+         \"context\":{{\"paths\":[\"...\"],\"from_work_units\":[\"<key>\"],\"knowledge\":[\"...\"]}},\
+         \"harness\":\"<genre id, or omit to inherit this task's genre>\",\
+         \"budget\":{{\"max_turns\":40,\"max_wall_secs\":1800}} (optional),\
+         \"outputs\":[\"...\"]}}]}}\n\
+         ```\n\
+         Do not write `assignee`, `tier`, or `model`: the owner never changes (WorkUnits inherit this \
+         task's owner) and the model lane is decided by celeris from each WorkUnit's nature (ADR-0069). \
+         Unknown fields are rejected, so do not add any field not shown above. `key` must match \
+         `[a-z0-9-]{{1,32}}` and be unique within this plan. `depends_on` refers to other `key`s in this \
+         same array and must form a DAG (no cycles). `checks` may only be `{{\"cmd\":\"...\",\
+         \"expect_exit\":0}}` (a deterministic command check; do not fabricate one you have not actually \
+         run — it will really be executed later). `harness`, if set, must be one of the genre ids listed \
+         below (available genres); an unset `harness` inherits this task's own genre. Plan at most \
+         {max_work_units} WorkUnits (a plan with more will be rejected and this run retried once). If \
+         you write a `budget` for a WorkUnit, `max_turns` will be capped at {work_unit_max_turns} and \
+         `max_wall_secs` at {work_unit_max_wall_secs}; if you omit it, the default is \
+         max({default_max_turns}, task budget) turns and max({default_max_wall_secs}, task budget) \
+         seconds.\n\n"
+    ));
+    let schema = serde_json::to_string(&task_core::execution_plan::schema_value())
+        .unwrap_or_else(|_| "{}".to_string());
+    out.push_str(&format!(
+        "### Schema for the `{artifacts}/execution-plan.json` object\n```json\n"
+    ));
+    out.push_str(&schema);
+    out.push_str("\n```\n\n");
+    if let Some(planner) = &context.execution_planner {
+        out.push_str(&format!(
+            "## Why this task was judged compound (Complexity Gate, rule `{}`, score {})\n",
+            planner.gate_rule_id, planner.gate_score
+        ));
+        if planner.gate_signals.is_empty() {
+            out.push_str(
+                "(no scored signals — a human or the CoS marked this task compound directly)\n\n",
+            );
+        } else {
+            for line in &planner.gate_signals {
+                out.push_str(&format!("- {line}\n"));
+            }
+            out.push('\n');
+        }
+    }
+    if !context.available_genres.is_empty() {
+        out.push_str("## Available genres (valid values for a WorkUnit's `harness`)\n");
+        out.push_str(&genre_list_lines(context));
+        out.push('\n');
+    }
+    out.push_str(&prior_review_section(context));
+    out.push_str(&answers_section(context));
     out.push_str(&result_json_instructions(artifacts));
     out
 }
@@ -2761,6 +2875,59 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             "artifacts",
         );
         assert!(!no_genres_prompt.contains("使える専門家"));
+    }
+
+    /// ADR-0072 D14（Phase E3）: `context.execution_planner` があれば、`task.kind` に関わらず
+    /// planner 用プロンプトを選ぶ（compound と判定された Task は常に `kind == Execute` のまま）。
+    /// 計画の schema・gate の根拠・上限・使える genre の一覧が載る。
+    #[test]
+    fn build_prompt_selects_the_execution_plan_prompt_when_execution_planner_is_present() {
+        let task = crate::protocol::tests::sample_task();
+        assert_eq!(task.kind, task_core::TaskKind::Execute);
+        let genre_spec = task_core::GenreSpec {
+            id: "coding".into(),
+            description: "write and fix code".into(),
+            roles: vec!["implementer".into()],
+            ..task_core::GenreSpec::default()
+        };
+        let planner_ctx = crate::protocol::ExecutionPlannerContext {
+            gate_rule_id: "compound/score".to_string(),
+            gate_score: 6,
+            gate_signals: vec!["F2: expected_length=high (+2)".to_string()],
+            max_work_units: 5,
+            work_unit_max_turns: 60,
+            work_unit_max_wall_secs: 1800,
+            default_max_turns: 30,
+            default_max_wall_secs: 1800,
+            replan: false,
+        };
+        let context = RunContext {
+            available_genres: vec![GenreContext::from(&genre_spec)],
+            execution_planner: Some(planner_ctx),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-planner-1", "artifacts");
+
+        // 通常の execute プロンプト（Objective の後の委譲節など）ではなく、計画作成の指示になる。
+        assert!(prompt.contains("artifacts/execution-plan.json"));
+        assert!(prompt.contains(task_core::EXECUTION_PLAN_SCHEMA));
+        assert!(prompt.contains("\"work_units\""));
+        // D18 の上限（テストの `ExecutionPlannerContext` の値）が文面に出る。
+        assert!(prompt.contains("Plan at most 5 WorkUnits"));
+        assert!(prompt.contains("capped at 60"));
+        // gate の根拠。
+        assert!(prompt.contains("compound/score"));
+        assert!(prompt.contains("F2: expected_length=high (+2)"));
+        // 使える genre の一覧（WU の harness に使える id）。
+        assert!(prompt.contains("Available genres"));
+        assert!(prompt.contains("coding: write and fix code"));
+        // `assignee`/`tier`/`model` を書くなと明示している。
+        assert!(prompt.contains("Do not write `assignee`, `tier`, or `model`"));
+
+        // `execution_planner` が無ければ従来どおりの execute プロンプト。
+        let normal_prompt =
+            build_prompt(&task, &RunContext::default(), "run-planner-2", "artifacts");
+        assert!(!normal_prompt.contains("artifacts/execution-plan.json"));
     }
 
     /// Phase 38（ADR-0028 追記）テスト用: ハーネス系の `literature`（`default_role` が `paperqa`）と、

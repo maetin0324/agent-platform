@@ -1099,3 +1099,61 @@ GUI を触る Phase では `pnpm typecheck` / `lint` / `test` / `gen:types` の�
 - **checkpoint の `run_seq`（WU 版）は `work_units.runs` 列をそのまま使う**（`CheckpointContext.run_seq:
   wu.runs`）。`start_work_unit_run` が dispatch 時に `runs` を先に +1 しているので、`on_worker_finished`
   で読み直した `wu.runs` の値がそのままこの run の番号になる。
+
+## Phase E3 実装時の逸脱・明確化（2026-09-24）
+
+実装しながら見つかった、D13〜D21 の記述とコードの食い違い・簡略化。黙って逸脱せず、ここに記録する。
+
+- **D13 の「対象外」は 2 段階に分けて実装した**。`kind != Execute` / 対話 / support-task / `routing`
+  無しの 4 条件は、`dispatcher.rs::execution_gate_if_needed` が gate を呼ぶ前にフィルタし、
+  `Event::ExecutionGated` そのものを**記録しない**（CoS の対話 1 発言ごとに別タスクが作られる・
+  support-task が daemon の裏方仕事として大量に湧く、という production の実態を踏まえ、Task の生涯に
+  1 件は確実に増える監査イベントを、判定するまでもなく atomic な種別にまで広げるのは無駄と判断した）。
+  固定パイプラインの harness（`literature`/`web-research`/`knowledge`）と `workspace_mode = Shared` の
+  内部タスクの 2 条件は `execution_gate::decide` 自身（`out_of_scope_rule`）が判定し、
+  `rule_id = "atomic/out-of-scope"` として記録する（こちらは execute タスクとして gate に本当に
+  到達しうる、まれだが監査したいケース）。単体テスト（(a)）は `out_of_scope_rule` に対して 6 条件
+  すべてを確認しているので、判定ロジック自体はどちらの経路でも同じ関数を通る。
+- **S4（複数の実行環境）と S6（直近の budget_exhausted 実績）は既定値で運用している**。
+  `ExecutionGateInputs { multi_environment: false, recent_budget_exhausted_ratio: None }` を
+  `dispatch_ready` から渡しており、org の部署またぎ判定や `runs` 索引を横断した直近タスクの集計は
+  実装していない（D13 は「S6 は daemon が store を決定的に読む…E3 の時点では events から数える実装で
+  もよい」としており、E3 の時点では未実装でもよいと明記されている）。規則表・スコア計算・閾値の境目は
+  純粋関数として単体テスト済み（(a)）なので、S4/S6 の実データ配線は E5/E6 の shadow の記録を見てから
+  行う（U10 と同じ「重みは推測の初期値」の扱い）。
+- **`[execution.planner].permission_mode` は設定に持つが、実行時の配線はしていない**。D14 は
+  「読み取り中心、既定 `plan`」としているが、`ClaudeCodeAdapter` の `permission_mode` は
+  プロバイダ単位で 1 つのアダプタインスタンスに固定されており（`with_model`/`with_env` と同じ形の
+  `with_permission_mode` フックが無い）、run ごとに上書きする経路が無かった。E3 では配線を見送り、
+  planner run もアダプタの既定（通常 `bypassPermissions`）で走る。プロンプト側で「計画を書くだけで、
+  コードは書かない・実装はしない」と明示しているので Task を壊す実害は無いが、D14 の「plan
+  permission-mode」を字義どおり強制してはいない。`with_permission_mode` トレイトフックの追加は
+  E4/E5 で検討すること。
+- **D21（WU ごとの lane）は `decide_for_work_unit`（`task_core::model_policy`）で配線したが、
+  リトライのエスカレーション（`EscalationPolicy`）は適用していない**。`decide_lane`（Task 全体）は
+  `task.attempts > 0` のときエスカレーションを効かせるが、`decide_lane_for_work_unit` は行わない。
+  D11 のとおり計画のある Task では WU の失敗が `task.attempts` を消費しない（`retries` は WU 側の
+  カウンタ）ため、`task.attempts` を見るエスカレーションの判定はそもそもほとんど発火しない
+  （継続 WU の retry では `task.attempts` が動かない）。D21 の「continuation では lane を上げない」は
+  結果としてそのまま守られているが、「WU の retry でエスカレーションする」経路自体は未実装。
+- **Planner の出力の harness 検証は `[[genres]]` の id 集合との照合だけ**（`validate_plan_harnesses`）。
+  D14 は「担当の profile が許す harness に限る」としているが、担当ノードの実効 profile が許可する
+  genre のサブセットまでは絞っていない（`[[genres]]` が空の設定では検証自体をしない。既存の
+  `role`/`genre` の検証と同じ緩さに揃えた）。
+- **planner run の `runs` 索引・`RoutingDecided` は `RunRole::Planner`/`RunIndexRole::Planner`/
+  `TierSource::System`（frontier 固定）で記録するが、`node_sessions` には触れない**（D9/D14「resume
+  しない」は、そもそも planner run が `is_conversation(task) == false` なので継続セッションの判定に
+  掛からず、実装を足すまでもなく満たされている。テストで `RunContext.session.is_none()` を確認した）。
+- **E2b からの指摘の修正（本 ADR の範囲外だが `dispatcher.rs` を触るついでに直した）**: E2 は
+  `run_index_start` を WU の run（`start_work_unit_run`）にしか配線しておらず、計画の無い Task の
+  worker run と reviewer run は `runs` 索引に行が作られていなかった（`run_index_finish` は E2 の時点で
+  既に全 run で呼ばれていたが、対応する `INSERT` が無いので `UPDATE` が 0 行に当たって黙って
+  no-op になっていた）。E3 で `dispatch_ready`（暗黙 WU の worker run）と `spawn_review`（reviewer run）
+  の両方に `run_index_start` を足し、`on_review_finished` の 3 つの終了経路（延期・引き分け再判定・
+  通常の pass/fail）すべてに `run_index_finish`（`finish_reviewer_run_index`）を足した。テスト
+  `plain_task_writes_both_a_worker_and_a_reviewer_row_to_the_runs_index` で確認。E2 の PROGRESS.md の
+  「(g)」の記述（"`run_index_finish` を atomic/WU を問わず常に呼ぶ"）は事実として不正確だったので、
+  この Phase の PROGRESS.md で訂正する。
+- **replan（D17）は実装していない**。`ExecutionPlannerContext.replan` は常に `false`、
+  `ContinueWhy::Replan` の配線は無い（D17 は E4 の範囲）。E3 の planner は「1 回だけ再試行、
+  それでも不正なら atomic に倒す」（D14）だけを実装した。

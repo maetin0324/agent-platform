@@ -1129,6 +1129,13 @@ pub struct ExecutionTomlConfig {
     /// 進捗なしの continuation が連続この回数で `blocked` にする。
     #[serde(default = "default_no_progress_limit")]
     pub no_progress_limit: u32,
+    /// ADR-0072 D13（Phase E3）: Complexity Gate の運用モード。`"off" | "shadow" | "on"`。
+    /// 既定は `"shadow"`（判定と記録だけをして、計画は作らない）。
+    #[serde(default = "default_execution_gate")]
+    pub gate: String,
+    /// ADR-0072 D14（Phase E3）: `[execution.planner]`。
+    #[serde(default)]
+    pub planner: ExecutionPlannerTomlConfig,
 }
 
 impl Default for ExecutionTomlConfig {
@@ -1137,6 +1144,8 @@ impl Default for ExecutionTomlConfig {
             continuation: default_execution_continuation(),
             max_continuations_per_work_unit: default_max_continuations_per_work_unit(),
             no_progress_limit: default_no_progress_limit(),
+            gate: default_execution_gate(),
+            planner: ExecutionPlannerTomlConfig::default(),
         }
     }
 }
@@ -1149,6 +1158,49 @@ fn default_max_continuations_per_work_unit() -> u32 {
 }
 fn default_no_progress_limit() -> u32 {
     2
+}
+fn default_execution_gate() -> String {
+    "shadow".to_string()
+}
+
+/// `[execution.planner]`（ADR-0072 D14, Phase E3）: task-local な計画 run の harness と上限。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionPlannerTomlConfig {
+    #[serde(default = "default_planner_adapter")]
+    pub adapter: String,
+    /// 読み取り中心の permission mode（既定 `"plan"`）。**E3 時点では配線していない**（実行時は
+    /// アダプタ既定の `permission_mode` のまま。ADR-0072 Phase E3 実装時の逸脱・明確化を参照）。
+    #[serde(default = "default_planner_permission_mode")]
+    pub permission_mode: String,
+    #[serde(default = "default_planner_max_turns")]
+    pub max_turns: u32,
+    #[serde(default = "default_planner_max_wall_secs")]
+    pub max_wall_secs: u64,
+}
+
+impl Default for ExecutionPlannerTomlConfig {
+    fn default() -> Self {
+        Self {
+            adapter: default_planner_adapter(),
+            permission_mode: default_planner_permission_mode(),
+            max_turns: default_planner_max_turns(),
+            max_wall_secs: default_planner_max_wall_secs(),
+        }
+    }
+}
+
+fn default_planner_adapter() -> String {
+    "claude-code".to_string()
+}
+fn default_planner_permission_mode() -> String {
+    "plan".to_string()
+}
+fn default_planner_max_turns() -> u32 {
+    40
+}
+fn default_planner_max_wall_secs() -> u64 {
+    1200
 }
 fn default_retry_backoff_base_secs() -> u64 {
     10
@@ -2134,6 +2186,13 @@ impl Config {
                 "[knowledge] default_mounts: {why}"
             )));
         }
+        // ADR-0072 D13（Phase E3）: gate は 3 つだけ（綴り間違いで黙って shadow/off に倒れないように）。
+        if task_core::GateMode::parse(&self.execution.gate).is_none() {
+            return Err(ConfigError::Invalid(format!(
+                "[execution] gate must be one of [\"off\", \"shadow\", \"on\"] (got {:?})",
+                self.execution.gate
+            )));
+        }
         // ADR-0043 D3: runtime は 3 つだけ（綴り間違いで黙ってホスト実行に倒れないように）。
         if task_worker::RuntimePreference::parse(&self.containers.runtime).is_none() {
             return Err(ConfigError::Invalid(format!(
@@ -2835,11 +2894,18 @@ impl Config {
             shared_build_cache: self.workspace.shared_build_cache,
             build_cache_dir: self.workspace.build_cache_dir.clone(),
             workspace_prune_after_secs: self.workspace.prune_after_secs,
-            // ADR-0072 D18（Phase E1）: continuation の可否と上限。
+            // ADR-0072 D18（Phase E1）/ D13・D14（Phase E3）: continuation・gate・planner。
             execution: task_dispatch::ExecutionConfig {
                 continuation: self.execution.continuation,
                 max_continuations_per_work_unit: self.execution.max_continuations_per_work_unit,
                 no_progress_limit: self.execution.no_progress_limit,
+                gate: task_core::GateMode::parse(&self.execution.gate).unwrap_or_default(),
+                planner: task_core::PlannerConfig {
+                    adapter: self.execution.planner.adapter.clone(),
+                    permission_mode: self.execution.planner.permission_mode.clone(),
+                    max_turns: self.execution.planner.max_turns,
+                    max_wall_secs: self.execution.planner.max_wall_secs,
+                },
             },
         }
     }

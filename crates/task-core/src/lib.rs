@@ -12,6 +12,8 @@ pub mod console_action;
 pub mod delegate;
 /// ADR-0072（Phase E1）: Run lifecycle / checkpoint / continuation の純粋な型と関数。
 pub mod execution;
+/// ADR-0072 D13（Phase E3）: Complexity Gate（atomic/compound の決定的な判定）の純粋な型と関数。
+pub mod execution_gate;
 /// ADR-0072（Phase E2）: ExecutionPlan / WorkUnit のデータモデルと決定的な scheduler の純粋な型と関数。
 pub mod execution_plan;
 /// ADR-0046 D3（Phase 59）: ハーネス = 実行契約（`[[harnesses]]`。旧 `[[genres]]` + `[[roles]]`）。
@@ -157,6 +159,12 @@ pub use execution_plan::{
     WorkUnitKind, WorkUnitRow, WorkUnitSpec, WorkUnitStatus, dependents_to_block, new_id,
     newly_ready, next_work_unit, validate,
 };
+// ---- ADR-0072 D13（Phase E3）: Complexity Gate ----
+pub use execution_gate::{
+    EXECUTION_GATE_POLICY_VERSION, EXECUTION_GATE_SCORE_THRESHOLD, ExecutionGateDecision,
+    ExecutionGateInputs, ExecutionHintSpec, ExecutionMode, GateMode, GateSignal, GateSource,
+    PlannerConfig, decide as decide_execution_gate, out_of_scope_rule,
+};
 
 pub mod model_routing;
 // ---- ADR-0069（Phase 114）: routing の 4 層（lane policy・retry/escalation・監査）----
@@ -165,7 +173,8 @@ pub mod retry_policy;
 pub mod routing_audit;
 pub use model_policy::{
     LANE_POLICY_VERSION, LaneCeiling, LaneDecision, Level, ModelPolicy, RoutingRecord,
-    ShadowClassifier, ShadowDecision, TaskFeatureHints, TaskFeatures,
+    ShadowClassifier, ShadowDecision, TaskFeatureHints, TaskFeatures, decide_for_task,
+    decide_for_work_unit,
 };
 pub use retry_policy::{
     AttemptOutcome, AttemptRecord, BudgetState, EscalationPolicy, RetryDecision, is_budget_outcome,

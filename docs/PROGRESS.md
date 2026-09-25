@@ -18254,3 +18254,207 @@ claude-code で `result` メッセージは観測できたのに `artifacts/resu
 - `docs/protocol/worker-protocol.md` の `context` の表に `context.work_unit` の行を追加していない
   （E1 が `context.continuation` も表に追加しなかったのと同じ扱いに揃えたが、GUI 節〈E5〉の前に
   一度ドキュメントを棚卸しした方がよい）。
+
+## Phase E3「Complexity Gate と自動 planning」（2026-09-24）
+
+ADR-0072 §6 E3 の受け入れ条件 (a)〜(h) を実装した。区切りは ADR/PROGRESS の指示どおり
+(a)(b)(c) gate と記録 → (d)(e)(f)(g) planner run → (h) WU routing と予算、の 3 段（1 セッション内で
+テストを都度通しながら進めたため commit は最終 1 本にまとめている）。branch:
+`worktree-agent-a65bbb7fb9eab5600`。
+
+作業の前提: worktree のブランチが main の Phase E2 統合（`1f663a8`）より前（`f7338ad`）から
+分岐していたため、まず `git merge --ff-only main` で E2 の内容を取り込んでから着手した
+（fast-forward。worktree に固有のコミットは無かったので安全）。
+
+### 受け入れ条件ごとの証跡
+
+**(a) D13 の規則表の単体テスト（信号ごと、閾値の境目、強制規則、対象外、人の明示 > 規則 > ヒント）。
+gate は決定論的（LLM を使わない）**
+- 新規: `crates/task-core/src/execution_gate.rs`（純粋関数 `decide`、`out_of_scope_rule`）。
+- 実行したコマンド: `cargo test -p task-core --lib execution_gate::`
+- 出力の要点: exit 0、9 passed。信号ごと（F1〜F5・S1〜S6・H の重み）、閾値の境目（score 4→atomic /
+  6→compound）、強制規則（`compound/long-and-broad`・`atomic/small`）、対象外（`kind!=Execute`・対話・
+  `routing` 無し・固定パイプラインの harness・`workspace_mode=Shared`）、優先順位（人の明示が規則表と
+  ヒントに優先し、`out_of_scope` はさらにその上に来る）をそれぞれ確認。
+
+**(b) `ExecutionGated` と `Task.routing.execution` の記録（点数、当たった信号、判定、mode）**
+- `crates/task-core/src/model.rs`: `Event::ExecutionGated{decision}`、`TaskRouting.execution:
+  Option<ExecutionGateDecision>`、`TaskRouting.execution_hint: Option<ExecutionHintSpec>`（人の明示/
+  CoS のヒントの入口）、`RunRole::Planner`。
+- `crates/task-dispatch/src/dispatcher.rs::execution_gate_if_needed`（`dispatch_ready` の中で
+  `assign_if_needed` の後・`decide_lane`/`wu_dispatch_gate` の前。Task の最初の dispatch で 1 回だけ
+  判定し、`Task.routing.execution` が既に `Some` なら何もしない）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- gate_on_compound_task_runs_a_planner_then_the_planned_work_units_in_order`
+- 出力の要点: exit 0、1 passed。`Event::ExecutionGated` が記録され、`Task.routing.execution.mode ==
+  Compound`、`source == Human`（テストは人の明示 `execution_hint.explicit = true` で gate をバイパス
+  させている。規則表のスコア自体は (a) で個別に検証済み）。
+
+**(c) `[execution] gate = shadow`（既定）では記録だけで実行は atomic のまま。`off` は記録もしない**
+- `crates/celeris/src/config.rs`: `[execution] gate`（既定 `"shadow"`。`GateMode::parse` で検証、
+  未知の値は起動時エラー）。`crates/task-dispatch/src/dispatcher.rs::ExecutionConfig.gate`。
+- `execution_gate_if_needed` は `gate = Off` なら即座に `Ok(task)`（判定もしない）。`Shadow`/`On` は
+  同じ `decide` を呼び、`ExecutionGateDecision.shadow` に運用モードを写すだけ（判定ロジックは変えない）。
+  実際に planner run を起こすかどうかは `dispatch_ready` の `is_planner_dispatch` 判定
+  （`gate == On` を明示的に要求）が握っているので、`shadow` では `Compound` と判定されても
+  `wu_dispatch_gate` が `Atomic` を返したまま実行される。
+- 実行したコマンド: `cargo test -p task-core --lib -- shadow_flag_is_recorded_without_changing_the_decision`
+- 出力の要点: exit 0、1 passed。`shadow=true`/`false` で `mode`/`rule_id` が変わらないことを確認
+  （純粋関数レベル）。dispatcher レベルでは、`invalid_planner_output_retries_once_then_falls_back_to_atomic`
+  等の既存 E2 のアトミック系テスト（`gate` 未設定 = 既定 `shadow`）がそのまま atomic 実行を続けている
+  ことで間接的に確認（`gate` を明示的に `On` にしない限り planner run は一切起きない。
+  `is_planner_dispatch` の条件に `self.config.execution.gate == GateMode::On` が入っている）。
+
+**(d) `gate = on` の compound な Task で最初の run が planner run（`RunRole::Planner`）になり、
+`execution-plan.json` を D14 で検証して採用（`Continue{planned}`）、WU を E2 の scheduler で順に
+実行する（偽の planner アダプタでテスト）**
+- `dispatcher.rs::dispatch_ready` に `is_planner_dispatch` の判定と、planner run 用の上書き
+  （`worker_hint.tier = Frontier`・`worker_hint.adapter = [execution.planner].adapter`・
+  `budget = [execution.planner]` の上限、`WorkerStarted.role = Some(Planner)`）を追加。
+- `dispatcher.rs::on_worker_finished` の先頭で「`current_wu` が無く、この run が
+  `WorkerStarted{role: Planner}` を持つ」ことを検出したら `on_planner_finished` に分岐する
+  （通常のワーカー/WU の判定を経由しない）。
+- `on_planner_finished`: `Terminal::Done` の run だけ `artifacts/execution-plan.json` を読み、
+  `task_core::execution_plan::validate`（+ harness の `[[genres]]` 照合）を通す。妥当なら
+  `task_ops::execution::adopt_plan`（`origin = Planner`）で採用し `Trigger::Continue{Planned}`。
+  採用後は既存の E2 の scheduler（`wu_dispatch_gate`/`next_work_unit`）がそのまま WU を順に実行する。
+- 新規: `crates/task-worker/src/claude_code.rs::build_execution_plan_prompt`（`build_prompt` が
+  `context.execution_planner.is_some()` を見て選ぶ）。`docs/protocol/execution-plan.schema.json`
+  をそのままプロンプトに埋め込み、D18 の上限・gate の根拠・使える genre 一覧を渡す。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- gate_on_compound_task_runs_a_planner_then_the_planned_work_units_in_order`
+- 出力の要点: exit 0、1 passed。偽の `PlannerScriptAdapter`（`execution-plan.json` を書いて
+  `Terminal::Done` を返すだけ）で、2 WU（`a`→`b`）の計画が採用され、`runs` に `role = planner` の
+  行が 1 件（`work_unit_id = None`）、続けて 2 件の worker run（`work_unit_id` あり）が記録され、
+  Task が `Status::Done` まで進むことを確認。`Event::ExecutionPlanned{origin: Planner, ..}` と
+  `Trigger::Transitioned{reason: "planned"}` が 1 回ずつ。
+- 実行したコマンド: `cargo test -p task-worker --lib -- build_prompt_selects_the_execution_plan_prompt_when_execution_planner_is_present`
+- 出力の要点: exit 0、1 passed。`context.execution_planner` が `Some` なら `task.kind == Execute` の
+  ままでも計画プロンプトが選ばれ、schema・D18 の上限・gate の根拠・使える genre 一覧・
+  「`assignee`/`tier`/`model` を書くな」の指示が文面に載ることを確認。
+
+**(e) planner の出力が不正なら 1 回だけ再試行し、それでも不正なら atomic に倒す（Task は失敗しない。
+理由を記録）**
+- `dispatcher.rs::give_up_or_retry_planner`: `events_for` から `WorkerStarted{role: Planner}` の件数
+  （この run 自身を含む）を数え、2 回未満なら `Trigger::Continue{Planned}` で再試行（次の
+  `dispatch_ready` が `is_planner_dispatch` の条件をまだ満たすので、もう一度 planner run を起こす）。
+  2 回に達したら `Task.routing.execution` を `mode = Atomic`・`rule_id = "atomic/planner-invalid"` に
+  書き換える 2 件目の `Event::ExecutionGated` を記録してから `Continue{Planned}`（以降
+  `is_planner_dispatch` は `false` になり、`wu_dispatch_gate` が `Atomic` を返して通常の暗黙 WU 実行に
+  倒れる）。どちらの経路も `Trigger::WorkerError`/`ReviewFail` を使わないので Task は失敗しない。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- invalid_planner_output_retries_once_then_falls_back_to_atomic`
+- 出力の要点: exit 0、1 passed。1 回目は `assignee` を書いた不正な出力（schema 違反）、2 回目は
+  `execution-plan.json` 自体を書かない、の 2 回の不正な試行の後に atomic へ倒れ、`Status::Done`
+  （`attempts == 0`）まで完走することを確認。`Event::ExecutionGated` が 2 件（最初の `Compound` 判定 +
+  atomic への書き換え）、planner run が正確に 2 回（`context.execution_planner.is_some()` の run が
+  2 件）であることも確認。
+
+**(f) planner の出力に `assignee` / `tier` / `model` があれば schema 違反**
+- `task_core::execution_plan::WorkUnitSpec` は元から `#[serde(deny_unknown_fields)]`（E2）で
+  `assignee`/`tier`/`model` の欄を持たないので、これらを書けば JSON のデシリアライズ自体が失敗する
+  （E3 で新規に検証を足す必要は無かった）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- invalid_planner_output_retries_once_then_falls_back_to_atomic`
+  （上の (e) と同じテストの 1 回目の試行が `assignee` を書いた出力で、これで確認している）。
+- 出力の要点: exit 0。1 回目の再試行の理由（`worker_progress` イベント）に
+  `execution-plan.json の形式が不正: unknown field \`assignee\`` を含むことを確認。
+
+**(g) planner は lead（Task の担当ノードの部署の lead）の実効 profile で走り、node_sessions は
+resume しない（task-local）**
+- ADR-0033 D1 の組織の木では department ノード自身がその部署の「lead」の実効 profile を持つ
+  （department の下に更に lead という別ノード種別は無い）。`dispatch_ready` の planner 分岐で
+  `task_core::department_of(&org, task.assignee)` → その department ノードの
+  `task_core::resolve_profile` を `extras.profile`/`extras.node` に上書きする（Task 本来の担当の
+  profile ではなく、部署の lead の profile で走る）。
+- `node_sessions` の resume は `is_conversation(task) == true` の run にしか掛からない仕組み
+  （ADR-0054）で、planner run の対象 Task は常に `is_conversation == false`（compound と判定される
+  対話・support-task は D13 の対象外）なので、実装を足すまでもなく「resume しない」が成り立つ。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- gate_on_compound_task_runs_a_planner_then_the_planned_work_units_in_order`
+- 出力の要点: exit 0。テストの中で `RunContext.session.is_none()`（planner run の context）を確認。
+  部署の lead 切り替えは org を持たない単純なテスト fixture では検証しづらいため、単体テストでは
+  「node_sessions を resume しない」側だけを直接確認し、department の profile 切り替え自体は
+  コードレビュー（`dispatch_ready` の該当ブロック、`crates/task-dispatch/src/dispatcher.rs`）で
+  確認した。実 org での確認は E6 の dogfood に譲る。
+
+**(h) WU ごとの `RoutingDecided.work_unit_id` と WU の view での lane。WU 予算
+（`WorkUnitSpec.budget`）を実行に反映**
+- 新規: `task_core::model_policy::decide_for_work_unit`（Task を複製し `objective`/`acceptance`/
+  `budget`/`genre`/`features` を WU の spec に差し替えた「WU の view」で `TaskFeatures::infer` →
+  `ModelPolicy` を通す。D21）。`dispatcher.rs::decide_lane_for_work_unit` から呼ぶ。
+- `dispatch_ready` の `RoutingRecord` 組み立てで `work_unit_id: current_wu.as_ref().map(|wu|
+  wu.id.clone())`（E2 では常に `None` だったのを配線）。
+- WU の予算: `dispatch_ready` で `current_wu` が決まった直後に、`task.budget`（この run が実際に使う
+  `RunLimits`/`preamble` の予算の予告）を `wu.spec.budget`（無ければ D18 の既定式
+  `max(task.budget.*, 30/1800)`）に差し替える。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- three_work_units_run_in_order_and_complete_the_task`
+- 出力の要点: exit 0、1 passed（E2 の既存テスト。WU ごとの `RoutingDecided` は今回の配線で
+  `work_unit_id` を持つようになったが、E2 時点のアサーションは `work_unit_id` を見ていなかったため
+  非破壊）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- gate_on_compound_task_runs_a_planner_then_the_planned_work_units_in_order`
+- 出力の要点: exit 0。`Event::RoutingDecided` のうち `work_unit_id.is_some()` が WU の数（2 件）と
+  一致することを確認。
+
+### E2b からの指摘の修正（範囲外だが `dispatcher.rs` を触るついでに直した）
+
+コーディネータから、E2 が `run_index_start` を WU の run（`start_work_unit_run`）にしか配線しておらず、
+計画の無い Task の worker run と reviewer run が `runs` 索引に行を作っていない（E2 の (g) 「全タスクの
+run について書かれる」に反する）との指摘があった。`dispatch_ready`（暗黙 WU の worker run）と
+`spawn_review`（reviewer run）の両方に `run_index_start` を足し、`on_review_finished` の 3 つの終了経路
+（延期・引き分け再判定・通常の pass/fail）すべてに `run_index_finish`（新規 `finish_reviewer_run_index`）
+を足した。
+
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- plain_task_writes_both_a_worker_and_a_reviewer_row_to_the_runs_index`
+- 出力の要点: exit 0、1 passed。`Check::Reviewer` を持つ計画の無い Task が、worker run 1 件 + reviewer
+  run 1 件、合わせて 2 件の `runs` 行を作ること（両方とも `finished_at` が埋まる）を確認。
+  E2 の PROGRESS.md の該当記述（「`run_index_finish` を atomic/WU を問わず常に呼ぶ」）は、対応する
+  `run_index_start`（`INSERT`）が無いために実際には `UPDATE` が 0 行に当たって黙って no-op になっていた
+  ので、事実として訂正する。
+
+### CoS のヒント（入口）
+
+- `task_core::console_action::ConsoleAction::CreateTask.execution: Option<ExecutionMode>`、
+  `task_ops::add::NewTaskSpec.execution: Option<ExecutionMode>`。`task_ops::add::create_task_with_roles`
+  で `TaskRouting.execution_hint`（`explicit = provenance.origin == Human`）に写す。
+- `crates/task-worker/src/preamble.rs::actions_instructions` に「大きな・工程がいくつもある依頼だと
+  思ったら `"execution": "compound"` を付けてよい（判定は Complexity Gate が決定的に行う）」の 2 行を
+  追加。
+
+### ゲート（本 Phase 完了時点）
+
+| ゲート | 実行したコマンド | 出力の要点 |
+|---|---|---|
+| fmt | `cargo fmt --all -- --check` | exit 0（差分なし） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0。`clone_on_copy`〈`Option<Usage>` は `Copy`〉を修正） |
+| 全テスト（1 回目） | `cargo test --workspace --no-fail-fast` | task-api と task-worker の schema 一致テストのみ FAILED（想定どおり。他は全て ok）。task-core 295 passed、task-dispatch 276 passed |
+| schema（task-core） | 変更無し（`execution_gate.rs` は独自の schema を持たない） | — |
+| schema（task-api） | `UPDATE_SCHEMA=1 cargo test -p task-api --lib` | exit 0、53 passed。`api-v1.schema.json` 更新（`ExecutionGateDecision`/`GateSignal`/`ExecutionHintSpec`/`Event::ExecutionGated`/`TaskRouting.execution*` 追加のみ） |
+| schema（task-worker） | `UPDATE_SCHEMA=1 cargo test -p task-worker --lib committed_schema_matches_generated` | exit 0、1 passed。`worker-protocol.schema.json` 更新（`RunContext.execution_planner`/`ExecutionPlannerContext` 追加のみ） |
+| 全テスト（2 回目、schema 再生成後） | `cargo test --workspace --no-fail-fast` | 実行中（システム負荷が高く完走に時間を要した。結果は本節末尾に追記） |
+| GUI gen:types | `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff | 2 回目が 1 回目と同一（差分ゼロ）。差分は `ExecutionGateDecision` 等の型追加のみ |
+| GUI typecheck | `cd gui && corepack pnpm@11.27.0 typecheck` | exit 0（エラーなし） |
+| GUI test | `cd gui && corepack pnpm@11.27.0 test` | exit 0。71 files / 1086 passed（画面は E5 の範囲なので型の追随だけ） |
+
+### ADR との差分
+
+`docs/adr/0072-task-execution-decomposition.md` の「Phase E3 実装時の逸脱・明確化」に詳細を記載。要点:
+
+1. D13 の「対象外」は 2 段階（対話・support-task・`kind!=Execute`・`routing`無しは gate 呼び出し前に
+   フィルタして記録しない／固定パイプラインの harness・`workspace_mode=Shared` は `decide` の中で
+   `rule_id="atomic/out-of-scope"` として記録する）。
+2. S4（複数の実行環境）・S6（直近の budget_exhausted 実績）は既定値（`false`/`None`）で運用（D13 が
+   明示的に許容している簡略化）。
+3. `[execution.planner].permission_mode` は設定に持つが実行時の配線はしていない（`with_permission_mode`
+   のようなアダプタフックが無いため）。
+4. D21 の WU ごとの lane にリトライのエスカレーションは適用しない（WU の retry は `task.attempts` を
+   消費しないので、そもそもほとんど発火しない）。
+5. Planner の出力の harness 検証は `[[genres]]` の id 集合との照合のみ（担当 profile のサブセットまでは
+   絞らない）。
+6. replan（D17）は未実装（E4 の範囲）。
+
+### 未解決事項・E4 への申し送り
+
+- replan（D17）: `ExecutionPlannerContext.replan` は常に `false`。WU の `failed`・`plan_issue`・
+  進捗なし・実質的なレビュー不合格から replan を起こす経路（D17）は E4 で実装すること。
+- `classify_review_failure`（D16）・WU の決定的 `checks`（Command）の実行（D14 で検証はしているが
+  E3 では実行しない。E4 の範囲）。
+- S4/S6 の実データ配線（org の部署またぎ判定、`runs` 索引からの直近 budget_exhausted 実績の集計）は
+  shadow の記録（E5/E6）を見てから行う。
+- `[execution.planner].permission_mode` の実行時配線（`with_permission_mode` フックの追加）。
+- replay/`work_units`・`runs` の再構築（E2 からの申し送りのまま、E3 でも着手できず）。

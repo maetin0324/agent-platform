@@ -690,6 +690,168 @@
       ],
       "type": "object"
     },
+    "ExecutionGateDecision": {
+      "description": "D13: `Event::ExecutionGated` の中身、および `Task.routing.execution`。",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/ExecutionMode"
+        },
+        "policy_version": {
+          "type": "string"
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "score": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "shadow": {
+          "description": "`[execution] gate = \"shadow\"` のときの判定なら `true`（記録だけで実行には使わない。D13）。",
+          "type": "boolean"
+        },
+        "signals": {
+          "items": {
+            "$ref": "#/$defs/GateSignal"
+          },
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/GateSource"
+        },
+        "threshold": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode",
+        "source",
+        "score",
+        "threshold",
+        "rule_id",
+        "policy_version",
+        "shadow"
+      ],
+      "type": "object"
+    },
+    "ExecutionHintSpec": {
+      "description": "`NewTaskSpec.execution` / CoS の `create_task.execution` から `Task.routing.execution_hint` に運ぶ値。\n`explicit = true` は人（API/CLI）の明示（gate をバイパスする）、`false` は CoS のヒント\n（signal `H` として +2 されるだけ）。",
+      "properties": {
+        "explicit": {
+          "type": "boolean"
+        },
+        "mode": {
+          "$ref": "#/$defs/ExecutionMode"
+        }
+      },
+      "required": [
+        "mode",
+        "explicit"
+      ],
+      "type": "object"
+    },
+    "ExecutionMode": {
+      "description": "D13: atomic / compound の判定結果。",
+      "enum": [
+        "atomic",
+        "compound"
+      ],
+      "type": "string"
+    },
+    "ExecutionPlannerContext": {
+      "description": "`context.execution_planner`（ADR-0072 D13/D14。Phase E3）: 計画を作らせる run に渡す、\ngate の判定根拠と D18 の上限。",
+      "properties": {
+        "default_max_turns": {
+          "description": "D18: WU が予算を書かなかったときの既定（`max(task.budget.*, 既定)`）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "default_max_wall_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gate_rule_id": {
+          "description": "D13 の gate が当てた規則（`compound/score` 等）。",
+          "type": "string"
+        },
+        "gate_score": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "gate_signals": {
+          "description": "当たった信号を `\"<name>: <detail> (+<weight>)\"` の形で 1 行ずつ。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_work_units": {
+          "description": "D18: 1 つの計画が持てる WorkUnit の数の上限。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "replan": {
+          "default": false,
+          "description": "replan モード（今の計画・WU の状態・checkpoint・起こした理由を渡す。E4 で使う。E3 では常に\n`false`）。",
+          "type": "boolean"
+        },
+        "work_unit_max_turns": {
+          "description": "D18: WU の予算の上限（丸め先）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "work_unit_max_wall_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "gate_rule_id",
+        "gate_score",
+        "max_work_units",
+        "work_unit_max_turns",
+        "work_unit_max_wall_secs",
+        "default_max_turns",
+        "default_max_wall_secs"
+      ],
+      "type": "object"
+    },
+    "GateSignal": {
+      "description": "D13: 当たった信号 1 件（規則表の行、または強制規則・対象外規則）。",
+      "properties": {
+        "detail": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "weight": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "weight",
+        "detail"
+      ],
+      "type": "object"
+    },
+    "GateSource": {
+      "description": "D13: `ExecutionGateDecision.source`。人の明示 > 規則表（CoS のヒントが効いたかどうかは\n`Hint` として残す。`Hint` でも実際に mode を決めるのは規則表のスコアである点に注意\n— 人の明示だけが規則表そのものをバイパスする）。",
+      "enum": [
+        "policy",
+        "human",
+        "hint"
+      ],
+      "type": "string"
+    },
     "GenreContext": {
       "description": "`context.available_genres[]`（ADR-0027 D1）: 委譲できる run に渡す、使える分野と役割の一覧。\n「タスクの分野」ではなく「この run が子に割り当てられる分野の選択肢」を表す。",
       "properties": {
@@ -1444,6 +1606,17 @@
           ],
           "description": "ADR-0033 D4（Phase 28）: 対話用タスクの run にだけ `Some`。委譲・`Question` を使わせず、\n返事だけを求める前置き（`preamble::conversation_instructions`）を出すための印。"
         },
+        "execution_planner": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionPlannerContext"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0072 D14: この run が Complexity Gate の compound 判定（または replan）で起こした\nplanner run のときだけ `Some`。`build_prompt` はこれを見て通常のワーカー用プロンプトの代わりに\n計画の作成を頼むプロンプトを組む（`claude_code::build_execution_plan_prompt`）。"
+        },
         "inputs": {
           "items": {
             "$ref": "#/$defs/ArtifactRef"
@@ -2056,6 +2229,28 @@
             "string",
             "null"
           ]
+        },
+        "execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionGateDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0072 D13（Phase E3）: Complexity Gate の判定そのもの（`Event::ExecutionGated` と同じ中身）。\ngate が判定した Task にだけ `Some`（`gate = \"off\"` の Task・E3 より前のタスクには無い）。"
+        },
+        "execution_hint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionHintSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0072 D13（Phase E3）: `NewTaskSpec.execution` / CoS の `create_task.execution`。\n`explicit = true` は人の明示（Complexity Gate をバイパスする）、`false` は CoS のヒント\n（規則表の signal `H` として +2 されるだけ）。gate の判定後もそのまま残す（監査用）。"
         },
         "features": {
           "anyOf": [

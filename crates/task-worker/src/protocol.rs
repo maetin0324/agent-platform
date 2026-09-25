@@ -510,6 +510,37 @@ pub struct RunContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_unit: Option<WorkUnitPromptContext>,
     // ---- ADR-0072 D9/D21（Phase E2）: ここまで ----
+    // ---- ADR-0072 D13/D14（Phase E3）: task-local な planner run。ここから ----
+    /// ADR-0072 D14: この run が Complexity Gate の compound 判定（または replan）で起こした
+    /// planner run のときだけ `Some`。`build_prompt` はこれを見て通常のワーカー用プロンプトの代わりに
+    /// 計画の作成を頼むプロンプトを組む（`claude_code::build_execution_plan_prompt`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_planner: Option<ExecutionPlannerContext>,
+    // ---- ADR-0072 D13/D14（Phase E3）: ここまで ----
+}
+
+/// `context.execution_planner`（ADR-0072 D13/D14。Phase E3）: 計画を作らせる run に渡す、
+/// gate の判定根拠と D18 の上限。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ExecutionPlannerContext {
+    /// D13 の gate が当てた規則（`compound/score` 等）。
+    pub gate_rule_id: String,
+    pub gate_score: i32,
+    /// 当たった信号を `"<name>: <detail> (+<weight>)"` の形で 1 行ずつ。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gate_signals: Vec<String>,
+    /// D18: 1 つの計画が持てる WorkUnit の数の上限。
+    pub max_work_units: usize,
+    /// D18: WU の予算の上限（丸め先）。
+    pub work_unit_max_turns: u32,
+    pub work_unit_max_wall_secs: u64,
+    /// D18: WU が予算を書かなかったときの既定（`max(task.budget.*, 既定)`）。
+    pub default_max_turns: u32,
+    pub default_max_wall_secs: u64,
+    /// replan モード（今の計画・WU の状態・checkpoint・起こした理由を渡す。E4 で使う。E3 では常に
+    /// `false`）。
+    #[serde(default)]
+    pub replan: bool,
 }
 
 /// `context.work_unit`（ADR-0072 D9/D21。Phase E2）。

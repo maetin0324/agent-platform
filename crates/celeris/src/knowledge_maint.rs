@@ -287,6 +287,7 @@ fn build_run_spec(
             category: None,
             status: None,
             features: None,
+            execution: None,
             provenance: task_ops::add::SpecProvenance::system(),
         };
         Ok(Some(spec))

@@ -166,6 +166,7 @@ mod tests {
             category: None,
             status: None,
             features: None,
+            execution: None,
             provenance: crate::add::SpecProvenance::default(),
         }
     }

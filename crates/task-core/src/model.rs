@@ -562,6 +562,15 @@ pub struct TaskRouting {
     /// TaskFeatures の明示の上書き（ADR-0069 D3）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<crate::model_policy::TaskFeatureHints>,
+    /// ADR-0072 D13（Phase E3）: `NewTaskSpec.execution` / CoS の `create_task.execution`。
+    /// `explicit = true` は人の明示（Complexity Gate をバイパスする）、`false` は CoS のヒント
+    /// （規則表の signal `H` として +2 されるだけ）。gate の判定後もそのまま残す（監査用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_hint: Option<crate::execution_gate::ExecutionHintSpec>,
+    /// ADR-0072 D13（Phase E3）: Complexity Gate の判定そのもの（`Event::ExecutionGated` と同じ中身）。
+    /// gate が判定した Task にだけ `Some`（`gate = "off"` の Task・E3 より前のタスクには無い）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<crate::execution_gate::ExecutionGateDecision>,
 }
 
 /// ADR-0016 D1: `[[roles]]` の 1 行。役割ごとの既定（タスクの値 > 役割の既定 > 全体の既定）とプロンプトに前置きする指示文。
@@ -730,6 +739,9 @@ pub struct RunMetrics {
 pub enum RunRole {
     Worker,
     Reviewer,
+    /// ADR-0072 D14（Phase E3）: task-local な計画 run（Complexity Gate が compound と判定した、
+    /// または replan で起こす run）。
+    Planner,
 }
 
 /// ADR-0048 D2（Phase 60a）: ワーカーの進行の種別。アダプタごとの差はアダプタ側で吸収し、
@@ -1065,6 +1077,11 @@ pub enum Event {
         reason: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
+    },
+    /// ADR-0072 D5/D13（Phase E3）: Complexity Gate の判定（atomic/compound、当たった信号）。
+    /// `Task.routing.execution` と同じトランザクションで書く。状態は変えない（`replay` は無視する）。
+    ExecutionGated {
+        decision: Box<crate::execution_gate::ExecutionGateDecision>,
     },
 }
 

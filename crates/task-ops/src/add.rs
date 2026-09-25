@@ -166,6 +166,10 @@ pub struct NewTaskSpec {
     /// ADR-0069 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。
     #[serde(default)]
     pub features: Option<task_core::TaskFeatureHints>,
+    /// ADR-0072 D13（Phase E3）: Complexity Gate の人の明示（`provenance.origin == Human` のときだけ
+    /// gate をバイパスする）。`Agent`（CoS）が書いたときはヒント（signal `H`）として扱う。
+    #[serde(default)]
+    pub execution: Option<task_core::ExecutionMode>,
     /// ADR-0069 D1: この spec の出自。**API の JSON からは入らない**（`serde(skip)`。偽装できない）。
     /// 既定は人（`POST /tasks` / `celerisctl add`）。LLM の経路（CoS の actions）はコードが `Agent` を立てる。
     #[serde(skip)]
@@ -623,6 +627,13 @@ fn build_task(
         assignee_explicit: spec.assignee.is_some(),
         dropped_assignee: spec.provenance.dropped_assignee.clone(),
         features: spec.features.filter(|f| !f.is_empty()),
+        // ADR-0072 D13: 人（API/CLI）が書けば明示（gate をバイパス）、CoS（Agent）が書けばヒント。
+        // celeris のコード（System）が明示することは無い。
+        execution_hint: spec.execution.map(|mode| task_core::ExecutionHintSpec {
+            mode,
+            explicit: spec.provenance.origin == SpecOrigin::Human,
+        }),
+        execution: None,
     };
     let task = Task {
         routing: Some(routing),
@@ -714,6 +725,7 @@ mod tests {
             category: None,
             status: None,
             features: None,
+            execution: None,
             provenance: SpecProvenance::default(),
         }
     }

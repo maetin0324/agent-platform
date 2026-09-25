@@ -460,6 +460,10 @@ export type Event =
       to: WorkUnitStatus;
       type: "work_unit_transitioned";
       work_unit_id: string;
+    }
+  | {
+      decision: ExecutionGateDecision;
+      type: "execution_gated";
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -484,6 +488,16 @@ export type Check =
   | {
       type: "human";
     };
+/**
+ * D13: atomic / compound の判定結果。
+ */
+export type ExecutionMode = "atomic" | "compound";
+/**
+ * D13: `ExecutionGateDecision.source`。人の明示 > 規則表（CoS のヒントが効いたかどうかは
+ * `Hint` として残す。`Hint` でも実際に mode を決めるのは規則表のスコアである点に注意
+ * — 人の明示だけが規則表そのものをバイパスする）。
+ */
+export type GateSource = "policy" | "human" | "hint";
 /**
  * 各軸の段階（小さな順序尺度）。
  */
@@ -526,7 +540,7 @@ export type WorkspaceMode = "worktree" | "shared";
 /**
  * run の役割（ADR-0014 D1）。`Event::WorkerStarted` / `WorkerFinished` の `role`。
  */
-export type RunRole = "worker" | "reviewer";
+export type RunRole = ("worker" | "reviewer") | "planner";
 /**
  * D7: `task_core::execution::RunEnd`（`WorkerFinished.end` に入れる）。
  */
@@ -2685,6 +2699,17 @@ export interface TaskRouting {
    */
   dropped_assignee?: string | null;
   /**
+   * ADR-0072 D13（Phase E3）: Complexity Gate の判定そのもの（`Event::ExecutionGated` と同じ中身）。
+   * gate が判定した Task にだけ `Some`（`gate = "off"` の Task・E3 より前のタスクには無い）。
+   */
+  execution?: ExecutionGateDecision | null;
+  /**
+   * ADR-0072 D13（Phase E3）: `NewTaskSpec.execution` / CoS の `create_task.execution`。
+   * `explicit = true` は人の明示（Complexity Gate をバイパスする）、`false` は CoS のヒント
+   * （規則表の signal `H` として +2 されるだけ）。gate の判定後もそのまま残す（監査用）。
+   */
+  execution_hint?: ExecutionHintSpec | null;
+  /**
    * TaskFeatures の明示の上書き（ADR-0069 D3）。
    */
   features?: TaskFeatureHints | null;
@@ -2692,6 +2717,39 @@ export interface TaskRouting {
    * ADR-0069 D1: `worker_hint.tier` を誰が決めたか。
    */
   tier_source?: "human" | "system" | "hint" | "default";
+}
+/**
+ * D13: `Event::ExecutionGated` の中身、および `Task.routing.execution`。
+ */
+export interface ExecutionGateDecision {
+  mode: ExecutionMode;
+  policy_version: string;
+  rule_id: string;
+  score: number;
+  /**
+   * `[execution] gate = "shadow"` のときの判定なら `true`（記録だけで実行には使わない。D13）。
+   */
+  shadow: boolean;
+  signals?: GateSignal[];
+  source: GateSource;
+  threshold: number;
+}
+/**
+ * D13: 当たった信号 1 件（規則表の行、または強制規則・対象外規則）。
+ */
+export interface GateSignal {
+  detail: string;
+  name: string;
+  weight: number;
+}
+/**
+ * `NewTaskSpec.execution` / CoS の `create_task.execution` から `Task.routing.execution_hint` に運ぶ値。
+ * `explicit = true` は人（API/CLI）の明示（gate をバイパスする）、`false` は CoS のヒント
+ * （signal `H` として +2 されるだけ）。
+ */
+export interface ExecutionHintSpec {
+  explicit: boolean;
+  mode: ExecutionMode;
 }
 /**
  * ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の
@@ -3201,7 +3259,7 @@ export interface RunSummary {
   /**
    * ワーカー run か Reviewer run か（ADR-0014 D1。イベントに `role` が無ければ `worker`）。
    */
-  role: "worker" | "reviewer";
+  role: ("worker" | "reviewer") | "planner";
   run_id: string;
   started_at: string;
   usage?: Usage | null;
@@ -3868,6 +3926,11 @@ export interface NewTaskSpec {
    */
   cluster?: string | null;
   depends_on?: TaskId[];
+  /**
+   * ADR-0072 D13（Phase E3）: Complexity Gate の人の明示（`provenance.origin == Human` のときだけ
+   * gate をバイパスする）。`Agent`（CoS）が書いたときはヒント（signal `H`）として扱う。
+   */
+  execution?: ExecutionMode | null;
   /**
    * ADR-0069 D3（Phase 114）: lane policy の `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。
    */

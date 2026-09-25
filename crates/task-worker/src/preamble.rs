@@ -973,6 +973,9 @@ fn actions_instructions() -> String {
      （各軸 low / medium / high。judgment, ambiguity, verifiability, reversibility, consequence, context_size, \
      tool_intensity, expected_length, cross_cutting）を書けます。人が発言で `@<担当 id>` や `tier:<lane>` と明示した\
      ときだけ、その値を `assignee` / `tier` に写してください（celeris は人の発言を確かめてから従います）。\n\
+     大きな・工程がいくつもある依頼だと思ったら、任意で `\"execution\": \"compound\"` を付けてよいです\
+     （調査→設計→実装→検証のように複数の作業段階に分かれる依頼が目安）。これはヒントで、実際に分割するか\
+     どうかは Complexity Gate が決定的に判定します（ADR-0072）。\n\
      `create_task.mode` は進め方で、prototype / production / research のいずれかです。通常実装は `mode: \"production\"` とし、mode に standard（tier の名前）は書かないでください。\n\
      `create_task.repos` は案件内の登録名です。指定するときは必ず所属する案件の ID を `project` に書き、\
      上の登録済み repos から選んでください。`project: null` と非空の `repos` の組み合わせは禁止です。\

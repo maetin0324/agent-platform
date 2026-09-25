@@ -676,6 +676,74 @@ pub fn decide_for_task(task: &Task, ceiling: &LaneCeiling) -> Option<LaneDecisio
     Some(decision)
 }
 
+/// ADR-0072 D21（Phase E3）: Task を複製し、`objective`/`acceptance`/`budget`/`genre` を WorkUnit の
+/// spec に差し替えた「WU の view」を作る（`routing`・`kind` 等はそのまま Task のものを継ぐ）。
+/// `TaskFeatures::infer` を WU 単位で計算するための入力を組み立てるだけの純粋関数。
+fn work_unit_view(task: &Task, wu: &crate::execution_plan::WorkUnitRow) -> Task {
+    let mut view = task.clone();
+    view.objective = wu.spec.objective.clone();
+    view.acceptance = if wu.spec.checks.is_empty() {
+        wu.spec
+            .done_when
+            .iter()
+            .map(|text| crate::model::Criterion {
+                text: text.clone(),
+                check: Check::Human,
+            })
+            .collect()
+    } else {
+        wu.spec
+            .checks
+            .iter()
+            .map(|c| crate::model::Criterion {
+                text: format!("check: {}", c.cmd),
+                check: Check::Command {
+                    cmd: c.cmd.clone(),
+                    expect_exit: c.expect_exit,
+                },
+            })
+            .collect()
+    };
+    // ADR-0072 D18: WU の予算の既定は `max(task.budget.max_turns, 30)` / `max(task.budget.max_wall_secs,
+    // 1800)`（planner が書かなかったとき）。
+    view.budget.max_turns = wu
+        .spec
+        .budget
+        .and_then(|b| b.max_turns)
+        .unwrap_or_else(|| task.budget.max_turns.max(30));
+    view.budget.max_wall_secs = wu
+        .spec
+        .budget
+        .and_then(|b| b.max_wall_secs)
+        .unwrap_or_else(|| task.budget.max_wall_secs.max(1800));
+    if let Some(harness) = &wu.spec.harness {
+        view.genre = Some(harness.clone());
+    }
+    view
+}
+
+/// ADR-0072 D21（Phase E3）: WU の `harness`（無ければ Task の genre）と WU の `features` の上書きで、
+/// その WU の lane を決める（`RoutingDecided.record.work_unit_id` に残すための `LaneDecision`）。
+/// `decide_for_task` と同じ規則（Task が `routing` を持たない・execute でなければ `None`）。
+pub fn decide_for_work_unit(
+    task: &Task,
+    wu: &crate::execution_plan::WorkUnitRow,
+    ceiling: &LaneCeiling,
+) -> Option<LaneDecision> {
+    let mut view = work_unit_view(task, wu);
+    // D21: WU の `features` があれば、Task の `routing.features` の代わりにそれを使う（WU 単位の
+    // 上書き）。無ければ Task の hints をそのまま継ぐ。
+    let wu_hints: Option<TaskFeatureHints> = wu
+        .spec
+        .features
+        .as_ref()
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    if let (Some(routing), Some(hints)) = (&mut view.routing, wu_hints) {
+        routing.features = Some(hints);
+    }
+    decide_for_task(&view, ceiling)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

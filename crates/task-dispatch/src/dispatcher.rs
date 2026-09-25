@@ -565,7 +565,7 @@ pub struct DispatchConfig {
 
 /// ADR-0072 D18（Phase E1）: `[execution]`。continuation（予算切れ・yield の続き）の可否と上限。
 /// E2 以降の欄（`max_work_units` 等）は ExecutionPlan/WorkUnit と一緒に導入する（今回は範囲外）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionConfig {
     /// `[execution] continuation`（既定 `true`）。`false` なら E1 の continuation を無効にし、
     /// 予算切れ・yield を従来どおり `WorkerError{retryable:true}` として扱う（ADR-0072 §6 (f)）。
@@ -576,6 +576,10 @@ pub struct ExecutionConfig {
     /// `[execution] no_progress_limit`（既定 2）。進捗なしの continuation が連続この回数で
     /// `blocked` にする。
     pub no_progress_limit: u32,
+    /// ADR-0072 D13（Phase E3）: `[execution] gate`。既定 `shadow`。
+    pub gate: task_core::GateMode,
+    /// ADR-0072 D14（Phase E3）: `[execution.planner]`。
+    pub planner: task_core::PlannerConfig,
 }
 
 impl Default for ExecutionConfig {
@@ -584,6 +588,8 @@ impl Default for ExecutionConfig {
             continuation: true,
             max_continuations_per_work_unit: 3,
             no_progress_limit: 2,
+            gate: task_core::GateMode::default(),
+            planner: task_core::PlannerConfig::default(),
         }
     }
 }
@@ -754,6 +760,52 @@ fn describe_run_end(end: task_core::RunEnd) -> String {
         task_core::RunEnd::HarnessError { class } => format!("harness_error({class:?})"),
         task_core::RunEnd::Cancelled => "cancelled".to_string(),
     }
+}
+
+/// ADR-0072 D5（E2b の指摘、Phase E3 で配線）: reviewer run の `runs` 索引の finish。`completed_review_run`
+/// が `None`（Reviewer run を起動しなかった判定）なら何もしない。失敗しても run は壊さない（警告のみ）。
+fn finish_reviewer_run_index(
+    store: &dyn TaskStore,
+    completed_review_run: &Option<String>,
+    status: task_core::RunIndexStatus,
+    metrics: Option<task_core::RunMetrics>,
+) {
+    let Some(run_id) = completed_review_run else {
+        return;
+    };
+    if let Err(e) = store.run_index_finish(
+        run_id,
+        status,
+        None,
+        None,
+        metrics,
+        OffsetDateTime::now_utc(),
+    ) {
+        tracing::warn!(%run_id, error = %e, "failed to finish the reviewer run in the runs index");
+    }
+}
+
+/// ADR-0072 D14（Phase E3）: 計画の各 WorkUnit の `harness` が `[[genres]]` にある id だけかを確かめる
+/// （担当の profile が許す harness に限る、の簡易版。`genres` が空の設定では検証しない。既存の
+/// `[[genres]] roles` の検証と同じ考え方）。
+fn validate_plan_harnesses(
+    spec: &task_core::ExecutionPlanSpec,
+    genres: &[GenreSpec],
+) -> Result<(), String> {
+    if genres.is_empty() {
+        return Ok(());
+    }
+    for wu in &spec.work_units {
+        if let Some(harness) = &wu.harness
+            && !genres.iter().any(|g| &g.id == harness)
+        {
+            return Err(format!(
+                "work unit {} has unknown harness {harness:?} (not in [[genres]])",
+                wu.key
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// ADR-0072 D9（Phase E1）: この run が continuation（予算切れ・yield の続き）なら、次の run の
@@ -992,6 +1044,9 @@ struct RunExtras {
     /// ADR-0072 D9（Phase E2）: この run が WU の continuation なら、events からではなく
     /// `runs` 索引から組み立てた続きの文脈（`run_worker` は events から求める代わりにこれを使う）。
     continuation_override: Option<task_worker::ContinuationContext>,
+    /// ADR-0072 D13/D14（Phase E3）: task-local な planner run にだけ `Some`
+    /// （`RunContext.execution_planner` にそのまま乗る）。
+    execution_planner: Option<task_worker::protocol::ExecutionPlannerContext>,
 }
 
 struct ReviewEntry {
@@ -3060,6 +3115,21 @@ impl Dispatcher {
             u.status == task_core::WorkUnitStatus::Running
                 && u.last_run_id.as_deref() == Some(run_id.as_str())
         });
+        // ADR-0072 D14（Phase E3）: task-local な planner run はここで分岐する（Reviewing への遷移・
+        // checkpoint の合成など、通常のワーカー/WU の判定は経由しない）。
+        if current_wu.is_none() {
+            let started_as_planner = self.store.events_for(task_id)?.iter().any(|(_, e)| {
+                matches!(
+                    e,
+                    Event::WorkerStarted { run_id: r, role: Some(RunRole::Planner), .. }
+                        if r == &run_id
+                )
+            });
+            if started_as_planner {
+                return self
+                    .on_planner_finished(task_id, &task, run_id, run_since, provider, result);
+            }
+        }
 
         let mut subject = ReviewSubject::default();
         // ADR-0013 D9: 供給側失敗なら種別（ProviderThrottled.reason）を、result を消費する前に取っておく。
@@ -3780,6 +3850,285 @@ impl Dispatcher {
         Ok(())
     }
 
+    /// ADR-0072 D14（Phase E3）: task-local な planner run の終わり方を判定する。`current_wu` が無い
+    /// （計画がまだ無い）Task の `RunRole::Planner` run はすべてここを通る。
+    ///
+    /// `artifacts/execution-plan.json` を D14 で検証し、
+    /// - 妥当（かつ run が `Terminal::Done` で終わった）なら採用して `Trigger::Continue{Planned}`。
+    /// - 不正・run 自体が異常終了（error/question/budget_exhausted/yielded）なら、1 回だけ再試行する
+    ///   （もう一度 planner run を起こす。2 回目もだめなら計画を作らず atomic に倒す。D14「1 回だけ
+    ///   再試行し、それでも不正なら atomic に倒す」）。Task は失敗させない（D12）。
+    fn on_planner_finished(
+        &mut self,
+        task_id: TaskId,
+        task: &Task,
+        run_id: String,
+        run_since: Option<OffsetDateTime>,
+        provider: ProviderId,
+        result: Result<RunOutcome, AdapterError>,
+    ) -> Result<(), DispatchError> {
+        let now = OffsetDateTime::now_utc();
+        // ADR-0013 D9 / S10 と同じ扱い（planner run は account pool のプロバイダを使わない前提。
+        // `[execution.planner].adapter` は既定 claude-code で、アカウントの当たり外れは通常の
+        // policy 報告に任せる）。
+        let policy_outcome = match &result {
+            Ok(_) => ProviderOutcome::Ok,
+            Err(e) => provider_failure_outcome(e).unwrap_or(ProviderOutcome::Ok),
+        };
+        self.policy.report(provider, &policy_outcome);
+
+        let (run_end, describe, usage): (
+            Option<task_core::RunEnd>,
+            String,
+            Option<task_core::Usage>,
+        ) = match &result {
+            Ok(RunOutcome {
+                terminal: Terminal::Done { summary, usage, .. },
+                ..
+            }) => (
+                Some(task_core::RunEnd::Completed),
+                format!("done: {summary}"),
+                *usage,
+            ),
+            Ok(RunOutcome {
+                terminal: Terminal::Question { text },
+                ..
+            }) => (
+                Some(task_core::RunEnd::Question),
+                format!("question: {text}"),
+                None,
+            ),
+            Ok(RunOutcome {
+                terminal: Terminal::Error { message, retryable },
+                ..
+            }) => (
+                Some(task_core::RunEnd::Failed {
+                    retryable: *retryable,
+                }),
+                format!("error(retryable={retryable}): {message}"),
+                None,
+            ),
+            Ok(RunOutcome {
+                terminal: Terminal::Yielded { usage, .. },
+                ..
+            }) => (
+                Some(task_core::RunEnd::Yielded),
+                "yielded (planner runs are not continued; treated as an invalid attempt)"
+                    .to_string(),
+                *usage,
+            ),
+            Ok(RunOutcome {
+                terminal:
+                    Terminal::BudgetExhausted {
+                        kind,
+                        message,
+                        usage,
+                    },
+                ..
+            }) => (
+                Some(task_core::RunEnd::BudgetExhausted { kind: *kind }),
+                format!("budget_exhausted({kind:?}): {message}"),
+                *usage,
+            ),
+            Err(e) => (None, format!("infra error: {e}"), None),
+        };
+
+        // D14: 計画の検証は run が `Terminal::Done` で終わったときだけ試みる（それ以外は無条件に
+        // 「不正な試行」として扱う）。
+        let validation: Result<task_core::execution_plan::ValidatedPlan, String> = if matches!(
+            result,
+            Ok(RunOutcome {
+                terminal: Terminal::Done { .. },
+                ..
+            })
+        ) {
+            let workspace_dir = self.task_dir(task);
+            let artifacts_dir = workspace_dir.as_ref().map(|d| self.artifacts_dir(task, d));
+            match artifacts_dir
+                .as_deref()
+                .map(|d| d.join("execution-plan.json"))
+                .and_then(|p| std::fs::read_to_string(p).ok())
+            {
+                None => Err("artifacts/execution-plan.json が見つからない".to_string()),
+                Some(text) => match serde_json::from_str::<task_core::ExecutionPlanSpec>(&text) {
+                    Err(e) => Err(format!("execution-plan.json の形式が不正: {e}")),
+                    Ok(spec) => match validate_plan_harnesses(&spec, &self.config.genres) {
+                        Err(e) => Err(e),
+                        Ok(()) => task_core::execution_plan::validate(
+                            &spec,
+                            task_core::ExecutionLimits::default(),
+                            &[],
+                        )
+                        .map_err(|errors| task_ops::execution::describe_validation_errors(&errors)),
+                    },
+                },
+            }
+        } else {
+            Err(format!("planner run did not finish cleanly: {describe}"))
+        };
+
+        let metrics = run_since.map(|since| task_core::RunMetrics {
+            wall_ms: wall_ms_since(since),
+            retries: task.attempts,
+            peak_context_tokens: None,
+            turns: None,
+        });
+        let index_status = run_end
+            .map(task_core::RunIndexStatus::from_run_end)
+            .unwrap_or(task_core::RunIndexStatus::HarnessError);
+        if let Err(e) =
+            self.store
+                .run_index_finish(&run_id, index_status, None, usage, metrics, now)
+        {
+            tracing::warn!(%task_id, %run_id, error = %e, "failed to finish the runs index row for the planner run");
+        }
+
+        match validation {
+            Ok(validated) => {
+                let outcome_str = format!(
+                    "done: {} work unit(s) planned",
+                    validated.spec.work_units.len()
+                );
+                let finished = Event::WorkerFinished {
+                    run_id: run_id.clone(),
+                    outcome: outcome_str,
+                    usage,
+                    role: Some(RunRole::Planner),
+                    metrics,
+                    end: run_end,
+                };
+                match task_ops::execution::adopt_plan(
+                    self.store.as_ref(),
+                    task_id,
+                    validated.spec,
+                    task_core::PlanOrigin::Planner,
+                    Some(run_id.clone()),
+                    task_core::ExecutionLimits::default(),
+                    now,
+                ) {
+                    Ok(_) => {
+                        self.store.apply_transition_with_events(
+                            task_id,
+                            Trigger::Continue {
+                                why: task_core::ContinueWhy::Planned,
+                            },
+                            vec![finished],
+                        )?;
+                    }
+                    Err(e) => {
+                        // 採用そのものが失敗した（既に有効な計画がある等、通常起きない）: 不正な
+                        // 試行として retry/give-up の判断に合流させる。
+                        tracing::warn!(%task_id, %run_id, error = %e, "failed to adopt the validated plan; treating as an invalid attempt");
+                        self.give_up_or_retry_planner(
+                            task_id,
+                            task,
+                            &run_id,
+                            finished,
+                            format!("計画の採用に失敗しました: {e}"),
+                            now,
+                        )?;
+                    }
+                }
+            }
+            Err(reason) => {
+                let finished = Event::WorkerFinished {
+                    run_id: run_id.clone(),
+                    outcome: format!("error(retryable=true): invalid execution plan: {reason}"),
+                    usage,
+                    role: Some(RunRole::Planner),
+                    metrics,
+                    end: run_end,
+                };
+                self.give_up_or_retry_planner(task_id, task, &run_id, finished, reason, now)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// ADR-0072 D14（Phase E3）: planner の出力が不正だった（または run が異常終了した）ときの、
+    /// 「1 回だけ再試行、それでも駄目なら atomic に倒す」の判断。過去の `Event::WorkerStarted{role:
+    /// Planner}` の件数（この run 自身を含む）で attempt 数を数える（events から純粋に導出。D5 と
+    /// 同じ考え方）。Task は失敗させない。
+    fn give_up_or_retry_planner(
+        &self,
+        task_id: TaskId,
+        task: &Task,
+        run_id: &str,
+        finished: Event,
+        reason: String,
+        now: OffsetDateTime,
+    ) -> Result<(), DispatchError> {
+        let attempts_so_far = self
+            .store
+            .events_for(task_id)?
+            .iter()
+            .filter(|(_, e)| {
+                matches!(
+                    e,
+                    Event::WorkerStarted {
+                        role: Some(RunRole::Planner),
+                        ..
+                    }
+                )
+            })
+            .count();
+        const MAX_PLANNER_ATTEMPTS: usize = 2;
+        if attempts_so_far < MAX_PLANNER_ATTEMPTS {
+            let progress = Event::worker_progress(
+                run_id,
+                format!("計画を採用できませんでした（{reason}）。もう一度だけ試します。"),
+            );
+            self.store.apply_transition_with_events(
+                task_id,
+                Trigger::Continue {
+                    why: task_core::ContinueWhy::Planned,
+                },
+                vec![finished, progress],
+            )?;
+        } else {
+            // D14: それでも不正なら atomic に倒す（暗黙の WU で実行する）。gate の判定を Atomic に
+            // 書き換えて監査に残す（`Task.routing.execution` を書き換えないと、次の dispatch でまた
+            // planner run を起こそうとしてしまう）。
+            if let Some(mut routing) = task.routing.clone()
+                && let Some(mut decision) = routing.execution.clone()
+            {
+                decision.mode = task_core::ExecutionMode::Atomic;
+                decision.rule_id = "atomic/planner-invalid".to_string();
+                decision.signals.push(task_core::GateSignal {
+                    name: "planner_retry_exhausted".to_string(),
+                    weight: 0,
+                    detail: format!(
+                        "{attempts_so_far} planner attempts failed; falling back to atomic: {reason}"
+                    ),
+                });
+                routing.execution = Some(decision.clone());
+                let mut fresh = task.clone();
+                fresh.routing = Some(routing);
+                fresh.updated_at = now;
+                if let Err(e) = self.store.update_task(
+                    &fresh,
+                    Event::ExecutionGated {
+                        decision: Box::new(decision),
+                    },
+                ) {
+                    tracing::warn!(%task_id, error = %e, "failed to record the atomic fallback after planner retries were exhausted");
+                }
+            }
+            let progress = Event::worker_progress(
+                run_id,
+                format!("計画を採用できず直接実行に切り替えました（{reason}）。"),
+            );
+            self.store.apply_transition_with_events(
+                task_id,
+                Trigger::Continue {
+                    why: task_core::ContinueWhy::Planned,
+                },
+                vec![finished, progress],
+            )?;
+        }
+        Ok(())
+    }
+
     /// ADR-0033 D6（Phase 24）: 結果ファイル（`<artifacts_dir>/result.json`）の `memory` を担当の記憶に追記する。
     /// `[memory]` を設定していない・担当がいない・`memory` が無いときは何もしない。失敗しても run は壊さない。
     fn absorb_memory(&self, task: &Task) {
@@ -3994,6 +4343,12 @@ impl Dispatcher {
             if let Some(ev) = &reviewer_finished {
                 self.store.append_event(task_id, ev)?;
             }
+            finish_reviewer_run_index(
+                self.store.as_ref(),
+                &completed_review_run,
+                task_core::RunIndexStatus::Cancelled,
+                review_metrics,
+            );
             return Ok(());
         }
         let mut throttled_events = Vec::new();
@@ -4066,6 +4421,12 @@ impl Dispatcher {
                 for ev in &throttled_events {
                     self.store.append_event(task_id, ev)?;
                 }
+                finish_reviewer_run_index(
+                    self.store.as_ref(),
+                    &completed_review_run,
+                    task_core::RunIndexStatus::HarnessError,
+                    review_metrics,
+                );
                 if let Some(entry) = entry {
                     self.pending_subjects.insert(task_id, entry.subject);
                 }
@@ -4148,6 +4509,20 @@ impl Dispatcher {
                 .collect();
             Some(reasons.join("; "))
         };
+        let reviewer_index_status = match &reviewer_finished {
+            Some(Event::WorkerFinished { outcome, .. })
+                if outcome.starts_with("error(retryable=false)") =>
+            {
+                task_core::RunIndexStatus::Failed
+            }
+            _ => task_core::RunIndexStatus::Completed,
+        };
+        finish_reviewer_run_index(
+            self.store.as_ref(),
+            &completed_review_run,
+            reviewer_index_status,
+            review_metrics,
+        );
         let mut events: Vec<Event> = reviewer_finished
             .into_iter()
             .chain(outcome.verdicts.iter().map(|v| Event::ReviewVerdict {
@@ -5096,6 +5471,98 @@ impl Dispatcher {
         })
     }
 
+    /// ADR-0072 D13（Phase E3）: Complexity Gate。Task の最初の dispatch で 1 回だけ判定し、
+    /// `Event::ExecutionGated` と `Task.routing.execution` を同じトランザクションで書く。
+    /// `gate = "off"` なら何もしない。対象外の大半（対話・support-task・kind != Execute・`routing`
+    /// 無し）は呼び出し側で既に除いてある（D13「いつ」節）ので、ここでは残りの対象外
+    /// （固定パイプラインの harness・`workspace_mode = Shared`）を `execution_gate::decide` の中で
+    /// 判定する。すでに判定済みの Task（`routing.execution` が `Some`）には触らない。
+    fn execution_gate_if_needed(&self, task: Task) -> Result<Task, DispatchError> {
+        if self.config.execution.gate == task_core::GateMode::Off {
+            return Ok(task);
+        }
+        if task.kind != task_core::TaskKind::Execute || task.routing.is_none() {
+            return Ok(task);
+        }
+        if task_core::support_kind(&task).is_some() {
+            return Ok(task);
+        }
+        let routing = task.routing.clone().unwrap_or_default();
+        if routing.execution.is_some() {
+            return Ok(task);
+        }
+        let (features, _overridden) =
+            task_core::TaskFeatures::infer_with_hints(&task, routing.features.as_ref());
+        let human_execution = routing
+            .execution_hint
+            .filter(|h| h.explicit)
+            .map(|h| h.mode);
+        let cos_hint_compound = routing
+            .execution_hint
+            .is_some_and(|h| !h.explicit && h.mode == task_core::ExecutionMode::Compound);
+        let shadow = self.config.execution.gate == task_core::GateMode::Shadow;
+        // S4/S6: E3 では決定的な既定値（`false`/`None`）で運用する（U10 と同じく、閾値・重みは
+        // shadow の記録を見て後で調整する。ADR-0072「Phase E3 実装時の逸脱・明確化」参照）。
+        let decision = task_core::decide_execution_gate(
+            &task,
+            &features,
+            human_execution,
+            cos_hint_compound,
+            task_core::ExecutionGateInputs::default(),
+            shadow,
+        );
+        let mut fresh = task.clone();
+        let mut new_routing = routing;
+        new_routing.execution = Some(decision.clone());
+        fresh.routing = Some(new_routing);
+        fresh.updated_at = OffsetDateTime::now_utc();
+        match self.store.update_task(
+            &fresh,
+            Event::ExecutionGated {
+                decision: Box::new(decision),
+            },
+        ) {
+            Ok(updated) => Ok(updated),
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, error = %e, "failed to record the execution gate decision; continuing without it");
+                Ok(task)
+            }
+        }
+    }
+
+    /// ADR-0072 D14（Phase E3）: planner run のプロンプトに渡す gate の根拠と D18 の上限。
+    /// `original_budget` は planner 用に上書きする**前**の Task の budget（WU の既定の計算に使う）。
+    fn execution_planner_context(
+        &self,
+        task: &Task,
+        original_budget: task_core::Budget,
+    ) -> task_worker::protocol::ExecutionPlannerContext {
+        let decision = task.routing.as_ref().and_then(|r| r.execution.clone());
+        let limits = task_core::ExecutionLimits::default();
+        task_worker::protocol::ExecutionPlannerContext {
+            gate_rule_id: decision
+                .as_ref()
+                .map(|d| d.rule_id.clone())
+                .unwrap_or_default(),
+            gate_score: decision.as_ref().map(|d| d.score).unwrap_or(0),
+            gate_signals: decision
+                .as_ref()
+                .map(|d| {
+                    d.signals
+                        .iter()
+                        .map(|s| format!("{}: {} (+{})", s.name, s.detail, s.weight))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            max_work_units: limits.max_work_units,
+            work_unit_max_turns: limits.work_unit_max_turns,
+            work_unit_max_wall_secs: limits.work_unit_max_wall_secs,
+            default_max_turns: original_budget.max_turns.max(30),
+            default_max_wall_secs: original_budget.max_wall_secs.max(1800),
+            replan: false,
+        }
+    }
+
     fn dispatch_ready(&mut self) -> Result<usize, DispatchError> {
         self.unroutable.clear();
         self.cluster_waiting.clear();
@@ -5134,6 +5601,9 @@ impl Dispatcher {
                 // 候補が無くて `blocked` にした（人に聞いた）。この tick では dispatch しない。
                 None => continue,
             };
+            // ADR-0072 D13（Phase E3）: Complexity Gate（assign_if_needed の後、decide_lane の前。
+            // 最初の dispatch で 1 回だけ判定する）。
+            task = self.execution_gate_if_needed(task)?;
             // ADR-0072 D6/D15（Phase E2）: 計画のある Task は、次に走らせる WorkUnit を
             // 決定的な scheduler（`task_core::next_work_unit`）で選ぶ。計画が無ければ従来どおり
             // （`current_wu = None`。プロンプト・遷移は E1 までと 1 バイトも変わらない。(i)）。
@@ -5142,6 +5612,42 @@ impl Dispatcher {
                 WuDispatchGate::RunWorkUnit(wu) => Some(*wu),
                 WuDispatchGate::Skip => continue,
             };
+            // ADR-0072 D14（Phase E3）: gate が compound と判定し、`gate = "on"` で、まだ計画が無い
+            // （`current_wu` が None = atomic 経路）なら、この run は task-local な planner run にする。
+            let is_planner_dispatch = current_wu.is_none()
+                && self.config.execution.gate == task_core::GateMode::On
+                && task
+                    .routing
+                    .as_ref()
+                    .and_then(|r| r.execution.as_ref())
+                    .map(|d| d.mode)
+                    == Some(task_core::ExecutionMode::Compound);
+            // D18/D14: 上書きする前の Task の予算（WU/planner の既定の計算に使う。ADR-0072 D14）。
+            let original_task_budget = task.budget;
+            if is_planner_dispatch {
+                // D14: harness/adapter は `[execution.planner]`、lane は固定（下の `lane_decision` で
+                // `TierSource::System` にする）。
+                task.worker_hint.tier = task_core::Tier::Frontier;
+                task.worker_hint.adapter = Some(self.config.execution.planner.adapter.clone());
+                task.budget.max_turns = self.config.execution.planner.max_turns;
+                task.budget.max_wall_secs = self.config.execution.planner.max_wall_secs;
+            } else if let Some(wu) = &current_wu {
+                // ADR-0072 D18/E2 申し送り（Phase E3）: WU の予算（`WorkUnitSpec.budget`）を実際の
+                // run の wall-clock/turn 上限に反映する。書かなければ D18 の既定
+                // （`max(task.budget.*, 既定)`）。
+                let default_max_turns = task.budget.max_turns.max(30);
+                let default_max_wall = task.budget.max_wall_secs.max(1800);
+                task.budget.max_turns = wu
+                    .spec
+                    .budget
+                    .and_then(|b| b.max_turns)
+                    .unwrap_or(default_max_turns);
+                task.budget.max_wall_secs = wu
+                    .spec
+                    .budget
+                    .and_then(|b| b.max_wall_secs)
+                    .unwrap_or(default_max_wall);
+            }
             // ADR-0010 D6（P-3）: ready に入った時刻（DB の updated_at）からのバックオフ。
             if task.attempts > 0 {
                 let delay = retry_backoff(
@@ -5272,7 +5778,31 @@ impl Dispatcher {
             // ADR-0069 D3 / D6（Phase 114）: `routing` を持つ execute タスクは、lane を決定的な policy
             // （TaskFeatures → 規則表 → 組織の天井）とリトライのエスカレーションで決める。人の明示・
             // System の tier はそのまま（記録だけ）。残量による調整はこの後の `select_tier`（別の層）。
-            let lane_decision = self.decide_lane(&task)?;
+            // ADR-0072 D14（Phase E3）: planner run は lane を丸めない固定の frontier（`TierSource::
+            // System`）。D21: WU の run は WU の view（objective/acceptance/budget/genre/features を
+            // 差し替えたもの）で lane を決める。
+            let lane_decision = if is_planner_dispatch {
+                Some(task_core::LaneDecision {
+                    lane: task_core::Tier::Frontier,
+                    proposed: task_core::Tier::Frontier,
+                    source: task_core::TierSource::System,
+                    rule_id: "planner/system-frontier".to_string(),
+                    policy_version: task_core::LANE_POLICY_VERSION.to_string(),
+                    features: task_core::TaskFeatures::infer(&task),
+                    reasons: vec![
+                        "ADR-0072 D14: planner run runs at frontier, fixed by celeris code"
+                            .to_string(),
+                    ],
+                    clamped_by: None,
+                    hint: None,
+                    escalation: None,
+                    shadow: None,
+                })
+            } else if let Some(wu) = &current_wu {
+                self.decide_lane_for_work_unit(&task, wu)?
+            } else {
+                self.decide_lane(&task)?
+            };
             if let Some(decision) = &lane_decision {
                 task.worker_hint.tier = decision.lane;
             }
@@ -5368,10 +5898,41 @@ impl Dispatcher {
                     provider: Some(provider_id.clone()),
                     // ADR-0024 D4: `account_pool` のプロバイダで選んだアカウント（プールを使わなければ `None`）。
                     account: account.clone(),
-                    role: None,
+                    // ADR-0072 D14（Phase E3）: planner run だけ `Some(Planner)`（ワーカー run は
+                    // 従来どおり `None`）。
+                    role: if is_planner_dispatch {
+                        Some(RunRole::Planner)
+                    } else {
+                        None
+                    },
                     task_role: task.role.clone(),
                 },
             )?;
+            // ADR-0072 D5（E2b の指摘）: 計画の無い Task（暗黙の WorkUnit）の worker run も `runs`
+            // 索引に書く（(g)「全タスクの run について書く」。WU の run は `start_work_unit_run`、
+            // planner run はこの少し上で、それぞれ自分で `run_index_start` を呼ぶ）。
+            if current_wu.is_none() && !is_planner_dispatch {
+                let seq = current_run_seq(&self.store.events_for(task.id)?) + 1;
+                if let Err(e) = self.store.run_index_start(task_core::RunRow {
+                    run_id: run_id.clone(),
+                    task_id: task.id.to_string(),
+                    work_unit_id: None,
+                    role: task_core::RunIndexRole::Worker,
+                    seq,
+                    status: task_core::RunIndexStatus::Running,
+                    adapter: Some(adapter_id.clone()),
+                    model: Some(model.clone()),
+                    account: account.clone(),
+                    session_id: None,
+                    checkpoint: None,
+                    usage: None,
+                    metrics: None,
+                    started_at: rfc3339(OffsetDateTime::now_utc()),
+                    finished_at: None,
+                }) {
+                    tracing::warn!(task_id = %task.id, %run_id, error = %e, "failed to record the (implicit work unit) worker run start in the runs index");
+                }
+            }
             // ADR-0069 D5: この run の routing の監査記録（担当・harness・lane・model・features・規則）。
             if let Some(mut decision) = lane_decision {
                 if task_core::model_policy::lane_rank(task.worker_hint.tier)
@@ -5399,7 +5960,8 @@ impl Dispatcher {
                     },
                     quota_reason: Some(routing_reason.clone()),
                     decision,
-                    work_unit_id: None,
+                    // ADR-0072 D21（Phase E3）: WU の run だけ `work_unit_id` を持つ。
+                    work_unit_id: current_wu.as_ref().map(|wu| wu.id.clone()),
                 };
                 self.store.append_event(
                     task.id,
@@ -5485,6 +6047,70 @@ impl Dispatcher {
                 )
             {
                 tracing::warn!(task_id = %task.id, work_unit = %wu.key, error = %e, "failed to record the work unit run start; continuing without work-unit context");
+            }
+            if current_wu.is_some() {
+                // ADR-0072 D22（Phase E3）: 計画のある Task の WU の run からは delegate.json を
+                // 使えない（部をまたぐ委譲は Task 単位。D21）。
+                extras.available_genres = Vec::new();
+            }
+            // ADR-0072 D14/D9（Phase E3）: planner run は、Task の担当が属する部署の**lead ノード**
+            // （`department_of` が返す department ノードそのもの。ADR-0033 D1 の組織の木では
+            // department ノード自身が「その部署の実効 profile」を持つ）の実効 profile で走る。
+            // `node_sessions` は resume しない（対話タスクではないので、そもそも継続セッションの
+            // 判定に掛からない。D9/D14）。
+            if is_planner_dispatch {
+                extras.execution_planner =
+                    Some(self.execution_planner_context(&task, original_task_budget));
+                // ADR-0072 D5（Phase E3）: `runs` 索引に planner run の行を作る（WU の
+                // `start_work_unit_run` と同じ役目。`role = planner`、`work_unit_id = None`）。
+                let planner_seq = self
+                    .store
+                    .runs_for_task(task.id)
+                    .map(|rs| {
+                        rs.iter()
+                            .filter(|r| r.role == task_core::RunIndexRole::Planner)
+                            .count() as u32
+                            + 1
+                    })
+                    .unwrap_or(1);
+                if let Err(e) = self.store.run_index_start(task_core::RunRow {
+                    run_id: run_id.clone(),
+                    task_id: task.id.to_string(),
+                    work_unit_id: None,
+                    role: task_core::RunIndexRole::Planner,
+                    seq: planner_seq,
+                    status: task_core::RunIndexStatus::Running,
+                    adapter: Some(adapter_id.clone()),
+                    model: Some(model.clone()),
+                    account: account.clone(),
+                    session_id: None,
+                    checkpoint: None,
+                    usage: None,
+                    metrics: None,
+                    started_at: rfc3339(OffsetDateTime::now_utc()),
+                    finished_at: None,
+                }) {
+                    tracing::warn!(task_id = %task.id, %run_id, error = %e, "failed to record the planner run start in the runs index");
+                }
+                if let Ok(org) = self.store.org_list()
+                    && let Some(dept_id) = task
+                        .assignee
+                        .as_deref()
+                        .and_then(|a| task_core::department_of(&org, a))
+                    && let Some(dept_node) = org.iter().find(|n| n.id == dept_id)
+                {
+                    let effective = task_core::resolve_profile(&org, &dept_node.id);
+                    extras.profile = if effective.is_trivial() {
+                        None
+                    } else {
+                        Some(effective.with_task(&task))
+                    };
+                    extras.node = Some(NodeContext {
+                        id: dept_node.id.clone(),
+                        name: dept_node.name.clone(),
+                        brief: dept_node.brief.clone(),
+                    });
+                }
             }
             // ADR-0052 D2: フォールバックの前置き（LangMem に渡しているのと同じ抽出の指示 + 出力契約）を
             // 役割の指示文として載せる。依頼文（`maintenance_objective`）は `task.objective` のまま。
@@ -5887,6 +6513,9 @@ impl Dispatcher {
             // ここ（`run_extras`）の返り値を上書きする（ここでは常に `None`）。
             work_unit: None,
             continuation_override: None,
+            // ADR-0072 D13/D14（Phase E3）: planner run かどうかも `dispatch_ready` が判断し、
+            // ここの返り値を上書きする（ここでは常に `None`）。
+            execution_planner: None,
         })
     }
 
@@ -6680,13 +7309,44 @@ impl Dispatcher {
                 &Event::WorkerStarted {
                     run_id: review_run_id.clone(),
                     adapter: adapter_id.clone(),
-                    model,
+                    model: model.clone(),
                     provider: Some(provider_id.clone()),
                     account: account.clone(),
                     role: Some(RunRole::Reviewer),
                     task_role: None,
                 },
             )?;
+            // ADR-0072 D5（E2b の指摘）: reviewer run も `runs` 索引に書く
+            // （(g)「全タスクの run について書く」）。
+            let seq = self
+                .store
+                .runs_for_task(task_id)
+                .map(|rs| {
+                    rs.iter()
+                        .filter(|r| r.role == task_core::RunIndexRole::Reviewer)
+                        .count() as u32
+                        + 1
+                })
+                .unwrap_or(1);
+            if let Err(e) = self.store.run_index_start(task_core::RunRow {
+                run_id: review_run_id.clone(),
+                task_id: task_id.to_string(),
+                work_unit_id: None,
+                role: task_core::RunIndexRole::Reviewer,
+                seq,
+                status: task_core::RunIndexStatus::Running,
+                adapter: Some(adapter_id.clone()),
+                model: Some(model.clone()),
+                account: account.clone(),
+                session_id: None,
+                checkpoint: None,
+                usage: None,
+                metrics: None,
+                started_at: rfc3339(OffsetDateTime::now_utc()),
+                finished_at: None,
+            }) {
+                tracing::warn!(%task_id, run_id = %review_run_id, error = %e, "failed to record the reviewer run start in the runs index");
+            }
         }
         let timeout = self.config.review_timeout;
         // ADR-0036 D1/D2: 判定（`plan.json` / `review.json` / `summary.md` / `ArtifactExists` の既定パス）は
@@ -7804,6 +8464,33 @@ impl Dispatcher {
         Ok(Some(decision))
     }
 
+    /// ADR-0072 D21（Phase E3）: WU の run の lane。`decide_lane` と同じ天井（担当ノードの実効
+    /// profile）を使うが、`TaskFeatures` は WU の view（`decide_for_work_unit`）で計算する。
+    /// エスカレーション（リトライでの lane の引き上げ）は WU の retries を数えないので、E3 では
+    /// 行わない（`task.attempts` は計画のある Task では WU の失敗で増えない。D11）。
+    fn decide_lane_for_work_unit(
+        &self,
+        task: &Task,
+        wu: &task_core::WorkUnitRow,
+    ) -> Result<Option<task_core::LaneDecision>, DispatchError> {
+        if task.routing.is_none() || task.kind != TaskKind::Execute {
+            return Ok(None);
+        }
+        let org = self.store.org_list()?;
+        let profile = task
+            .assignee
+            .as_deref()
+            .filter(|_| !org.is_empty())
+            .map(|a| task_core::profile::resolve(&org, a));
+        let ceiling = profile
+            .as_ref()
+            .map(|p| p.lane_ceiling())
+            .unwrap_or_default();
+        Ok(task_core::model_policy::decide_for_work_unit(
+            task, wu, &ceiling,
+        ))
+    }
+
     /// ADR-0046 D5（Phase 59）: `assignee` が無い `ready` のタスクの担当を**決定的に**決める。
     ///
     /// - 決まったら `Event::Assigned { node, score, reason }` を残して担当を書き戻し、そのタスクを返す。
@@ -8577,6 +9264,8 @@ async fn run_worker(
                 .or_else(|| build_continuation_context(&events)),
             // ADR-0072 D9/D21（Phase E2）: 計画のある Task の WU の run にだけ `Some`。
             work_unit: extras.work_unit.clone(),
+            // ADR-0072 D13/D14（Phase E3）: task-local な planner run にだけ `Some`。
+            execution_planner: extras.execution_planner.clone(),
         },
     };
     // ADR-0066 D1（Phase 110b）: ローカルの git worktree のホスト実行にだけ、共有ビルドキャッシュの
@@ -18972,6 +19661,7 @@ mod tests {
             mode: None,
             category: None,
             features: None,
+            execution: None,
             provenance: Default::default(),
             status: None,
         };
@@ -20578,6 +21268,319 @@ mod tests {
             ctx_a.work_unit.as_ref().unwrap().objective,
             "Implement a thoroughly and completely"
         );
+    }
+
+    // ========== ADR-0072（Phase E3）: Complexity Gate と自動 planning ==========
+
+    /// planner run の応答を制御し、それ以外（WU/atomic の run）は内側の `WuScriptAdapter` に委譲する。
+    /// `plan_attempts` は planner run が呼ばれるたびに 1 つずつ消費する
+    /// （`Some(json)` は `execution-plan.json` に書く内容、`None` は「書かない」＝ 不正な試行）。
+    struct PlannerScriptAdapter {
+        plan_attempts: StdMutex<std::collections::VecDeque<Option<String>>>,
+        wu: WuScriptAdapter,
+        seen: Arc<StdMutex<Vec<task_worker::RunContext>>>,
+    }
+
+    impl PlannerScriptAdapter {
+        fn new(
+            plan_attempts: Vec<Option<String>>,
+            wu_script: HashMap<String, Vec<Terminal>>,
+        ) -> Self {
+            PlannerScriptAdapter {
+                plan_attempts: StdMutex::new(plan_attempts.into_iter().collect()),
+                wu: WuScriptAdapter::new(wu_script),
+                seen: Arc::new(StdMutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for PlannerScriptAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            run_id: &str,
+            limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            self.seen.lock().unwrap().push(req.context.clone());
+            if req.context.execution_planner.is_some() {
+                let next = self.plan_attempts.lock().unwrap().pop_front().flatten();
+                if let Some(json) = next {
+                    std::fs::create_dir_all(&req.artifacts_dir).ok();
+                    std::fs::write(req.artifacts_dir.join("execution-plan.json"), json)
+                        .expect("write execution-plan.json");
+                }
+                return Ok(RunOutcome {
+                    terminal: Terminal::Done {
+                        summary: "planned".into(),
+                        evidence: vec![],
+                        usage: None,
+                    },
+                    exit_code: Some(0),
+                });
+            }
+            self.wu.run(req, run_id, limits, sink).await
+        }
+    }
+
+    fn plan_json(work_units: Vec<task_core::WorkUnitSpec>) -> String {
+        let spec = task_core::ExecutionPlanSpec {
+            schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
+            rationale: "test plan".to_string(),
+            work_units,
+        };
+        serde_json::to_string(&spec).unwrap()
+    }
+
+    /// 人の明示（`execution_hint.explicit = true`）を持つ compound task を作る（gate の規則表を
+    /// バイパスし、テストを score のチューニングから独立させる）。
+    fn compound_task(dir: &std::path::Path) -> Task {
+        let mut task = new_task(
+            dir,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        task.routing = Some(task_core::TaskRouting {
+            execution_hint: Some(task_core::ExecutionHintSpec {
+                mode: task_core::ExecutionMode::Compound,
+                explicit: true,
+            }),
+            ..Default::default()
+        });
+        task
+    }
+
+    /// ADR-0072 §6 E3 (d): gate = on の compound task で最初の run が planner run になり、
+    /// `execution-plan.json` を検証して採用し（`Continue{planned}`）、WU を順に実行する。
+    #[tokio::test]
+    async fn gate_on_compound_task_runs_a_planner_then_the_planned_work_units_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = compound_task(dir.path());
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+
+        let valid_plan = plan_json(vec![wu_spec("a", &[]), wu_spec("b", &["a"])]);
+        let adapter = Arc::new(PlannerScriptAdapter::new(
+            vec![Some(valid_plan)],
+            HashMap::new(),
+        ));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.gate = task_core::GateMode::On;
+        d.config.execution.planner.adapter = "instant".to_string();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+        let decision = stored
+            .routing
+            .as_ref()
+            .and_then(|r| r.execution.as_ref())
+            .expect("gate decision recorded");
+        assert_eq!(decision.mode, task_core::ExecutionMode::Compound);
+        assert_eq!(decision.source, task_core::GateSource::Human);
+
+        let plan = store
+            .execution_plan_active(task_id)
+            .unwrap()
+            .expect("plan adopted");
+        assert_eq!(plan.origin, task_core::PlanOrigin::Planner);
+        let units = store.work_units_for(task_id).unwrap();
+        assert_eq!(units.len(), 2);
+        assert!(
+            units
+                .iter()
+                .all(|u| u.status == task_core::WorkUnitStatus::Done)
+        );
+
+        let runs = store.runs_for_task(task_id).unwrap();
+        let planner_runs: Vec<&task_core::RunRow> = runs
+            .iter()
+            .filter(|r| r.role == task_core::RunIndexRole::Planner)
+            .collect();
+        assert_eq!(planner_runs.len(), 1, "{runs:?}");
+        assert_eq!(planner_runs[0].status, task_core::RunIndexStatus::Completed);
+        assert!(planner_runs[0].work_unit_id.is_none());
+
+        let events = store.events_for(task_id).unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ExecutionGated { .. })),
+            "{events:?}"
+        );
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::ExecutionPlanned {
+                    origin: task_core::PlanOrigin::Planner,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+        let planned_reasons = events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::Transitioned { reason, .. } if reason == "planned"))
+            .count();
+        assert_eq!(planned_reasons, 1, "{events:?}");
+
+        // (g): planner run は node_sessions を resume しない（対話ではないので session は常に無い）。
+        let planner_contexts: Vec<task_worker::RunContext> = adapter
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.execution_planner.is_some())
+            .cloned()
+            .collect();
+        assert_eq!(planner_contexts.len(), 1);
+        assert!(planner_contexts[0].session.is_none());
+
+        // (h): WU の run は `RoutingDecided.work_unit_id` を持つ。
+        let routing_records: Vec<task_core::RoutingRecord> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::RoutingDecided { record, .. } => Some((**record).clone()),
+                _ => None,
+            })
+            .collect();
+        let wu_routing = routing_records
+            .iter()
+            .filter(|r| r.work_unit_id.is_some())
+            .count();
+        assert_eq!(wu_routing, 2, "{routing_records:?}");
+    }
+
+    /// ADR-0072 §6 E3 (e)(f): planner の出力が不正なら 1 回だけ再試行し、それでも不正なら
+    /// Task を失敗させずに atomic に倒す。`assignee`/`tier` を書いた出力は schema 違反
+    /// （`deny_unknown_fields`）として同じ経路で拒否される。
+    #[tokio::test]
+    async fn invalid_planner_output_retries_once_then_falls_back_to_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = compound_task(dir.path());
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+
+        // 1 回目: `assignee` を書いた不正な出力（schema 違反、(f)）。2 回目: ファイル自体を書かない。
+        let bad_plan = r#"{"schema":"celeris.execution-plan/1","rationale":"r","work_units":[
+            {"key":"a","kind":"implement","title":"t","objective":"o","depends_on":[],
+             "done_when":[],"checks":[],
+             "context":{"paths":[],"from_work_units":[],"knowledge":[]},"outputs":[],
+             "assignee":"someone"}
+        ]}"#
+        .to_string();
+        let adapter = Arc::new(PlannerScriptAdapter::new(
+            vec![Some(bad_plan), None],
+            HashMap::new(),
+        ));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.gate = task_core::GateMode::On;
+        d.config.execution.planner.adapter = "instant".to_string();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            Status::Done,
+            "an invalid plan must not fail the task: {stored:?}"
+        );
+        assert_eq!(
+            stored.attempts, 0,
+            "planner retries must not consume Task.attempts"
+        );
+        assert!(
+            store.execution_plan_active(task_id).unwrap().is_none(),
+            "no plan should have been adopted"
+        );
+        let decision = stored
+            .routing
+            .as_ref()
+            .and_then(|r| r.execution.as_ref())
+            .expect("gate decision recorded");
+        assert_eq!(
+            decision.mode,
+            task_core::ExecutionMode::Atomic,
+            "falls back to atomic after exhausting retries: {decision:?}"
+        );
+        assert_eq!(decision.rule_id, "atomic/planner-invalid");
+
+        let planner_attempts = adapter
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.execution_planner.is_some())
+            .count();
+        assert_eq!(planner_attempts, 2, "exactly one retry (2 attempts total)");
+
+        let events = store.events_for(task_id).unwrap();
+        let gated = events
+            .iter()
+            .filter(|(_, e)| matches!(e, Event::ExecutionGated { .. }))
+            .count();
+        assert_eq!(
+            gated, 2,
+            "the original decision plus the atomic fallback: {events:?}"
+        );
+    }
+
+    /// ADR-0072 D5（E2b の指摘、Phase E3 で配線）: 計画の無い Task（暗黙の WorkUnit）の worker run と
+    /// reviewer run の両方が `runs` 索引に行を書く（(g)「全タスクの run について書かれる」は WU の run
+    /// だけでなく atomic/reviewer にも及ぶ）。
+    #[tokio::test]
+    async fn plain_task_writes_both_a_worker_and_a_reviewer_row_to_the_runs_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        // `Check::Reviewer` を使うので reviewer run が実際に起動する。`review.json` を書かない
+        // `InstantAdapter` では reviewer の判定は不合格になるが、`runs` の行は起動した時点で作られる。
+        let task = new_task(dir.path(), Check::Reviewer, 0);
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let report = run_until_idle(&mut d, 300).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            Status::Failed,
+            "no review.json was written, so the reviewer criterion fails: {stored:?}"
+        );
+
+        let runs = store.runs_for_task(task_id).unwrap();
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert!(
+            runs.iter()
+                .any(|r| r.role == task_core::RunIndexRole::Worker && r.work_unit_id.is_none()),
+            "{runs:?}"
+        );
+        assert!(
+            runs.iter()
+                .any(|r| r.role == task_core::RunIndexRole::Reviewer),
+            "{runs:?}"
+        );
+        for r in &runs {
+            assert!(r.finished_at.is_some(), "{r:?}");
+        }
     }
 
     /// ADR-0072 §6 E2 (d): WU の失敗 → retry → 上限で `failed`。依存先は `blocked(dependency_failed)`。
