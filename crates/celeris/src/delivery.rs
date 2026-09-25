@@ -988,6 +988,7 @@ mod tests {
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].status, WorkUnitStatus::Done);
         assert_eq!(units[1].status, WorkUnitStatus::Ready);
+        assert!(units[1].spec.title.starts_with("repair (format):"));
         assert!(units[1].spec.objective.contains("Diff in src/main.rs:1"));
         assert!(!units[1].spec.objective.contains("implement"));
         assert_eq!(
@@ -1046,19 +1047,32 @@ mod tests {
     }
 
     #[test]
-    fn merge_base_failure_creates_repair_and_rechecks_new_head() {
-        use task_core::DeliveryStore;
+    fn merge_base_repair_revalidates_and_delivers_only_the_repaired_branch() {
+        use task_core::{DeliveryStore, Trigger};
         let (store, dir, d) = merge_queued_delivery();
         let tmp = tempfile::tempdir().unwrap();
         let cfg = cfg_for(dir.path(), &tmp.path().join("releases"));
+        // The previous run may have a large transcript; it must not enter the repair objective.
+        let transcript_marker = "ORIGINAL_RUN_TRANSCRIPT_MARKER";
+        store
+            .append_event(
+                d.task_id,
+                &Event::worker_progress("original-run", transcript_marker),
+            )
+            .unwrap();
         git_text(dir.path(), &["commit", "--allow-empty", "-m", "main moved"]).unwrap();
+        let moved_main = sha(dir.path(), "main").unwrap();
         advance(&store, &cfg, &d, OffsetDateTime::now_utc()).unwrap();
         let blocked = store.delivery_get(d.task_id).unwrap().unwrap();
         assert!(blocked.detail.starts_with(MERGE_BASE_FAILURE));
         advance(&store, &cfg, &blocked, OffsetDateTime::now_utc()).unwrap();
+        assert_eq!(store.get(d.task_id).unwrap().unwrap().status, Status::Ready);
         let units = store.work_units_for(d.task_id).unwrap();
         assert_eq!(units.len(), 2);
-        assert!(units[1].spec.title.starts_with("repair (merge_base):"));
+        let repair = &units[1];
+        assert_eq!(repair.kind, WorkUnitKind::Repair);
+        assert_eq!(repair.status, WorkUnitStatus::Ready);
+        assert!(repair.spec.title.starts_with("repair (merge_base):"));
         assert_eq!(
             store
                 .execution_plan_active(d.task_id)
@@ -1067,7 +1081,57 @@ mod tests {
                 .status,
             task_core::PlanStatus::Active
         );
-        assert!(units[1].spec.objective.contains(&d.head));
+        assert!(repair.spec.objective.contains(&d.branch));
+        assert!(repair.spec.objective.contains(&moved_main));
+        assert!(repair.spec.objective.contains(&blocked.detail));
+        assert!(!repair.spec.objective.contains(transcript_marker));
+        assert!(!repair.spec.objective.contains("implement"));
+        assert!(!repair.spec.objective.contains("work_units"));
+
+        // Simulate the repair worker rebasing feature onto the new main and passing review.
+        git_text(dir.path(), &["checkout", "feature"]).unwrap();
+        git_text(dir.path(), &["rebase", "main"]).unwrap();
+        let repaired_head = sha(dir.path(), "feature").unwrap();
+        git_text(dir.path(), &["checkout", "main"]).unwrap();
+        let mut done = repair.clone();
+        done.status = WorkUnitStatus::Done;
+        store
+            .work_unit_transition(
+                d.task_id,
+                done,
+                Event::WorkUnitTransitioned {
+                    work_unit_id: repair.id.clone(),
+                    key: repair.key.clone(),
+                    from: WorkUnitStatus::Ready,
+                    to: WorkUnitStatus::Done,
+                    reason: "test_repair_completed".into(),
+                    run_id: None,
+                },
+            )
+            .unwrap();
+        for trigger in [Trigger::Dispatch, Trigger::WorkerDone, Trigger::ReviewPass] {
+            store.apply_transition(d.task_id, trigger, None).unwrap();
+        }
+        let now = OffsetDateTime::now_utc();
+        advance(&store, &cfg, &blocked, now).unwrap();
+        let requeued = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert_eq!(requeued.state, State::MergeQueued);
+        assert_eq!(requeued.base, moved_main);
+        assert_eq!(requeued.head, repaired_head);
+        // A local fake prepare script lets the merge proceed without touching a real release.
+        let script = cfg
+            .selfdeploy
+            .releases_dir
+            .parent()
+            .unwrap()
+            .join("current/scripts/prepare.sh");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        advance(&store, &cfg, &requeued, now).unwrap();
+        let delivered = store.delivery_get(d.task_id).unwrap().unwrap();
+        assert_eq!(delivered.state, State::Preparing);
+        assert_eq!(sha(dir.path(), "main").unwrap(), repaired_head);
+        assert_eq!(delivered.release.as_deref(), Some(&repaired_head[..12]));
     }
 
     // ---- ADR-0051 Phase 106追記: merge直後・release前のpush。ここから ----

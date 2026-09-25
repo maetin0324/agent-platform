@@ -22294,6 +22294,111 @@ mod tests {
 
     // ========== ADR-0072（Phase E4）: reviewer repair ==========
 
+    #[tokio::test]
+    async fn reopened_delivery_task_dispatches_only_its_ready_repair_unit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        let main_spec = wu_spec("main", &[]);
+        let plan = task_ops::execution::adopt_plan(
+            store.as_ref(),
+            task_id,
+            task_core::ExecutionPlanSpec {
+                schema: task_core::EXECUTION_PLAN_SCHEMA.into(),
+                rationale: "initial implementation".into(),
+                work_units: vec![main_spec],
+            },
+            task_core::PlanOrigin::Fixture,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        let main = store.work_units_for(task_id).unwrap().remove(0);
+        let mut done_main = main.clone();
+        done_main.status = task_core::WorkUnitStatus::Done;
+        store
+            .work_unit_transition(
+                task_id,
+                done_main,
+                Event::WorkUnitTransitioned {
+                    work_unit_id: main.id.clone(),
+                    key: main.key.clone(),
+                    from: task_core::WorkUnitStatus::Ready,
+                    to: task_core::WorkUnitStatus::Done,
+                    reason: "initial_implementation_done".into(),
+                    run_id: None,
+                },
+            )
+            .unwrap();
+        for trigger in [Trigger::Dispatch, Trigger::WorkerDone, Trigger::ReviewPass] {
+            store.apply_transition(task_id, trigger, None).unwrap();
+        }
+
+        let repair_spec = task_core::WorkUnitSpec {
+            key: "repair-1".into(),
+            kind: task_core::WorkUnitKind::Repair,
+            title: "repair (merge_base): delivery".into(),
+            objective: "Rebase feature on main".into(),
+            ..wu_spec("repair-1", &[])
+        };
+        let repair = task_core::WorkUnitRow::new(
+            task_core::new_id(),
+            task_id.to_string(),
+            plan.id,
+            1,
+            repair_spec,
+            task_core::WorkUnitStatus::Ready,
+            OffsetDateTime::now_utc().to_string(),
+        );
+        store
+            .delivery_repair_apply(
+                task_id,
+                vec![Event::WorkUnitTransitioned {
+                    work_unit_id: repair.id.clone(),
+                    key: repair.key.clone(),
+                    from: task_core::WorkUnitStatus::Pending,
+                    to: task_core::WorkUnitStatus::Ready,
+                    reason: "delivery_repair".into(),
+                    run_id: None,
+                }],
+                None,
+                vec![repair.clone()],
+            )
+            .unwrap();
+        assert_eq!(store.get(task_id).unwrap().unwrap().status, Status::Ready);
+        let adapter = Arc::new(WuScriptAdapter::new(HashMap::new()));
+        let mut dispatcher = dispatcher(store.clone(), adapter.clone(), 1);
+        let report = run_until_idle(&mut dispatcher, 400).await;
+        assert!(report.idle, "{report:?}");
+        assert_eq!(store.get(task_id).unwrap().unwrap().status, Status::Done);
+        assert_eq!(
+            store.work_units_for(task_id).unwrap()[0].status,
+            task_core::WorkUnitStatus::Done
+        );
+        assert_eq!(
+            store.work_units_for(task_id).unwrap()[1].status,
+            task_core::WorkUnitStatus::Done
+        );
+        let seen: Vec<_> = adapter
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect();
+        assert_eq!(seen, vec!["repair-1"], "main WU must not run again");
+    }
+
     /// 完了した WU の run の後、`key` が `repair-` で始まる repair run のときだけ `.repair-done` を
     /// 作る（`Check::Command` の再実行が通るようにする）。それ以外は内側の `WuScriptAdapter` そのまま。
     struct RepairFsAdapter(WuScriptAdapter);
