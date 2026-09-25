@@ -12,9 +12,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use schemars::JsonSchema;
 use serde::Serialize;
 use task_core::{
-    Event, EventRow, ExecutionLimits, ExecutionPlanSpec, RunIndexRole, RunIndexStatus, RunRole,
-    RunRow, Status, Task, TaskId, TaskStore, WorkUnitBlockedReason, WorkUnitRow, WorkUnitStatus,
-    validate,
+    Event, EventRow, ExecutionLimits, ExecutionPlanRow, ExecutionPlanSpec, PlanStatus,
+    RunIndexRole, RunIndexStatus, RunRole, RunRow, Status, Task, TaskId, TaskStore,
+    WorkUnitBlockedReason, WorkUnitRow, WorkUnitStatus, validate,
 };
 
 use crate::error::OpsError;
@@ -137,6 +137,22 @@ pub struct RunMismatch {
     pub run_id: String,
     pub field: String,
     pub replayed: String,
+    pub stored: String,
+}
+
+/// ADR-0072 D5/D17（Phase E4b 項目5）: `replay` が検出した 1 件の `execution_plans`（版の履歴）の
+/// 食い違い。`version` で突き合わせる（`id` はフィールドの 1 つとして比較する。下記 `plan_field_pairs`
+/// 参照。`Event::ExecutionPlanned.plan_id` が DB の `id` そのものなので、`work_units.id` と違って
+/// events から確実に復元できる）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExecutionPlanMismatch {
+    pub task_id: TaskId,
+    pub version: u32,
+    /// 比較した欄の名前（`presence`/`id`/`origin`/`status`/`spec_json`。下の `plan_field_pairs` 参照）。
+    pub field: String,
+    /// `events` から再構築した値。
+    pub replayed: String,
+    /// `execution_plans` テーブルに保存されている値。
     pub stored: String,
 }
 
@@ -355,6 +371,60 @@ pub fn rebuild_work_units_and_runs(
     (wu_out, run_out)
 }
 
+/// ADR-0072 D5/D17（Phase E4b 項目5、E2b からの持ち越し）: `execution_plans`（版の履歴）を
+/// `Event::ExecutionPlanned` だけから再構築する（純粋関数）。E2b は「E2 の範囲では replan が無く
+/// 事実上 1 タスク 1 行」として対象外にしていたが、E4 で replan が入り複数版になりうる。
+///
+/// - `id`/`version`/`origin`/`spec` はそのままイベントの値（`plan_id` は `adopt_plan`/`replan` が
+///   `new_id()` で発行し、行と event の両方に同じ値を書くので、`work_units.id`（`key` しか運ばれない）
+///   と違って events から確実に復元できる）。
+/// - `status`/`superseded_at`: 版を時系列に畳み込み、後続の `ExecutionPlanned.supersedes` に
+///   名指しされた版を `superseded`（そのイベントの `EventRow::ts` を `superseded_at` に）にする。
+///   最後まで supersede されなかった版が `active`。`execution_plan_adopt`/`execution_plan_replan`
+///   は常にこの 2 状態しか書かない（`PlanStatus::Completed`/`Abandoned` は現行の実装では未使用）ので、
+///   これで実際の scheduler の書き方と一致する。
+/// - `created_at`: 自分の `EventRow::ts`。
+/// - `planner_run_id`: `Event::ExecutionPlanned` 自体はこれを運ばない（D5 の event 表を参照。
+///   `plan_id`/`version`/`origin`/`supersedes`/`reason`/`plan` の 6 欄のみ）ので、events だけからは
+///   確実に復元できない。常に `None` にし、[`diff_execution_plans`] の比較対象からも外す
+///   （`work_units`/`runs` の `created_at`/`updated_at`/`last_checkpoint_run_id` と同じ「タイムスタンプ
+///   級で厳密には復元できない欄は比較しない」という規則の延長。`rebuild_work_units_and_runs` の
+///   ドキュメント参照）。
+pub fn rebuild_execution_plans(task_id: TaskId, events: &[EventRow]) -> Vec<ExecutionPlanRow> {
+    let mut rows: Vec<ExecutionPlanRow> = Vec::new();
+    for er in events {
+        let Event::ExecutionPlanned {
+            plan_id,
+            version,
+            origin,
+            supersedes,
+            plan,
+            ..
+        } = &er.event
+        else {
+            continue;
+        };
+        if let Some(superseded_id) = supersedes
+            && let Some(prev) = rows.iter_mut().find(|p| &p.id == superseded_id)
+        {
+            prev.status = PlanStatus::Superseded;
+            prev.superseded_at = Some(er.ts.clone());
+        }
+        rows.push(ExecutionPlanRow {
+            id: plan_id.clone(),
+            task_id: task_id.to_string(),
+            version: *version,
+            origin: *origin,
+            planner_run_id: None,
+            status: PlanStatus::Active,
+            spec: (**plan).clone(),
+            created_at: er.ts.clone(),
+            superseded_at: None,
+        });
+    }
+    rows
+}
+
 /// 比較対象の欄と文字列表現（id そのもの、および `created_at`/`updated_at`/`last_checkpoint_run_id`
 /// は除く。理由は [`rebuild_work_units_and_runs`] のドキュメント参照）。
 fn wu_field_pairs(w: &WorkUnitRow) -> Vec<(&'static str, String)> {
@@ -525,24 +595,115 @@ pub fn diff_execution(
     (wu_mismatches, run_mismatches)
 }
 
+/// 比較対象の欄と文字列表現。`created_at`/`superseded_at`/`planner_run_id` は除く（理由は
+/// [`rebuild_execution_plans`] のドキュメント参照）。`id` は比較に含める（`work_units.id` と違って
+/// events から確実に復元できるため。同ドキュメント参照）。
+fn plan_field_pairs(p: &ExecutionPlanRow) -> Vec<(&'static str, String)> {
+    vec![
+        ("id", p.id.clone()),
+        ("origin", p.origin.as_str().to_string()),
+        ("status", p.status.as_str().to_string()),
+        (
+            "spec_json",
+            serde_json::to_string(&p.spec).unwrap_or_default(),
+        ),
+    ]
+}
+
+/// ADR-0072 D5/D17（Phase E4b 項目5）: `replayed`/`stored` を `version` で突き合わせ、業務上意味の
+/// ある欄の食い違いを返す（[`rebuild_execution_plans`] のドキュメントに書いた除外欄を除く）。
+/// [`diff_execution`] と対になる。
+pub fn diff_execution_plans(
+    task_id: TaskId,
+    replayed: &[ExecutionPlanRow],
+    stored: &[ExecutionPlanRow],
+) -> Vec<ExecutionPlanMismatch> {
+    let mut mismatches = Vec::new();
+    let stored_by_version: BTreeMap<u32, &ExecutionPlanRow> =
+        stored.iter().map(|p| (p.version, p)).collect();
+    let mut seen_versions: BTreeSet<u32> = BTreeSet::new();
+    for r in replayed {
+        seen_versions.insert(r.version);
+        match stored_by_version.get(&r.version) {
+            None => mismatches.push(ExecutionPlanMismatch {
+                task_id,
+                version: r.version,
+                field: "presence".to_string(),
+                replayed: "present".to_string(),
+                stored: "<missing>".to_string(),
+            }),
+            Some(s) => {
+                for ((field, rv), (_, sv)) in
+                    plan_field_pairs(r).into_iter().zip(plan_field_pairs(s))
+                {
+                    if rv != sv {
+                        mismatches.push(ExecutionPlanMismatch {
+                            task_id,
+                            version: r.version,
+                            field: field.to_string(),
+                            replayed: rv,
+                            stored: sv,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for s in stored {
+        if !seen_versions.contains(&s.version) {
+            mismatches.push(ExecutionPlanMismatch {
+                task_id,
+                version: s.version,
+                field: "presence".to_string(),
+                replayed: "<missing>".to_string(),
+                stored: "present".to_string(),
+            });
+        }
+    }
+    mismatches
+}
+
+/// [`check_and_apply_execution`] の戻り値: `(work_unit_mismatches, run_mismatches,
+/// execution_plan_mismatches, applied_task_count)`。
+pub type ExecutionCheckReport = (
+    Vec<WorkUnitMismatch>,
+    Vec<RunMismatch>,
+    Vec<ExecutionPlanMismatch>,
+    usize,
+);
+
 /// `celerisctl replay --check`/`--apply`（ADR-0072 D15: 索引と events が食い違えば events が勝つ）:
-/// 全タスクについて [`rebuild_work_units_and_runs`] と現在の索引を突き合わせ、`apply` が true なら
-/// 食い違ったタスクの `work_units`/`runs` を再構築結果で上書きする（`events` は変えない）。戻り値は
-/// `(work_unit_mismatches, run_mismatches, applied_task_count)`。`apply` して直したタスクの分は
-/// mismatch に含めない。
+/// 全タスクについて [`rebuild_work_units_and_runs`]/[`rebuild_execution_plans`] と現在の索引を
+/// 突き合わせ、`apply` が true なら食い違ったタスクの `execution_plans`/`work_units`/`runs` を
+/// 再構築結果で上書きする（`events` は変えない）。`apply` して直したタスクの分は mismatch に
+/// 含めない（3 つの表のうちどれか 1 つでも食い違えば、そのタスクの 3 つとも書き直す。
+/// `execution_plans`/`work_units`/`runs` は互いに `plan_id`/`work_unit_id` で参照し合うため、
+/// 一部だけ書き直すと整合が崩れる）。
 pub fn check_and_apply_execution(
     store: &dyn TaskStore,
     apply: bool,
-) -> Result<(Vec<WorkUnitMismatch>, Vec<RunMismatch>, usize), OpsError> {
+) -> Result<ExecutionCheckReport, OpsError> {
     let tasks = store.list(None)?;
     let mut wu_mismatches = Vec::new();
     let mut run_mismatches = Vec::new();
+    let mut plan_mismatches = Vec::new();
     let mut applied = 0usize;
     for task in &tasks {
         let events = store.event_rows_for(task.id, None, usize::MAX)?;
         let (rebuilt_units, rebuilt_runs) = rebuild_work_units_and_runs(task.id, &events);
+        let mut rebuilt_plans = rebuild_execution_plans(task.id, &events);
         let stored_units = store.work_units_for(task.id)?;
         let stored_runs = store.runs_for_task(task.id)?;
+        let stored_plans = store.execution_plan_list(task.id)?;
+        // `planner_run_id` は events から復元できない（rebuild のドキュメント参照）ので、`--apply`
+        // で書き戻すときは既存の行から引き継ぐ（比較はしないが、既にある値を消したくない）。
+        let stored_plan_by_id: BTreeMap<&str, &ExecutionPlanRow> =
+            stored_plans.iter().map(|p| (p.id.as_str(), p)).collect();
+        for p in &mut rebuilt_plans {
+            if let Some(s) = stored_plan_by_id.get(p.id.as_str()) {
+                p.planner_run_id = s.planner_run_id.clone();
+            }
+        }
         let (mut u_mm, mut r_mm) = diff_execution(
             task.id,
             &rebuilt_units,
@@ -550,17 +711,21 @@ pub fn check_and_apply_execution(
             &rebuilt_runs,
             &stored_runs,
         );
-        if apply && (!u_mm.is_empty() || !r_mm.is_empty()) {
+        let mut p_mm = diff_execution_plans(task.id, &rebuilt_plans, &stored_plans);
+        if apply && (!u_mm.is_empty() || !r_mm.is_empty() || !p_mm.is_empty()) {
+            store.execution_plans_replace(task.id, rebuilt_plans)?;
             store.work_units_replace(task.id, rebuilt_units)?;
             store.runs_replace(task.id, rebuilt_runs)?;
             applied += 1;
             u_mm.clear();
             r_mm.clear();
+            p_mm.clear();
         }
         wu_mismatches.append(&mut u_mm);
         run_mismatches.append(&mut r_mm);
+        plan_mismatches.append(&mut p_mm);
     }
-    Ok((wu_mismatches, run_mismatches, applied))
+    Ok((wu_mismatches, run_mismatches, plan_mismatches, applied))
 }
 
 #[cfg(test)]
@@ -1440,9 +1605,11 @@ mod tests {
             .expect("corrupt runs");
 
         // --check（apply=false）: 壊れたままで、差分が報告される。
-        let (wu_mm, run_mm, applied) = check_and_apply_execution(&store, false).expect("check");
+        let (wu_mm, run_mm, plan_mm, applied) =
+            check_and_apply_execution(&store, false).expect("check");
         assert!(!wu_mm.is_empty(), "expected a work_unit mismatch");
         assert!(!run_mm.is_empty(), "expected a run mismatch");
+        assert_eq!(plan_mm, Vec::new(), "execution_plans was not corrupted");
         assert_eq!(applied, 0);
         assert_eq!(
             store
@@ -1457,9 +1624,11 @@ mod tests {
         );
 
         // --apply: events に合わせて直る。
-        let (wu_mm, run_mm, applied) = check_and_apply_execution(&store, true).expect("apply");
+        let (wu_mm, run_mm, plan_mm, applied) =
+            check_and_apply_execution(&store, true).expect("apply");
         assert_eq!(wu_mm, Vec::new(), "{wu_mm:?}");
         assert_eq!(run_mm, Vec::new(), "{run_mm:?}");
+        assert_eq!(plan_mm, Vec::new(), "{plan_mm:?}");
         assert_eq!(applied, 1);
         let fixed = store
             .work_units_for(task.id)
@@ -1472,9 +1641,148 @@ mod tests {
         assert_eq!(fixed_run.status, RunIndexStatus::Completed);
 
         // 直した後は再び --check しても差分ゼロ。
-        let (wu_mm, run_mm, applied) = check_and_apply_execution(&store, false).expect("recheck");
+        let (wu_mm, run_mm, plan_mm, applied) =
+            check_and_apply_execution(&store, false).expect("recheck");
         assert_eq!(wu_mm, Vec::new());
         assert_eq!(run_mm, Vec::new());
+        assert_eq!(plan_mm, Vec::new());
+        assert_eq!(applied, 0);
+    }
+
+    /// ADR-0072 D5/D17（Phase E4b 項目5、E2b からの持ち越し）: replan で `execution_plans` が
+    /// 複数版になっても、`Event::ExecutionPlanned` だけから版の履歴（v1 = superseded、v2 = active、
+    /// `supersedes` の対応）を再構築できる。索引を events に無い値へ故意に壊しても
+    /// `check_and_apply_execution` が検出し（`--check`）、`--apply` で直す。`planner_run_id`
+    /// （events からは復元できない欄）は比較対象に入らないが、`--apply` で書き戻しても消えない
+    /// （既存の値を引き継ぐ）ことも確認する。
+    #[test]
+    fn check_and_apply_execution_rebuilds_the_replanned_execution_plans_history() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let task = sample_task(Status::Running);
+        store.insert(&task).expect("insert");
+        let now = OffsetDateTime::now_utc();
+
+        let v1_spec = ExecutionPlanSpec {
+            schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
+            rationale: "v1".to_string(),
+            work_units: vec![wu_spec("a", &[])],
+        };
+        let v1 = crate::execution::adopt_plan(
+            &store,
+            task.id,
+            v1_spec,
+            task_core::PlanOrigin::Fixture,
+            None,
+            ExecutionLimits::default(),
+            now,
+        )
+        .expect("adopt v1");
+
+        let v2_spec = ExecutionPlanSpec {
+            schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
+            rationale: "v2".to_string(),
+            work_units: vec![wu_spec("a", &[]), wu_spec("b", &["a"])],
+        };
+        let (v2, _diff) = crate::execution::replan(
+            &store,
+            task.id,
+            v2_spec,
+            "test replan".to_string(),
+            task_core::PlanOrigin::Planner,
+            Some("planner-run-1".to_string()),
+            ExecutionLimits::default(),
+            now,
+        )
+        .expect("replan to v2");
+
+        // events だけから execution_plans の版の履歴を再構築できる。
+        let events = store
+            .event_rows_for(task.id, None, usize::MAX)
+            .expect("events");
+        let rebuilt = rebuild_execution_plans(task.id, &events);
+        assert_eq!(rebuilt.len(), 2, "{rebuilt:?}");
+        let r1 = rebuilt.iter().find(|p| p.version == 1).expect("v1");
+        assert_eq!(r1.id, v1.id);
+        assert_eq!(r1.status, PlanStatus::Superseded);
+        assert!(r1.superseded_at.is_some(), "{r1:?}");
+        let r2 = rebuilt.iter().find(|p| p.version == 2).expect("v2");
+        assert_eq!(r2.id, v2.id);
+        assert_eq!(r2.status, PlanStatus::Active);
+        assert_eq!(r2.origin, task_core::PlanOrigin::Planner);
+        assert!(r2.superseded_at.is_none());
+
+        // --check: まだ索引を壊していないので差分ゼロ（`planner_run_id` は比較対象外なので、
+        // stored に `Some("planner-run-1")` があっても不一致にならない）。
+        let (_, _, plan_mm, applied) =
+            check_and_apply_execution(&store, false).expect("check clean");
+        assert_eq!(plan_mm, Vec::new(), "{plan_mm:?}");
+        assert_eq!(applied, 0);
+
+        // 索引だけを events に無い値で故意に壊す（v2 の origin を書き換える）。
+        let mut corrupted_plans = store.execution_plan_list(task.id).expect("list");
+        for p in &mut corrupted_plans {
+            if p.version == 2 {
+                p.origin = task_core::PlanOrigin::Human;
+            }
+        }
+        store
+            .execution_plans_replace(task.id, corrupted_plans)
+            .expect("corrupt execution_plans");
+
+        // --check（apply=false）: 壊れたままで、差分が報告される。
+        let (wu_mm, run_mm, plan_mm, applied) =
+            check_and_apply_execution(&store, false).expect("check corrupted");
+        assert!(wu_mm.is_empty(), "{wu_mm:?}");
+        assert!(run_mm.is_empty(), "{run_mm:?}");
+        assert!(
+            plan_mm
+                .iter()
+                .any(|m| m.version == 2 && m.field == "origin"),
+            "{plan_mm:?}"
+        );
+        assert_eq!(applied, 0);
+        let still_corrupted = store
+            .execution_plan_list(task.id)
+            .expect("list")
+            .into_iter()
+            .find(|p| p.version == 2)
+            .expect("v2 present");
+        assert_eq!(
+            still_corrupted.origin,
+            task_core::PlanOrigin::Human,
+            "--check だけでは書き換えない"
+        );
+
+        // --apply: events に合わせて直る。
+        let (wu_mm, run_mm, plan_mm, applied) =
+            check_and_apply_execution(&store, true).expect("apply");
+        assert_eq!(wu_mm, Vec::new(), "{wu_mm:?}");
+        assert_eq!(run_mm, Vec::new(), "{run_mm:?}");
+        assert_eq!(plan_mm, Vec::new(), "{plan_mm:?}");
+        assert_eq!(applied, 1);
+        let fixed = store
+            .execution_plan_list(task.id)
+            .expect("list")
+            .into_iter()
+            .find(|p| p.version == 2)
+            .expect("v2 present");
+        assert_eq!(
+            fixed.origin,
+            task_core::PlanOrigin::Planner,
+            "events が勝つ"
+        );
+        assert_eq!(
+            fixed.planner_run_id.as_deref(),
+            Some("planner-run-1"),
+            "--apply で書き戻しても、events から復元できない planner_run_id は既存の値のまま"
+        );
+
+        // 直した後は再び --check しても差分ゼロ。
+        let (wu_mm, run_mm, plan_mm, applied) =
+            check_and_apply_execution(&store, false).expect("recheck");
+        assert_eq!(wu_mm, Vec::new());
+        assert_eq!(run_mm, Vec::new());
+        assert_eq!(plan_mm, Vec::new());
         assert_eq!(applied, 0);
     }
 

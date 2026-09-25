@@ -1,5 +1,6 @@
 //! `celerisctl replay` — DESIGN.md §4.3 / §5.9, ADR-0002「結果」節, ADR-0004 D6。
 //! ADR-0072 D5/D15（Phase E2b）: `--check`/`--apply` で `work_units`/`runs` の再構築も行う。
+//! ADR-0072 D17（Phase E4b 項目5）: `execution_plans`（replan で複数版になった版の履歴）も同様。
 //!
 //! 出力整形と exit code だけをここで持つ。再構築ロジックは `task_ops::replay`（ADR-0013 D7）
 //! に移した。
@@ -40,7 +41,7 @@ pub fn run(store: &dyn TaskStore, args: ReplayArgs) -> Result<ExitCode, CliError
 
     let mut total_mismatches = report.mismatches.len();
     if args.check || args.apply {
-        let (wu_mismatches, run_mismatches, applied) =
+        let (wu_mismatches, run_mismatches, plan_mismatches, applied) =
             check_and_apply_execution(store, args.apply)?;
         for m in &wu_mismatches {
             outln!(
@@ -62,7 +63,18 @@ pub fn run(store: &dyn TaskStore, args: ReplayArgs) -> Result<ExitCode, CliError
                 m.stored
             );
         }
-        total_mismatches += wu_mismatches.len() + run_mismatches.len();
+        // ADR-0072 D5/D17（Phase E4b 項目5）: `execution_plans`（版の履歴）の食い違い。
+        for m in &plan_mismatches {
+            outln!(
+                "EXECUTION_PLAN_MISMATCH task={} version={} field={} replayed={} stored={}",
+                m.task_id,
+                m.version,
+                m.field,
+                m.replayed,
+                m.stored
+            );
+        }
+        total_mismatches += wu_mismatches.len() + run_mismatches.len() + plan_mismatches.len();
         if args.apply {
             outln!(
                 "replay: applied execution index fixes for {} task(s)",

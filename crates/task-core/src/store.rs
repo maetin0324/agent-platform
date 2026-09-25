@@ -979,6 +979,15 @@ pub trait TaskStore:
     -> Result<(), StoreError>;
     /// 同上。`task_id` の `runs` 行を渡した集合でまるごと置き換える。
     fn runs_replace(&self, task_id: TaskId, rows: Vec<RunRow>) -> Result<(), StoreError>;
+    /// ADR-0072 D5/D17（Phase E4b 項目5）: 同上。`task_id` の `execution_plans` 行（版の履歴）を
+    /// 渡した集合でまるごと置き換える。`task_ops::replay::check_and_apply_execution` が
+    /// `rebuild_execution_plans`（`Event::ExecutionPlanned` からの再構築。replan で複数版になった
+    /// 履歴を含む）の結果を書き戻すのに使う。
+    fn execution_plans_replace(
+        &self,
+        task_id: TaskId,
+        rows: Vec<ExecutionPlanRow>,
+    ) -> Result<(), StoreError>;
 
     /// ADR-0072 D16（Phase E4）: reviewer repair の採用。`Trigger::ReviewRepair`
     /// （`Reviewing → Ready`、attempts 据え置き）と、`new_plan`（`Some` のときだけ挿入。atomic な
@@ -4688,6 +4697,38 @@ impl TaskStore for SqliteStore {
         )?;
         for r in &rows {
             Self::insert_run_row_tx(&tx, r)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn execution_plans_replace(
+        &self,
+        task_id: TaskId,
+        rows: Vec<ExecutionPlanRow>,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM execution_plans WHERE task_id = ?1",
+            params![task_id.to_string()],
+        )?;
+        for plan in &rows {
+            tx.execute(
+                "INSERT INTO execution_plans (id, task_id, version, origin, planner_run_id, \
+                 status, json, created_at, superseded_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    plan.id,
+                    plan.task_id,
+                    plan.version,
+                    plan.origin.as_str(),
+                    plan.planner_run_id,
+                    plan.status.as_str(),
+                    serde_json::to_string(&plan.spec)?,
+                    plan.created_at,
+                    plan.superseded_at,
+                ],
+            )?;
         }
         tx.commit()?;
         Ok(())
