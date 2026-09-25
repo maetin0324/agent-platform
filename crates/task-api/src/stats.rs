@@ -5,12 +5,12 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use task_core::{Event, EventRow, StoreError, TaskStore};
+use task_core::{Event, EventRow, Status, StoreError, Task, TaskStore, Tier};
 use task_ops::view::RunOutcomeKind;
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, UtcOffset};
 
-use crate::types::{DailyUsage, ProviderStats};
+use crate::types::{DailyUsage, ExecutionMetricsGroup, ExecutionMetricsSummary, ProviderStats};
 
 const STATS_BATCH: usize = 5_000;
 const STATS_DAYS: i64 = 30;
@@ -288,6 +288,128 @@ impl AccountStatsState {
             output_tokens: totals.output_tokens,
         }
     }
+}
+
+// ============================================================================
+// ADR-0072 D19（Phase E5）: `GET /metrics/execution`
+// ============================================================================
+
+/// `group_by` の許される値（`GET /metrics/execution` のクエリ検証にも使う）。
+pub(crate) const EXECUTION_METRICS_GROUP_BY: &[&str] = &["gate_mode", "genre", "assignee", "lane"];
+
+#[derive(Debug, Default, Clone)]
+struct ExecutionGroupAcc {
+    tasks: u64,
+    done: u64,
+    failed: u64,
+    other: u64,
+    continuations: u64,
+    max_turn_failures: u64,
+    repairs: u64,
+    replans: u64,
+}
+
+fn tier_key(t: Tier) -> &'static str {
+    match t {
+        Tier::Frontier => "frontier",
+        Tier::Standard => "standard",
+        Tier::Cheap => "cheap",
+    }
+}
+
+/// `group_by = "genre" | "assignee" | "gate_mode"` のグループキー（`"lane"` は run 単位の情報が
+/// 要るので呼び出し側〈[`execution_metrics_summary`]〉が別に扱う）。
+fn execution_group_key(
+    task: &Task,
+    metrics: &task_core::ExecutionMetrics,
+    group_by: &str,
+) -> String {
+    match group_by {
+        "genre" => task.genre.clone().unwrap_or_else(|| "none".to_string()),
+        "assignee" => task.assignee.clone().unwrap_or_else(|| "none".to_string()),
+        _ => metrics
+            .gate_mode
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_else(|| "none".to_string()),
+    }
+}
+
+/// D19: `GET /metrics/execution?since=&group_by=`。events からタスクごとに
+/// `task_core::summarize_execution_metrics` を求め、`group_by` の値でまとめる（`runs` の索引の
+/// 代わりに、E1〜E4 の events をタスクごとに 1 回ずつ読む素朴な全走査。`StatsState` のような
+/// カーソル付きの増分キャッシュは持たない。分析用の低頻度な問い合わせという想定。ADR の逸脱節参照）。
+pub(crate) fn execution_metrics_summary(
+    store: &dyn TaskStore,
+    since: Option<OffsetDateTime>,
+    group_by: &str,
+) -> Result<ExecutionMetricsSummary, StoreError> {
+    let tasks = store.list(None)?;
+    let mut groups: BTreeMap<String, ExecutionGroupAcc> = BTreeMap::new();
+    let mut total_tasks: u64 = 0;
+    for task in &tasks {
+        if let Some(since) = since
+            && task.updated_at < since
+        {
+            continue;
+        }
+        let events = store.events_for(task.id)?;
+        let event_list: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let metrics = task_core::summarize_execution_metrics(task, &event_list);
+        let key = if group_by == "lane" {
+            let audits = task_core::routing_audit(task, &event_list);
+            audits
+                .iter()
+                .rev()
+                .find_map(|a| a.lane)
+                .map(tier_key)
+                .unwrap_or("none")
+                .to_string()
+        } else {
+            execution_group_key(task, &metrics, group_by)
+        };
+        total_tasks += 1;
+        let acc = groups.entry(key).or_default();
+        acc.tasks += 1;
+        match task.status {
+            Status::Done => acc.done += 1,
+            Status::Failed => acc.failed += 1,
+            _ => acc.other += 1,
+        }
+        acc.continuations += u64::from(metrics.continuations);
+        acc.max_turn_failures += u64::from(metrics.max_turn_failures);
+        acc.repairs += u64::from(metrics.repairs_total);
+        acc.replans += u64::from(metrics.replans);
+    }
+
+    let groups = groups
+        .into_iter()
+        .map(|(key, acc)| {
+            let completion_rate = if acc.done + acc.failed > 0 {
+                Some(acc.done as f64 / (acc.done + acc.failed) as f64)
+            } else {
+                None
+            };
+            ExecutionMetricsGroup {
+                key,
+                tasks: acc.tasks,
+                done: acc.done,
+                failed: acc.failed,
+                other: acc.other,
+                completion_rate,
+                continuations: acc.continuations,
+                max_turn_failures: acc.max_turn_failures,
+                repairs: acc.repairs,
+                replans: acc.replans,
+            }
+        })
+        .collect();
+
+    Ok(ExecutionMetricsSummary {
+        group_by: group_by.to_string(),
+        since: since.map(|t| t.format(&Rfc3339).unwrap_or_default()),
+        total_tasks,
+        groups,
+    })
 }
 
 #[cfg(test)]

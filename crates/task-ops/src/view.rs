@@ -148,6 +148,101 @@ pub struct TaskDetail {
     /// ADR-0070 D1（Phase 116）: `task.status == Failed` のときだけ `Some`（分類・理由・配送済みの release）。
     /// GUI のタスク詳細の赤いバナーの材料。
     pub failure: Option<FailureSummary>,
+    /// ADR-0072 D20（Phase E5）: Execution 節。events に E-phase 由来の活動（gate の判定・計画・
+    /// checkpoint・WorkUnit の遷移）が 1 件も無ければ `None`（D23: 既存の古いタスクの詳細を壊さない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionView>,
+}
+
+/// ADR-0072 D20（Phase E5）: タスクの状態バッジの横に出す、今どの段階かの導出値（D6 の R3 の代替。
+/// 状態機械そのものには足さない）。`Task.status` から次のとおり決める（[`build_execution_view`] 参照）:
+/// `reviewing` は常に `verifying`。`running` は、進行中の WorkUnit があれば `repairing`
+/// （`kind = repair`）か `executing`、無ければ（計画はあるのに走っている WU が無い）planner run が
+/// 動いていると見なして `planning`。それ以外（計画が無い・終端）は `None`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPhase {
+    Planning,
+    Executing,
+    Repairing,
+    Verifying,
+}
+
+/// D19/D20: タスク詳細の Execution 節そのもの。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExecutionView {
+    /// D13: Complexity Gate の判定（gate が判定していない Task には無い）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<task_core::ExecutionGateDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<ExecutionPhase>,
+    /// 計画が無い Task（D20:「直接実行」の 1 行）は `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ExecutionPlanOverview>,
+    pub metrics: task_core::ExecutionMetrics,
+}
+
+/// D20: 計画の概要（現在アクティブでない Task でも、生涯で作った WU をまとめて見せる。
+/// `versions` が replan の履歴）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExecutionPlanOverview {
+    pub id: String,
+    pub version: u32,
+    pub origin: task_core::PlanOrigin,
+    pub rationale: String,
+    pub work_units: Vec<ExecutionWorkUnitView>,
+    /// D17(f): 版の履歴（`version` 昇順。superseded を含む）。
+    pub versions: Vec<ExecutionPlanVersionSummary>,
+}
+
+/// D20: WU の表の 1 行。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExecutionWorkUnitView {
+    pub id: String,
+    pub key: String,
+    pub seq: u32,
+    pub kind: task_core::WorkUnitKind,
+    pub title: String,
+    pub status: task_core::WorkUnitStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<task_core::WorkUnitBlockedReason>,
+    pub depends_on: Vec<String>,
+    /// D21: WU は Task の担当を継ぐ（`Task.assignee` と同じ値）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// 直近の run の routing（`RoutingDecided`）から。まだ 1 度も走っていなければ `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<Tier>,
+    pub runs: u32,
+    pub continuations: u32,
+    pub retries: u32,
+    /// 最後の checkpoint の全文（GUI は折り畳んで出す。D8）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_checkpoint: Option<task_core::Checkpoint>,
+    /// 直近の `WorkUnitTransitioned.reason`（失敗・レビューの理由。無ければ `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reason: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// D17(f): `execution_plans` の 1 版（監査用）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExecutionPlanVersionSummary {
+    pub id: String,
+    pub version: u32,
+    pub origin: task_core::PlanOrigin,
+    pub status: task_core::PlanStatus,
+    /// `Event::ExecutionPlanned.reason`（replan を起こした理由。新規採用なら `None`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<String>,
 }
 
 /// ADR-0070 D1（Phase 116）: `TaskDetail.failure` / 受信箱 `AttentionItem::Failed` が共有する形。
@@ -229,6 +324,11 @@ pub struct RunSummary {
     /// 導入前の run・分類できなかった run は `None`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end: Option<task_core::RunEnd>,
+    /// ADR-0072 D20（Phase E5）: この run が実行した WorkUnit の `key`（計画の無い Task、または
+    /// `work_units`/`runs` の索引に無い導入前の run は `None`）。`runs()` 自体は events だけの
+    /// 純粋関数なので、[`run_work_unit_keys`] で store から引いた後段が埋める。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_unit: Option<String>,
     pub usage: Option<Usage>,
     pub progress: u32,
     pub artifacts: u32,
@@ -534,6 +634,7 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
                     outcome: None,
                     outcome_text: None,
                     end: None,
+                    work_unit: None,
                     usage: None,
                     progress: 0,
                     artifacts: 0,
@@ -586,6 +687,31 @@ pub fn runs(rows: &[EventRow]) -> Vec<RunSummary> {
         .collect();
     out.sort_by(|a, b| a.started_at.cmp(&b.started_at));
     out
+}
+
+/// ADR-0072 D20（Phase E5）: `run_id` → WorkUnit の `key`。`work_units`/`runs` の派生索引から
+/// 引く（計画の無い Task なら空の map）。`runs()` の後段で `RunSummary.work_unit` を埋めるのに使う。
+pub fn run_work_unit_keys(
+    store: &dyn TaskStore,
+    task_id: TaskId,
+) -> Result<HashMap<String, String>, OpsError> {
+    let units = store.work_units_for(task_id)?;
+    if units.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let key_by_id: HashMap<&str, &str> = units
+        .iter()
+        .map(|u| (u.id.as_str(), u.key.as_str()))
+        .collect();
+    let runs = store.runs_for_task(task_id)?;
+    Ok(runs
+        .into_iter()
+        .filter_map(|r| {
+            let wu_id = r.work_unit_id?;
+            let key = key_by_id.get(wu_id.as_str())?;
+            Some((r.run_id, (*key).to_string()))
+        })
+        .collect())
 }
 
 /// `docs/gui/api.md` §5.3。
@@ -760,7 +886,11 @@ pub fn task_detail(
         .collect();
     dependents.sort_by_key(|r| r.id);
 
-    let run_summaries = runs(&rows);
+    let mut run_summaries = runs(&rows);
+    let wu_keys_by_run = run_work_unit_keys(store, id)?;
+    for r in &mut run_summaries {
+        r.work_unit = wu_keys_by_run.get(&r.run_id).cloned();
+    }
     let timers_view = timers(&task, &rows, ctx, now);
     let prior_review = derive::prior_review_from_events(&events);
     let answers = derive::answers_from_events(&events);
@@ -820,6 +950,7 @@ pub fn task_detail(
 
     let task_actions = actions_with_events(&task, &events);
     let failure = task_failure(&task, &events, store)?;
+    let execution = build_execution_view(store, &task, &events)?;
     let worker_run_hint = if task.status.is_terminal() {
         None
     } else {
@@ -868,6 +999,7 @@ pub fn task_detail(
         worker_run_hint,
         worktree,
         failure,
+        execution,
     })
 }
 
@@ -889,6 +1021,167 @@ fn task_failure(
         reason,
         delivered_release,
     }))
+}
+
+/// ADR-0072 D19/D20（Phase E5）: Execution 節の組み立て。events に E-phase 由来の活動が 1 件も
+/// 無ければ `None`（D23 の後方互換。既存の古いタスクの詳細を壊さない）。
+fn build_execution_view(
+    store: &dyn TaskStore,
+    task: &Task,
+    events: &[(u64, Event)],
+) -> Result<Option<ExecutionView>, OpsError> {
+    let has_activity = events.iter().any(|(_, e)| {
+        matches!(
+            e,
+            Event::ExecutionGated { .. }
+                | Event::ExecutionPlanned { .. }
+                | Event::CheckpointSaved { .. }
+                | Event::WorkUnitTransitioned { .. }
+        )
+    });
+    if !has_activity {
+        return Ok(None);
+    }
+
+    let event_list: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+    let metrics = task_core::summarize_execution_metrics(task, &event_list);
+    let gate = task.routing.as_ref().and_then(|r| r.execution.clone());
+
+    let all_units = store.work_units_for(task.id)?;
+    let active_units: Vec<&task_core::WorkUnitRow> =
+        all_units.iter().filter(|u| u.status.is_active()).collect();
+
+    let phase = execution_phase(task, &active_units);
+
+    let plan = if active_units.is_empty() {
+        None
+    } else {
+        let audits = task_core::routing_audit(task, &event_list);
+        let audit_by_run: HashMap<&str, &task_core::RoutingAudit> =
+            audits.iter().map(|a| (a.run_id.as_str(), a)).collect();
+        let mut work_units = Vec::with_capacity(active_units.len());
+        for u in &active_units {
+            let last_audit = u
+                .last_run_id
+                .as_deref()
+                .and_then(|rid| audit_by_run.get(rid).copied());
+            let last_checkpoint = match &u.last_checkpoint_run_id {
+                Some(run_id) => store
+                    .run_index_get(run_id)?
+                    .and_then(|r| r.checkpoint.clone()),
+                None => None,
+            };
+            let last_reason = events.iter().rev().find_map(|(_, e)| match e {
+                Event::WorkUnitTransitioned {
+                    work_unit_id,
+                    reason,
+                    ..
+                } if *work_unit_id == u.id => Some(reason.clone()),
+                _ => None,
+            });
+            work_units.push(ExecutionWorkUnitView {
+                id: u.id.clone(),
+                key: u.key.clone(),
+                seq: u.seq,
+                kind: u.kind,
+                title: u.spec.title.clone(),
+                status: u.status,
+                blocked_reason: u.blocked_reason,
+                depends_on: u.depends_on.clone(),
+                assignee: task.assignee.clone(),
+                harness: u.spec.harness.clone().or_else(|| task.genre.clone()),
+                model: last_audit.and_then(|a| a.model.clone()),
+                lane: last_audit.and_then(|a| a.lane),
+                runs: u.runs,
+                continuations: u.continuations,
+                retries: u.retries,
+                last_checkpoint,
+                last_reason,
+                created_at: u.created_at.clone(),
+                updated_at: u.updated_at.clone(),
+            });
+        }
+        work_units.sort_by_key(|w| w.seq);
+
+        let versions = store
+            .execution_plan_list(task.id)?
+            .into_iter()
+            .map(|row| {
+                let reason = event_list.iter().find_map(|e| match e {
+                    Event::ExecutionPlanned {
+                        plan_id, reason, ..
+                    } if *plan_id == row.id => reason.clone(),
+                    _ => None,
+                });
+                ExecutionPlanVersionSummary {
+                    id: row.id,
+                    version: row.version,
+                    origin: row.origin,
+                    status: row.status,
+                    reason,
+                    created_at: row.created_at,
+                    superseded_at: row.superseded_at,
+                }
+            })
+            .collect();
+
+        let active_plan_row = store.execution_plan_active(task.id)?;
+        match active_plan_row {
+            Some(row) => Some(ExecutionPlanOverview {
+                id: row.id,
+                version: row.version,
+                origin: row.origin,
+                rationale: row.spec.rationale,
+                work_units,
+                versions,
+            }),
+            None => {
+                let latest = versions.last().cloned();
+                latest.map(|latest| ExecutionPlanOverview {
+                    id: latest.id,
+                    version: latest.version,
+                    origin: latest.origin,
+                    rationale: String::new(),
+                    work_units,
+                    versions,
+                })
+            }
+        }
+    };
+
+    Ok(Some(ExecutionView {
+        gate,
+        phase,
+        plan,
+        metrics,
+    }))
+}
+
+/// D20: 今どの段階か（[`ExecutionPhase`] のドキュメント参照）。
+fn execution_phase(
+    task: &Task,
+    active_units: &[&task_core::WorkUnitRow],
+) -> Option<ExecutionPhase> {
+    match task.status {
+        Status::Reviewing => Some(ExecutionPhase::Verifying),
+        Status::Running => {
+            if active_units.is_empty() {
+                None
+            } else if let Some(u) = active_units
+                .iter()
+                .find(|u| u.status == task_core::WorkUnitStatus::Running)
+            {
+                if u.kind == task_core::WorkUnitKind::Repair {
+                    Some(ExecutionPhase::Repairing)
+                } else {
+                    Some(ExecutionPhase::Executing)
+                }
+            } else {
+                Some(ExecutionPhase::Planning)
+            }
+        }
+        _ => None,
+    }
 }
 
 /// `Approval needed: <title> — criterion <idx> (attempt <n>)`（`derive::human_approval_title` の書式）を解析して
@@ -2025,5 +2318,228 @@ mod tests {
             parse_human_approval_title("Approval needed: x — criterion 1 (attempt)"),
             None
         );
+    }
+
+    // ---- ADR-0072 D19/D20（Phase E5）: Execution 節 ----
+
+    fn wu_spec(
+        key: &str,
+        kind: task_core::WorkUnitKind,
+        depends_on: &[&str],
+    ) -> task_core::WorkUnitSpec {
+        task_core::WorkUnitSpec {
+            key: key.to_string(),
+            kind,
+            title: format!("title {key}"),
+            objective: format!("objective for {key}, spelled out plainly and distinctly"),
+            depends_on: depends_on.iter().map(|s| s.to_string()).collect(),
+            done_when: vec![],
+            checks: vec![],
+            context: task_core::WorkUnitContext::default(),
+            harness: None,
+            features: None,
+            budget: None,
+            outputs: vec![],
+        }
+    }
+
+    fn plan_spec(work_units: Vec<task_core::WorkUnitSpec>) -> task_core::ExecutionPlanSpec {
+        task_core::ExecutionPlanSpec {
+            schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
+            rationale: "investigate then implement".to_string(),
+            work_units,
+        }
+    }
+
+    fn set_status(
+        store: &SqliteStore,
+        task_id: TaskId,
+        key: &str,
+        status: task_core::WorkUnitStatus,
+    ) {
+        let units = store.work_units_for(task_id).expect("work_units_for");
+        let row = units.iter().find(|u| u.key == key).expect("wu");
+        let mut updated = row.clone();
+        let from = updated.status;
+        updated.status = status;
+        store
+            .work_unit_transition(
+                task_id,
+                updated,
+                Event::WorkUnitTransitioned {
+                    work_unit_id: row.id.clone(),
+                    key: row.key.clone(),
+                    from,
+                    to: status,
+                    reason: "completed".to_string(),
+                    run_id: None,
+                },
+            )
+            .expect("work_unit_transition");
+    }
+
+    /// (c): 計画も gate の判定も無い（events に E-phase の活動が無い）古いタスクは
+    /// `execution: None` のまま（`task_detail` の他のフィールドは変わらない）。
+    #[test]
+    fn task_detail_execution_is_none_for_a_task_with_no_execution_activity() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let task = sample_task(TaskKind::Execute, Status::Done);
+        store.insert(&task).expect("insert");
+        store
+            .append_event(
+                task.id,
+                &Event::WorkerFinished {
+                    run_id: "r1".to_string(),
+                    outcome: "done: ok".to_string(),
+                    usage: None,
+                    role: None,
+                    metrics: None,
+                    end: None,
+                },
+            )
+            .expect("append");
+
+        let ctx = view_ctx();
+        let detail = task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        assert!(detail.execution.is_none());
+    }
+
+    /// gate が atomic と判定しただけ（計画なし）の Task は Execution 節が出るが `plan` は無い
+    /// （D20 の「直接実行」の 1 行に対応する材料）。
+    #[test]
+    fn task_detail_execution_shows_gate_only_when_there_is_no_plan() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut task = sample_task(TaskKind::Execute, Status::Running);
+        task.routing = Some(task_core::TaskRouting {
+            execution: Some(task_core::ExecutionGateDecision {
+                mode: task_core::ExecutionMode::Atomic,
+                source: task_core::GateSource::Policy,
+                score: 1,
+                threshold: 5,
+                rule_id: "atomic/score".to_string(),
+                signals: vec![],
+                policy_version: task_core::EXECUTION_GATE_POLICY_VERSION.to_string(),
+                shadow: false,
+            }),
+            ..task_core::TaskRouting::default()
+        });
+        store.insert(&task).expect("insert");
+        store
+            .append_event(
+                task.id,
+                &Event::ExecutionGated {
+                    decision: Box::new(task.routing.as_ref().unwrap().execution.clone().unwrap()),
+                },
+            )
+            .expect("append");
+
+        let ctx = view_ctx();
+        let detail = task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        let execution = detail.execution.expect("execution present");
+        assert_eq!(
+            execution.gate.map(|g| g.mode),
+            Some(task_core::ExecutionMode::Atomic)
+        );
+        assert!(execution.plan.is_none());
+        // 走っている WU が無い（そもそも計画が無い）ので phase は導出しない。
+        assert!(execution.phase.is_none());
+    }
+
+    /// 計画のある Task: WU の表・現在の段階（`running` かつ WU が `running` なら `executing`）・
+    /// done の件数を確かめる。
+    #[test]
+    fn task_detail_execution_reports_the_plan_and_work_unit_table() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let task = sample_task(TaskKind::Execute, Status::Running);
+        store.insert(&task).expect("insert");
+        crate::execution::adopt_plan(
+            &store,
+            task.id,
+            plan_spec(vec![
+                wu_spec("survey", task_core::WorkUnitKind::Investigate, &[]),
+                wu_spec("build", task_core::WorkUnitKind::Implement, &["survey"]),
+            ]),
+            task_core::PlanOrigin::Fixture,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("adopt_plan");
+        set_status(&store, task.id, "survey", task_core::WorkUnitStatus::Done);
+        set_status(&store, task.id, "build", task_core::WorkUnitStatus::Running);
+
+        let ctx = view_ctx();
+        let detail = task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        let execution = detail.execution.expect("execution present");
+        assert_eq!(execution.phase, Some(ExecutionPhase::Executing));
+        let plan = execution.plan.expect("plan present");
+        assert_eq!(plan.work_units.len(), 2);
+        assert_eq!(plan.work_units[0].key, "survey");
+        assert_eq!(plan.work_units[0].status, task_core::WorkUnitStatus::Done);
+        assert_eq!(plan.work_units[1].key, "build");
+        assert_eq!(
+            plan.work_units[1].status,
+            task_core::WorkUnitStatus::Running
+        );
+        assert_eq!(execution.metrics.work_units_total, 2);
+        assert_eq!(execution.metrics.work_units_done, 1);
+        assert_eq!(plan.versions.len(), 1);
+    }
+
+    /// replan の後、版の履歴（`versions`）に旧版・新版が理由付きで並ぶ（D17(f)）。
+    #[test]
+    fn task_detail_execution_reports_replan_version_history() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let task = sample_task(TaskKind::Execute, Status::Ready);
+        store.insert(&task).expect("insert");
+        crate::execution::adopt_plan(
+            &store,
+            task.id,
+            plan_spec(vec![wu_spec("a", task_core::WorkUnitKind::Implement, &[])]),
+            task_core::PlanOrigin::Fixture,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("adopt_plan");
+        crate::execution::replan(
+            &store,
+            task.id,
+            plan_spec(vec![
+                wu_spec("a", task_core::WorkUnitKind::Implement, &[]),
+                wu_spec("b", task_core::WorkUnitKind::Implement, &["a"]),
+            ]),
+            "add a follow-up step".to_string(),
+            task_core::PlanOrigin::Human,
+            None,
+            task_core::ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .expect("replan");
+
+        let ctx = view_ctx();
+        let detail = task_detail(&store, task.id, &ctx, OffsetDateTime::now_utc()).expect("detail");
+        let plan = detail
+            .execution
+            .expect("execution present")
+            .plan
+            .expect("plan");
+        assert_eq!(plan.version, 2);
+        assert_eq!(plan.versions.len(), 2);
+        assert_eq!(plan.versions[0].version, 1);
+        assert_eq!(plan.versions[0].status, task_core::PlanStatus::Superseded);
+        assert_eq!(plan.versions[1].version, 2);
+        assert_eq!(plan.versions[1].status, task_core::PlanStatus::Active);
+        assert_eq!(
+            plan.versions[1].reason.as_deref(),
+            Some("add a follow-up step")
+        );
+    }
+
+    /// `reviewing` は計画の有無に関わらず常に `verifying`。
+    #[test]
+    fn execution_phase_reviewing_is_always_verifying() {
+        let task = sample_task(TaskKind::Execute, Status::Reviewing);
+        assert_eq!(execution_phase(&task, &[]), Some(ExecutionPhase::Verifying));
     }
 }

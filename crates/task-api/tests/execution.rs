@@ -208,3 +208,169 @@ async fn a_second_plan_for_the_same_task_is_rejected_with_409() {
     .await;
     assert_eq!(second.status, 409, "{}", second.text());
 }
+
+// ---- ADR-0072 D19（Phase E5）: GET /tasks/{id}/execution, GET /metrics/execution ----
+
+fn plan_spec() -> task_core::ExecutionPlanSpec {
+    serde_json::from_value(plan_body()).expect("plan spec")
+}
+
+fn gate_decision(mode: task_core::ExecutionMode) -> task_core::ExecutionGateDecision {
+    task_core::ExecutionGateDecision {
+        mode,
+        source: task_core::GateSource::Policy,
+        score: if mode == task_core::ExecutionMode::Compound {
+            6
+        } else {
+            1
+        },
+        threshold: 5,
+        rule_id: "test/score".to_string(),
+        signals: vec![],
+        policy_version: task_core::EXECUTION_GATE_POLICY_VERSION.to_string(),
+        shadow: false,
+    }
+}
+
+#[tokio::test]
+async fn task_execution_for_an_unknown_task_is_not_found() {
+    let env = env();
+    let app = env.router();
+    let missing = task_core::TaskId::new();
+    let resp = send(&app, g(&format!("/api/v1/tasks/{missing}/execution"))).await;
+    assert_eq!(resp.status, 404, "{}", resp.text());
+}
+
+/// 計画も gate の判定も無いタスクでも 200（metrics は既定値。D20 の「直接実行」に対応）。
+#[tokio::test]
+async fn task_execution_with_no_activity_returns_zeroed_metrics_and_no_plan() {
+    let env = env();
+    let app = env.router();
+    let task = new_task(TaskKind::Execute, Status::Done);
+    env.seed(&task);
+
+    let resp = send(&app, g(&format!("/api/v1/tasks/{}/execution", task.id))).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let body = resp.json();
+    assert!(body["plan"].is_null(), "{body}");
+    assert!(body["gate"].is_null(), "{body}");
+    assert_eq!(body["metrics"]["work_units_total"], 0);
+    assert_eq!(body["runs"].as_array().expect("runs").len(), 0);
+}
+
+/// gate と計画のあるタスク: `plan.work_units`・`versions`・`phase` が出る。
+#[tokio::test]
+async fn task_execution_reports_gate_plan_and_phase() {
+    let env = env();
+    let app = env.router();
+    let mut task = new_task(TaskKind::Execute, Status::Running);
+    task.routing = Some(task_core::TaskRouting {
+        execution: Some(gate_decision(task_core::ExecutionMode::Compound)),
+        ..task_core::TaskRouting::default()
+    });
+    env.seed_with(
+        &task,
+        vec![task_core::Event::ExecutionGated {
+            decision: Box::new(task.routing.as_ref().unwrap().execution.clone().unwrap()),
+        }],
+    );
+    task_ops::execution::adopt_plan(
+        &env.store,
+        task.id,
+        plan_spec(),
+        task_core::PlanOrigin::Fixture,
+        None,
+        task_core::ExecutionLimits::default(),
+        time::OffsetDateTime::now_utc(),
+    )
+    .expect("adopt_plan");
+
+    let resp = send(&app, g(&format!("/api/v1/tasks/{}/execution", task.id))).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let body = resp.json();
+    assert_eq!(body["gate"]["mode"], "compound");
+    let plan = &body["plan"];
+    assert_eq!(plan["version"], 1);
+    let work_units = plan["work_units"].as_array().expect("work_units");
+    assert_eq!(work_units.len(), 3);
+    let versions = plan["versions"].as_array().expect("versions");
+    assert_eq!(versions.len(), 1);
+    assert_eq!(body["metrics"]["work_units_total"], 3);
+    assert_eq!(body["metrics"]["gate_mode"], "compound");
+}
+
+#[tokio::test]
+async fn execution_metrics_rejects_an_unknown_group_by() {
+    let env = env();
+    let app = env.router();
+    let resp = send(&app, g("/api/v1/metrics/execution?group_by=bogus")).await;
+    assert_eq!(resp.status, 400, "{}", resp.text());
+}
+
+#[tokio::test]
+async fn execution_metrics_rejects_a_malformed_since() {
+    let env = env();
+    let app = env.router();
+    let resp = send(&app, g("/api/v1/metrics/execution?since=not-a-date")).await;
+    assert_eq!(resp.status, 400, "{}", resp.text());
+}
+
+/// gate の判定分布（既定の `group_by = gate_mode`）: atomic 1 件・compound 1 件が別グループになる。
+#[tokio::test]
+async fn execution_metrics_groups_by_gate_mode_by_default() {
+    let env = env();
+    let app = env.router();
+
+    let mut atomic_task = new_task(TaskKind::Execute, Status::Done);
+    atomic_task.routing = Some(task_core::TaskRouting {
+        execution: Some(gate_decision(task_core::ExecutionMode::Atomic)),
+        ..task_core::TaskRouting::default()
+    });
+    env.seed(&atomic_task);
+
+    let mut compound_task = new_task(TaskKind::Execute, Status::Failed);
+    compound_task.routing = Some(task_core::TaskRouting {
+        execution: Some(gate_decision(task_core::ExecutionMode::Compound)),
+        ..task_core::TaskRouting::default()
+    });
+    env.seed(&compound_task);
+
+    let resp = send(&app, g("/api/v1/metrics/execution")).await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    let body = resp.json();
+    assert_eq!(body["group_by"], "gate_mode");
+    assert_eq!(body["total_tasks"], 2);
+    let groups = body["groups"].as_array().expect("groups");
+    let atomic = groups
+        .iter()
+        .find(|g| g["key"] == "atomic")
+        .expect("atomic group");
+    assert_eq!(atomic["tasks"], 1);
+    assert_eq!(atomic["done"], 1);
+    let compound = groups
+        .iter()
+        .find(|g| g["key"] == "compound")
+        .expect("compound group");
+    assert_eq!(compound["tasks"], 1);
+    assert_eq!(compound["failed"], 1);
+}
+
+/// `since` は `updated_at` で絞る（未来の `since` なら何も残らない）。
+#[tokio::test]
+async fn execution_metrics_since_filters_out_tasks_updated_before_it() {
+    let env = env();
+    let app = env.router();
+    let task = new_task(TaskKind::Execute, Status::Done);
+    env.seed(&task);
+
+    let future = (time::OffsetDateTime::now_utc() + time::Duration::days(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let resp = send(
+        &app,
+        g(&format!("/api/v1/metrics/execution?since={future}")),
+    )
+    .await;
+    assert_eq!(resp.status, 200, "{}", resp.text());
+    assert_eq!(resp.json()["total_tasks"], 0);
+}

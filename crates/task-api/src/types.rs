@@ -7,7 +7,7 @@ use task_core::{
     ProjectStatus, Status, TaskId, Tier,
 };
 use task_ops::daemon::{CooldownView, DaemonSnapshot};
-use task_ops::view::RunSummary;
+use task_ops::view::{ExecutionPhase, RunSummary};
 
 /// `GET /health`（無認証）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -1782,3 +1782,57 @@ pub struct LlmSourcesView {
     pub celeris_tiers: Vec<LlmCelerisTierView>,
 }
 // ========== ADR-0053（Phase 65）: ここまで ==========
+
+// ============================================================================
+// ADR-0072 D19（Phase E5）: `GET /tasks/{id}/execution` と `GET /metrics/execution`
+// ============================================================================
+
+/// `GET /tasks/{id}/execution`: 計画・WU 一覧・run 一覧（checkpoint 込み）・metrics・
+/// ExecutionPhase を 1 つにまとめた、Execution 節の専用の深掘りビュー
+/// （`TaskDetail.execution` は要約、こちらは全文）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct TaskExecutionView {
+    /// D13: Complexity Gate の判定（無ければ gate 対象外か、まだ判定していない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<task_core::ExecutionGateDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<ExecutionPhase>,
+    /// 計画の無い Task（暗黙の WorkUnit）は `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<ExecutionPlanView>,
+    /// checkpoint はそれぞれの `RunSummary` からは見えない（run 詳細ルートで見る。D20）。
+    pub runs: Vec<RunSummary>,
+    pub metrics: task_core::ExecutionMetrics,
+}
+
+/// `GET /metrics/execution` の 1 グループ（`group_by` の値ごと）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExecutionMetricsGroup {
+    /// `group_by = gate_mode` なら `"atomic"`/`"compound"`/`"none"`、`genre`/`assignee` ならその
+    /// 値（無ければ `"none"`）、`lane` なら直近の run の lane（`"frontier"`/`"standard"`/`"cheap"`/
+    /// `"none"`）。
+    pub key: String,
+    pub tasks: u64,
+    pub done: u64,
+    pub failed: u64,
+    /// `done`/`failed` 以外（実行中・blocked など）。
+    pub other: u64,
+    /// `done / (done + failed)`（両方 0 なら `None`。D19 の「compound の完走率」）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_rate: Option<f64>,
+    pub continuations: u64,
+    pub max_turn_failures: u64,
+    pub repairs: u64,
+    pub replans: u64,
+}
+
+/// `GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct ExecutionMetricsSummary {
+    pub group_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// `since` 以降に更新された（フィルタを満たした）タスクの総数。
+    pub total_tasks: u64,
+    pub groups: Vec<ExecutionMetricsGroup>,
+}
