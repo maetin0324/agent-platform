@@ -19249,6 +19249,13 @@ Phase E4 統合（`751f973`）と同じ時点から分岐していたため `git
 - E6（end-to-end の dogfood）は本 Phase の範囲外。ADR §6 E6 の受け入れ条件どおり、認証が使える
   環境でエージェントが実行し証跡を残すか、使えなければ人に手順を渡す。
 
+## Phase E4 / E4b / E5 の本番反映と E6 の開始（2026-09-25 10:51Z）
+
+- 統合: E4 751f973、E5 9cf66c2、E4b a119458（E4b は E5 と `crates/task-api/tests/execution.rs` で衝突し、担当エージェントが自分の branch に main を取り込んで解消。私の統合スクリプトは docs 以外の衝突を含む merge を一度 commit してしまったが push 前に `git reset --hard origin/main` で戻した。以後、コードの衝突は必ず abort して担当に解消させる）。ゲート: fmt 0、cargo test FAILED 0、clippy 0、GUI typecheck / lint / test 1091 件 / gen:types 差分ゼロ。
+- release `a1194588b417`、verify 全 true、in-flight 0 でライブ切替（from a2968d1b7477）。**Phase 119 の実機確認**: 旧デーモン a2968d1b7477 は「runtime shutdown reached its time bound; a background task … likely did not stop」を出して自分で終了し、プロセスは現行 1 つだけになった（終了ハングは解消）。
+- 本番設定に `[execution] gate = "on"`（`config.toml.bak-20260925a`）。E6 の dogfood のため。既定（shadow）に戻すかは E6 の結果で判断。
+- E6 dogfood タスク 01M3C33KW8YH336QDD0QAV45H8（software-engineering、`execution: compound` を人が明示、3 成果: 配送の repair WU（E4 の (h)）、pricing の fable / gpt-6 単価（P-118-1）、`GET /metrics/execution` の索引化）を `POST /tasks` で投入。比較の基準は 1 巨大 session だった 01M38J4X53P1Y684FS42Z6R0VZ（ルーティング再設計、89 分の run を切替で失い attempts 3 で failed）と Knowledge GC の複製群。
+
 ## Phase E6「dogfood: 配送の局所修復・単価表・実行 metrics の集計性能」（完了日 2026-09-25）
 
 ADR-0072 D16 に沿って、配送の merge-base 不一致と `cargo-fmt-check` 不合格から
