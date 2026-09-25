@@ -5162,6 +5162,261 @@
       ],
       "type": "object"
     },
+    "ExecutionMetrics": {
+      "description": "D19: Task 単位の実行メトリクス（`GET /tasks/{id}/execution` と `GET /metrics/execution` の材料）。",
+      "properties": {
+        "budget_exhausted_by_kind": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "D7: 予算切れの種類ごとの run 数（`\"turns\"` / `\"wall_clock\"` / `\"context\"`）。",
+          "type": "object"
+        },
+        "continuations": {
+          "description": "D11: continuation（予算切れ・yield の続き）の回数（`Trigger::Continue{why: Continue}`）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cost_usd": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "final_status": {
+          "$ref": "#/$defs/Status"
+        },
+        "gate_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "D13: Complexity Gate の最終判定（`Task.routing.execution.mode`）。gate が判定していない\nTask（`gate = off`・E3 より前・対象外規則）は `None`。"
+        },
+        "gate_shadow": {
+          "default": false,
+          "description": "`[execution] gate = \"shadow\"` の判定だった（記録だけで実行には使わなかった）。",
+          "type": "boolean"
+        },
+        "has_plan": {
+          "default": false,
+          "description": "このタスクの生涯で一度でも `Event::ExecutionPlanned` を受け取った（計画実行に入った）。",
+          "type": "boolean"
+        },
+        "max_turn_failures": {
+          "description": "`budget_exhausted_by_kind[\"turns\"]` の便宜上のコピー（E1 の主要因）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "peak_context_tokens": {
+          "description": "D19: この Task の run の中で観測した context 量の最大値。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "repairs_by_class": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "D16: repair の class ごとの回数。`\"unknown\"` は、計画に既存だった repair WU\n（`ExecutionPlanned` に載らない）で class が復元できなかったもの（events だけからの\n復元の既知の限界。ADR の逸脱節を参照）。",
+          "type": "object"
+        },
+        "repairs_total": {
+          "description": "repair の総数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "replans": {
+          "description": "D17: replan（`Event::ExecutionPlanned.supersedes.is_some()`）の回数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retries": {
+          "description": "D11: retry（atomic の `Trigger::WorkerError{retryable:true}` の再試行 + WU の\n`work_unit_retry`）の回数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs_by_role": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default": {},
+          "description": "role ごとの run 数（`\"worker\"` / `\"reviewer\"` / `\"planner\"`）。",
+          "type": "object"
+        },
+        "total_input_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total_output_tokens": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "wall_ms": {
+          "description": "`Task.created_at` から `Task.updated_at` まで（ミリ秒）。終端でなければ `None`\n（まだ進行中で終わりの時刻が無い）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "work_units_done": {
+          "description": "うち `done` になった数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "work_units_total": {
+          "description": "生涯で作られた WorkUnit の数（repair を含む。superseded/cancelled も数える）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "work_units_total",
+        "work_units_done",
+        "continuations",
+        "max_turn_failures",
+        "retries",
+        "repairs_total",
+        "replans",
+        "final_status"
+      ],
+      "type": "object"
+    },
+    "ExecutionMetricsGroup": {
+      "description": "`GET /metrics/execution` の 1 グループ（`group_by` の値ごと）。",
+      "properties": {
+        "completion_rate": {
+          "description": "`done / (done + failed)`（両方 0 なら `None`。D19 の「compound の完走率」）。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "continuations": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "done": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "failed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "description": "`group_by = gate_mode` なら `\"atomic\"`/`\"compound\"`/`\"none\"`、`genre`/`assignee` ならその\n値（無ければ `\"none\"`）、`lane` なら直近の run の lane（`\"frontier\"`/`\"standard\"`/`\"cheap\"`/\n`\"none\"`）。",
+          "type": "string"
+        },
+        "max_turn_failures": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "other": {
+          "description": "`done`/`failed` 以外（実行中・blocked など）。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "repairs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "replans": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tasks": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "key",
+        "tasks",
+        "done",
+        "failed",
+        "other",
+        "continuations",
+        "max_turn_failures",
+        "repairs",
+        "replans"
+      ],
+      "type": "object"
+    },
+    "ExecutionMetricsSummary": {
+      "description": "`GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`。",
+      "properties": {
+        "group_by": {
+          "type": "string"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/ExecutionMetricsGroup"
+          },
+          "type": "array"
+        },
+        "since": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total_tasks": {
+          "description": "`since` 以降に更新された（フィルタを満たした）タスクの総数。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "group_by",
+        "total_tasks",
+        "groups"
+      ],
+      "type": "object"
+    },
     "ExecutionMode": {
       "description": "D13: atomic / compound の判定結果。",
       "enum": [
@@ -5169,6 +5424,57 @@
         "compound"
       ],
       "type": "string"
+    },
+    "ExecutionPhase": {
+      "description": "ADR-0072 D20（Phase E5）: タスクの状態バッジの横に出す、今どの段階かの導出値（D6 の R3 の代替。\n状態機械そのものには足さない）。`Task.status` から次のとおり決める（[`build_execution_view`] 参照）:\n`reviewing` は常に `verifying`。`running` は、進行中の WorkUnit があれば `repairing`\n（`kind = repair`）か `executing`、無ければ（計画はあるのに走っている WU が無い）planner run が\n動いていると見なして `planning`。それ以外（計画が無い・終端）は `None`。",
+      "enum": [
+        "planning",
+        "executing",
+        "repairing",
+        "verifying"
+      ],
+      "type": "string"
+    },
+    "ExecutionPlanOverview": {
+      "description": "D20: 計画の概要（現在アクティブでない Task でも、生涯で作った WU をまとめて見せる。\n`versions` が replan の履歴）。",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/PlanOrigin"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "versions": {
+          "description": "D17(f): 版の履歴（`version` 昇順。superseded を含む）。",
+          "items": {
+            "$ref": "#/$defs/ExecutionPlanVersionSummary"
+          },
+          "type": "array"
+        },
+        "work_units": {
+          "items": {
+            "$ref": "#/$defs/ExecutionWorkUnitView"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "origin",
+        "rationale",
+        "work_units",
+        "versions"
+      ],
+      "type": "object"
     },
     "ExecutionPlanSpec": {
       "additionalProperties": false,
@@ -5191,6 +5497,49 @@
         "schema",
         "rationale",
         "work_units"
+      ],
+      "type": "object"
+    },
+    "ExecutionPlanVersionSummary": {
+      "description": "D17(f): `execution_plans` の 1 版（監査用）。",
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "origin": {
+          "$ref": "#/$defs/PlanOrigin"
+        },
+        "reason": {
+          "description": "`Event::ExecutionPlanned.reason`（replan を起こした理由。新規採用なら `None`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/PlanStatus"
+        },
+        "superseded_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "version",
+        "origin",
+        "status",
+        "created_at"
       ],
       "type": "object"
     },
@@ -5298,6 +5647,175 @@
         "plan",
         "created_at",
         "work_units"
+      ],
+      "type": "object"
+    },
+    "ExecutionView": {
+      "description": "D19/D20: タスク詳細の Execution 節そのもの。",
+      "properties": {
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionGateDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "D13: Complexity Gate の判定（gate が判定していない Task には無い）。"
+        },
+        "metrics": {
+          "$ref": "#/$defs/ExecutionMetrics"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionPhase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionPlanOverview"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "計画が無い Task（D20:「直接実行」の 1 行）は `None`。"
+        }
+      },
+      "required": [
+        "metrics"
+      ],
+      "type": "object"
+    },
+    "ExecutionWorkUnitView": {
+      "description": "D20: WU の表の 1 行。",
+      "properties": {
+        "assignee": {
+          "description": "D21: WU は Task の担当を継ぐ（`Task.assignee` と同じ値）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "blocked_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkUnitBlockedReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "continuations": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "depends_on": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "harness": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkUnitKind"
+        },
+        "lane": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Tier"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_checkpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Checkpoint"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "最後の checkpoint の全文（GUI は折り畳んで出す。D8）。"
+        },
+        "last_reason": {
+          "description": "直近の `WorkUnitTransitioned.reason`（失敗・レビューの理由。無ければ `None`）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "model": {
+          "description": "直近の run の routing（`RoutingDecided`）から。まだ 1 度も走っていなければ `None`。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retries": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runs": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seq": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/WorkUnitStatus"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "key",
+        "seq",
+        "kind",
+        "title",
+        "status",
+        "depends_on",
+        "runs",
+        "continuations",
+        "retries",
+        "created_at",
+        "updated_at"
       ],
       "type": "object"
     },
@@ -11067,6 +11585,13 @@
           "format": "uint32",
           "minimum": 0,
           "type": "integer"
+        },
+        "work_unit": {
+          "description": "ADR-0072 D20（Phase E5）: この run が実行した WorkUnit の `key`（計画の無い Task、または\n`work_units`/`runs` の索引に無い導入前の run は `None`）。`runs()` 自体は events だけの\n純粋関数なので、[`run_work_unit_keys`] で store から引いた後段が埋める。",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -11798,6 +12323,17 @@
           },
           "type": "array"
         },
+        "execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ADR-0072 D20（Phase E5）: Execution 節。events に E-phase 由来の活動（gate の判定・計画・\ncheckpoint・WorkUnit の遷移）が 1 件も無ければ `None`（D23: 既存の古いタスクの詳細を壊さない）。"
+        },
         "failure": {
           "anyOf": [
             {
@@ -12088,6 +12624,58 @@
           "description": "ADR-0062 Phase 108 追記: 作業場所の差し替え。検証は `POST /tasks` と同じ規則\n（`Remote.cluster` が設定に存在すること — API 層〈`validated_workspace`〉で見る、\n`Remote` かつ明示の担当が `cluster:<id>` を持たなければ 422、`Local.path` は空でないこと）。\n**この項目だけは `draft`/`ready`/`blocked`/`failed` でも受け付ける**（他の項目は従来どおり\n終端〈`done`/`failed`/`cancelled`〉で 409。`running`/`reviewing` への `workspace` 編集は 409）。\n`blocked`（B1 の unroutable）だったタスクは、この編集または `assignee` の変更で経路が通れば\nその場で `ready` に戻す（下記 `edit_task` を見よ）。"
         }
       },
+      "type": "object"
+    },
+    "TaskExecutionView": {
+      "description": "`GET /tasks/{id}/execution`: 計画・WU 一覧・run 一覧（checkpoint 込み）・metrics・\nExecutionPhase を 1 つにまとめた、Execution 節の専用の深掘りビュー\n（`TaskDetail.execution` は要約、こちらは全文）。",
+      "properties": {
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionGateDecision"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "D13: Complexity Gate の判定（無ければ gate 対象外か、まだ判定していない）。"
+        },
+        "metrics": {
+          "$ref": "#/$defs/ExecutionMetrics"
+        },
+        "phase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionPhase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "plan": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExecutionPlanView"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "計画の無い Task（暗黙の WorkUnit）は `None`。"
+        },
+        "runs": {
+          "description": "checkpoint はそれぞれの `RunSummary` からは見えない（run 詳細ルートで見る。D20）。",
+          "items": {
+            "$ref": "#/$defs/RunSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "runs",
+        "metrics"
+      ],
       "type": "object"
     },
     "TaskFeatureHints": {
@@ -13853,6 +14441,9 @@
     "events_page": {
       "$ref": "#/$defs/EventsPage"
     },
+    "execution_metrics": {
+      "$ref": "#/$defs/ExecutionMetricsSummary"
+    },
     "execution_plan": {
       "$ref": "#/$defs/ExecutionPlanView",
       "description": "ADR-0072 D14（Phase E2）: `POST`/`GET /tasks/{id}/execution-plan`。"
@@ -14111,6 +14702,10 @@
     "task_edit_result": {
       "$ref": "#/$defs/EditResult"
     },
+    "task_execution": {
+      "$ref": "#/$defs/TaskExecutionView",
+      "description": "ADR-0072 D19（Phase E5）: `GET /tasks/{id}/execution` と `GET /metrics/execution`。"
+    },
     "task_list": {
       "$ref": "#/$defs/TaskList"
     },
@@ -14253,7 +14848,9 @@
     "skill_put_result",
     "org_skill_mount",
     "execution_plan",
-    "execution_plan_create"
+    "execution_plan_create",
+    "task_execution",
+    "execution_metrics"
   ],
   "title": "ApiV1Schema",
   "type": "object"

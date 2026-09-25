@@ -19066,3 +19066,185 @@ E4 の内容を取り込んでから着手した。branch: `worktree-agent-a0670
   lane 強制、`node_sessions` 関連など）は引き続き E5/E6 で検討する。
 - `gui/`・`task-ops/src/view.rs`・`task-api/src/{stats.rs,routing.rs}`・
   `task-core/src/execution_metrics.rs` は指示どおり触っていない（E5 が並行編集中の可能性）。
+
+## Phase E5「GUI と metrics」（2026-09-25）
+
+ADR-0072 §6 E5 の受け入れ条件 (a)〜(e) を実装した。作業の前提: worktree のブランチが main の
+Phase E4 統合（`751f973`）と同じ時点から分岐していたため `git merge` は不要だった（fast-forward
+かどうかの確認だけ行い、コンフリクトは無かった）。branch: `worktree-agent-aed7ebd3d8b37d44f`。
+
+指示どおり区切って進めた: (a) metrics と API（1 コミット）→ (b)(c)(d) GUI の Execution 節
+（1 コミット）→ ADR の逸脱節（1 コミット）→ 本節（PROGRESS と最終ゲート）。途中、利用制限で
+一度中断し、再開時に未 commit だった ADR の逸脱節を先に commit してから (e) の監査に進んだ。
+
+### 受け入れ条件ごとの証跡
+
+**(a) `ExecutionMetrics` の純粋関数のテスト。`GET /tasks/{id}/execution` と `GET /metrics/execution`**
+- 新規: `crates/task-core/src/execution_metrics.rs::summarize(&Task, &[Event]) -> ExecutionMetrics`
+  （純粋関数。`gate_mode`/`work_units_total`/`work_units_done`/`runs_by_role`/`continuations`/
+  `budget_exhausted_by_kind`/`max_turn_failures`/`retries`/`repairs_by_class`/`repairs_total`/
+  `replans`/`peak_context_tokens`/`total_input_tokens`/`total_output_tokens`/`cost_usd`/`wall_ms`/
+  `final_status`）。D19 の signature（`&Task, &[Event]`）はそのまま守り、`wall_ms` は
+  `Task.created_at`→`updated_at` で近似した（ADR の逸脱節参照）。
+- 実行したコマンド: `cargo test -p task-core --lib execution_metrics::`
+- 出力の要点: exit 0、10 passed（空 events・gate 反映・continuation・budget_exhausted の kind 別・
+  work_units/replan の派生・repair の class 復元〈atomic 経路は成功・既存計画への追加経路は
+  `"unknown"` に落ちることの両方〉・tokens/cost/peak_context の集計・runs_by_role・wall_ms が
+  終端のときだけ出ることを確認）。
+- `GET /tasks/{id}/execution`（`crates/task-api/src/execution.rs::get_task_execution`）: 計画・
+  WU 一覧（`ExecutionPlanView`。既存の `WorkUnitView` を再利用）・runs 一覧（`RunSummary`、files
+  付き）・metrics・`ExecutionPhase` を 1 つにまとめて返す。
+- `GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`
+  （`crates/task-api/src/stats.rs::execution_metrics_summary`）: タスク一覧 + events の全走査で
+  gate の判定分布・completion rate・continuation/max_turn_failures/repair/replan の頻度を group_by
+  でまとめる（「`runs` の索引から作る」という ADR の文言からの逸脱。理由は ADR 参照）。
+- 実行したコマンド: `cargo test -p task-api --test execution`
+- 出力の要点: exit 0、14 passed（既存の (POST)/(GET) execution-plan のテストに加え、
+  `task_execution_for_an_unknown_task_is_not_found`・
+  `task_execution_with_no_activity_returns_zeroed_metrics_and_no_plan`・
+  `task_execution_reports_gate_plan_and_phase`・`execution_metrics_rejects_an_unknown_group_by`・
+  `execution_metrics_rejects_a_malformed_since`・`execution_metrics_groups_by_gate_mode_by_default`・
+  `execution_metrics_since_filters_out_tasks_updated_before_it` を追加）。
+
+**(b) タスク詳細の Execution 節（D20）。計画なし・計画あり・replan あり・repair ありの 4 fixture で vitest**
+- `crates/task-ops/src/view.rs`: `TaskDetail.execution: Option<ExecutionView>`（`ExecutionPhase`/
+  `ExecutionPlanOverview`/`ExecutionWorkUnitView`/`ExecutionPlanVersionSummary` を新設。
+  `task-api::types::ExecutionPlanView`/`WorkUnitView` とは別の軽量な型。理由は ADR 参照）。
+  `RunSummary.work_unit: Option<String>`（`run_work_unit_keys` で `work_units`/`runs` の索引から
+  引く）も追加。
+- 実行したコマンド: `cargo test -p task-ops --lib view::`
+- 出力の要点: exit 0、46 passed（既存 41 + 新規 5: `task_detail_execution_is_none_for_a_task_with_no_execution_activity`・
+  `task_detail_execution_shows_gate_only_when_there_is_no_plan`・
+  `task_detail_execution_reports_the_plan_and_work_unit_table`・
+  `task_detail_execution_reports_replan_version_history`・`execution_phase_reviewing_is_always_verifying`）。
+- GUI: `gui/app/lib/task-execution.ts`（新規。celeris の値をそのまま並べる純粋関数。
+  `~/lib/task-routing.ts` と同じ置き場）+ `gui/app/components/ExecutionSection.tsx`（新規）。
+  `gui/test/unit/task-execution.test.ts` に計画なし・計画あり・replan あり（版の履歴 2 件）・
+  repair あり（`kind = repair` の WU）の 4 fixture、5 テスト。
+- 実行したコマンド: `cd gui && corepack pnpm@11.27.0 exec vitest run test/unit/task-execution.test.ts`
+- 出力の要点: exit 0、1 file / 5 passed。
+
+**(c) 古いタスクの詳細（`execution` 無し）が変わらない**
+- `build_execution_view`（`task-ops/src/view.rs`）は、events に E-phase 由来の活動
+  （`ExecutionGated`/`ExecutionPlanned`/`CheckpointSaved`/`WorkUnitTransitioned`）が 1 件も無ければ
+  `None` を返す（`TaskDetail.execution` は `skip_serializing_if = "Option::is_none"` なので JSON に
+  現れない）。`task_detail_execution_is_none_for_a_task_with_no_execution_activity`（上記 (b)）で
+  直接検証。
+- 既存の `task-ops`/`task-api`/GUI のテストは 1 件も期待値を変えていない（後述の全体ゲートで
+  既存分を含め全て緑）。`docs/api/v1/api-v1.schema.json`/`gui/app/celeris/types.ts` の差分は
+  追加のみ（`git diff` を目視、末尾に要点）。
+
+**(d) runs の表（既存の run 一覧）に `end`（completed/yielded/budget_exhausted …）と WU の列**
+- `gui/app/routes/tasks.$id.tsx`: runs の表に `end`（`RunEnd` のバッジ）・`WU`（`work_unit` の
+  key）の列を追加。`~/lib/task-execution.ts::runEndLabel`/`runEndTone` を使用。
+- タスク詳細のヘッダに `ExecutionPhase` バッジ（`task-status` の隣。計画も gate の判定も無ければ
+  出ない）。
+
+**(e) `gen:types` の差分ゼロ（2 回実行）、`pnpm build`、`mobile-audit` の違反 0（393px で崩れない）**
+- 実行したコマンド: `cd gui && corepack pnpm@11.27.0 gen:types`（2 回）
+- 出力の要点: `app/celeris/types.ts` は 1 回目で `ExecutionPhase`/`ExecutionView`/`ExecutionMetrics`/
+  `ExecutionPlanOverview`/`ExecutionWorkUnitView`/`ExecutionPlanVersionSummary`/`TaskExecutionView`/
+  `ExecutionMetricsSummary`/`ExecutionMetricsGroup`/`RunSummary.work_unit` が追加され（`git diff`
+  は追加のみ + 既存コメント 1 行の位置が `$defs` のアルファベット順で動いただけ）、2 回目は
+  1 回目と完全に同一（`diff -q` 差分なし）。最終確認では `git status --short
+  gui/app/celeris/types.ts` も空（commit 済みの内容と一致）。
+- 実行したコマンド: `cd gui && corepack pnpm@11.27.0 typecheck && corepack pnpm@11.27.0 lint &&
+  corepack pnpm@11.27.0 test && corepack pnpm@11.27.0 build`
+- 出力の要点: typecheck exit 0（エラーなし）。lint exit 0（`scripts/check-resume-recovery.mjs` の
+  `lint/style/useTemplate` info 2 件のみ。E5 が触っていない既存ファイルの pre-existing な info で
+  `pnpm lint` の exit code には影響しない）。test: 72 files / 1091 passed（E5 前は 71 files / 1086
+  passed。差分は `task-execution.test.ts` の 1 file / 5 tests）。build 成功
+  （`tasks._id-*.js` 72.82 kB、`INEFFECTIVE_DYNAMIC_IMPORT` の warning 2 件は E5 が触っていない
+  既存の `task-files.tsx`/`task-changes.tsx` の静的+動的二重 import で pre-existing）。
+- 実行したコマンド: `UV_USE_IO_URING=0 corepack pnpm@11.27.0 mobile-audit`
+  （`UV_USE_IO_URING=0` はこのサンドボックスだけの事情。ADR の逸脱節参照。コードの変更ではない）
+- 出力の要点: `{"ok":true,"total":0,"by_rule":{},"by_scheme":{"light":0,"dark":0}}`。
+  routes=27 schemes=2 violations=0。`git_sha` はこの完了報告の最終 commit の sha12 と一致する形で
+  記録される（監査レポートの慣例）。
+  - 初回の実装（WU の表・runs の表を `overflow-x-auto` の横スクロール表のままにした版）は
+    `touch-scroll` の違反が出た（`task-overview` の `execution-section`/`runs-section` の各 2 件）。
+    原因は `checkFocusOrder`（Tab キーで文書全体を歩く検査。`checkTouchScroll` の直前に走る）が
+    表内の `<details>`（checkpoint の折り畳み・run の outcome 詳細）にフォーカスすると、ブラウザが
+    横スクロールコンテナをネイティブに「要素が見える位置まで」動かし、その後の
+    スワイプ検査が向きを変えられず偽陽性になるというもの（デバッグ用の使い捨てスクリプトで、
+    `scrollIntoViewIfNeeded` を経由しない単発の swipe は成功することを確認して特定した）。
+    D20 の指示どおり `max-sm:` で表からカードの一覧に折り返す設計に直し（`~/routes/projects.tsx`
+    の案件一覧と同じ技法）、解消した（ADR の逸脱節に詳細）。
+  - 副産物: run 一覧の `started_at`/`finished_at` セルが ADR-0055 D1-4（本文 14px 以上）に
+    違反していたことも見つかった（`task-overview` の fixture がこれまで `runs: []` だったため、
+    E5 で初めて可視化された既存の欠落）。`text-sm ... lg:text-xs` に直した。
+  - `gui/scripts/lib/celeris-fixture.mjs`: `mobile-audit`/`e2e-check` が共有する `task-overview` の
+    fixture に `execution`（gate・計画・WU 3 件〈done/blocked/repair〉・replan の版履歴 2 件）と
+    `runs`（`end`/`work_unit` 付き 2 件）を追加し、新しい Execution 節を実際に描画した状態で
+    機械検査されるようにした。
+
+### ゲート（本 Phase 完了時点）
+
+| ゲート | 実行したコマンド | 出力の要点 |
+|---|---|---|
+| fmt | `cargo fmt --all -- --check` | exit 0（差分なし） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0） |
+| 全テスト | `cargo test --workspace --no-fail-fast` | exit 0。81 個の `test result:` ブロック全て `ok`（FAILED 0、計 2,273 tests passed） |
+| schema（task-core） | `UPDATE_SCHEMA=1 cargo test -p task-core --lib` の `committed_schema_matches_generated`（execution/execution_plan/plan） | exit 0、3 passed。差分なし |
+| schema（task-worker） | `UPDATE_SCHEMA=1 cargo test -p task-worker --lib committed_schema_matches_generated` | exit 0、1 passed。差分なし |
+| schema（task-api） | `cargo test -p task-api --lib schema::` | exit 0、2 passed（`committed_schema_matches_generated`・`schema_uses_defs_once_for_shared_types`）。`docs/api/v1/api-v1.schema.json` は既に commit 済みで差分なし |
+| GUI typecheck | `cd gui && corepack pnpm@11.27.0 typecheck` | exit 0 |
+| GUI lint | `cd gui && corepack pnpm@11.27.0 lint` | exit 0（pre-existing な info 2 件のみ、E5 の対象外ファイル） |
+| GUI test | `cd gui && corepack pnpm@11.27.0 test` | exit 0。72 files / 1091 passed |
+| GUI gen:types | `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff | 2 回目が 1 回目と同一（差分ゼロ）。`git status --short` も空 |
+| GUI build | `cd gui && corepack pnpm@11.27.0 build` | exit 0 |
+| GUI mobile-audit | `cd gui && UV_USE_IO_URING=0 corepack pnpm@11.27.0 mobile-audit` | `ok:true`、routes=27 schemes=2 violations=0 |
+
+**途中で踏んだ 2 件のフレーク（本 Phase の変更とは無関係。証跡）**:
+- `sse_delivers_created_quickly_and_resumes_from_last_event_id`（`tests/e2e`）: 最初のフルテストで
+  `celerisctl replay` の mismatch（`status=Reviewing` vs `Running`）で 1 回だけ落ちた。単体では
+  `cargo test -p e2e --test api_scenarios sse_delivers_created_quickly_and_resumes_from_last_event_id`
+  で 0.52 秒で通過（時間依存のフレーク。過去の Phase でも同種の記録あり）。
+- `acp::tests::{startup_timeout_without_any_response_is_a_spawn_failure,
+  wall_clock_exceeded_cancels_then_kills_the_process_group, idle_timeout_kills_and_reports_error}`
+  （`task-worker`）と `accounts_admin::tests::spawn_check_codex_reports_ok_and_records_observation`
+  （`celeris`）: 別 worktree（E4b のセッション）が同じマシンで並行に `cargo test --workspace`/
+  `cargo clippy` を走らせていた時間帯に 2 回に分けて落ちた（`git diff --stat 751f973..HEAD --
+  crates/task-worker/ crates/task-dispatch/ crates/celeris/` はいずれも空 = 本 Phase はこれらの
+  crate を一切触っていない）。負荷が退いた後 `cargo test -p task-worker --lib acp::tests::` で
+  26/26 が 0.73 秒、`cargo test -p celeris --lib
+  accounts_admin::tests::spawn_check_codex_reports_ok_and_records_observation` も単体で通過。
+  最終の `cargo test --workspace --no-fail-fast`（上表）は FAILED 0 で確認済み。
+
+### ADR との差分
+
+`docs/adr/0072-task-execution-decomposition.md` の「Phase E5 実装時の逸脱・明確化」に詳細を記載。要点:
+
+1. 触るファイルが ADR §6 E5 の表より広い（`task-core/src/lib.rs`〈モジュール宣言〉、
+   `task-api/src/schema.rs`〈`ApiV1Schema` への 2 型の登録〉、`task-api/tests/execution.rs`
+   〈(a) の HTTP テスト〉、`gui/app/lib/task-execution.ts`〈新規〉、
+   `gui/scripts/lib/celeris-fixture.mjs`〈mobile-audit の fixture〉）。
+2. `GET /metrics/execution` の集計は「`runs` の索引から作る」ではなく、`store.rs` を触らずに
+   タスク一覧 + events の全走査にした（低頻度な分析用クエリという想定）。
+3. `repairs_by_class` は既に計画のある Task への repair 追加（`WorkUnitTransitioned` だけの経路）
+   では class を復元できず `"unknown"` に落ちる既知の限界（events だけの純粋関数の制約）。
+4. `ExecutionPlanVersionSummary`（版の履歴）に「差分の件数」は含めない（`reason` の自由記述まで。
+   次の一手）。
+5. `ExecutionPhase` の導出規則は D20 の文面に明文化が無い決め打ち（`task_ops::view::execution_phase`
+   のドキュメントコメント参照）。
+6. GUI: D20 の「モバイル幅: WU の表はカードの一覧に折り返す」を、当初の横スクロール表の実装で
+   `mobile-audit` の `touch-scroll` に落ちたことを受けて設計をやり直し、`max-sm:` のカード表示
+   （runs の表にも同じ理由で適用）にした。
+
+### 未解決事項・E6 への申し送り
+
+- **`GET /metrics/execution` の集計方式**: 現状はタスク一覧 + events の全走査（`StatsState` のような
+  増分カーソルは持たない）。タスク数が多い実運用で遅ければ、`store.rs` に `runs` 由来の専用集計
+  クエリを足す。
+- **`repairs_by_class` の `"unknown"` バケット**: 既に計画のある Task への repair 追加時に class を
+  events だけから復元できない（D16/E4 の設計に起因。`WorkUnitSpec` に repair 専用の欄を足すか、
+  別の記録方法が要る）。
+- **`ExecutionPlanVersionSummary` に差分の件数（added/changed/removed）を足す**: `E4` の
+  `task_ops::execution::ReplanDiff` を events から再計算する経路、または `execution_plans` の行に
+  差分を保存する設計変更が要る。
+- **`GET /metrics/execution` の `group_by = lane`**: WU 単位ではなくタスクの直近 run の lane を代表値
+  にしている。WU 単位の lane 別集計が要ることが分かれば次の一手。
+- E1〜E4 からの申し送り（S4/S6 の実データ配線、`permission_mode` の実行時配線、D17 3. の
+  `plan_issue` トリガー、(h) 配送の repair 等）は本 Phase では着手していない（引き続き E6 で検討）。
+- E6（end-to-end の dogfood）は本 Phase の範囲外。ADR §6 E6 の受け入れ条件どおり、認証が使える
+  環境でエージェントが実行し証跡を残すか、使えなければ人に手順を渡す。

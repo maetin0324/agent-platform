@@ -196,6 +196,9 @@ pub struct ApiV1Schema {
     /// ADR-0072 D14（Phase E2）: `POST`/`GET /tasks/{id}/execution-plan`。
     pub execution_plan: crate::types::ExecutionPlanView,
     pub execution_plan_create: task_core::ExecutionPlanSpec,
+    /// ADR-0072 D19（Phase E5）: `GET /tasks/{id}/execution` と `GET /metrics/execution`。
+    pub task_execution: crate::types::TaskExecutionView,
+    pub execution_metrics: crate::types::ExecutionMetricsSummary,
 }
 
 /// 生成したスキーマ（`serde_json::Value`）。

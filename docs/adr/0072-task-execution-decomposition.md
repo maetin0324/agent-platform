@@ -1409,3 +1409,114 @@ E4 の申し送り項目 1〜5（6 は任意・未実装）を実装しながら
 - **項目6（配送の repair の `merge_base` 化）は本 Phase でも未実装**。E4 の「Phase E4 実装時の
   逸脱・明確化」に記載済みの理由（時間の制約）が本 Phase でも継続した。次の一手は
   `docs/PROGRESS.md` の Phase E4b 節に記録した。
+
+## Phase E5 実装時の逸脱・明確化（2026-09-25）
+
+E5（GUI と metrics）を実装しながら見つかった、D19/D20 の記述とコードの食い違い・簡略化。黙って
+逸脱せず、ここに記録する。
+
+- **触るファイルが ADR §6 E5 の表より広い**。表は `crates/task-core/src/execution_metrics.rs`（新規）・
+  `crates/task-ops/src/view.rs`・`crates/task-api`（handlers/types/stats）・
+  `gui/app/routes/tasks.$id.tsx`・`gui/app/components/ExecutionSection.tsx`（新規）・
+  `gui/app/celeris/types.ts`（生成）を挙げているが、以下も触った（理由を添える）。
+  - `crates/task-core/src/lib.rs`: 新モジュール `execution_metrics` の宣言と re-export。
+  - `crates/task-api/src/schema.rs`: `ApiV1Schema` の登録一覧（型ごとに手で 1 フィールド足す既存の
+    仕組み。D19 が名指す `GET /tasks/{id}/execution`/`GET /metrics/execution` の応答型
+    （`TaskExecutionView`/`ExecutionMetricsSummary`）を `docs/api/v1/api-v1.schema.json` ひいては
+    `gui/app/celeris/types.ts` に出すのに必須）。
+  - `crates/task-api/tests/execution.rs`: (a) の受け入れ条件が名指す 2 エンドポイントの HTTP レベル
+    テストをここに追加した（既存の `POST`/`GET /tasks/{id}/execution-plan` のテストと同じファイル）。
+  - `gui/app/lib/task-execution.ts`（新規）: `ExecutionSection.tsx` の表示ロジック（celeris が記録した
+    値をそのまま並べる純粋関数）を、既存の `~/lib/task-routing.ts`（ADR-0069 D5 の「ルーティング」
+    パネル）と同じ置き場に分離した。(b) が要求する「4 つの fixture で vitest」はこのファイルの
+    テスト（`gui/test/unit/task-execution.test.ts`）で満たす。
+  - `gui/scripts/lib/celeris-fixture.mjs`: `mobile-audit`/`e2e-check` が共有する `task-overview` の
+    fixture に `execution`（計画・WU・repair・replan の版履歴）と `runs`（`end`/`work_unit` 付き）を
+    足した。これが無いと、(e) の `mobile-audit` は新しい Execution 節を実際には 1 度も描画せずに
+    「違反 0」を名乗ることになり、監査として意味を失う。
+
+- **`task_core::execution_metrics::summarize` の設計判断（D19 の signature `&Task, &[Event]` は
+  そのまま守った）**: `wall_ms`（D19「最初の dispatch から終端まで」）は、`Event` 自体がタイムスタンプを
+  持たない（`EventRow.ts` は store 層にしかない）ため、`Task.created_at` → `Task.updated_at`
+  （タスクが終端になったときの最後の書き込み）で近似した。「最初の dispatch」ではなく「作成から
+  終端まで」になるが、Draft のまま長く放置されるタスクは稀という前提での近似。events の
+  タイムスタンプが要る、より厳密な値が要ることが分かれば、E6 以降で signature を
+  `&Task, &[EventRow]` に変える再設計を検討する。
+
+- **`repairs_by_class` の `"unknown"` バケット（D16 の repair class を events だけから復元する
+  ことの既知の限界）**: atomic な Task で初めて repair WU を作るとき（`review_repair_apply` の
+  `new_plan: Some(..)` 経路）は `Event::ExecutionPlanned` に repair WU の `title`（`"repair (<bucket>):
+  …"`）ごと載るので class を復元できるが、既に計画のある Task に repair WU を足すとき
+  （`new_plan: None` 経路）は `Event::WorkUnitTransitioned` だけが記録され、title を運ばない
+  （E4 の実装。ADR「Phase E4 実装時の逸脱・明確化」参照）。events だけの純粋関数ではこの経路の
+  repair class を復元できないため `"unknown"` に落とす（`repairs_total` 自体は両経路とも正確）。
+  `task-core/src/execution_metrics.rs` のテスト
+  `repairs_without_a_recoverable_title_fall_back_to_unknown` で明示的に確認している。
+
+- **`GET /metrics/execution` の集計は「`runs` の索引から作る」ではなく、タスク一覧 + events の
+  全走査**（`crate::stats::execution_metrics_summary`）。ADR 本文は「`runs` の索引から作る」と
+  書いているが、`runs`/`work_units`/`execution_plans` の派生索引（D5、`crates/task-core/src/store.rs`）
+  を新しい集計クエリのために拡張するには `store.rs` に手を入れる必要があり、`store.rs` は
+  ADR §6 E5 の表にも今回の指示にも入っていない。`GET /metrics/execution` は低頻度の分析用クエリ
+  という想定（`StatsState` のような増分カーソルのキャッシュは持たない）なので、`store.list(None)`
+  で全タスクを読み、タスクごとに `store.events_for` と `summarize_execution_metrics` を呼ぶ素朴な
+  全走査にした。タスク数が大きくなった実運用で遅ければ、`store.rs` に `runs` 由来の専用集計クエリを
+  足す（E6 以降）。
+
+- **`GET /metrics/execution` の `group_by = lane`** は `runs.lane`（`work_units` には lane を持たない）
+  ではなく、`task_core::routing_audit` から求めたタスクの**直近の run** の lane を使う（1 タスク 1 値。
+  複数 WU が別々の lane で走っていても代表値でまとめる）。WU 単位の lane 別集計が要ることが分かれば
+  次の一手。
+
+- **タスク詳細の `TaskDetail.execution` は、`GET /tasks/{id}/execution` が返す `TaskExecutionView`
+  （task-api、`ExecutionPlanView`/`WorkUnitView` を再利用した全文）とは別の、`task-ops::view` 独自の
+  軽量な型（`ExecutionView`/`ExecutionPlanOverview`/`ExecutionWorkUnitView`/
+  `ExecutionPlanVersionSummary`）を使う**。`task_core::WorkUnitRow`/`ExecutionPlanRow` は
+  `Serialize`/`JsonSchema` を持たない store 層の型（`task-api::types::WorkUnitView`/
+  `ExecutionPlanView` が既にこの写像を担っている）なので、`task_ops::view`（`task-api` に依存できない
+  下位レイヤ）が `TaskDetail` に直接埋め込むには別の軽量な型が要る。両者の値の出所は同じ
+  （store の派生索引）だが、フィールドの粒度は意図して違える（inline の要約 vs 深掘りの全文。
+  D19/D20 の使い分けと同じ）。
+
+- **`ExecutionPlanVersionSummary`（版の履歴）に「差分の件数」は含めない**。D17(f) は「版の履歴（版・
+  理由・差分の件数・作ったもの）」と書いているが、実装したのは `id`/`version`/`origin`/`status`/
+  `reason`/`created_at`/`superseded_at` まで（E4 で `task_ops::execution::ReplanDiff` は既にある
+  ものの、`execution_plans` の行やイベントには保存しておらず、events を読み直さないと再構成できない）。
+  時間の制約により、版ごとの `reason`（人・planner が書いた自由記述）で足りると判断した。差分の
+  件数（added/changed/removed）を GUI に出したければ、`Event::ExecutionPlanned` を events から
+  読んで `task_ops::execution` 相当の diff を再計算する経路が要る（次の一手）。
+
+- **`ExecutionPhase` の導出規則は仕様書に明文化が無い決め打ち**（D20 の文面は「タスクの状態バッジの
+  横に出す」としか言っていない）。`task_ops::view::execution_phase` の規則: `reviewing` は常に
+  `verifying`。`running` は、計画があり（`work_units` が空でない）かつ `running` 状態の WU があれば
+  `repairing`（`kind = repair`）か `executing`、計画はあるのに `running` の WU が無ければ
+  `planning`（replan/初回計画の planner run が走っていると見なす）。計画が無い（`work_units` が
+  空）タスクは `running` でも `None`（バッジを出さない。素の状態バッジで足りる）。実運用（E6）で
+  この分類が実態と合っているか確認すること。
+
+- **GUI: WU の表・runs の表を、393px では `max-sm:` で表からカードの一覧に折り替えた**
+  （`~/routes/projects.tsx` の案件一覧と同じ技法。D20 の「モバイル幅: WU の表はカードの一覧に折り返す」
+  の指示どおり）。これは当初 `overflow-x-auto` の横スクロール表のまま実装したところ、
+  `pnpm mobile-audit` の `touch-scroll` 検査で違反になったために設計をやり直したもの:
+  表内の `<details>`（checkpoint の折り畳み・run の outcome 詳細）は Tab キーでフォーカスできる
+  要素で、`checkTouchScroll` の直前に走る `checkFocusOrder`（Tab キーで文書全体を歩く検査）が
+  この `<details>` にフォーカスすると、ブラウザが横スクロールコンテナをネイティブに
+  「要素が見える位置まで」動かす。その結果 `checkTouchScroll` が見る時点で `scrollLeft` が既に
+  端まで動いており、そこからさらに同じ向きへスワイプしても動きようがなく「スワイプしても
+  スクロールしない」という偽陽性になる（デバッグ用の使い捨てスクリプトで、`scrollIntoViewIfNeeded`
+  を経由しない単発の swipe は成功することを確認した上で特定した）。カードにすれば横スクロール
+  コンテナ自体が無くなるので、この競合が起きない。runs の表（既存）も同じ理由で同じ技法にした
+  （D20 は runs の表のカード化までは求めていないが、E5 で足した列を含め同じ問題を踏むため、
+  一貫性のため合わせた）。
+  - 副産物として、run 一覧の `started_at`/`finished_at` セル（`text-xs`、フェーズ 74 から）が
+    ADR-0055 D1-4（本文 14px 以上）に違反していたことも見つかった。`task-overview` の fixture が
+    これまで `runs: []` だったため、run の行自体が描画されず機械検査の対象になっていなかった
+    （E5 で fixture に実データを足して初めて可視化された既存の欠落）。ここで合わせて
+    `text-sm ... lg:text-xs`（既存の ADR-0055 パターン）に直した。
+
+- **`pnpm mobile-audit` をこの開発コンテナで走らせるには `UV_USE_IO_URING=0` が要った**
+  （コードの変更ではなく実行時の環境変数）。このサンドボックスでは Node 24 の `server.js`
+  （production ビルド）が起動時に `io_uring` の syscall で無期限に `D`（disk sleep）状態のまま
+  止まる現象を確認した（`UV_USE_IO_URING=0` を付けると即座に健全に起動する）。celeris-gui 側の
+  コードやビルド成果物の問題ではなく、この特定のサンドボックスの制約と見られる。次にこの環境で
+  `mobile-audit`/`e2e` を走らせる担当者への申し送り。

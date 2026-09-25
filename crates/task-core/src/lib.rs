@@ -14,6 +14,8 @@ pub mod delegate;
 pub mod execution;
 /// ADR-0072 D13（Phase E3）: Complexity Gate（atomic/compound の決定的な判定）の純粋な型と関数。
 pub mod execution_gate;
+/// ADR-0072 D19（Phase E5）: Task 単位の実行メトリクス（純粋関数）。
+pub mod execution_metrics;
 /// ADR-0072（Phase E2）: ExecutionPlan / WorkUnit のデータモデルと決定的な scheduler の純粋な型と関数。
 pub mod execution_plan;
 /// ADR-0046 D3（Phase 59）: ハーネス = 実行契約（`[[harnesses]]`。旧 `[[genres]]` + `[[roles]]`）。
@@ -167,6 +169,8 @@ pub use execution_gate::{
     ExecutionGateInputs, ExecutionHintSpec, ExecutionMode, GateMode, GateSignal, GateSource,
     PlannerConfig, decide as decide_execution_gate, out_of_scope_rule,
 };
+// ---- ADR-0072 D19（Phase E5）: Task 単位の実行メトリクス ----
+pub use execution_metrics::{ExecutionMetrics, summarize as summarize_execution_metrics};
 
 pub mod model_routing;
 // ---- ADR-0069（Phase 114）: routing の 4 層（lane policy・retry/escalation・監査）----

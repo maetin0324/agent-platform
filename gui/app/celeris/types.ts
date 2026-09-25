@@ -751,6 +751,14 @@ export type InstanceRole = "active" | "standby" | "draining" | "verify";
  */
 export type RepoRun = "auto" | "host" | "container";
 /**
+ * ADR-0072 D20（Phase E5）: タスクの状態バッジの横に出す、今どの段階かの導出値（D6 の R3 の代替。
+ * 状態機械そのものには足さない）。`Task.status` から次のとおり決める（[`build_execution_view`] 参照）:
+ * `reviewing` は常に `verifying`。`running` は、進行中の WorkUnit があれば `repairing`
+ * （`kind = repair`）か `executing`、無ければ（計画はあるのに走っている WU が無い）planner run が
+ * 動いていると見なして `planning`。それ以外（計画が無い・終端）は `None`。
+ */
+export type ExecutionPhase = "planning" | "executing" | "repairing" | "verifying";
+/**
  * ADR-0070 D1（Phase 116）: `failed` の分類。`infra` はレース・切替・供給側都合、`work` はレビュー
  * 不合格やワーカー自身の明示的な失敗（人が中身を見て判断すべきもの）。
  */
@@ -869,6 +877,7 @@ export interface ApiV1Schema {
   docs_init: DocsInitResult;
   docs_tree: DocsTree;
   events_page: EventsPage;
+  execution_metrics: ExecutionMetricsSummary;
   execution_plan: ExecutionPlanView;
   execution_plan_create: ExecutionPlanSpec;
   graph: Graph;
@@ -948,6 +957,7 @@ export interface ApiV1Schema {
   task_detail: TaskDetail;
   task_edit: TaskEdit;
   task_edit_result: EditResult;
+  task_execution: TaskExecutionView;
   task_list: TaskList;
   task_routing: TaskRoutingView;
   timeline: Timeline;
@@ -3064,7 +3074,45 @@ export interface WorkUnitContext {
   paths?: string[];
 }
 /**
- * ADR-0072 D14（Phase E2）: `POST`/`GET /tasks/{id}/execution-plan`。
+ * `GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`。
+ */
+export interface ExecutionMetricsSummary {
+  group_by: string;
+  groups: ExecutionMetricsGroup[];
+  since?: string | null;
+  /**
+   * `since` 以降に更新された（フィルタを満たした）タスクの総数。
+   */
+  total_tasks: number;
+}
+/**
+ * `GET /metrics/execution` の 1 グループ（`group_by` の値ごと）。
+ */
+export interface ExecutionMetricsGroup {
+  /**
+   * `done / (done + failed)`（両方 0 なら `None`。D19 の「compound の完走率」）。
+   */
+  completion_rate?: number | null;
+  continuations: number;
+  done: number;
+  failed: number;
+  /**
+   * `group_by = gate_mode` なら `"atomic"`/`"compound"`/`"none"`、`genre`/`assignee` ならその
+   * 値（無ければ `"none"`）、`lane` なら直近の run の lane（`"frontier"`/`"standard"`/`"cheap"`/
+   * `"none"`）。
+   */
+  key: string;
+  max_turn_failures: number;
+  /**
+   * `done`/`failed` 以外（実行中・blocked など）。
+   */
+  other: number;
+  repairs: number;
+  replans: number;
+  tasks: number;
+}
+/**
+ * `POST`/`GET /tasks/{id}/execution-plan` の応答。
  */
 export interface ExecutionPlanView {
   created_at: string;
@@ -3281,6 +3329,12 @@ export interface RunSummary {
   started_at: string;
   usage?: Usage | null;
   verdicts: number;
+  /**
+   * ADR-0072 D20（Phase E5）: この run が実行した WorkUnit の `key`（計画の無い Task、または
+   * `work_units`/`runs` の索引に無い導入前の run は `None`）。`runs()` 自体は events だけの
+   * 純粋関数なので、[`run_work_unit_keys`] で store から引いた後段が埋める。
+   */
+  work_unit?: string | null;
 }
 export interface RunFiles {
   /**
@@ -5422,6 +5476,11 @@ export interface TaskDetail {
   dependencies: TaskRef[];
   dependents: TaskRef[];
   /**
+   * ADR-0072 D20（Phase E5）: Execution 節。events に E-phase 由来の活動（gate の判定・計画・
+   * checkpoint・WorkUnit の遷移）が 1 件も無ければ `None`（D23: 既存の古いタスクの詳細を壊さない）。
+   */
+  execution?: ExecutionView | null;
+  /**
    * ADR-0070 D1（Phase 116）: `task.status == Failed` のときだけ `Some`（分類・理由・配送済みの release）。
    * GUI のタスク詳細の赤いバナーの材料。
    */
@@ -5479,6 +5538,167 @@ export interface DelegatedView {
    * イベントの ts（`EventRow.ts`）。
    */
   ts: string;
+}
+/**
+ * D19/D20: タスク詳細の Execution 節そのもの。
+ */
+export interface ExecutionView {
+  /**
+   * D13: Complexity Gate の判定（gate が判定していない Task には無い）。
+   */
+  gate?: ExecutionGateDecision | null;
+  metrics: ExecutionMetrics;
+  phase?: ExecutionPhase | null;
+  /**
+   * 計画が無い Task（D20:「直接実行」の 1 行）は `None`。
+   */
+  plan?: ExecutionPlanOverview | null;
+}
+/**
+ * D19: Task 単位の実行メトリクス（`GET /tasks/{id}/execution` と `GET /metrics/execution` の材料）。
+ */
+export interface ExecutionMetrics {
+  /**
+   * D7: 予算切れの種類ごとの run 数（`"turns"` / `"wall_clock"` / `"context"`）。
+   */
+  budget_exhausted_by_kind?: {
+    [k: string]: number;
+  };
+  /**
+   * D11: continuation（予算切れ・yield の続き）の回数（`Trigger::Continue{why: Continue}`）。
+   */
+  continuations: number;
+  cost_usd?: number | null;
+  final_status: Status;
+  /**
+   * D13: Complexity Gate の最終判定（`Task.routing.execution.mode`）。gate が判定していない
+   * Task（`gate = off`・E3 より前・対象外規則）は `None`。
+   */
+  gate_mode?: ExecutionMode | null;
+  /**
+   * `[execution] gate = "shadow"` の判定だった（記録だけで実行には使わなかった）。
+   */
+  gate_shadow?: boolean;
+  /**
+   * このタスクの生涯で一度でも `Event::ExecutionPlanned` を受け取った（計画実行に入った）。
+   */
+  has_plan?: boolean;
+  /**
+   * `budget_exhausted_by_kind["turns"]` の便宜上のコピー（E1 の主要因）。
+   */
+  max_turn_failures: number;
+  /**
+   * D19: この Task の run の中で観測した context 量の最大値。
+   */
+  peak_context_tokens?: number | null;
+  /**
+   * D16: repair の class ごとの回数。`"unknown"` は、計画に既存だった repair WU
+   * （`ExecutionPlanned` に載らない）で class が復元できなかったもの（events だけからの
+   * 復元の既知の限界。ADR の逸脱節を参照）。
+   */
+  repairs_by_class?: {
+    [k: string]: number;
+  };
+  /**
+   * repair の総数。
+   */
+  repairs_total: number;
+  /**
+   * D17: replan（`Event::ExecutionPlanned.supersedes.is_some()`）の回数。
+   */
+  replans: number;
+  /**
+   * D11: retry（atomic の `Trigger::WorkerError{retryable:true}` の再試行 + WU の
+   * `work_unit_retry`）の回数。
+   */
+  retries: number;
+  /**
+   * role ごとの run 数（`"worker"` / `"reviewer"` / `"planner"`）。
+   */
+  runs_by_role?: {
+    [k: string]: number;
+  };
+  total_input_tokens?: number | null;
+  total_output_tokens?: number | null;
+  /**
+   * `Task.created_at` から `Task.updated_at` まで（ミリ秒）。終端でなければ `None`
+   * （まだ進行中で終わりの時刻が無い）。
+   */
+  wall_ms?: number | null;
+  /**
+   * うち `done` になった数。
+   */
+  work_units_done: number;
+  /**
+   * 生涯で作られた WorkUnit の数（repair を含む。superseded/cancelled も数える）。
+   */
+  work_units_total: number;
+}
+/**
+ * D20: 計画の概要（現在アクティブでない Task でも、生涯で作った WU をまとめて見せる。
+ * `versions` が replan の履歴）。
+ */
+export interface ExecutionPlanOverview {
+  id: string;
+  origin: PlanOrigin;
+  rationale: string;
+  version: number;
+  /**
+   * D17(f): 版の履歴（`version` 昇順。superseded を含む）。
+   */
+  versions: ExecutionPlanVersionSummary[];
+  work_units: ExecutionWorkUnitView[];
+}
+/**
+ * D17(f): `execution_plans` の 1 版（監査用）。
+ */
+export interface ExecutionPlanVersionSummary {
+  created_at: string;
+  id: string;
+  origin: PlanOrigin;
+  /**
+   * `Event::ExecutionPlanned.reason`（replan を起こした理由。新規採用なら `None`）。
+   */
+  reason?: string | null;
+  status: PlanStatus;
+  superseded_at?: string | null;
+  version: number;
+}
+/**
+ * D20: WU の表の 1 行。
+ */
+export interface ExecutionWorkUnitView {
+  /**
+   * D21: WU は Task の担当を継ぐ（`Task.assignee` と同じ値）。
+   */
+  assignee?: string | null;
+  blocked_reason?: WorkUnitBlockedReason | null;
+  continuations: number;
+  created_at: string;
+  depends_on: string[];
+  harness?: string | null;
+  id: string;
+  key: string;
+  kind: WorkUnitKind;
+  lane?: Tier | null;
+  /**
+   * 最後の checkpoint の全文（GUI は折り畳んで出す。D8）。
+   */
+  last_checkpoint?: Checkpoint | null;
+  /**
+   * 直近の `WorkUnitTransitioned.reason`（失敗・レビューの理由。無ければ `None`）。
+   */
+  last_reason?: string | null;
+  /**
+   * 直近の run の routing（`RoutingDecided`）から。まだ 1 度も走っていなければ `None`。
+   */
+  model?: string | null;
+  retries: number;
+  runs: number;
+  seq: number;
+  status: WorkUnitStatus;
+  title: string;
+  updated_at: string;
 }
 /**
  * ADR-0070 D1（Phase 116）: `TaskDetail.failure` / 受信箱 `AttentionItem::Failed` が共有する形。
@@ -5617,6 +5837,44 @@ export interface EditResult {
    */
   fields: string[];
   task: Task;
+}
+/**
+ * ADR-0072 D19（Phase E5）: `GET /tasks/{id}/execution` と `GET /metrics/execution`。
+ */
+export interface TaskExecutionView {
+  /**
+   * D13: Complexity Gate の判定（無ければ gate 対象外か、まだ判定していない）。
+   */
+  gate?: ExecutionGateDecision | null;
+  metrics: ExecutionMetrics;
+  phase?: ExecutionPhase | null;
+  /**
+   * 計画の無い Task（暗黙の WorkUnit）は `None`。
+   */
+  plan?: ExecutionPlanView1 | null;
+  /**
+   * checkpoint はそれぞれの `RunSummary` からは見えない（run 詳細ルートで見る。D20）。
+   */
+  runs: RunSummary[];
+}
+/**
+ * `POST`/`GET /tasks/{id}/execution-plan` の応答。
+ */
+export interface ExecutionPlanView1 {
+  created_at: string;
+  id: string;
+  origin: PlanOrigin;
+  plan: ExecutionPlanSpec;
+  planner_run_id?: string | null;
+  status: PlanStatus;
+  superseded_at?: string | null;
+  task_id: string;
+  version: number;
+  /**
+   * ADR-0072 D17（Phase E4）: 版の履歴（`version` 昇順。superseded を含む。監査用）。
+   */
+  versions?: ExecutionPlanVersionView[];
+  work_units: WorkUnitView[];
 }
 export interface TaskList {
   /**
