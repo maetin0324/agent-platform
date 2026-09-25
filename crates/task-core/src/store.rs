@@ -532,6 +532,36 @@ fn parse_status(s: &str) -> Result<Status, StoreError> {
     }
 }
 
+/// `GET /metrics/execution` 用の、索引から取得した最新 run の情報。
+/// `metrics_json` は RunMetrics であり、WorkerFinished の `end`（予算切れの種類）は含まない。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionMetricsLatestRun {
+    pub run_id: String,
+    pub role: RunIndexRole,
+    pub status: RunIndexStatus,
+    pub adapter: Option<String>,
+    pub model: Option<String>,
+    pub metrics_json: Option<String>,
+    pub usage_json: Option<String>,
+}
+
+/// `GET /metrics/execution` 用のタスク別の索引集計行。`routing_json` は `tasks.json.routing`。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExecutionMetricsTaskRow {
+    pub task_id: TaskId,
+    pub status: Status,
+    pub genre: Option<String>,
+    pub assignee: Option<String>,
+    pub routing_json: Option<String>,
+    pub repairs: u32,
+    pub replans: u32,
+    pub continuations: u32,
+    pub retries: u32,
+    pub runs_count: u32,
+    pub budget_exhausted_runs: u32,
+    pub latest_run: Option<ExecutionMetricsLatestRun>,
+}
+
 /// ADR-0033 D3: 報告（`reports`）の読み書きは `crate::report::ReportStore` にあり、`TaskStore` はそれを
 /// supertrait として要求する（ディスパッチャの `Arc<dyn TaskStore>` から報告を追記できるようにするため。
 /// 実装は `report.rs` にあり、この表の SQL はここには無い）。
@@ -970,6 +1000,28 @@ pub trait TaskStore:
     fn runs_for_task(&self, task_id: TaskId) -> Result<Vec<RunRow>, StoreError>;
     /// その WorkUnit の run（`started_at` 昇順）。
     fn runs_for_work_unit(&self, work_unit_id: &str) -> Result<Vec<RunRow>, StoreError>;
+
+    /// `updated_at >= since` のタスク別実行集計を派生索引から 1 回の SQL で読む。
+    ///
+    /// | API の欄 | events 版 | 索引版 |
+    /// |---|---|---|
+    /// | tasks / done / failed / other | Task と最終 status | tasks.status（API が集約） |
+    /// | completion_rate | done / (done + failed) | 同じ計算（API） |
+    /// | continuations | Transitioned `continue` | work_units.continuations の和 |
+    /// | max_turn_failures | WorkerFinished `BudgetExhausted(Turns)` | runs.status には種類が無く、最新 run の events だけでは過去 run 分も復元できない |
+    /// | repairs | repair WorkUnit の key 数 | work_units.kind = repair の行数 |
+    /// | replans | supersedes のある ExecutionPlanned 数 | execution_plans.version > 1 の行数 |
+    /// | gate_mode / genre / assignee | Task.routing / Task の欄 | tasks.json.routing / 列 |
+    /// | lane | routing_audit の最後の lane | runs に lane 列が無く、最新 run の events だけでは過去の監査結果を保証できない |
+    ///
+    /// Atomic task には work_units 行が無く、その `continue` と `worker_error` retry は索引から
+    /// 復元できない。古い run（E2 より前）も runs に埋め戻していない。API が補完する場合は
+    /// 該当タスクに限って events を読む必要があり、全タスクの events 走査へ戻さないこと。
+    /// `budget_exhausted_runs` は種類を問わない数で、turns の数として扱ってはならない。
+    fn execution_metrics_task_rows(
+        &self,
+        since: Option<OffsetDateTime>,
+    ) -> Result<Vec<ExecutionMetricsTaskRow>, StoreError>;
 
     /// ADR-0072 D5/D15（Phase E2b）: `task_id` の `work_units` 行を、渡した集合でまるごと置き換える
     /// （既存行を全て削除してから挿入。1 トランザクション）。`events` は変えない。
@@ -4709,6 +4761,92 @@ impl TaskStore for SqliteStore {
             let mut out = Vec::new();
             for row in rows {
                 out.push(row??);
+            }
+            Ok(out)
+        })
+    }
+
+    fn execution_metrics_task_rows(
+        &self,
+        since: Option<OffsetDateTime>,
+    ) -> Result<Vec<ExecutionMetricsTaskRow>, StoreError> {
+        let since_text = since.map(format_rfc3339).transpose()?;
+        self.with_read_conn(|conn| {
+            // Aggregate each child table before joining: raw joins multiply counts.
+            let mut stmt = conn.prepare(
+                "WITH eligible AS MATERIALIZED (\
+                   SELECT id, status, genre, assignee, json, updated_at FROM tasks \
+                   WHERE (?1 IS NULL OR julianday(updated_at) >= julianday(?1) - 1.0 / 86400000)), \
+                 wu AS (\
+                   SELECT w.task_id, SUM(CASE WHEN w.kind = 'repair' THEN 1 ELSE 0 END) repairs, \
+                          SUM(w.continuations) continuations, SUM(w.retries) retries \
+                   FROM work_units w JOIN eligible t ON t.id = w.task_id GROUP BY w.task_id), \
+                 plans AS (\
+                   SELECT p.task_id, SUM(CASE WHEN p.version > 1 THEN 1 ELSE 0 END) replans \
+                   FROM execution_plans p JOIN eligible t ON t.id = p.task_id GROUP BY p.task_id), \
+                 run_counts AS (\
+                   SELECT r.task_id, COUNT(*) runs_count, \
+                          SUM(CASE WHEN r.status = 'budget_exhausted' THEN 1 ELSE 0 END) budget_exhausted_runs \
+                   FROM runs r JOIN eligible t ON t.id = r.task_id GROUP BY r.task_id) \
+                 SELECT t.id, t.status, t.genre, t.assignee, json_extract(t.json, '$.routing'), \
+                        COALESCE(wu.repairs, 0), COALESCE(plans.replans, 0), \
+                        COALESCE(wu.continuations, 0), COALESCE(wu.retries, 0), \
+                        COALESCE(run_counts.runs_count, 0), COALESCE(run_counts.budget_exhausted_runs, 0), \
+                        latest.run_id, latest.role, latest.status, latest.adapter, latest.model, \
+                        latest.metrics_json, latest.usage_json, \
+                        t.updated_at \
+                 FROM eligible t \
+                 LEFT JOIN wu ON wu.task_id = t.id \
+                 LEFT JOIN plans ON plans.task_id = t.id \
+                 LEFT JOIN run_counts ON run_counts.task_id = t.id \
+                 LEFT JOIN runs latest ON latest.run_id = (\
+                   SELECT r.run_id FROM runs r WHERE r.task_id = t.id \
+                   ORDER BY r.started_at DESC, r.run_id DESC LIMIT 1) \
+                 ORDER BY t.id",
+            )?;
+            let rows = stmt.query_map(params![since_text], |row| {
+                Ok((
+                    row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?, row.get::<_, u32>(5)?,
+                    row.get::<_, u32>(6)?, row.get::<_, u32>(7)?,
+                    row.get::<_, u32>(8)?, row.get::<_, u32>(9)?,
+                    row.get::<_, u32>(10)?, row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?, row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?, row.get::<_, Option<String>>(15)?,
+                    row.get::<_, Option<String>>(16)?, row.get::<_, Option<String>>(17)?,
+                    row.get::<_, String>(18)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                let (id, status, genre, assignee, routing_json, repairs, replans,
+                    continuations, retries, runs_count, budget_exhausted_runs, run_id,
+                    role, run_status, adapter, model, metrics_json, usage_json, updated_at) = row?;
+                // SQLite julianday has millisecond resolution. Keep a 1 ms candidate margin in
+                // SQL, then apply the original OffsetDateTime comparison exactly here.
+                if let Some(since) = since && parse_rfc3339(&updated_at)? < since {
+                    continue;
+                }
+                let latest_run = if let Some(run_id) = run_id {
+                    let role = role.and_then(|s| RunIndexRole::parse(&s)).ok_or_else(|| {
+                        StoreError::Invalid(format!("invalid latest runs.role for {run_id}"))
+                    })?;
+                    let status = run_status
+                        .and_then(|s| RunIndexStatus::parse(&s))
+                        .ok_or_else(|| StoreError::Invalid(format!("invalid latest runs.status for {run_id}")))?;
+                    Some(ExecutionMetricsLatestRun {
+                        run_id, role, status, adapter, model, metrics_json, usage_json,
+                    })
+                } else {
+                    None
+                };
+                out.push(ExecutionMetricsTaskRow {
+                    task_id: id.parse().map_err(|_| StoreError::Invalid(format!("invalid tasks.id: {id}")))?,
+                    status: parse_status(&status)?, genre, assignee, routing_json,
+                    repairs, replans, continuations, retries, runs_count,
+                    budget_exhausted_runs, latest_run,
+                });
             }
             Ok(out)
         })
@@ -8904,6 +9042,235 @@ mod tests {
                 )
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn execution_metrics_task_rows_cover_planned_repair_replan_and_atomic() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let at = |s| OffsetDateTime::parse(s, &Rfc3339).unwrap();
+        let mut planned = sample_task(Status::Done);
+        planned.genre = Some("coding".into());
+        planned.assignee = Some("engineering".into());
+        planned.routing = Some(crate::model::TaskRouting::default());
+        planned.updated_at = at("2026-09-25T00:00:00Z");
+        let mut repair = sample_task(Status::Failed);
+        repair.updated_at = at("2026-09-25T00:01:00Z");
+        let mut replan = sample_task(Status::Reviewing);
+        replan.updated_at = at("2026-09-25T00:02:00Z");
+        let mut atomic = sample_task(Status::Ready);
+        atomic.updated_at = at("2026-09-25T00:03:00Z");
+        for task in [&planned, &repair, &replan, &atomic] {
+            store.insert(task).unwrap();
+        }
+        let plan_for = |task: &Task, id: &str, version, status| ExecutionPlanRow {
+            id: id.into(),
+            task_id: task.id.to_string(),
+            version,
+            origin: PlanOrigin::Human,
+            planner_run_id: None,
+            status,
+            spec: sample_plan_spec(),
+            created_at: "2026-09-25T00:00:00Z".into(),
+            superseded_at: None,
+        };
+        let units_for = |task: &Task, plan_id: &str| {
+            let mut units = sample_work_units(task.id, plan_id);
+            for unit in &mut units {
+                unit.id = format!("{}-{}", task.id, unit.key);
+            }
+            units
+        };
+        let planned_plan = plan_for(&planned, "planned-v1", 1, PlanStatus::Active);
+        let mut planned_units = units_for(&planned, &planned_plan.id);
+        planned_units[0].continuations = 2;
+        planned_units[0].retries = 1;
+        planned_units[1].continuations = 1;
+        store
+            .execution_plan_adopt(
+                planned.id,
+                planned_plan.clone(),
+                planned_units,
+                Event::ExecutionPlanned {
+                    plan_id: planned_plan.id,
+                    version: 1,
+                    origin: PlanOrigin::Human,
+                    supersedes: None,
+                    reason: None,
+                    plan: Box::new(sample_plan_spec()),
+                },
+            )
+            .unwrap();
+
+        let repair_plan = plan_for(&repair, "repair-v1", 1, PlanStatus::Active);
+        let mut repair_units = units_for(&repair, &repair_plan.id);
+        repair_units[1].kind = WorkUnitKind::Repair;
+        repair_units[1].spec.kind = WorkUnitKind::Repair;
+        repair_units[1].continuations = 1;
+        store
+            .execution_plan_adopt(
+                repair.id,
+                repair_plan.clone(),
+                repair_units,
+                Event::ExecutionPlanned {
+                    plan_id: repair_plan.id,
+                    version: 1,
+                    origin: PlanOrigin::Human,
+                    supersedes: None,
+                    reason: None,
+                    plan: Box::new(sample_plan_spec()),
+                },
+            )
+            .unwrap();
+
+        let replan_v1 = plan_for(&replan, "replan-v1", 1, PlanStatus::Superseded);
+        let replan_v2 = plan_for(&replan, "replan-v2", 2, PlanStatus::Active);
+        store
+            .execution_plans_replace(replan.id, vec![replan_v1, replan_v2])
+            .unwrap();
+        store
+            .work_units_replace(replan.id, units_for(&replan, "replan-v2"))
+            .unwrap();
+
+        let start_run = |task: &Task, run_id: &str, started_at: &str| {
+            store
+                .run_index_start(RunRow {
+                    run_id: run_id.into(),
+                    task_id: task.id.to_string(),
+                    work_unit_id: None,
+                    role: RunIndexRole::Worker,
+                    seq: 1,
+                    status: RunIndexStatus::Running,
+                    adapter: Some("codex".into()),
+                    model: Some("gpt-6-sol".into()),
+                    account: None,
+                    session_id: None,
+                    checkpoint: None,
+                    usage: None,
+                    metrics: None,
+                    started_at: started_at.into(),
+                    finished_at: None,
+                })
+                .unwrap();
+        };
+        start_run(&planned, "planned-run-1", "2026-09-25T00:00:00Z");
+        start_run(&planned, "planned-run-2", "2026-09-25T00:01:00Z");
+        store
+            .run_index_finish(
+                "planned-run-1",
+                RunIndexStatus::BudgetExhausted,
+                None,
+                None,
+                None,
+                at("2026-09-25T00:01:00Z"),
+            )
+            .unwrap();
+        let usage = crate::model::Usage {
+            input_tokens: Some(42),
+            ..Default::default()
+        };
+        let metrics = crate::model::RunMetrics {
+            turns: Some(5),
+            ..Default::default()
+        };
+        store
+            .run_index_finish(
+                "planned-run-2",
+                RunIndexStatus::Completed,
+                None,
+                Some(usage),
+                Some(metrics),
+                at("2026-09-25T00:02:00Z"),
+            )
+            .unwrap();
+        start_run(&atomic, "atomic-run", "2026-09-25T00:03:00Z");
+
+        let rows = store.execution_metrics_task_rows(None).unwrap();
+        assert_eq!(rows.len(), 4);
+        let find = |id| rows.iter().find(|row| row.task_id == id).unwrap();
+        let p = find(planned.id);
+        assert_eq!(
+            (
+                p.status,
+                p.repairs,
+                p.replans,
+                p.continuations,
+                p.retries,
+                p.runs_count,
+                p.budget_exhausted_runs
+            ),
+            (Status::Done, 0, 0, 3, 1, 2, 1)
+        );
+        assert_eq!(p.genre.as_deref(), Some("coding"));
+        assert_eq!(p.assignee.as_deref(), Some("engineering"));
+        assert_eq!(
+            serde_json::from_str::<crate::model::TaskRouting>(p.routing_json.as_ref().unwrap())
+                .unwrap(),
+            planned.routing.unwrap()
+        );
+        let latest = p.latest_run.as_ref().unwrap();
+        assert_eq!(latest.run_id, "planned-run-2");
+        assert_eq!(latest.role, RunIndexRole::Worker);
+        assert_eq!(latest.status, RunIndexStatus::Completed);
+        assert_eq!(latest.adapter.as_deref(), Some("codex"));
+        assert_eq!(latest.model.as_deref(), Some("gpt-6-sol"));
+        assert_eq!(
+            serde_json::from_str::<crate::model::Usage>(latest.usage_json.as_ref().unwrap())
+                .unwrap(),
+            usage
+        );
+        assert_eq!(
+            serde_json::from_str::<crate::model::RunMetrics>(latest.metrics_json.as_ref().unwrap())
+                .unwrap(),
+            metrics
+        );
+        let r = find(repair.id);
+        assert_eq!(
+            (
+                r.status,
+                r.repairs,
+                r.replans,
+                r.continuations,
+                r.retries,
+                r.runs_count
+            ),
+            (Status::Failed, 1, 0, 1, 0, 0)
+        );
+        let rp = find(replan.id);
+        assert_eq!(
+            (
+                rp.status,
+                rp.repairs,
+                rp.replans,
+                rp.continuations,
+                rp.retries,
+                rp.runs_count
+            ),
+            (Status::Reviewing, 0, 1, 0, 0, 0)
+        );
+        let a = find(atomic.id);
+        assert_eq!(
+            (
+                a.status,
+                a.repairs,
+                a.replans,
+                a.continuations,
+                a.retries,
+                a.runs_count
+            ),
+            (Status::Ready, 0, 0, 0, 0, 1)
+        );
+        assert!(a.latest_run.is_some());
+        let since_rows = store
+            .execution_metrics_task_rows(Some(at("2026-09-25T00:02:00Z")))
+            .unwrap();
+        assert_eq!(since_rows.len(), 2);
+        assert!(since_rows.iter().any(|row| row.task_id == replan.id));
+        assert!(since_rows.iter().any(|row| row.task_id == atomic.id));
+        let subsecond_rows = store
+            .execution_metrics_task_rows(Some(at("2026-09-25T00:02:00.000000001Z")))
+            .unwrap();
+        assert_eq!(subsecond_rows.len(), 1);
+        assert_eq!(subsecond_rows[0].task_id, atomic.id);
     }
 
     // ---- ADR-0072 D16/D17（Phase E4）: review_repair_apply / execution_plan_replan ----
