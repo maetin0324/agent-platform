@@ -19288,6 +19288,12 @@ E4/E5 の申し送りのうち、**(h) 配送の repair** と **`GET /metrics/ex
 - `CARGO_TARGET_DIR=target/e6-metrics-api cargo clippy --workspace --all-targets -- -D warnings`:
   exit 0、warning 0。
 - 完全な検査ログと成果ごとの変更ファイルは run の `artifacts/finish/` と `artifacts/report.md`。
+- main `f479ca500753` を取り込み、`docs/PROGRESS.md` のみの衝突を両節を残して解消した。
+  取り込み後、`cargo fmt --all -- --check` は exit 0（1.90 秒）、
+  `env -u CARGO_TARGET_DIR cargo test --workspace` は exit 0（132.82 秒、81 ブロック、
+  2,289 passed / 0 failed / 5 ignored、`FAILED` 行なし）、
+  `env -u CARGO_TARGET_DIR cargo clippy --workspace --all-targets -- -D warnings` は exit 0。
+  ログは run の `artifacts/merge-main/` に保存した。
 
 ### 未解決事項
 
