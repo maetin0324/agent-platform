@@ -17,8 +17,8 @@
 
 ## 手順
 ### 0. 準備（ダウンタイムなし）
-- TrueNAS: dataset `tank/home/rmaeda`（owner 1001:1001、mode 700）、NFS export（許可ホスト = Proxmox ホスト、NFSv4、`no_root_squash` は不要）。
-- Proxmox ホスト: `mkdir -p /mnt/truenas-home && echo 'truenas:/mnt/tank/home /mnt/truenas-home nfs4 _netdev,hard,noatime,nconnect=4 0 0' >> /etc/fstab && mount /mnt/truenas-home`。`touch /mnt/truenas-home/rmaeda/.probe` で書けることと所有者を確認。
+- TrueNAS: dataset `tank/share_home`（既存。配下に `rmaeda/` を owner 1001:1001 で作る）（owner 1001:1001、mode 700）、NFS export（許可ホスト = Proxmox ホスト、NFSv4、`no_root_squash` は不要）。
+- Proxmox ホスト: `mkdir -p /mnt/truenas-home && echo '192.168.1.4:/mnt/tank/share_home /mnt/truenas-home nfs4 _netdev,hard,noatime,nconnect=4 0 0' >> /etc/fstab && mount /mnt/truenas-home`。`touch /mnt/truenas-home/rmaeda/.probe` で書けることと所有者を確認。
 - Proxmox ホスト: `/etc/subuid` と `/etc/subgid` に `root:1001:1` を追記。CT 設定（`/etc/pve/lxc/100.conf`）に idmap を追加:
   ```
   lxc.idmap: u 0 100000 1001
