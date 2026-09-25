@@ -18712,3 +18712,10 @@ API 型（`task-api`/`task-core` の public 型）は変更していないので
   が空を返すだけで壊れない）。
 - 実機での `promote.sh --stop-stale` の動作確認と、次回のライブ切替で「drain 後にプロセスが終了しない」
   事故が再発しないかは、本番環境（このエージェントは触れない）での確認が必要。
+
+## Phase E3 + Phase 119 の本番反映（2026-09-25 00:53Z）
+
+- E3 統合 3dafac5（ゲート: fmt 0、clippy 0、GUI 1086 件 / gen:types 差分ゼロ。`cargo test` は e2e `reload_clears_provider_cooldown` が load 17 の中で 1 回落ちたが単体では 0.3 秒で通過。時間依存のフレーク）。119 統合 a2968d1（fmt / test FAILED 0 / clippy 0、`scripts/selfdeploy/tests/pid_resolution_test.sh` 6/6）。
+- release `a2968d1b7477`、verify 全 true（schema 26、N-1 = 1f663a83ff6c は読める）、in-flight 0 でライブ切替。本番は E3（gate は既定 shadow: 判定と記録だけ、実行は atomic のまま）と 119 を含む。
+- 旧デーモン 1f663a83ff6c は 119 以前のコードなので予想どおり「celeris stopped」の後もプロセスが残った → `systemctl --user stop` で片付け（最後の該当個体。以後の切替は 119 の shutdown_timeout + process::exit で自動終了するはず。次回の切替で確認する）。
+- クラスタ（pegasus / sirius）は E2 の停止→起動以降、未接続のまま（人の TOTP 再接続待ち）。
