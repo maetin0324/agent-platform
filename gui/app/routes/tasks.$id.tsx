@@ -52,6 +52,8 @@ import type {
 import { CodeViewer } from "~/components/CodeViewer";
 /* ADR-0048 D2・フェーズ 74: worker_progress の折り畳みの中身は Console と同じ行を再利用する。 */
 import { ReplyStepRow } from "~/components/ConsoleBlockItem";
+/* celeris ADR-0072 D19/D20（Phase E5）: 実行の分解（Execution 節・ExecutionPhase）。 */
+import { ExecutionSection } from "~/components/ExecutionSection";
 import {
   ErrorFlash,
   RetryFlash,
@@ -123,6 +125,7 @@ import { isLiveStatusScreen } from "~/lib/live-status";
 import { milestoneTitle } from "~/lib/project-index";
 import { isTransientStatus } from "~/lib/recovery";
 import { revalidateAfterActionErrors } from "~/lib/revalidate";
+import { EXECUTION_PHASE_LABEL, EXECUTION_PHASE_TONE, runEndLabel, runEndTone } from "~/lib/task-execution";
 import {
   groupTimelineWorkerProgress,
   type TimelineWorkerProgressItem,
@@ -191,6 +194,17 @@ const ACTION_LABELS: Record<Action, string> = {
   // ADR-0070 D2（Phase 116）。failed の失敗バナーに置く。
   rereview: "再レビュー",
 };
+
+/**
+ * ADR-0055 D1（393px で崩れない）: run 一覧を `max-sm:` でカードにするときの各 `<td>` の共通クラス
+ * （`~/routes/projects.tsx` の案件一覧と同じ技法。celeris ADR-0072 D20/Phase E5）。
+ */
+const runCardCellClass = "max-sm:block max-sm:border-0 max-sm:px-1 max-sm:first:col-span-2 max-sm:break-words";
+
+/** モバイルのカード表示で、値の前に付ける列名。 */
+function RunCellLabel({ children }: { children: string }) {
+  return <span className="text-fg-subtle sm:hidden">{children}: </span>;
+}
 
 /** run の outcome → 色（docs/adr/0011 D4 と同じ考え方。文字列は outcome 名をそのまま出す）。 */
 const OUTCOME_TONE: Record<string, Tone> = {
@@ -496,6 +510,13 @@ export default function TaskDetailPage({ loaderData }: Route.ComponentProps) {
                   role={isLiveStatusScreen("task-detail") ? "status" : undefined}
                   data-testid="task-status"
                 />
+                {/* celeris ADR-0072 D20（Phase E5）: 今どの段階か（計画中/実行中/修復中/検証中）。
+                    計画の無いタスク・終端のタスクには無い（`detail.execution?.phase` が null）。 */}
+                {detail.execution?.phase && (
+                  <Badge tone={EXECUTION_PHASE_TONE[detail.execution.phase]} data-testid="task-execution-phase">
+                    {EXECUTION_PHASE_LABEL[detail.execution.phase]}
+                  </Badge>
+                )}
                 <KindBadge kind={task.kind} data-testid="task-kind" />
                 <RoleLabel role={detail.role ?? "-"} data-testid="task-role" />
                 {/* 分野（ADR-0027 D1）。role と同じ理由で色分けはせずテキストのラベルだけ。分野なしは "-"。 */}
@@ -1119,6 +1140,10 @@ function OverviewTab({
         </Card>
       </section>
 
+      {/* celeris ADR-0072 D19/D20（Phase E5）: 実行の分解（計画・WU の表・replan の履歴）。
+          計画も gate の判定も無い古いタスクは execution が無いので何も出ない（D23 の後方互換）。 */}
+      <ExecutionSection execution={detail.execution} />
+
       <section aria-labelledby="runs-heading" data-testid="runs-section">
         <Card>
           <CardHeader
@@ -1133,9 +1158,14 @@ function OverviewTab({
             {detail.runs.length === 0 ? (
               <EmptyState icon="terminal" title="ありません。" compact />
             ) : (
-              <div className="overflow-x-auto">
-                <table className={tableClass}>
-                  <thead className={theadClass}>
+              /* ADR-0055 D1（393px で崩れない）: モバイルは表ではなくカードの一覧に折り返す（`max-sm:`。
+                 `~/routes/projects.tsx` の案件一覧と同じ技法。celeris ADR-0072 D20/Phase E5 で列が増え、
+                 表のまま横スクロールさせると `<details>`（run-outcome-detail）へのキーボードフォーカスが
+                 ブラウザのネイティブな「要素を可視領域へ」で横スクロールを動かし、タッチのスワイプ検査
+                 〈mobile-audit の touch-scroll〉と競合するため、この列数では表を維持しない）。 */
+              <div className="overflow-x-auto sm:rounded-b-xl">
+                <table className={cn(tableClass, "max-sm:block")}>
+                  <thead className={cn(theadClass, "max-sm:hidden")}>
                     <tr>
                       <th className={thClass}>run_id</th>
                       <th className={thClass}>role</th>
@@ -1146,6 +1176,9 @@ function OverviewTab({
                       <th className={thClass}>started_at</th>
                       <th className={thClass}>finished_at</th>
                       <th className={thClass}>outcome</th>
+                      {/* celeris ADR-0072 D19/D20（Phase E5）: 構造化した終わり方と WU の key。 */}
+                      <th className={thClass}>end</th>
+                      <th className={thClass}>WU</th>
                       <th className={thClass}>usage</th>
                       <th className={thClass}>progress</th>
                       <th className={thClass}>artifacts</th>
@@ -1154,30 +1187,65 @@ function OverviewTab({
                       <th className={thClass}>ログ</th>
                     </tr>
                   </thead>
-                  <tbody>
+                  <tbody className="max-sm:block">
                     {detail.runs.map((run) => (
-                      <tr key={run.run_id} data-testid="run-row" className={trHoverClass}>
-                        <td className={cn(tdClass, "font-mono text-xs break-all")} title={run.run_id}>
+                      <tr
+                        key={run.run_id}
+                        data-testid="run-row"
+                        className={cn(
+                          trHoverClass,
+                          "max-sm:grid max-sm:grid-cols-2 max-sm:border-t max-sm:border-border max-sm:p-3",
+                        )}
+                      >
+                        <td className={cn(tdClass, "font-mono text-xs break-all", runCardCellClass)} title={run.run_id}>
                           {shortId(run.run_id)}
                         </td>
-                        <td className={tdClass}>
+                        <td className={cn(tdClass, runCardCellClass)}>
+                          <RunCellLabel>role</RunCellLabel>
                           <RoleLabel role={run.role} />
                         </td>
-                        <td className={tdClass}>{run.adapter}</td>
-                        <td className={tdClass}>{run.provider ?? "-"}</td>
+                        <td className={cn(tdClass, runCardCellClass)}>
+                          <RunCellLabel>adapter</RunCellLabel>
+                          {run.adapter}
+                        </td>
+                        <td className={cn(tdClass, runCardCellClass)}>
+                          <RunCellLabel>provider</RunCellLabel>
+                          {run.provider ?? "-"}
+                        </td>
                         {/* プールの run だけ、どのアカウントで動いたかが入る（ADR-0024 D4 / ADR-0025） */}
-                        <td className={cn(tdClass, "whitespace-nowrap")} data-testid="run-account">
+                        <td className={cn(tdClass, "whitespace-nowrap", runCardCellClass)} data-testid="run-account">
+                          <RunCellLabel>account</RunCellLabel>
                           {run.account ?? "-"}
                         </td>
-                        <td className={tdClass}>{run.model}</td>
-                        {/* フェーズ 74（ADR-0055 D2 ラウンド 6）: 生の ISO は表の幅も取るので相対表示に揃える。 */}
-                        <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}>
+                        <td className={cn(tdClass, runCardCellClass)}>
+                          <RunCellLabel>model</RunCellLabel>
+                          {run.model}
+                        </td>
+                        {/* フェーズ 74（ADR-0055 D2 ラウンド 6）: 生の ISO は表の幅も取るので相対表示に揃える。
+                            ADR-0055 D1-4: 本文 14px 以上。モバイルは text-sm、デスクトップは lg: で元の text-xs のまま
+                            （celeris ADR-0072 D20/Phase E5 で runs 一覧が実データを持つ経路が増え、この列が初めて
+                            機械検査対象になって見つかった既存の欠落。ここで合わせて直す）。 */}
+                        <td
+                          className={cn(
+                            tdClass,
+                            "whitespace-nowrap text-sm text-fg-subtle lg:text-xs",
+                            runCardCellClass,
+                          )}
+                        >
+                          <RunCellLabel>started_at</RunCellLabel>
                           <LocalTime iso={run.started_at} fetchedAtIso={fetchedAt} />
                         </td>
-                        <td className={cn(tdClass, "whitespace-nowrap text-xs text-fg-subtle")}>
+                        <td
+                          className={cn(
+                            tdClass,
+                            "whitespace-nowrap text-sm text-fg-subtle lg:text-xs",
+                            runCardCellClass,
+                          )}
+                        >
+                          <RunCellLabel>finished_at</RunCellLabel>
                           {run.finished_at ? <LocalTime iso={run.finished_at} fetchedAtIso={fetchedAt} /> : "-"}
                         </td>
-                        <td className={tdClass}>
+                        <td className={cn(tdClass, runCardCellClass, "max-sm:col-span-2")}>
                           {run.outcome ? (
                             <Badge tone={OUTCOME_TONE[run.outcome] ?? "neutral"} title={run.outcome_text ?? undefined}>
                               {run.outcome}
@@ -1187,7 +1255,10 @@ function OverviewTab({
                           )}
                           {/* 長い理由・要約はステータス欄に混ぜず、折り畳みの中に分ける。 */}
                           {run.outcome_text && (
-                            <details data-testid="run-outcome-detail" className="mt-1 max-w-xs text-xs text-fg-muted">
+                            <details
+                              data-testid="run-outcome-detail"
+                              className="mt-1 max-w-xs text-sm text-fg-muted lg:text-xs"
+                            >
                               <summary className="cursor-pointer select-none">詳細</summary>
                               <p className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
                                 {run.outcome_text}
@@ -1195,22 +1266,46 @@ function OverviewTab({
                             </details>
                           )}
                         </td>
-                        <td className={cn(tdClass, "tabular-nums")}>
+                        {/* celeris ADR-0072 D19/D20（Phase E5）: `RunEnd`（無ければ導入前・分類できなかった run）。 */}
+                        <td className={cn(tdClass, runCardCellClass)} data-testid="run-end">
+                          <RunCellLabel>end</RunCellLabel>
+                          {runEndLabel(run.end) ? (
+                            <Badge tone={runEndTone(run.end)}>{runEndLabel(run.end)}</Badge>
+                          ) : (
+                            <span className="text-fg-subtle">-</span>
+                          )}
+                        </td>
+                        <td className={cn(tdClass, "font-mono text-xs", runCardCellClass)} data-testid="run-work-unit">
+                          <RunCellLabel>WU</RunCellLabel>
+                          {run.work_unit ?? "-"}
+                        </td>
+                        <td className={cn(tdClass, "tabular-nums", runCardCellClass)}>
+                          <RunCellLabel>usage</RunCellLabel>
                           {run.usage
                             ? `in=${run.usage.input_tokens ?? "-"} out=${run.usage.output_tokens ?? "-"}`
                             : "-"}
                         </td>
-                        <td className={cn(tdClass, "tabular-nums")}>{run.progress}</td>
-                        <td className={cn(tdClass, "tabular-nums")}>{run.artifacts}</td>
-                        <td className={cn(tdClass, "tabular-nums")}>{run.verdicts}</td>
-                        <td className={tdClass} data-testid="run-files">
+                        <td className={cn(tdClass, "tabular-nums", runCardCellClass)}>
+                          <RunCellLabel>progress</RunCellLabel>
+                          {run.progress}
+                        </td>
+                        <td className={cn(tdClass, "tabular-nums", runCardCellClass)}>
+                          <RunCellLabel>artifacts</RunCellLabel>
+                          {run.artifacts}
+                        </td>
+                        <td className={cn(tdClass, "tabular-nums", runCardCellClass)}>
+                          <RunCellLabel>verdicts</RunCellLabel>
+                          {run.verdicts}
+                        </td>
+                        <td className={cn(tdClass, runCardCellClass)} data-testid="run-files">
+                          <RunCellLabel>files</RunCellLabel>
                           {run.files
                             ? ["stdout", "stderr", "result"]
                                 .filter((k) => run.files?.[k as keyof typeof run.files])
                                 .join(", ") || "-"
                             : "-"}
                         </td>
-                        <td className={tdClass}>
+                        <td className={cn(tdClass, runCardCellClass, "max-sm:col-span-2")}>
                           <Link
                             to={`/tasks/${task.id}/runs/${run.run_id}`}
                             data-testid="run-log-link"
