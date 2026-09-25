@@ -6085,17 +6085,44 @@ impl Dispatcher {
         }
     }
 
-    /// ADR-0072 D14（Phase E3）: planner run のプロンプトに渡す gate の根拠と D18 の上限。
-    /// `original_budget` は planner 用に上書きする**前**の Task の budget（WU の既定の計算に使う）。
+    /// ADR-0072 D14（Phase E3）/ D17（Phase E4b 項目1）: planner run のプロンプトに渡す gate の
+    /// 根拠と D18 の上限。`replan` のときは、今の計画（版・WU ごとの状態・完了/失敗の要約）・起こした
+    /// 理由・保持すべき `done` の WU の key も添える。`original_budget` は planner 用に上書きする
+    /// **前**の Task の budget（WU の既定の計算に使う）。
     fn execution_planner_context(
         &self,
         task: &Task,
         original_budget: task_core::Budget,
         replan: bool,
-    ) -> task_worker::protocol::ExecutionPlannerContext {
+    ) -> Result<task_worker::protocol::ExecutionPlannerContext, DispatchError> {
         let decision = task.routing.as_ref().and_then(|r| r.execution.clone());
         let limits = task_core::ExecutionLimits::default();
-        task_worker::protocol::ExecutionPlannerContext {
+        let (replan_reason, current_plan_version, work_unit_summaries, preserve_done_keys) =
+            if replan {
+                let version = self
+                    .store
+                    .execution_plan_active(task.id)?
+                    .map(|p| p.version);
+                let units = self.store.work_units_for(task.id)?;
+                let summaries = units
+                    .iter()
+                    .map(|u| self.work_unit_plan_summary_line(u))
+                    .collect();
+                let preserve = units
+                    .iter()
+                    .filter(|u| u.status == task_core::WorkUnitStatus::Done)
+                    .map(|u| u.key.clone())
+                    .collect();
+                (
+                    self.replan_trigger_reason(task.id)?,
+                    version,
+                    summaries,
+                    preserve,
+                )
+            } else {
+                (String::new(), None, Vec::new(), Vec::new())
+            };
+        Ok(task_worker::protocol::ExecutionPlannerContext {
             gate_rule_id: decision
                 .as_ref()
                 .map(|d| d.rule_id.clone())
@@ -6116,7 +6143,110 @@ impl Dispatcher {
             default_max_turns: original_budget.max_turns.max(30),
             default_max_wall_secs: original_budget.max_wall_secs.max(1800),
             replan,
+            replan_reason,
+            current_plan_version,
+            work_unit_summaries,
+            preserve_done_keys,
+        })
+    }
+
+    /// ADR-0072 D17（Phase E4b 項目1）: 今の計画の 1 つの WorkUnit を、replan run のプロンプトに
+    /// 載せる 1 行に要約する。`done`/`failed` は最新の checkpoint（`last_run_id` から `runs` 索引を
+    /// 引く）の `completed`/`known_failures` を使う。checkpoint が無ければ状態だけを出す
+    /// （`runs`/`checkpoint` の欠落は既存の run でも起こりうる。D5/D8 の合成規則と同じく「無ければ
+    /// 状態だけ」に倒す）。
+    fn work_unit_plan_summary_line(&self, wu: &task_core::WorkUnitRow) -> String {
+        let checkpoint = wu
+            .last_run_id
+            .as_deref()
+            .and_then(|rid| self.store.run_index_get(rid).ok().flatten())
+            .and_then(|r| r.checkpoint);
+        let status = match wu.blocked_reason {
+            Some(reason) => format!("{} ({})", wu.status.as_str(), reason.as_str()),
+            None => wu.status.as_str().to_string(),
+        };
+        let detail = match wu.status {
+            task_core::WorkUnitStatus::Done => checkpoint
+                .as_ref()
+                .map(|cp| cp.completed.join("; "))
+                .filter(|s| !s.is_empty()),
+            task_core::WorkUnitStatus::Failed => checkpoint.as_ref().and_then(|cp| {
+                let joined = cp
+                    .known_failures
+                    .iter()
+                    .map(|f| f.what.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if joined.is_empty() {
+                    None
+                } else {
+                    Some(joined)
+                }
+            }),
+            _ => checkpoint.as_ref().and_then(|cp| {
+                if cp.next_action.is_empty() {
+                    None
+                } else {
+                    Some(cp.next_action.clone())
+                }
+            }),
+        };
+        match detail {
+            Some(detail) => format!(
+                "{} ({}) status={}: {}",
+                wu.key,
+                wu.kind.as_str(),
+                status,
+                detail
+            ),
+            None => format!("{} ({}) status={}", wu.key, wu.kind.as_str(), status),
         }
+    }
+
+    /// ADR-0072 D17（Phase E4b 項目1）: replan の planner run に渡す「起こした理由」。events を
+    /// 新しい方から辿り、決定的に文字列化する（events が正本。D5）。
+    /// - WU の failed/limit からの replan（`execution_scheduler::decide` が `outcome_str = "replan:
+    ///   <why>"` を書く。`crate::dispatcher` の `finish_worker_result` 参照）は、その `<why>` をそのまま使う。
+    /// - 実質的な review 不合格（D17 4.、`Trigger::ReviewFail` の後の再 dispatch）は、直近の
+    ///   `Event::ReviewVerdict{pass:false}` の理由を添える。
+    /// - どちらでもなければ（人の依頼 D17 5. など）決定的な既定文を返す。
+    fn replan_trigger_reason(&self, task_id: TaskId) -> Result<String, DispatchError> {
+        let events = self.store.events_for(task_id)?;
+        for (_, ev) in events.iter().rev() {
+            match ev {
+                Event::WorkerFinished { outcome, .. } if outcome.starts_with("replan: ") => {
+                    return Ok(outcome
+                        .strip_prefix("replan: ")
+                        .unwrap_or(outcome)
+                        .to_string());
+                }
+                Event::Transitioned { reason, .. } if reason == "review_fail" => {
+                    let reasons: Vec<String> = events
+                        .iter()
+                        .rev()
+                        .filter_map(|(_, e)| match e {
+                            Event::ReviewVerdict {
+                                pass: false,
+                                reason,
+                                ..
+                            } => Some(reason.clone()),
+                            _ => None,
+                        })
+                        .take(3)
+                        .collect();
+                    return Ok(if reasons.is_empty() {
+                        "the final review failed and could not be repaired locally".to_string()
+                    } else {
+                        format!(
+                            "the final review failed and could not be repaired locally: {}",
+                            reasons.join("; ")
+                        )
+                    });
+                }
+                _ => {}
+            }
+        }
+        Ok("a human or the daemon requested a replan".to_string())
     }
 
     fn dispatch_ready(&mut self) -> Result<usize, DispatchError> {
@@ -6630,7 +6760,7 @@ impl Dispatcher {
                     &task,
                     original_task_budget,
                     replan_dispatch,
-                ));
+                )?);
                 // ADR-0072 D5（Phase E3）: `runs` 索引に planner run の行を作る（WU の
                 // `start_work_unit_run` と同じ役目。`role = planner`、`work_unit_id = None`）。
                 let planner_seq = self
@@ -22491,14 +22621,38 @@ mod tests {
             "{events:?}"
         );
         // planner run は lead の実効 profile・システム固定の lane で走る（D14 と同じ扱い）。
-        let planner_calls = adapter
-            .seen
-            .lock()
-            .unwrap()
+        let seen = adapter.seen.lock().unwrap();
+        let replan_calls: Vec<_> = seen
             .iter()
             .filter(|c| c.execution_planner.as_ref().is_some_and(|p| p.replan))
-            .count();
-        assert_eq!(planner_calls, 1, "{:?}", adapter.seen.lock().unwrap());
+            .collect();
+        assert_eq!(replan_calls.len(), 1, "{seen:?}");
+        // ADR-0072 D17（Phase E4b 項目1）: replan run のプロンプトに渡す文脈に、今の計画の版・
+        // WU の状態・起こした理由・保持すべき done の key が乗っている。
+        let planner_ctx = replan_calls[0].execution_planner.as_ref().unwrap();
+        assert_eq!(planner_ctx.current_plan_version, Some(1));
+        assert!(
+            planner_ctx.replan_reason.contains("work unit b failed"),
+            "{:?}",
+            planner_ctx.replan_reason
+        );
+        assert_eq!(planner_ctx.preserve_done_keys, vec!["a".to_string()]);
+        assert!(
+            planner_ctx
+                .work_unit_summaries
+                .iter()
+                .any(|s| s.starts_with("a (") && s.contains("status=done")),
+            "{:?}",
+            planner_ctx.work_unit_summaries
+        );
+        assert!(
+            planner_ctx
+                .work_unit_summaries
+                .iter()
+                .any(|s| s.starts_with("b (") && s.contains("status=failed")),
+            "{:?}",
+            planner_ctx.work_unit_summaries
+        );
     }
 
     /// ADR-0072 §6 E4 (e): replan の上限（`max_replans`）を超えると、進捗なしの WU は従来どおり

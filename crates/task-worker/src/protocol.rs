@@ -537,10 +537,29 @@ pub struct ExecutionPlannerContext {
     /// D18: WU が予算を書かなかったときの既定（`max(task.budget.*, 既定)`）。
     pub default_max_turns: u32,
     pub default_max_wall_secs: u64,
-    /// replan モード（今の計画・WU の状態・checkpoint・起こした理由を渡す。E4 で使う。E3 では常に
-    /// `false`）。
+    /// replan モード（今の計画・WU の状態・checkpoint・起こした理由を渡す。E3 では常に `false`。
+    /// Phase E4b で下の 4 欄を実際に埋めるようになった）。
     #[serde(default)]
     pub replan: bool,
+    // ---- ADR-0072 D17（Phase E4b 項目1）: replan のときだけ埋める。`replan = false` のときは
+    // すべて既定値（空文字列/None/空配列）で、`build_execution_plan_prompt` はこの節を出さないので
+    // 初回 planning のプロンプトは 1 バイトも変わらない。---- ここから
+    /// replan を起こした理由（WU failed / no-progress・continuation の上限 / 実質的な review 不合格、
+    /// のいずれかの決定的な説明文。`replan = false` なら空文字列）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub replan_reason: String,
+    /// 直前の（superseded になる）版の番号。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_plan_version: Option<u32>,
+    /// 今の計画の WorkUnit ごとの状態を 1 行ずつ（`"<key> (<kind>) status=<status>[blocked:
+    /// <reason>]: <完了/失敗の要約>"` の形）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub work_unit_summaries: Vec<String>,
+    /// `done` の WorkUnit の key（新しい版でも変えてはいけない。D14「replan のときは done の WU の
+    /// key と spec が変わっていないこと」）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preserve_done_keys: Vec<String>,
+    // ---- ここまで ----
 }
 
 /// `context.work_unit`（ADR-0072 D9/D21。Phase E2）。

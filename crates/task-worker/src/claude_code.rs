@@ -783,6 +783,11 @@ fn build_execution_plan_prompt(
             out.push('\n');
         }
     }
+    // ADR-0072 D17（Phase E4b 項目1）: replan のときだけ、今の計画・WU の状態・起こした理由を足す
+    // （`replan = false` の run は 1 バイトも変わらない）。
+    if let Some(planner) = context.execution_planner.as_ref().filter(|p| p.replan) {
+        out.push_str(&replan_context_section(planner));
+    }
     if !context.available_genres.is_empty() {
         out.push_str("## Available genres (valid values for a WorkUnit's `harness`)\n");
         out.push_str(&genre_list_lines(context));
@@ -791,6 +796,50 @@ fn build_execution_plan_prompt(
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
     out.push_str(&result_json_instructions(artifacts));
+    out
+}
+
+/// ADR-0072 D17（Phase E4b 項目1）: replan run のプロンプトに足す節。今の計画の版・WU ごとの状態・
+/// 起こした理由・保持すべき `done` の WU の key を出す。`v2` の出力は `done` の WU を変えてはいけない、
+/// と明示する（D14 の検証がこれを拒否することも書く）。
+fn replan_context_section(planner: &crate::protocol::ExecutionPlannerContext) -> String {
+    let mut out = String::from("## You are REPLANNING an existing execution plan\n");
+    out.push_str(
+        "This is not the first plan for this task: a previous plan already ran, and something \
+         about it needs to change. Write a full new plan version (not a diff) that reflects the \
+         current reality below.\n\n",
+    );
+    if let Some(version) = planner.current_plan_version {
+        out.push_str(&format!("Current (superseded) plan version: v{version}.\n"));
+    }
+    out.push_str(&format!(
+        "Why this replan was triggered: {}\n\n",
+        if planner.replan_reason.is_empty() {
+            "(not recorded)"
+        } else {
+            planner.replan_reason.as_str()
+        }
+    ));
+    if !planner.work_unit_summaries.is_empty() {
+        out.push_str("### WorkUnits in the current plan\n");
+        for line in &planner.work_unit_summaries {
+            out.push_str(&format!("- {line}\n"));
+        }
+        out.push('\n');
+    }
+    if planner.preserve_done_keys.is_empty() {
+        out.push_str(
+            "No WorkUnit in the current plan is done yet, so you may replace all of them.\n\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "IMPORTANT: these WorkUnit keys are already done and MUST appear unchanged (same \
+             `key`, same spec — objective, depends_on, done_when, checks, context, harness, \
+             budget, outputs) in your new plan; do not edit, rename, remove, or reorder them. A \
+             plan that changes a done WorkUnit will be rejected: {}.\n\n",
+            planner.preserve_done_keys.join(", ")
+        ));
+    }
     out
 }
 
@@ -2900,6 +2949,10 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             default_max_turns: 30,
             default_max_wall_secs: 1800,
             replan: false,
+            replan_reason: String::new(),
+            current_plan_version: None,
+            work_unit_summaries: Vec::new(),
+            preserve_done_keys: Vec::new(),
         };
         let context = RunContext {
             available_genres: vec![GenreContext::from(&genre_spec)],
@@ -2923,11 +2976,55 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert!(prompt.contains("coding: write and fix code"));
         // `assignee`/`tier`/`model` を書くなと明示している。
         assert!(prompt.contains("Do not write `assignee`, `tier`, or `model`"));
+        // ADR-0072 D17（Phase E4b 項目1）: `replan = false`（初回 planning）には replan 節が出ない。
+        assert!(!prompt.contains("REPLANNING an existing execution plan"));
 
         // `execution_planner` が無ければ従来どおりの execute プロンプト。
         let normal_prompt =
             build_prompt(&task, &RunContext::default(), "run-planner-2", "artifacts");
         assert!(!normal_prompt.contains("artifacts/execution-plan.json"));
+    }
+
+    /// ADR-0072 D17（Phase E4b 項目1）: replan のときは「今の計画（版・WU の状態・完了/失敗の要約）」
+    /// 「起こした理由」「保持すべき done の WU の key」が文面に載り、v2 は done の WU を変えてはならない
+    /// と明示する。初回 planning（`replan = false`）のプロンプトは、この節を出さない限り 1 バイトも
+    /// 変わらない（上のテストで確認済み）。
+    #[test]
+    fn build_execution_plan_prompt_replan_includes_current_plan_and_reason() {
+        let task = crate::protocol::tests::sample_task();
+        let planner_ctx = crate::protocol::ExecutionPlannerContext {
+            gate_rule_id: "compound/score".to_string(),
+            gate_score: 6,
+            gate_signals: Vec::new(),
+            max_work_units: 8,
+            work_unit_max_turns: 80,
+            work_unit_max_wall_secs: 3600,
+            default_max_turns: 30,
+            default_max_wall_secs: 1800,
+            replan: true,
+            replan_reason: "work unit b failed: boom again".to_string(),
+            current_plan_version: Some(1),
+            work_unit_summaries: vec![
+                "a (implement) status=done: implemented the core model".to_string(),
+                "b (test) status=failed: work unit b failed: boom again".to_string(),
+                "c (release) status=blocked (dependency_failed): waiting on b".to_string(),
+            ],
+            preserve_done_keys: vec!["a".to_string()],
+        };
+        let context = RunContext {
+            execution_planner: Some(planner_ctx),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-planner-2", "artifacts");
+
+        assert!(prompt.contains("REPLANNING an existing execution plan"));
+        assert!(prompt.contains("Current (superseded) plan version: v1."));
+        assert!(prompt.contains("Why this replan was triggered: work unit b failed: boom again"));
+        assert!(prompt.contains("a (implement) status=done: implemented the core model"));
+        assert!(prompt.contains("b (test) status=failed: work unit b failed: boom again"));
+        assert!(prompt.contains("c (release) status=blocked (dependency_failed): waiting on b"));
+        assert!(prompt.contains("MUST appear unchanged"));
+        assert!(prompt.contains("will be rejected: a."));
     }
 
     /// Phase 38（ADR-0028 追記）テスト用: ハーネス系の `literature`（`default_role` が `paperqa`）と、

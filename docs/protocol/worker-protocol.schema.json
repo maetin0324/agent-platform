@@ -762,6 +762,15 @@
     "ExecutionPlannerContext": {
       "description": "`context.execution_planner`（ADR-0072 D13/D14。Phase E3）: 計画を作らせる run に渡す、\ngate の判定根拠と D18 の上限。",
       "properties": {
+        "current_plan_version": {
+          "description": "直前の（superseded になる）版の番号。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "default_max_turns": {
           "description": "D18: WU が予算を書かなかったときの既定（`max(task.budget.*, 既定)`）。",
           "format": "uint32",
@@ -794,10 +803,21 @@
           "minimum": 0,
           "type": "integer"
         },
+        "preserve_done_keys": {
+          "description": "`done` の WorkUnit の key（新しい版でも変えてはいけない。D14「replan のときは done の WU の\nkey と spec が変わっていないこと」）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "replan": {
           "default": false,
-          "description": "replan モード（今の計画・WU の状態・checkpoint・起こした理由を渡す。E4 で使う。E3 では常に\n`false`）。",
+          "description": "replan モード（今の計画・WU の状態・checkpoint・起こした理由を渡す。E3 では常に `false`。\nPhase E4b で下の 4 欄を実際に埋めるようになった）。",
           "type": "boolean"
+        },
+        "replan_reason": {
+          "description": "replan を起こした理由（WU failed / no-progress・continuation の上限 / 実質的な review 不合格、\nのいずれかの決定的な説明文。`replan = false` なら空文字列）。",
+          "type": "string"
         },
         "work_unit_max_turns": {
           "description": "D18: WU の予算の上限（丸め先）。",
@@ -809,6 +829,13 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "work_unit_summaries": {
+          "description": "今の計画の WorkUnit ごとの状態を 1 行ずつ（`\"<key> (<kind>) status=<status>[blocked:\n<reason>]: <完了/失敗の要約>\"` の形）。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
