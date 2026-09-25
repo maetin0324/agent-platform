@@ -1357,3 +1357,55 @@ E4（reviewer repair・replanning）を実装しながら見つかった、D11�
   自体からは返らない設計。ADR 本文の該当コメント参照）なので、E5 以降で
   `crates/celeris/src/delivery.rs` 側から直接 `RepairClass::MergeBase` を使って repair WU を組み立てる
   実装を足すのは比較的小さい追加になる見込み。
+
+## Phase E4b 実装時の逸脱・明確化（2026-09-25）
+
+E4 の申し送り項目 1〜5（6 は任意・未実装）を実装しながら見つかった、D14〜D18 の記述との
+食い違い・補足。黙って逸脱せず、ここに記録する。
+
+- **D17 3. の `plan_issue` は「`Task` を一度も `Blocked` にせず `Continue{Replan}` で Ready に
+  直行する」経路を既定にした**。D17 の本文は「checkpoint に `plan_issue` が書かれた」を
+  D12「失敗にしないもの」と同列の replan トリガーとして挙げるだけで、Task の一時状態には
+  触れていない。実装では、`failed`/`limit` と同じ枠組み（replan の余地があれば即 `Continue{why:
+  Replan}`）に揃えた。WU の行自体は一度 `blocked(plan_issue)` を経由する（監査上
+  `WorkUnitTransitioned{reason: "plan_issue"}` が残る）が、`Task.status` が実際に `Blocked` に
+  なるのは replan の上限を使い切ったとき（`WorkerQuestion`）だけである。
+- **`WorkUnitBlockedReason::PlanIssue` を新設した**。D5/D6 の表は `blocked_reason` を
+  `question|dependency_failed|limit` の 3 種と書いているが、`plan_issue` を既存の 3 種のどれかに
+  無理に当てはめると（E4 の逸脱記録が指摘したとおり）`wu_dispatch_gate` の「人の回答直後だけ
+  再開する」判定や `has_unresolved_failure` の判定を誤動作させる。新しい変種を追加し、
+  「人の回答（Answer）での再開は `Question` と同じく `Ready` へ」という既定を選んだ
+  （`resume_after_answer` の `_ => Ready` 分岐に自然に乗る。continuation の窓を保持したまま
+  `NeedsContinuation` に戻すべきかは、実運用〈E6 dogfood〉で plan_issue の実例を見てから
+  再検討してよい）。
+- **replan run のプロンプトに渡す「起こした理由」は、events の字句パターンから導出する
+  ヒューリスティックである**（`Dispatcher::replan_trigger_reason`）。D17 は「起こした理由」を
+  渡すことだけを求めており、導出方法までは規定していない。`WorkerFinished.outcome` の
+  `"replan: "` 接頭辞（WU failed/limit/plan_issue の経路が書く）と、直近の `Transitioned{reason:
+  "review_fail"}` に紐づく `ReviewVerdict{pass:false}`（D17 4. の経路）の 2 パターンだけを
+  認識し、どちらにも当たらなければ「a human or the daemon requested a replan」という決定的な
+  既定文にフォールバックする。人の依頼（D17 5.、`POST /tasks/{id}/execution-plan/replan`。E5 の
+  範囲）はまだ実装が無いため、このフォールバック文が実際に使われる経路は現時点では無い。
+- **`with_permission_mode` は claude-code だけに実装し、codex は見送った**。D14 は
+  「`[execution.planner]` で adapter・`permission_mode`…を決める」としており、codex が
+  planner の adapter に選ばれる運用を排除していないが、`CodexConfig` には `permission_mode` に
+  相当する単一の設定欄が無い（`extra_args` の自由記述でサンドボックス/承認モードを指定する設計。
+  ADR-0008 D3）。トレイトの既定 `None`（対応しないアダプタ）のまま運用する。codex を planner に
+  使う設定で `permission_mode` を指定しても、警告ログを残して黙って無視される
+  （`ClaudeCodeAdapter` 以外は全てこの挙動）。
+- **`execution_plans` の再構築で `planner_run_id` は常に `None` とし、比較・上書きの対象外にした**。
+  D5 の event 表（`ExecutionPlanned { plan_id, version, origin, supersedes, reason, plan }`）は
+  `planner_run_id` を運ばない。`adopt_plan`/`replan` は呼び出し元（`dispatcher.rs::on_planner_finished`
+  や `celerisctl execution plan set`）が別途渡す値をその場で `execution_plans` 行に書くだけなので、
+  events だけからは復元できない。`--apply` で書き戻すときは、比較していない値を消さないよう
+  既存の stored 行から引き継ぐ処理を足した（`work_units`/`runs` の再構築が `session_id`/
+  `last_checkpoint_run_id` を「常に `None`」で妥協しているのとは異なり、こちらは「値があるなら
+  保存する」を選んだ。理由: `planner_run_id` は replan の監査〈D17「版の履歴が監査できる」〉に
+  実際に使われる値で、`--apply` のたびに失われると実害があるため）。
+- **`check_and_apply_execution` は `execution_plans`/`work_units`/`runs` のどれか 1 つでも食い違えば
+  3 表とも書き直す**（部分適用しない）。D5 は 3 表が互いに `plan_id`/`work_unit_id` で参照し合うと
+  明記しており、一部だけ書き直すと参照が壊れうる（例: `work_units.plan_id` が指す
+  `execution_plans` の行を書き換えずに `work_units` だけ直すと、存在しない版を指す行ができる）。
+- **項目6（配送の repair の `merge_base` 化）は本 Phase でも未実装**。E4 の「Phase E4 実装時の
+  逸脱・明確化」に記載済みの理由（時間の制約）が本 Phase でも継続した。次の一手は
+  `docs/PROGRESS.md` の Phase E4b 節に記録した。

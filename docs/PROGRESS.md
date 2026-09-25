@@ -18913,3 +18913,156 @@ v2 が採用される。人の依頼の例（A done / M 追加 / B blocked by M 
 このセッションは "checkpoint" を切らずに完走したため、`git commit` は最終的に 2 回
 （`phase E4 (1/3)`: (a)(b)(c)(g)、`phase E4 (2/3)` または統合コミット: (d)(e)(f) + ADR/PROGRESS）
 に分けて記録する。詳細な commit sha は本セクションの末尾（完了報告）を参照。
+
+## Phase E4b「E3/E4 の申し送りの穴埋め」（2026-09-25）
+
+Phase E4 の「未解決事項・E5 への申し送り」のうち小〜中規模の項目 1〜5 を実装した（6 は任意・
+時間の制約により未実装）。worktree のブランチが main の Phase E4 統合（`751f973`）より前
+（`e8f1b6f`）から分岐していたため、まず `git merge main`（fast-forward、コンフリクト無し）で
+E4 の内容を取り込んでから着手した。branch: `worktree-agent-a067096616a9c8d0d`。
+
+指示どおり 1 → 2 → 3 → 4 → 5 の順に区切ってコミットした。
+
+### 項目ごとの証跡
+
+**1. replan run のプロンプト配線**
+- `task_worker::protocol::ExecutionPlannerContext` に `replan_reason`/`current_plan_version`/
+  `work_unit_summaries`/`preserve_done_keys` を追加（`replan = false` のときは全て既定値で、
+  `build_execution_plan_prompt` はこの節自体を出さないため、初回 planning のプロンプトは
+  1 バイトも変わらない）。`claude_code.rs::replan_context_section`（新規）が、replan のときだけ
+  「現在の計画（版）」「WU ごとの状態（`<key> (<kind>) status=<status>[blocked: <reason>]: <完了/
+  失敗の要約>`）」「起こした理由」「保持すべき done の WU の key（変えたら拒否される旨も明示）」を描く。
+  `dispatcher.rs::execution_planner_context` を `Result` を返すよう変更し、replan のときだけ
+  `work_units_for`/`execution_plan_active`/`events_for` を読んで埋める。「起こした理由」は
+  `replan_trigger_reason`（新規）が events を新しい方から辿って決定的に文字列化する
+  （`WorkerFinished.outcome` の `"replan: "` 接頭辞、または実質的な review 不合格なら直近の
+  `ReviewVerdict{pass:false}` の理由）。
+- 実行したコマンド: `cargo test -p task-worker --lib -- build_prompt_selects_the_execution_plan_prompt_when_execution_planner_is_present build_execution_plan_prompt_replan_includes_current_plan_and_reason`
+- 出力の要点: exit 0、2 passed。`replan = false` のプロンプトに `"REPLANNING an existing execution plan"` が出ないこと（初回プロンプト不変の確認）、`replan = true` のプロンプトに版・理由・WU 要約・
+  保持すべき key が載ることを確認。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- a_failed_work_unit_triggers_a_replan_instead_of_failing_the_task`
+- 出力の要点: exit 0、1 passed。実際の replan dispatch で `execution_planner.current_plan_version ==
+  Some(1)`、`replan_reason` に `"work unit b failed"` を含む、`preserve_done_keys == ["a"]`、
+  `work_unit_summaries` に `a`（`status=done`）と `b`（`status=failed`）の行が出ることを確認。
+- `UPDATE_SCHEMA=1 cargo test -p task-worker --lib committed_schema_matches_generated`: exit 0、
+  1 passed。`worker-protocol.schema.json` は `ExecutionPlannerContext` の追加フィールドのみの差分。
+
+**2. plan_issue トリガー（D17 の 3）**
+- `task_core::WorkUnitBlockedReason::PlanIssue`（新設）。`execution_scheduler::decide` は、`end` の
+  種類に関わらず（continuation 判定より前に）合成済み checkpoint が `plan_issue` を持てば
+  `blocked(plan_issue)` を返す（checkpoint は `end.is_continuable()`〈Yielded/BudgetExhausted〉の
+  ときだけ合成されるという既存の制約〈E2b〉があるため、実際に効くのはその 2 つの終わり方だけ）。
+  `dispatcher.rs` は `"failed"`/`"limit"` と同じ枠組みで `"plan_issue"` を扱い、replan の余地
+  （`max_replans`）があれば `Trigger::Continue{why: Replan}`、無ければ `WorkerQuestion`（blocked）に
+  倒す。`wu_dispatch_gate` の「人の回答直後だけ再開する」判定と `Stuck` の `has_unresolved_failure`
+  にも `PlanIssue` を追加（replan 上限を使い切った plan_issue が永久に `Stuck` で固まらないように）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- execution_scheduler`
+- 出力の要点: exit 0、11 passed（新規
+  `a_plan_issue_in_the_checkpoint_blocks_the_work_unit_even_within_budget` を含む。continuation の
+  上限にまだ達していなくても `plan_issue` が優先され、`continuations` を消費しないことを確認）。
+- 実行したコマンド: `cargo test -p task-dispatch --lib -- a_plan_issue_checkpoint_triggers_a_replan_and_v2_is_adopted`
+- 出力の要点: exit 0、1 passed。偽ワーカーが `Terminal::Yielded{checkpoint: {"plan_issue": "..."}}`
+  を書く → WU が一度 `blocked(plan_issue)` を経由（`WorkUnitTransitioned{reason: "plan_issue"}`）
+  → replan の planner run → v2 採用 → `b` は plan_issue を書かずに完了 → Task `done`（attempts
+  不変）を確認。replan run のプロンプト文脈（項目1）の `replan_reason` に plan_issue の文言が
+  乗ることも合わせて確認。
+- `UPDATE_SCHEMA=1 cargo test -p task-api --lib schema::`: exit 0、2 passed。
+  `api-v1.schema.json` は `WorkUnitBlockedReason` に `plan_issue` が増えた分のみの差分。
+  `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff ゼロ、`typecheck` 通過
+  （`types.ts` に 1 行差分）。
+
+**3. `[execution.planner].permission_mode` の実行時配線**
+- `task_worker::WorkerAdapter` トレイトに `with_permission_mode`（`with_model` と同じ形、既定
+  `None`）を追加。`ClaudeCodeAdapter` で実装（`--permission-mode` を上書きした複製）。
+  `self.adapters` に登録されている実体は `TieredAdapter` で包まれているため、
+  `TieredAdapter::with_permission_mode` も基盤アダプタへ中継するようにした。codex は
+  permission_mode に相当する単一の設定欄を持たない（`extra_args` の自由記述のみ）ため見送り
+  （トレイトの既定 `None` のまま。対応しないアダプタとして扱われる）。
+  `dispatcher.rs`: `RunExtras` に `planner_permission_mode: Option<String>` を追加し、
+  `dispatch_ready` の `is_planner_dispatch` 分岐で `self.config.execution.planner.permission_mode`
+  を積む（`RunContext` には乗せない。プロンプトではなく実行そのものの配線）。`run_worker` が
+  `with_container` と同じ形で `adapter.with_permission_mode` を呼び、対応しないアダプタは警告ログを
+  出してそのまま既定のアダプタで走る。
+- 実行したコマンド: `cargo test -p task-worker --lib -- with_permission_mode_overrides_the_permission_mode_argument`
+- 出力の要点: exit 0、1 passed。偽 CLI が受け取った argv（`"$*"`）を検査し、既定の
+  `bypassPermissions` ではなく上書きした値 `"plan"` が `--permission-mode` に渡ることを確認。
+
+**4. task-api の HTTP テスト**
+- `crates/task-api/tests/execution.rs` に
+  `getting_a_replanned_task_returns_the_active_version_with_both_versions_listed` を追加
+  （`crates/task-api/src/execution.rs` 自体は触っていない）。POST で v1 を採用 →
+  `task_ops::execution::replan` を直接呼んで（POST は新規採用専用で 409 を返すため）WU を 1 つ
+  足した v2 を採用 → GET の本体が最新の active（v2、追加した WU も `work_units` に含む）を返し、
+  `versions` に v1（`superseded`、`superseded_at` 付き）と v2（`active`）が並ぶことを確認。
+  `Event::ExecutionPlanned{version:2, supersedes: Some(v1_id)}` が events から監査できることも
+  確認した（`versions` 自体に `supersedes` 列は無い設計〈E4 の逸脱記録どおり〉なので、その裏付けは
+  events で行う）。
+- `GET /tasks/{id}/execution` は本 worktree のブランチにはまだ存在しない（E5 が別 worktree で
+  作業中の可能性があるため、無いものには触れない指示どおり見送り）。
+- 実行したコマンド: `cargo test -p task-api --test execution`
+- 出力の要点: exit 0、8 passed（新規 1 本を含む）。
+- 実行したコマンド: `cargo test -p task-api --no-fail-fast`
+- 出力の要点: exit 0。38 個の `test result:` ブロック全て ok（FAILED 0）。
+
+**5. `celerisctl replay`/`rebuild_work_units_and_runs` の `execution_plans` 対応（E2b からの持ち越し）**
+- `task_core::store::TaskStore` に `execution_plans_replace`（`work_units_replace`/`runs_replace`
+  と同じ形。DELETE + INSERT を 1 トランザクションで）を追加。
+- `task_ops::replay::rebuild_execution_plans`（新規）: `Event::ExecutionPlanned` だけから
+  `execution_plans` の版の履歴を再構築する純粋関数。`plan_id` はイベント自身が運ぶ（`adopt_plan`/
+  `replan` が `new_id()` で発行し、行と event の両方に同じ値を書く）ので `work_units.id`（`key` しか
+  運ばれない）と違って確実に復元できる。`status`/`superseded_at` は、後続イベントの `supersedes` を
+  見て畳み込む（最後まで supersede されなかった版が `active`）。`planner_run_id` は
+  `Event::ExecutionPlanned` 自体が運ばない欄なので、events だけからは確実に復元できず常に `None`
+  にし、`diff_execution_plans`（新規）の比較対象からも外した（`work_units`/`runs` の
+  `created_at`/`updated_at`/`last_checkpoint_run_id` と同じ「タイムスタンプ級で厳密には復元できない
+  欄は比較しない」という E2b の規則の延長）。`check_and_apply_execution` に配線し、戻り値に
+  `execution_plan_mismatches` を追加（型が複雑になったので `ExecutionCheckReport` エイリアスに
+  整理。clippy `type_complexity` 対応）。`--apply` で書き戻すときは、比較対象外の `planner_run_id`
+  を既存の stored 行から引き継ぎ、消えないようにした（そうしないと、`work_units`/`runs` だけが
+  食い違っていて `execution_plans` は正しいタスクでも、3 表を一緒に書き直す際に
+  `planner_run_id` が黙って消えてしまう）。`celerisctl replay` に `EXECUTION_PLAN_MISMATCH` 行の
+  出力を追加。
+- 実行したコマンド: `cargo test -p task-ops --lib -- check_and_apply_execution_rebuilds_the_replanned_execution_plans_history`
+- 出力の要点: exit 0、1 passed。`adopt_plan` → `replan` で v1/v2 を作り、
+  `rebuild_execution_plans` が `supersedes`/`superseded_at`/`active` を正しく復元することを確認
+  → `execution_plans` を events に無い値（v2 の `origin`）で故意に壊す → `--check` で検出
+  （`plan_mm` に `version=2 field=origin` が出る）→ `--apply` で直り、かつ比較対象外の
+  `planner_run_id`（`"planner-run-1"`）が消えないことを確認 → 直った後の再 `--check` で差分ゼロ。
+- `cargo test -p task-ops --lib`: exit 0、319 passed（既存 318 + 新規 1）。
+- `cargo test -p task-core -p celerisctl --no-fail-fast`: exit 0。両クレート合わせて全ブロック ok。
+
+**6.（任意）配送の repair**
+- 未実装。ADR 自身・今回の指示ともに「任意。時間があれば」としている項目で、1〜5 の実装・検証を
+  優先し、時間の制約により見送った。`crates/celeris/src/delivery.rs:338-354` の `[delivery-repair]`
+  （マージ/ビルドの技術的な不備を、実装担当への `Trigger::Reopen`〈Task 全体の再実行〉+ コメントで
+  差し戻している）を、`task_core::execution::RepairClass::MergeBase`（型・budget は E4 で用意済み。
+  `crates/task-core/src/execution.rs:580,592,601`）を使った repair WU の組み立てに置き換えるのが
+  次の一手。`delivery.rs` は dispatcher の外（celeris 本体のポーリング処理）から `store` を直接
+  操作しており、`dispatcher.rs::try_review_repair`/`TaskStore::review_repair_apply` が前提にしている
+  「reviewing → repair WU → 再レビュー」の状態遷移とは別の入り口（`Ready|Blocked → Reopen`）なので、
+  `review_repair_apply` をそのまま呼べるかの設計確認から要る。
+
+### ゲート（本 Phase 完了時点）
+
+| ゲート | 実行したコマンド | 出力の要点 |
+|---|---|---|
+| fmt | `cargo fmt --all -- --check` | exit 0（差分なし。各項目コミット前に確認） |
+| clippy | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0（警告 0。項目5で `ExecutionCheckReport` 型エイリアスを導入して `type_complexity` を解消） |
+| 全テスト（1回目） | `cargo test --workspace --no-fail-fast` | 81 個の `test result:` ブロック中 1 個 FAILED（`e2e::provider_admin_scenarios::reload_clears_provider_cooldown`）。高負荷（他セッションの並行 cargo ビルドで load average 12〜24/24 コア）下での実機ポーリングのタイムアウトと判断し、切り分けのため item5 の変更を `git stash` で外した状態でも再現（＝本変更由来ではない）、`stash pop` で戻した後は単体実行で 3 回連続 ok を確認 |
+| 全テスト（2回目、確認） | `cargo test --workspace --no-fail-fast` | exit 0。81 個の `test result:` ブロック全て ok（FAILED 0） |
+| GUI gen:types（項目2 のみ） | `cd gui && corepack pnpm@11.27.0 gen:types` を 2 回実行し diff | 2 回目が 1 回目と同一（差分ゼロ） |
+| GUI typecheck（項目2 のみ） | `cd gui && corepack pnpm@11.27.0 typecheck` | exit 0（エラーなし） |
+
+項目 1・3・4・5 は `Event`/API/protocol の型を変えていない（項目1は `ExecutionPlannerContext` を
+拡張したが worker-protocol のみ、項目4はテスト追加のみ、項目5は task-core/task-ops/celerisctl 内部）。
+`UPDATE_SCHEMA` の再生成は項目1（worker-protocol）と項目2（api-v1、`WorkUnitBlockedReason`）でのみ
+行った。
+
+### 未解決事項・次の一手
+
+- **項目6（配送の repair の merge_base 化）**: 上記のとおり未実装。次の worktree（E5/E6）で
+  `delivery.rs` の入口（`Reopen`）から `review_repair_apply` 相当を呼べるかを先に設計すること。
+- E1〜E4 からの申し送りのうち本 Phase で扱わなかったもの（S4/S6 の実データ配線、D16 の repair
+  lane 強制、`node_sessions` 関連など）は引き続き E5/E6 で検討する。
+- `gui/`・`task-ops/src/view.rs`・`task-api/src/{stats.rs,routing.rs}`・
+  `task-core/src/execution_metrics.rs` は指示どおり触っていない（E5 が並行編集中の可能性）。
