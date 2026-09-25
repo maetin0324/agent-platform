@@ -180,6 +180,20 @@ pub fn decide_tick(
     }
 }
 
+/// Phase 119 D4（監視）: `rows` のうち、自分（`self_id`）以外で `drained_at` が付いているのに
+/// `alive(pid)` が真の行（＝「drain 後にプロセスが終了しない」障害。D1/D2 で直したが、念のための
+/// 監視）。`instance_delete_stale` がこの行を消す直前に `Supervisor::step` が呼び、見つかった行だけ
+/// WARN ログに残す。純粋な判定だけを持つ（DB にもログにも触れない）ので単体テストできる。
+pub fn stale_but_alive_rows<'a>(
+    rows: &'a [DaemonInstance],
+    self_id: &str,
+    alive: &dyn Fn(u32) -> bool,
+) -> Vec<&'a DaemonInstance> {
+    rows.iter()
+        .filter(|r| r.instance_id != self_id && r.drained_at.is_some() && alive(r.pid))
+        .collect()
+}
+
 /// `Supervisor::start` の結果。
 pub enum Started {
     Running(Supervisor),
@@ -361,6 +375,23 @@ impl Supervisor {
             }
         };
         // 3. 終わった・死んだ他のインスタンスの行を消す。
+        //
+        // Phase 119 D4（監視）: `drained_at` が付いた行は ADR-0040 D4 の設計どおりこの直後に消える
+        // （すぐ下の `instance_delete_stale`。旧に `heartbeat_at` の猶予を与えない）。消える前に、
+        // その pid がまだ生きていれば WARN を出す — D1/D2 が直した「drain 後にプロセスが終了しない」
+        // 障害（本番 2026-09-24）の再発を journal で気付けるようにするための、念のための監視。
+        // `GET /health`/`GET /releases` の `instances`（`daemon_instances` をそのまま返す）は、この
+        // 行が消える直前の tick に限って同じ `drained_at`/`pid` を見せる（`status.sh` の
+        // `stale_instances`〈Phase 119 D3〉は systemd を直接見るのでこの削除タイミングに左右されない）。
+        for r in stale_but_alive_rows(&rows, &self.identity.instance_id, &pid_alive) {
+            tracing::warn!(
+                instance_id = %r.instance_id, release = %r.release, pid = r.pid,
+                drained_at = ?r.drained_at,
+                "stale: a drained daemon instance's process is still alive (it did not exit \
+                 after drain; Phase 119 D1/D4). check with `ps --pid <pid>` or `systemctl \
+                 --user status celeris@<release>`"
+            );
+        }
         let stale_before =
             now - time::Duration::try_from(self.freshness).unwrap_or(time::Duration::MAX);
         match self
@@ -597,6 +628,41 @@ mod tests {
         assert_eq!(
             decide_tick(InstanceRole::Verify, "me", &[], at(31), WINDOW),
             TickDecision::Stay
+        );
+    }
+
+    /// Phase 119 D4: `drained_at` が付いた行のうち、pid がまだ生きている（＝「drain 後にプロセスが
+    /// 終了しない」障害）ものだけを拾う。自分自身の行・`drained_at` 無し・pid が死んでいる行は拾わない。
+    #[test]
+    fn stale_but_alive_rows_finds_only_drained_rows_whose_pid_is_still_running() {
+        let mut still_stuck = row("stuck", "old-rel", InstanceRole::Draining, 0);
+        still_stuck.drained_at = Some(at(5));
+        still_stuck.pid = 9001;
+        let mut cleanly_exited = row("exited", "older-rel", InstanceRole::Draining, 0);
+        cleanly_exited.drained_at = Some(at(3));
+        cleanly_exited.pid = 9002;
+        let still_draining = row("draining", "mid-rel", InstanceRole::Draining, 10);
+        // まだ drain していない（`drained_at` 無し）行は、pid が生きていても対象外。
+        let mut myself = row("me", "new-rel", InstanceRole::Active, 10);
+        myself.drained_at = Some(at(5)); // 自分自身は（理屈上あり得なくても）除外される。
+        myself.pid = 9001;
+
+        let rows = vec![
+            still_stuck.clone(),
+            cleanly_exited.clone(),
+            still_draining,
+            myself,
+        ];
+        let alive = |pid: u32| pid == 9001; // 9001 だけ生きている扱い。9002 は死んでいる。
+
+        let found = stale_but_alive_rows(&rows, "me", &alive);
+        assert_eq!(
+            found
+                .iter()
+                .map(|r| r.instance_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stuck"],
+            "only the still-running, drained, non-self row should be flagged"
         );
     }
 

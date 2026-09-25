@@ -233,3 +233,146 @@ resuming the incomplete GUI/link handoff」）で完了した。
 詳細・受け入れ条件は `docs/PROGRESS.md` の Phase 105 節、実装は `crates/task-worker/src/detach.rs`、
 `crates/celeris/src/releases.rs::start_promote` / `start_promote_with_launcher` /
 `promote_exec_command`。
+
+## Phase 119 追記（2026-09-24）: drain 後にプロセスが終了しない障害の修正と、promote.sh の停止対象の特定
+
+### 本番で観測した事実（2026-09-24。再掲）
+
+ライブ切替で draining になった旧デーモンが「drained; exiting 0（ADR-0040 D4）」「celeris stopped,
+exit: Drained」まで journal に出した**後もプロセスが終了しない**（tick は止まっている = logically
+stopped だが pid は残り、`SIGTERM` も効かない）。過去 4 世代の `celeris@<sha>.service` が active
+running のまま溜まり、`promote.sh` の停止→起動が**最も古い無関係な pid**（/proc の argv 走査が
+最初に見つけたもの）に SIGTERM を送って 300 秒待ち、「old celeris is still serving after 300s」で
+失敗した。1 つの旧 unit の cgroup には `sleep 3600` が 3 つ（ワーカー run が起こしたシェルの子孫）、
+現行 unit には `[codex] <defunct>` が 1 つ残っていた。
+
+### D1: 原因の特定（推定。実機のスタックトレースは取れていない — 下記「未解決」参照）
+
+`crates/celeris/src/main.rs` は `#[tokio::main]`（既定 multi-thread runtime）を使っていた。この
+マクロが組む `Runtime` は `async fn main` が返った**後**に暗黙に drop され、`Runtime::drop` は
+**上限なしに**`spawn_blocking` のブロッキングスレッドプールが空になるまで待つ（`shutdown_timeout`
+を明示的に呼ばない限り）。tick ループはすでに `Ok(Exit::Drained)` を返し、`main.rs` が
+「celeris stopped, exit: Drained」まで確かにログを出しているので、**アプリケーションの終わり方
+自体は正しく完了していた**。残る説明は「`run()` が返った後、まだ完了していない `spawn_blocking`
+タスク（Phase 110a の背景チェックポイント/バックアップが busy_timeout の間ブロックしている、
+または本番が以前踏んだ NFS 越し loop デバイスの D 状態の fsync 等）を `Runtime::drop` が
+無期限に待ち続けていた」という仮説である。
+
+**「`SIGTERM` すら効かない」を説明する仕組み**: `tick_loop` は
+`tokio::signal::unix::signal(SignalKind::terminate())` で SIGTERM の**専用ハンドラ**を登録する。
+これは OS のデフォルトの「SIGTERM で終了する」という挙動を、**プロセスの生存期間全体にわたって**
+「シグナルをチャネルに転送するだけ」に置き換える。tick ループがとっくに終わり、誰もそのチャネルを
+読んでいない状態（＝まさに `Runtime::drop` が無期限に止まっている状況）で人が SIGTERM を送っても、
+もう「デフォルトの終了」は起きない（ハンドラは登録されたまま何もしない）。`SIGKILL` だけが効く
+状態になる。これは本番の「SIGTERM も効かない」という観測と正確に一致する。
+
+**未解決**: どの `spawn_blocking` 呼び出しが実際に詰まっていたかは、実機のプロセスのスタック
+（`/proc/<pid>/task/*/stack` や `py-spy`/`gdb` 相当）が無いと確定できない。このセッションでは
+本番プロセスに触れられない（CLAUDE.md の制約）ため、コードレビューで見つけた「無期限に待ちうる
+`spawn_blocking`」の候補（Phase 110a の `db_maintenance::RunningDbMaintenance::stop`— 内部の
+`tokio::time::timeout(5s, handle)` が、`[db] busy_timeout_ms`〈本番推奨 15000ms〉より短いため、
+チェックポイント/バックアップの真っ最中に drain が始まると 5 秒で諦めて `spawn_blocking` タスクを
+孤児のまま残す）を修正の根拠にした。原因を確定させずとも、**D1 の対処（下記）はこの種のあらゆる
+「止まらない背景タスク」を一律に無害化する**ので、実装としてはこれで十分と判断した。
+
+### D1 の対処: `Runtime::shutdown_timeout` + `std::process::exit`
+
+`crates/celeris/src/main.rs`: `#[tokio::main]` をやめ、`tokio::runtime::Builder::new_multi_thread()`
+で runtime を手で組む。`run()`（`celeris::run` を包む `run_and_report`）が返った後、
+`runtime.shutdown_timeout(Duration::from_secs(10))` を明示的に呼ぶ（`Runtime::drop` の無期限待ちとは
+違い、10 秒で必ず制御が戻る）。その後 `std::process::exit(code)` で**確実に**プロセスを終える
+（生き残ったブロッキングスレッドは OS がプロセスごと片付ける — `std::process::exit` は他のスレッドの
+完了を待たない）。10 秒の上限に達した場合は WARN ログを残す（原因の切り分け用）。
+
+テスト（`crates/celeris/src/main.rs::tests::shutdown_timeout_gives_up_within_its_bound_even_with_a_stuck_background_task`）:
+stop シグナルを見ない・600 秒眠り続ける `spawn_blocking` を持つ Runtime に対して
+`shutdown_timeout(3s)` を呼び、5 秒未満で制御が戻ることを確認する（実プロセスを終わらせる
+`std::process::exit` はテストプロセスごと終わってしまうので確認できないが、そこに至る前の
+`shutdown_timeout` が無期限に待たないことがこの Phase の core fix）。
+
+### D2: 正常終了でも孤児を残さない
+
+`crates/task-worker/src/process_group.rs`: `on_worker_finished`（run が自分から終わる経路:
+done/error/question/yield/budget）には `kill_tree` の呼び出しが 1 つも無かった。しかも
+`ProcessGroup` の RAII guard は、アダプタが `child.wait()` を終えた直後（`on_worker_finished` が
+呼ばれる**前**）にスコープを抜けて drop されるので、`on_worker_finished` 側に `kill_tree` を
+足しても手遅れ（登録は既に消えている）。ワーカー自身の直接の子は `child.wait()` で reap される
+（消える）が、その子が `&` で起こした孫（`sleep 3600` 等）はプロセスグループの長が死んでも生き残る。
+
+**最初の実装（撤回済み）**: `Drop for ProcessGroup` 自体に SIGTERM → grace 後 SIGKILL を持たせた
+（`kill_tree_with` と同じ `spawn_group_reaper` を共有）。`cargo test -p task-worker --lib` で
+`paperqa::` の 6 テストが断続的に失敗し（`literature search returned nothing`）、原因を追うと
+この実装がバグだと判明した: `ProcessGroup` の guard は、アダプタが `child.wait()` で子を reap し
+終えてから（`stderr_task.await`・`stdout_file.flush().await` 等、複数の `await` を挟んだ）関数が
+戻るときにようやく drop される。reap 済みで**空いた pid** は、高い並列度（`cargo test` は既定で
+論理コア数だけ並列に走る）で他の run が別のプロセスを spawn したときにすぐ再利用されうる。
+`Drop` が「登録されていた pgid」へ SIGTERM を送る時点にはその pid が**無関係な、別の run の
+まだ生きているプロセス**を指していることがあり、そのプロセスを誤って止めていた（テストでは
+python3 の acquire ランナーが道半ばで signal を受け、出力が揃わず「検索結果 0 件」に見えた）。
+`docs/DESIGN.md` 系の「決定的」原則には反しないが、**副作用の対象を取り違える**という意味で
+安全性のバグである。
+
+`baseline-check`（変更前の HEAD からの使い捨て worktree）で `cargo test -p task-worker --lib
+paperqa::` が 57/57 通ることを確認し、変更後の `Drop` 実装だけが原因であることを切り分けた。
+
+**採用した実装**: `Drop` は元の「登録を表から消すだけ」に戻し、代わりに
+`crate::subprocess::reap_after_terminal`（ほぼ全アダプタが共有する、リーダーの `child.wait()` を
+呼ぶ関数）の**リーダーが自分から終わった枝**で、`await` を一切挟まずに
+`process_group::sweep(pid, grace)`（新設。登録テーブルを経由せず、呼び出し元がその場で
+`child.id()` から取った新鮮な pid で `killpg` する）を呼ぶ。ここが `killpg` を送るすべての経路の
+中で最も新鮮なタイミングであり、pid 再利用の危険は abort 系の `kill_tree`/`kill_tree_with`
+（レジストリから引いた直後に送る）と同程度まで小さくなる。タイムアウト側（`kill_now`）は
+`send_signal_to_group` が既に `killpg`（グループ全体）を送っているので変更不要。
+
+ゾンビ（`[codex] <defunct>`）は `kill_on_drop(true)` の非同期 reap が shutdown に間に合わなかった
+場合に残る。`task_worker::process_group::reap_finished_children`（`waitpid(-1, WNOHANG)` を
+`ECHILD` まで繰り返す）を追加し、`main.rs::shutdown_and_exit` が **runtime が完全に止まった後**
+（tokio 自身の SIGCHLD 駆動の reap と競合しないタイミング）にだけ呼ぶ。
+
+テスト: `subprocess::a_normally_finished_run_reaps_a_background_grandchild`
+（`sh -c "sleep 300 & ...; echo done"` で正常終了させ、孫が `run_subprocess` の戻り後に片付くことを
+確認）、`process_group::sweep_signals_the_group_and_is_a_no_op_when_nothing_is_left`。
+`cargo test -p task-worker --lib`（517 passed）を `--test-threads=32` で 3 回繰り返し実行し、
+退行が無いことを確認した。
+
+### D3: `promote.sh` の停止対象
+
+`scripts/selfdeploy/lib.sh` に `sd_resolve_old_daemon_pid`（`current` の release が systemd 管理下で
+生きていれば、その unit の `MainPID` だけを対象にする。systemd がまだ知らない release〈初回の移行〉
+だけ `sd_find_old_celeris_pid`〈従来の `/proc` の `--config` 完全一致走査〉にフォールバックする）と
+`sd_list_stale_celeris_units`（昇格の対象 `current`/`new` 以外に active な `celeris@*` unit の一覧。
+D1/D2 で防ぐはずだが、念のための検出）を追加した。`promote.sh` は旧 pid の決定に
+`sd_resolve_old_daemon_pid` を使うよう変更し、昇格前に stale unit の一覧を出す（`--stop-stale` で
+SIGKILL。既定は一覧だけ）。`status.sh` にも `stale_instances`（`current`/`previous` 以外に active な
+`celeris@*` の sha12 と `MainPID`）を追加した。
+
+### D4: 監視
+
+`crates/celeris/src/instance.rs`: `Supervisor::step` は、`daemon_instances` の `drained_at` が
+付いた他インスタンスの行を**同じ tick で**削除する（ADR-0040 D4 の設計どおり。ここは変えていない）。
+削除の**直前**に `stale_but_alive_rows`（純粋関数。`rows` のうち `drained_at` が付いていて
+`pid_alive(pid)` が真の行）を見て、見つかれば WARN ログを残す
+（`"stale: a drained daemon instance's process is still alive"`）。`GET /health`/`GET /releases` の
+`instances`（`daemon_instances` をそのまま返す）は API 型を増やしていない — 既存の `pid`/`drained_at`
+フィールドで十分と判断した（行はこの tick の直後に消えるので API での可視性は一瞬に限られるが、
+journal の WARN と `status.sh` の `stale_instances`〈systemd を直接見るので削除タイミングに
+左右されない〉で実運用上は足りると判断した。未解決事項に記録）。
+
+### 未解決事項
+
+- 実機のプロセススタックが取れないため、D1 の根本原因（どの `spawn_blocking` が詰まっていたか）は
+  確定していない。D1 の対処（`shutdown_timeout` + `process::exit`）はこの種のあらゆる「止まらない
+  背景タスク」を無害化するので実害は無いはずだが、次に同じ事故が起きたら `/proc/<pid>/task/*/stack`
+  を取ってから殺すこと。
+- D4 は `daemon_instances` の削除タイミング（ADR-0040 D4 の「`drained_at` が付いたら即削除」）を
+  変えていないので、`GET /releases`/`GET /health` から「drain 後も生きているプロセス」を安定して
+  観測することはできない（その tick に限られる）。安定した API 可視性が要るなら、`drained_at` が
+  付いた行を一定期間（例: 削除猶予を pid の生存確認に紐付ける）残す設計変更が要る
+  — ADR-0040 D4 の記述自体を変える話なので、次の Phase で改めて判断すること。
+- `status.sh`/`promote.sh --stop-stale` は systemd（`systemctl --user`）に依存する。systemd が無い
+  環境（テスト・非 systemd）では `sd_list_stale_celeris_units` は空を返すだけで壊れない。
+- D2 の `sweep` は `subprocess::reap_after_terminal` を経由する全アダプタ（claude-code / codex /
+  aider / langmem / local_deep_research / paperqa / acp / 汎用 subprocess）の**正常終了**を一律に
+  カバーする（`acp.rs` も `force_kill` でない枝で `reap_after_terminal` を呼ぶ）。`acp.rs` が別途
+  持つ複数の `kill_now` 呼び出しは、`session/cancel` を伴うタイムアウト/中断の経路で、既に
+  `send_signal_to_group`（`killpg`）がグループ全体へ signal を送っているので対象外のままでよい。
