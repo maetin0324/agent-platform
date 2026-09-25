@@ -14,10 +14,14 @@ SD_PROG=promote
 
 usage() {
   cat >&2 <<'EOF'
-usage: promote.sh <sha12> [--pre-start <script>]
+usage: promote.sh <sha12> [--pre-start <script>] [--stop-stale]
 
   verify.sh が `ok` を出したリリースだけを昇格できる。`--force` は無い（ADR-0040 D2）。
   systemd の unit が要る: scripts/selfdeploy/install-units.sh を一度だけ実行しておくこと。
+
+  --stop-stale  昇格の対象（current/new）以外に active な celeris@* unit が残っていたら
+                （drain したまま終了しなかった前回昇格の残骸。Phase 119 D3）SIGKILL する。
+                既定では一覧を出すだけで、何も止めない（人が判断する）。
 EOF
   exit 2
 }
@@ -27,13 +31,28 @@ EOF
 # 引数は `<sha12> <release dir> <db path> <config path>`。失敗したら DB をバックアップから戻し、旧 unit を起こし直して止まる。
 # ライブ引き継ぎ（live）では実行できない（デーモンが動いている）ので、指定があれば停止→起動に倒す。
 PRE_START=""
-if [ $# -eq 3 ] && [ "$2" = "--pre-start" ]; then
-  PRE_START="$3"
-  [ -x "$PRE_START" ] || { echo "promote.sh: --pre-start script is not executable: $PRE_START" >&2; exit 2; }
-elif [ $# -ne 1 ]; then
-  usage
-fi
-SHA12="$1"
+# Phase 119 D3: 既定は出すだけ。SIGKILL するのは `--stop-stale` を明示したときだけ（人が判断する）。
+STOP_STALE=false
+SHA12=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --pre-start)
+      shift
+      [ $# -ge 1 ] || usage
+      PRE_START="$1"
+      [ -x "$PRE_START" ] || { echo "promote.sh: --pre-start script is not executable: $PRE_START" >&2; exit 2; }
+      ;;
+    --stop-stale) STOP_STALE=true ;;
+    -h | --help) usage ;;
+    --*) usage ;;
+    *)
+      [ -z "$SHA12" ] || usage
+      SHA12="$1"
+      ;;
+  esac
+  shift
+done
+[ -n "$SHA12" ] || usage
 
 sd_require_json_tool
 TS="$(sd_stamp)"
@@ -106,6 +125,31 @@ if [ "$LIVE_OK" = true ] && [ -n "$LIVE_ROLE" ] && [ -z "$PRE_START" ]; then MOD
 if [ -n "$PRE_START" ]; then sd_log "--pre-start given ($PRE_START): forcing stop-start"; fi
 sd_log "promotion mode: $MODE"
 
+# ---- Phase 119 D3: 他に残っている celeris@* の draining unit を検出する --------------------
+#
+# 実機 2026-09-24: 過去 4 世代の celeris@<sha> が drain したまま終了せず active running のまま
+# 溜まっていた（ADR-0040 追記）。昇格の対象（$OLD / $SHA12）以外に active な unit があれば、
+# ここで一覧を出す（既定はそれだけ）。`--stop-stale` が付いていれば SIGKILL する。
+STALE_SHAS="$(sd_list_stale_celeris_units "$SHA12" "$OLD" || true)"
+if [ -n "$STALE_SHAS" ]; then
+  sd_log "stale: drained だが終了していない celeris インスタンスが他にもいる（current=${OLD:-<none>} new=$SHA12 以外に active）:"
+  while IFS= read -r stale_sha; do
+    [ -n "$stale_sha" ] || continue
+    stale_pid="$(systemctl --user show -p MainPID --value "celeris@$stale_sha" 2>/dev/null || echo 0)"
+    sd_log "  celeris@$stale_sha pid=${stale_pid:-?}"
+    if [ "$STOP_STALE" = true ] && [ -n "$stale_pid" ] && [ "$stale_pid" != 0 ]; then
+      sd_log "  --stop-stale: SIGKILL celeris@$stale_sha (pid=$stale_pid)"
+      kill -KILL "$stale_pid" 2>/dev/null || true
+      systemctl --user stop "celeris@$stale_sha" 2>/dev/null || true
+    fi
+  done <<<"$STALE_SHAS"
+  if [ "$STOP_STALE" != true ]; then
+    sd_log "  (not stopping them — pass --stop-stale to SIGKILL, or investigate why they did not exit after drain)"
+  fi
+else
+  sd_log "no stale celeris@* units besides current=${OLD:-<none>} and new=$SHA12"
+fi
+
 # ---- 道具 ------------------------------------------------------------------
 
 BACKUP="$SD_BACKUPS/$TS-pre-$SHA12.sqlite3"
@@ -149,36 +193,6 @@ poll_release() {
   done
   sd_log "poll $url: gave up after ${timeout}s (last release=${got_rel:-?} role=${got_role:-?})"
   rm -f "$tmp"
-  return 1
-}
-
-# 本番の celeris の pid を**設定パスまで含めた完全一致**で探す（ADR-0040 D4）。
-# `pgrep -f` は自分のシェルのコマンドラインにも当たるので使わない（過去に踏んだ）。/proc を直接見る。
-find_old_celeris_pid() {
-  local pid i argv matched skip
-  for pid in /proc/[0-9]*; do
-    pid="${pid#/proc/}"
-    if [ "$pid" = "$$" ]; then continue; fi
-    if [ ! -r "/proc/$pid/cmdline" ]; then continue; fi
-    argv=()
-    mapfile -d '' -t argv <"/proc/$pid/cmdline" 2>/dev/null || continue
-    if [ "${#argv[@]}" -lt 3 ]; then continue; fi
-    # argv[0] が `celeris` そのものでなければ対象外（`grep`、`bash -c`、`sh -c` はここで落ちる）。
-    if [ "$(basename -- "${argv[0]}")" != celeris ]; then continue; fi
-    # staging（verify.sh が起こす `--mode verify --db … --listen …`）は本番ではない。
-    skip=false
-    for i in "${argv[@]}"; do
-      case "$i" in --mode | --db | --listen | --workspace-root | --token-file) skip=true ;; esac
-    done
-    if [ "$skip" = true ]; then continue; fi
-    matched=false
-    for i in $(seq 0 $((${#argv[@]} - 2))); do
-      if [ "${argv[$i]}" = "--config" ] && [ "${argv[$((i + 1))]}" = "$SD_CONFIG" ]; then matched=true; fi
-    done
-    if [ "$matched" != true ]; then continue; fi
-    printf '%s' "$pid"
-    return 0
-  done
   return 1
 }
 
@@ -254,8 +268,8 @@ promote_stop_start() {
   local old_pid grace waited old_gui_pid
   grace="$(kill_grace_secs)"
 
-  if old_pid="$(find_old_celeris_pid)"; then
-    sd_log "old celeris pid=$old_pid (exact match on: celeris --config $SD_CONFIG)"
+  if old_pid="$(sd_resolve_old_daemon_pid "$OLD")"; then
+    sd_log "old celeris pid=$old_pid (systemd MainPID of celeris@${OLD:-<none>}, or an exact /proc match on: celeris --config $SD_CONFIG if systemd does not know this release yet; Phase 119 D3)"
     # 実機 2026-09-19 22:42: SIGTERM の後、旧 celeris が ext4 のジャーナル待ち（jbd2_log_wait_commit、D 状態）で
     # 2 分半かかり、20 秒で諦めた promote.sh が「何も変えていない」と言って止まった。しかし SIGTERM は届いていて
     # API は閉じていたので、本番は新も旧も無い状態で 3 分止まった。SIGTERM を送ったら**戻れない**ので、

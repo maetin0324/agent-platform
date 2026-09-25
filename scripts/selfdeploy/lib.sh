@@ -503,3 +503,89 @@ sd_is_sensitive() {
   done
   return 1
 }
+
+# ---- 旧 celeris の pid（Phase 119 D3） ------------------------------------
+#
+# 実機 2026-09-24: `promote.sh` の停止→起動が、drain したまま終了しない前回の昇格の残骸
+# （`celeris@0e20e1b2a058` 等、複数の draining インスタンス）の中から**最も古い無関係な pid**に
+# SIGTERM を送り、300 秒待って「old celeris is still serving after 300s」で失敗した。本来は
+# `current` symlink が指す release の unit の MainPID を対象にすべき（ADR-0040 追記）。
+#
+# 以下 3 つは `promote.sh`/`status.sh` からだけでなく `scripts/selfdeploy/tests/` からも直接
+# source して呼べるよう、`/proc` 相当のディレクトリと自分の pid を引数で受け取れるようにしてある
+# （既定はどちらも本物。本物の `/proc`・本物の `systemctl` に触れるのは実引数を省略したときだけ）。
+
+# `sd_find_old_celeris_pid [proc_dir] [self_pid]` — 本番の celeris の pid を**設定パス
+# （`$SD_CONFIG`）まで含めた完全一致**で `/proc` を走査して探す。`pgrep -f` は自分のシェルの
+# コマンドラインにも当たるので使わない（過去に踏んだ）。
+#
+# **これは systemd 管理化にない場合の最終手段**（初回の移行。`sd_resolve_old_daemon_pid` を使うこと）。
+# 複数の draining インスタンスが同じ `--config` を持つ状態では、この関数は「最初に見つかった」
+# プロセスを返すだけなので、どれが `current` かは分からない。
+sd_find_old_celeris_pid() {
+  local proc_dir="${1:-/proc}" self_pid="${2:-$$}"
+  local pid_dir pid argv i matched skip
+  for pid_dir in "$proc_dir"/[0-9]*; do
+    pid="${pid_dir##*/}"
+    if [ "$pid" = "$self_pid" ]; then continue; fi
+    if [ ! -r "$pid_dir/cmdline" ]; then continue; fi
+    argv=()
+    mapfile -d '' -t argv <"$pid_dir/cmdline" 2>/dev/null || continue
+    if [ "${#argv[@]}" -lt 3 ]; then continue; fi
+    # argv[0] が `celeris` そのものでなければ対象外（`grep`、`bash -c`、`sh -c` はここで落ちる）。
+    if [ "$(basename -- "${argv[0]}")" != celeris ]; then continue; fi
+    # staging（verify.sh が起こす `--mode verify --db … --listen …`）は本番ではない。
+    skip=false
+    for i in "${argv[@]}"; do
+      case "$i" in --mode | --db | --listen | --workspace-root | --token-file) skip=true ;; esac
+    done
+    if [ "$skip" = true ]; then continue; fi
+    matched=false
+    for i in $(seq 0 $((${#argv[@]} - 2))); do
+      if [ "${argv[$i]}" = "--config" ] && [ "${argv[$((i + 1))]}" = "$SD_CONFIG" ]; then matched=true; fi
+    done
+    if [ "$matched" != true ]; then continue; fi
+    printf '%s' "$pid"
+    return 0
+  done
+  return 1
+}
+
+# `sd_resolve_old_daemon_pid <old_sha> [proc_dir] [self_pid]` — Phase 119 D3。
+#
+# `<old_sha>`（= `current` symlink が指す release）が systemd 管理下で生きているなら、**その unit の
+# MainPID だけ**を対象にする（実機で確認した事故の再発防止: 複数の draining インスタンスが同じ
+# `--config` を持つときに、`sd_find_old_celeris_pid` の /proc 走査は最初に見つかった無関係な pid
+# （最も古い残骸であることが多い）を拾ってしまう）。systemd がまだこの release を知らない
+# （初回の移行、または unit がまだ無い）ときだけ `sd_find_old_celeris_pid` にフォールバックする。
+sd_resolve_old_daemon_pid() {
+  local old_sha="$1" proc_dir="${2:-/proc}" self_pid="${3:-$$}" pid
+  if [ -n "$old_sha" ] && systemctl --user is-active --quiet "celeris@$old_sha" 2>/dev/null; then
+    pid="$(systemctl --user show -p MainPID --value "celeris@$old_sha" 2>/dev/null || echo 0)"
+    if [ -n "$pid" ] && [ "$pid" != 0 ]; then
+      printf '%s' "$pid"
+      return 0
+    fi
+  fi
+  sd_find_old_celeris_pid "$proc_dir" "$self_pid"
+}
+
+# `sd_list_stale_celeris_units <new_sha> <old_sha>` — Phase 119 D3。
+#
+# `<new_sha>`/`<old_sha>` 以外に**まだ active な** `celeris@*.service` の sha12 を 1 行ずつ返す
+# （前回までの昇格で drain したまま終了しなかった残骸。ADR-0040 追記「drain 後にプロセスが終了しない」）。
+# systemd が無い環境では何も返さない（クラッシュしない）。
+sd_list_stale_celeris_units() {
+  local new_sha="$1" old_sha="$2" sha
+  command -v systemctl >/dev/null 2>&1 || return 0
+  systemctl --user list-units --type=service --state=active --no-legend --plain 'celeris@*.service' \
+    2>/dev/null \
+    | awk '{print $1}' \
+    | sed -n 's/^celeris@\(.*\)\.service$/\1/p' \
+    | while IFS= read -r sha; do
+        [ -n "$sha" ] || continue
+        [ "$sha" = "$new_sha" ] && continue
+        [ "$sha" = "$old_sha" ] && continue
+        printf '%s\n' "$sha"
+      done
+}
