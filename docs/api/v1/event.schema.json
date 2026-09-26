@@ -1225,6 +1225,102 @@
             "weights_version"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0074 D1.2（Phase F2b）: v2 の WU の run が done になり、daemon が WU の作業ツリーで\n決定的に commit した（`git add -A && git commit -m \"wu/<key>: <title>\"`。変更が無ければ commit\nせず、その時点の HEAD）。`work_units.branch`/`base_commit`/`head_commit` の正本。状態は変えない。",
+          "properties": {
+            "base": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "branch": {
+              "description": "`celeris-wu/<task_id>/<key>`（統合の repair WU のように Task の worktree で走った WU は\nTask のブランチ）。",
+              "type": "string"
+            },
+            "commit": {
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "type": {
+              "const": "work_unit_committed",
+              "type": "string"
+            },
+            "work_unit_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "work_unit_id",
+            "key",
+            "branch",
+            "commit"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0074 D1.4（Phase F2b）: 工程の統合が済んだ（葉の WU の merge と検査の再実行が通った）。\n状態は変えない（Task の遷移は同じトランザクションの `Transitioned`）。",
+          "properties": {
+            "checks": {
+              "items": {
+                "$ref": "#/$defs/PhaseCheckResult"
+              },
+              "type": "array"
+            },
+            "head": {
+              "description": "統合後の Task ブランチの HEAD（WU の worktree を持たない並列 1 の工程では空文字列）。",
+              "type": "string"
+            },
+            "merged": {
+              "items": {
+                "$ref": "#/$defs/PhaseMerged"
+              },
+              "type": "array"
+            },
+            "phase": {
+              "type": "string"
+            },
+            "type": {
+              "const": "phase_integrated",
+              "type": "string"
+            },
+            "work_unit_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "phase",
+            "work_unit_id",
+            "merged",
+            "head"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "ADR-0074 D1.2（Phase F2b）: v2 の計画だが並列 1 に倒した（remote / 書き込み可能な `dir` の\nrepo / `Shared`）。計画ごとに 1 回だけ残す。状態は変えない。",
+          "properties": {
+            "plan_id": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "type": {
+              "const": "work_units_serialized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "plan_id",
+            "reason"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1524,6 +1620,47 @@
     "MilestoneId": {
       "description": "途中目標の一意識別子（ULID）。",
       "type": "string"
+    },
+    "PhaseCheckResult": {
+      "description": "`Event::PhaseIntegrated.checks[]`（ADR-0074 D1.4 の 4）。",
+      "properties": {
+        "cmd": {
+          "type": "string"
+        },
+        "pass": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd",
+        "pass",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "PhaseMerged": {
+      "description": "`Event::PhaseIntegrated.merged[]`（ADR-0074 D1.4）。",
+      "properties": {
+        "commit": {
+          "description": "merge した WU ブランチの HEAD。",
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "skipped": {
+          "description": "既に Task ブランチに入っていたので飛ばした（冪等なやり直し）。",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "commit"
+      ],
+      "type": "object"
     },
     "PhaseSpec": {
       "additionalProperties": false,

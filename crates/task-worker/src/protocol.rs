@@ -560,6 +560,17 @@ pub struct ExecutionPlannerContext {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preserve_done_keys: Vec<String>,
     // ---- ここまで ----
+    /// ADR-0074 D1.1（Phase F2b）: `[execution] parallel = true` のときだけ `true`。planner に
+    /// `celeris.execution-plan/2`（工程と並列の WU）を出させる。`false` ならプロンプトは変わらない。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub parallel: bool,
+    /// ADR-0074 §4: v2 の工程の数の上限（`parallel` のときだけ意味を持つ）。
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub max_phases: usize,
+}
+
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
 }
 
 /// `context.work_unit`（ADR-0072 D9/D21。Phase E2）。
@@ -581,6 +592,13 @@ pub struct WorkUnitPromptContext {
     /// D9: 計画の中の WU 一覧（key・title・status を 1 行ずつ）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plan_overview: Vec<String>,
+    /// ADR-0074 D1.2（Phase F2b）: v2 の WU の run が WU ごとの worktree で走るときの作業ブランチ
+    /// （`celeris-wu/<task_id>/<key>`）。v1・並列 1 の run では `None`（プロンプトは変わらない）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// ADR-0074 D1.2: 同じ工程で並行しうる他の WU（`"<key>: <title>"`）。`branch` があるときだけ。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parallel_siblings: Vec<String>,
 }
 
 /// ADR-0072 D9（Phase E1）: 続きの実行に渡す最小限の文脈。前の run の会話・出力の全文は載せない

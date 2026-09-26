@@ -207,6 +207,8 @@ fn prompt_header(task: &Task, context: &RunContext, run_id: &str, artifacts: &st
                 }
                 out.push('\n');
             }
+            // ADR-0074 D1.2（Phase F2b）: WU ごとの worktree で走る run だけ（無ければ空）。
+            out.push_str(&crate::preamble::work_unit_branch_section(wu));
         }
         None => {
             out.push_str(&format!("## Objective\n{}\n\n", task.objective));
@@ -717,7 +719,16 @@ fn build_execution_plan_prompt(
          further than the goal actually requires. You are planning, not doing the work yourself: do not \
          write code or run the actual implementation in this run.\n\n",
     );
-    let planner_schema = task_core::EXECUTION_PLAN_SCHEMA;
+    // ADR-0074 D1.1（Phase F2b）: `[execution] parallel = true` のときだけ v2 を書かせる。
+    let parallel = context
+        .execution_planner
+        .as_ref()
+        .is_some_and(|p| p.parallel);
+    let planner_schema = if parallel {
+        task_core::EXECUTION_PLAN_SCHEMA_V2
+    } else {
+        task_core::EXECUTION_PLAN_SCHEMA
+    };
     let max_work_units = context
         .execution_planner
         .as_ref()
@@ -783,6 +794,9 @@ fn build_execution_plan_prompt(
     out.push_str(&schema);
     out.push_str("\n```\n\n");
     out.push_str(&work_unit_features_section());
+    if let Some(planner) = context.execution_planner.as_ref().filter(|p| p.parallel) {
+        out.push_str(&parallel_phases_section(planner.max_phases));
+    }
     if let Some(planner) = &context.execution_planner {
         out.push_str(&format!(
             "## Why this task was judged compound (Complexity Gate, rule `{}`, score {})\n",
@@ -812,6 +826,36 @@ fn build_execution_plan_prompt(
     out.push_str(&prior_review_section(context));
     out.push_str(&answers_section(context));
     out.push_str(&result_json_instructions(artifacts));
+    out
+}
+
+/// ADR-0074 D1.1（Phase F2b）: v2（工程と並列の WU）の書き方。`[execution] parallel = true` の planner
+/// run にだけ足す（v1 のプロンプトは 1 バイトも変わらない）。
+fn parallel_phases_section(max_phases: usize) -> String {
+    let max_phases = if max_phases == 0 { 5 } else { max_phases };
+    let mut out = String::from("### Phases and parallel WorkUnits (`celeris.execution-plan/2`)\n");
+    out.push_str(&format!(
+        "Group the WorkUnits into ordered phases. Add a top-level `\"phases\":[{{\"key\":\"build\",\
+         \"kind\":\"implement\",\"title\":\"...\"}}, ...]` array (1 to {max_phases} phases; the array \
+         order is the execution order; `key` matches `[a-z0-9-]{{1,32}}`) and give every WorkUnit a \
+         `\"phase\":\"<phase key>\"`. Rules (a plan that breaks them is rejected):\n\
+         - WorkUnits in the **same phase may run in parallel**, each in its own git worktree and branch. \
+         Put independent pieces of work (different files/modules) in the same phase; celeris merges \
+         each phase's branches deterministically at the end of the phase and re-runs the checks.\n\
+         - Within a phase a WorkUnit may depend on **at most one** other WorkUnit of the same phase \
+         (it then starts from that WorkUnit's branch). If it needs two or more, put it in a later phase.\n\
+         - `depends_on` may point to WorkUnits in the same phase or an earlier phase, never a later one.\n\
+         - Do not use keys starting with `integrate-` and do not write `\"kind\":\"integrate\"` \
+         (celeris adds one integration step per phase itself).\n\
+         - `\"children\"` must be `[]` or omitted.\n\n"
+    ));
+    out.push_str(
+        "Example: `{\"schema\":\"celeris.execution-plan/2\",\"rationale\":\"...\",\"phases\":[\
+         {\"key\":\"build\",\"kind\":\"implement\",\"title\":\"core pieces\"},\
+         {\"key\":\"verify\",\"kind\":\"test\",\"title\":\"end-to-end\"}],\"work_units\":[\
+         {\"key\":\"api\",\"phase\":\"build\",...},{\"key\":\"store\",\"phase\":\"build\",...},\
+         {\"key\":\"e2e\",\"phase\":\"verify\",\"depends_on\":[\"api\",\"store\"],...}]}`.\n\n",
+    );
     out
 }
 
@@ -1798,6 +1842,84 @@ mod tests {
     /// ADR-0072 D9/D21（Phase E2）: `context.work_unit` があれば `## Objective` は WU の objective に
     /// 差し替わり、Task 全体の目的は参考として、受け入れ条件は WU の `done_when` になる。
     /// `context.work_unit` が無い run は前のテストのとおり 1 バイトも変わらない。
+    /// ADR-0074 D1.2（Phase F2b）: WU ごとの worktree で走る run には作業ブランチと「他の WU の
+    /// ファイルに触らない」を出す。`branch` の無い run（v1）には出さない。
+    #[test]
+    fn a_parallel_work_unit_prompt_names_its_branch_and_forbids_touching_siblings() {
+        let task = crate::protocol::tests::sample_task();
+        let mut wu = crate::protocol::WorkUnitPromptContext {
+            key: "api".into(),
+            title: "api".into(),
+            objective: "add the api".into(),
+            ..Default::default()
+        };
+        let plain = build_prompt(
+            &task,
+            &RunContext {
+                work_unit: Some(wu.clone()),
+                ..RunContext::default()
+            },
+            "run-1",
+            "artifacts",
+        );
+        assert!(!plain.contains("作業ブランチ"));
+        wu.branch = Some("celeris-wu/T/api".into());
+        wu.parallel_siblings = vec!["store: store layer".into()];
+        let prompt = build_prompt(
+            &task,
+            &RunContext {
+                work_unit: Some(wu),
+                ..RunContext::default()
+            },
+            "run-1",
+            "artifacts",
+        );
+        assert!(prompt.contains("`celeris-wu/T/api`"));
+        assert!(prompt.contains("commit してかまいません"));
+        assert!(prompt.contains("他の WorkUnit が担当するファイルには触らない"));
+        assert!(prompt.contains("store: store layer"));
+    }
+
+    /// ADR-0074 D1.1（Phase F2b）: `parallel = true` の planner run だけ v2 の書き方（工程・同じ工程 =
+    /// 並列可・工程内の依存は 1 つまで）を出す。`false` は従来のプロンプトのまま。
+    #[test]
+    fn the_planner_prompt_explains_v2_phases_only_when_parallel() {
+        let task = crate::protocol::tests::sample_task();
+        let base = crate::protocol::ExecutionPlannerContext {
+            max_work_units: 8,
+            ..Default::default()
+        };
+        let serial = build_prompt(
+            &task,
+            &RunContext {
+                execution_planner: Some(base.clone()),
+                ..RunContext::default()
+            },
+            "run-p",
+            "artifacts",
+        );
+        assert!(serial.contains(r#"{"schema":"celeris.execution-plan/1","rationale""#));
+        assert!(!serial.contains("Phases and parallel WorkUnits"));
+        let parallel = build_prompt(
+            &task,
+            &RunContext {
+                execution_planner: Some(crate::protocol::ExecutionPlannerContext {
+                    parallel: true,
+                    max_phases: 5,
+                    max_work_units: 10,
+                    ..base
+                }),
+                ..RunContext::default()
+            },
+            "run-p",
+            "artifacts",
+        );
+        assert!(parallel.contains(r#"{"schema":"celeris.execution-plan/2","rationale""#));
+        assert!(parallel.contains("same phase may run in parallel"));
+        assert!(parallel.contains("at most one"));
+        assert!(parallel.contains("1 to 5 phases"));
+    }
+
     #[test]
     fn build_prompt_replaces_the_objective_and_acceptance_with_the_work_unit_when_present() {
         let task = crate::protocol::tests::sample_task();
@@ -1810,6 +1932,8 @@ mod tests {
                 task_objective_excerpt: task.objective.clone(),
                 dependency_summaries: vec!["survey: 完了".into()],
                 plan_overview: vec!["survey done, core-model running, tests pending".into()],
+                branch: None,
+                parallel_siblings: Vec::new(),
             }),
             ..RunContext::default()
         };
@@ -3020,6 +3144,8 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             current_plan_version: None,
             work_unit_summaries: Vec::new(),
             preserve_done_keys: Vec::new(),
+            parallel: false,
+            max_phases: 0,
         };
         let context = RunContext {
             available_genres: vec![GenreContext::from(&genre_spec)],
@@ -3085,6 +3211,8 @@ echo '{"type":"result","subtype":"success","is_error":false}'
             current_plan_version: None,
             work_unit_summaries: Vec::new(),
             preserve_done_keys: Vec::new(),
+            parallel: false,
+            max_phases: 0,
         };
         let context = RunContext {
             execution_planner: Some(planner_ctx),
@@ -3131,6 +3259,8 @@ echo '{"type":"result","subtype":"success","is_error":false}'
                 "c (release) status=blocked (dependency_failed): waiting on b".to_string(),
             ],
             preserve_done_keys: vec!["a".to_string()],
+            parallel: false,
+            max_phases: 0,
         };
         let context = RunContext {
             execution_planner: Some(planner_ctx),

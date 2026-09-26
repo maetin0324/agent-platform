@@ -145,7 +145,9 @@ async fn get_task_execution(
                         events.iter().map(|(_, e)| e.clone()).collect();
                     let by_wu = task_core::group_quota_by_work_unit(&event_list);
                     Some(
-                        ExecutionPlanView::new(pv.plan, pv.work_units, versions).with_quota(&by_wu),
+                        ExecutionPlanView::new(pv.plan, pv.work_units, versions)
+                            .with_quota(&by_wu)
+                            .with_serialized_reason(&event_list),
                     )
                 }
                 None => None,

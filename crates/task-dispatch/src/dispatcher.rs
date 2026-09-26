@@ -8067,6 +8067,27 @@ impl Dispatcher {
                 .unwrap_or_else(|| "完了".to_string());
             dependency_summaries.push(format!("{}: {}", dep.spec.title, completed));
         }
+        // ADR-0074 D1.2（Phase F2b）: WU ごとの worktree で走る run には、作業ブランチと並行しうる兄弟を渡す。
+        let branch = self
+            .store
+            .work_unit_get(&wu.id)?
+            .and_then(|row| row.branch)
+            .or_else(|| wu.branch.clone());
+        let parallel_siblings = if branch.is_some() {
+            units
+                .iter()
+                .filter(|u| {
+                    u.id != wu.id
+                        && u.phase.is_some()
+                        && u.phase == wu.phase
+                        && u.kind != task_core::WorkUnitKind::Integrate
+                        && u.status.is_active()
+                })
+                .map(|u| format!("{}: {}", u.key, u.spec.title))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(task_worker::protocol::WorkUnitPromptContext {
             key: wu.key.clone(),
             title: wu.spec.title.clone(),
@@ -8075,6 +8096,8 @@ impl Dispatcher {
             task_objective_excerpt,
             dependency_summaries,
             plan_overview,
+            branch,
+            parallel_siblings,
         })
     }
 
@@ -8219,7 +8242,11 @@ impl Dispatcher {
                         .collect()
                 })
                 .unwrap_or_default(),
-            max_work_units: limits.max_work_units,
+            max_work_units: if self.config.execution.parallel {
+                limits.max_work_units_v2
+            } else {
+                limits.max_work_units
+            },
             work_unit_max_turns: limits.work_unit_max_turns,
             work_unit_max_wall_secs: limits.work_unit_max_wall_secs,
             default_max_turns: original_budget.max_turns.max(30),
@@ -8229,6 +8256,12 @@ impl Dispatcher {
             current_plan_version,
             work_unit_summaries,
             preserve_done_keys,
+            parallel: self.config.execution.parallel,
+            max_phases: if self.config.execution.parallel {
+                limits.max_phases
+            } else {
+                0
+            },
         })
     }
 
@@ -26636,6 +26669,11 @@ mod tests {
         let units = store.work_units_for(task.id).unwrap();
         let events = events_of(&store, task.id);
         let task_dir = root.path().join(task.id.to_string());
+        // ADR-0074 §5.2: 統合 WU・工程・commit の列は events から作り直せる（replay の突き合わせで差分 0）。
+        let (wu_mismatches, _runs, plan_mismatches, _) =
+            task_ops::replay::check_and_apply_execution(store.as_ref(), false).unwrap();
+        assert!(wu_mismatches.is_empty(), "{wu_mismatches:?}");
+        assert!(plan_mismatches.is_empty(), "{plan_mismatches:?}");
         (
             adapter.max_active(),
             stored,
