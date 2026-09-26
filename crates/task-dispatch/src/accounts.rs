@@ -1343,11 +1343,22 @@ use std::collections::VecDeque;
 pub struct QuotaGroupMember {
     pub task_id: task_core::TaskId,
     pub run_id: String,
-    #[allow(dead_code)]
-    // 呼び出し側（dispatcher）が Closed の結果から他タスクへ events を書くのに使う
     pub work_unit_id: Option<String>,
     pub source: String,
     pub weighted_tokens: f64,
+    /// 参考の定価 USD（`Usage.cost_usd`）。グループが閉じたときに他タスクへ書く
+    /// `Event::QuotaEstimated.list_price_usd` に使う（この run の `Usage` はもう手元に無いため、
+    /// `begin`/`end` の時点で持っていた値をここに保存しておく）。
+    pub list_price_usd: Option<f64>,
+}
+
+/// ADR-0053/ADR-0074: `AccountAdapter` を quota の `source` 文字列に写す
+/// （`llm-proxy::server::source_label` と同じ語彙。プールを使うのはこの 2 つだけ）。
+pub fn quota_source_label(adapter: AccountAdapter) -> &'static str {
+    match adapter {
+        AccountAdapter::ClaudeCode => "claude-oauth",
+        AccountAdapter::Codex => "codex-oauth",
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1391,6 +1402,15 @@ pub struct QuotaActivity {
 impl QuotaActivity {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// `run_id` がこのアカウントで `begin` 済み（まだ `end` していない）かどうか。
+    /// `begin` を呼ばなかった run（例: planner run。`Dispatcher::quota_begin` の doc 参照）に対して
+    /// 誤って `end` を呼び、無関係な他の run のグループを壊さないための、呼び出し側の防御に使う。
+    pub fn is_tracked(&self, adapter: AccountAdapter, account_id: &str, run_id: &str) -> bool {
+        self.groups
+            .get(&(adapter, account_id.to_string()))
+            .is_some_and(|g| g.open_run_ids.contains(run_id))
     }
 
     /// run の開始。`snapshot` はこの時点で `AccountBook` から読んだ観測値、`snapshot_valid` は
@@ -1527,7 +1547,17 @@ mod quota_activity_tests {
             work_unit_id: None,
             source: "claude-oauth".to_string(),
             weighted_tokens,
+            list_price_usd: None,
         }
+    }
+
+    #[test]
+    fn quota_source_label_maps_adapters() {
+        assert_eq!(
+            quota_source_label(AccountAdapter::ClaudeCode),
+            "claude-oauth"
+        );
+        assert_eq!(quota_source_label(AccountAdapter::Codex), "codex-oauth");
     }
 
     #[test]

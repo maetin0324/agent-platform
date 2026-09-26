@@ -309,6 +309,21 @@ struct ExecutionGroupAcc {
     max_turn_failures: u64,
     repairs: u64,
     replans: u64,
+    /// ADR-0074 D4.3（Phase F3 quota）: このグループの各タスクの `ExecutionMetrics.quota` を集めた
+    /// もの（まだ (source, account, window) ごとに合計していない。`execution_metrics_from_groups`
+    /// で `task_core::merge_quota_use` に通す）。
+    quota_rows: Vec<task_core::QuotaUse>,
+    /// このグループの全タスクで `cost_usd_complete` だった（1 件でも不完全なタスクがあれば `false`）。
+    cost_usd_complete: bool,
+}
+
+impl ExecutionGroupAcc {
+    fn new() -> Self {
+        Self {
+            cost_usd_complete: true,
+            ..Self::default()
+        }
+    }
 }
 
 fn tier_key(t: Tier) -> &'static str {
@@ -361,6 +376,9 @@ pub(crate) fn execution_metrics_summary(
         let needs_events = (group_by == "lane" && row.has_execution_events)
             || row.has_budget_events
             || row.has_transition_metrics
+            // ADR-0074 D4.3（Phase F3 quota）: quota/cost_usd_complete は summarize_execution_metrics
+            // でしか求まらないので、QuotaEstimated を持つタスクは events を読む。
+            || row.has_quota_events
             || (row.has_execution_events
                 && row.runs_count == 0
                 && row.continuations == 0
@@ -402,7 +420,10 @@ pub(crate) fn execution_metrics_summary(
                 .to_string(),
             _ => gate,
         };
-        let acc = groups.entry(key).or_default();
+        // clippy::unwrap_or_default は誤検知（`ExecutionGroupAcc::new` は
+        // `cost_usd_complete: true` で `Default`〈`false`〉と値が違うので `or_default()` には置き換えられない）。
+        #[allow(clippy::unwrap_or_default)]
+        let acc = groups.entry(key).or_insert_with(ExecutionGroupAcc::new);
         acc.tasks += 1;
         match row.status {
             Status::Done => acc.done += 1,
@@ -422,6 +443,12 @@ pub(crate) fn execution_metrics_summary(
                 .map_or(row.repairs, |(m, _)| m.repairs_total),
         );
         acc.replans += u64::from(fallback.as_ref().map_or(row.replans, |(m, _)| m.replans));
+        // ADR-0074 D4.3（Phase F3 quota）: fallback（events を読んだ）タスクだけが quota /
+        // cost_usd_complete を持つ（索引には無い）。
+        if let Some((m, _)) = &fallback {
+            acc.quota_rows.extend(m.quota.iter().cloned());
+            acc.cost_usd_complete = acc.cost_usd_complete && m.cost_usd_complete;
+        }
     }
     Ok(execution_metrics_from_groups(
         group_by,
@@ -466,7 +493,10 @@ pub(crate) fn execution_metrics_summary_from_events(
             execution_group_key(task, &metrics, group_by)
         };
         total_tasks += 1;
-        let acc = groups.entry(key).or_default();
+        // clippy::unwrap_or_default は誤検知（`ExecutionGroupAcc::new` は
+        // `cost_usd_complete: true` で `Default`〈`false`〉と値が違うので `or_default()` には置き換えられない）。
+        #[allow(clippy::unwrap_or_default)]
+        let acc = groups.entry(key).or_insert_with(ExecutionGroupAcc::new);
         acc.tasks += 1;
         match task.status {
             Status::Done => acc.done += 1,
@@ -477,6 +507,8 @@ pub(crate) fn execution_metrics_summary_from_events(
         acc.max_turn_failures += u64::from(metrics.max_turn_failures);
         acc.repairs += u64::from(metrics.repairs_total);
         acc.replans += u64::from(metrics.replans);
+        acc.quota_rows.extend(metrics.quota.iter().cloned());
+        acc.cost_usd_complete = acc.cost_usd_complete && metrics.cost_usd_complete;
     }
 
     Ok(execution_metrics_from_groups(
@@ -512,6 +544,10 @@ fn execution_metrics_from_groups(
                 max_turn_failures: acc.max_turn_failures,
                 repairs: acc.repairs,
                 replans: acc.replans,
+                // ADR-0074 D4.3（Phase F3 quota）: グループ内の各タスクの quota を
+                // (source, account, window) ごとに合計する。
+                quota: task_core::merge_quota_use(acc.quota_rows),
+                cost_usd_complete: acc.cost_usd_complete,
             }
         })
         .collect();
@@ -521,6 +557,9 @@ fn execution_metrics_from_groups(
         since: since.map(|t| t.format(&Rfc3339).unwrap_or_default()),
         total_tasks,
         groups,
+        // `GET /metrics/execution` の呼び出し元（`task-api/src/execution.rs`）が
+        // `accounts_now`（`LlmSourcesReader` から）を埋める。ここでは常に空。
+        accounts_now: Vec::new(),
     }
 }
 

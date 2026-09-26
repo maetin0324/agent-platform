@@ -401,6 +401,34 @@ pub fn aggregate_quota_use<'a>(
         .collect()
 }
 
+/// D4.3: 複数の `QuotaUse`（例えば別々の Task から求めたもの）を、さらに (source, account, window)
+/// ごとに合計する純粋関数（`GET /metrics/execution` の group ごとの集計に使う）。
+pub fn merge_quota_use(rows: impl IntoIterator<Item = QuotaUse>) -> Vec<QuotaUse> {
+    let mut acc: BTreeMap<(String, Option<String>, QuotaWindow), QuotaUse> = BTreeMap::new();
+    for row in rows {
+        let key = (row.source.clone(), row.account.clone(), row.window);
+        match acc.entry(key) {
+            std::collections::btree_map::Entry::Vacant(v) => {
+                v.insert(row);
+            }
+            std::collections::btree_map::Entry::Occupied(mut o) => {
+                let existing = o.get_mut();
+                existing.runs += row.runs;
+                existing.used_pct = match (existing.used_pct, row.used_pct) {
+                    (Some(a), Some(b)) => Some(a + b),
+                    (Some(a), None) => Some(a),
+                    (None, Some(b)) => Some(b),
+                    (None, None) => None,
+                };
+                for (method, count) in row.method_counts {
+                    *existing.method_counts.entry(method).or_insert(0) += count;
+                }
+            }
+        }
+    }
+    acc.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -810,5 +838,59 @@ mod tests {
         );
         assert_eq!(row.method_counts.get("measured"), Some(&1));
         assert_eq!(row.method_counts.get("unknown"), Some(&1));
+    }
+
+    // ---- merge_quota_use ----
+
+    #[test]
+    fn merge_quota_use_sums_rows_from_different_tasks() {
+        let a = QuotaUse {
+            source: "claude-oauth".to_string(),
+            account: Some("x".to_string()),
+            window: QuotaWindow::FiveHour,
+            used_pct: Some(3.0),
+            runs: 1,
+            method_counts: BTreeMap::from([("measured".to_string(), 1)]),
+        };
+        let b = QuotaUse {
+            used_pct: Some(2.0),
+            runs: 1,
+            method_counts: BTreeMap::from([("measured".to_string(), 1)]),
+            ..a.clone()
+        };
+        let c_unknown = QuotaUse {
+            used_pct: None,
+            runs: 1,
+            method_counts: BTreeMap::from([("unknown".to_string(), 1)]),
+            ..a.clone()
+        };
+        let other_source = QuotaUse {
+            source: "codex-oauth".to_string(),
+            ..a.clone()
+        };
+        let merged = merge_quota_use(vec![a, b, c_unknown, other_source]);
+        assert_eq!(merged.len(), 2, "{merged:?}");
+        let claude = merged
+            .iter()
+            .find(|r| r.source == "claude-oauth")
+            .expect("claude row");
+        assert_eq!(claude.runs, 3);
+        assert_eq!(
+            claude.used_pct,
+            Some(5.0),
+            "unknown row contributes nothing"
+        );
+        assert_eq!(claude.method_counts.get("measured"), Some(&2));
+        assert_eq!(claude.method_counts.get("unknown"), Some(&1));
+        let codex = merged
+            .iter()
+            .find(|r| r.source == "codex-oauth")
+            .expect("codex row");
+        assert_eq!(codex.runs, 1);
+    }
+
+    #[test]
+    fn merge_quota_use_of_empty_is_empty() {
+        assert!(merge_quota_use(std::iter::empty()).is_empty());
     }
 }

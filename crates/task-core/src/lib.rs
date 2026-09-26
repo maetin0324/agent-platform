@@ -177,7 +177,7 @@ pub use execution_metrics::{
 // ---- ADR-0074 D4（Phase F3 quota）: quota 消費の推定 ----
 pub use quota::{
     QuotaCalibration, QuotaMethod, QuotaRunRecord, QuotaUse, QuotaWindow, QuotaWindowUse,
-    WindowSnapshot, aggregate_quota_use,
+    WindowSnapshot, aggregate_quota_use, merge_quota_use,
 };
 
 pub mod model_routing;

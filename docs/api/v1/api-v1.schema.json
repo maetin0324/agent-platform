@@ -233,6 +233,43 @@
       ],
       "type": "object"
     },
+    "AccountNowView": {
+      "description": "ADR-0074 D4.3（Phase F3 quota）: `GET /metrics/execution` の最上位に足す「今の残量」\n（`GET /llm/sources` の accounts と同じ値）。`source` は `sources[].id`（`claude-oauth` /\n`codex-oauth` / `openai-compatible:<id>`）。",
+      "properties": {
+        "cooldown_until": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "remaining_long": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "remaining_short": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "id"
+      ],
+      "type": "object"
+    },
     "AccountStats": {
       "description": "`WorkerStarted.account` / `WorkerFinished` から集計（task-api のメモリ内の観測値。再起動で再計算）。",
       "properties": {
@@ -5454,6 +5491,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "cost_usd_complete": {
+          "default": true,
+          "description": "D4.3: このグループの全タスクで定価 USD が完全だったか（単価不明のモデルを使った run が\n1 件でもあれば `false`）。",
+          "type": "boolean"
+        },
         "done": {
           "format": "uint64",
           "minimum": 0,
@@ -5478,6 +5520,14 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "quota": {
+          "default": [],
+          "description": "ADR-0074 D4.3（Phase F3 quota）: このグループの (source, account, window) ごとの quota 消費の合計。",
+          "items": {
+            "$ref": "#/$defs/QuotaUse"
+          },
+          "type": "array"
         },
         "repairs": {
           "format": "uint64",
@@ -5511,6 +5561,14 @@
     "ExecutionMetricsSummary": {
       "description": "`GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`。",
       "properties": {
+        "accounts_now": {
+          "default": [],
+          "description": "ADR-0074 D4.3（Phase F3 quota）: 今のアカウントの残量（`GET /llm/sources` と同じ値）。\n`[llm_proxy]` が無効なら空。",
+          "items": {
+            "$ref": "#/$defs/AccountNowView"
+          },
+          "type": "array"
+        },
         "group_by": {
           "type": "string"
         },
@@ -14457,6 +14515,14 @@
             "string",
             "null"
           ]
+        },
+        "quota": {
+          "default": [],
+          "description": "ADR-0074 D4.3（Phase F3 quota）: この WU の run の quota 消費の合計\n（`ExecutionPlanView::with_quota` が events から埋める。既定は空）。",
+          "items": {
+            "$ref": "#/$defs/QuotaUse"
+          },
+          "type": "array"
         },
         "retries": {
           "format": "uint32",
