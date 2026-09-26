@@ -95,6 +95,10 @@ pub fn decide(
 
 fn now_wu(mut wu: WorkUnitRow, status: WorkUnitStatus) -> WorkUnitRow {
     wu.status = status;
+    // ADR-0074 D1.5（Phase F2）: `running` を離れたら WU の lease を外す（v1 では常に空のまま）。
+    if status != WorkUnitStatus::Running {
+        wu.clear_lease();
+    }
     if status != WorkUnitStatus::Blocked {
         wu.blocked_reason = None;
     }

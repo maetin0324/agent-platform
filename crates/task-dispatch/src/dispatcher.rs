@@ -5905,6 +5905,7 @@ impl Dispatcher {
         } else {
             task_core::WorkUnitStatus::Ready
         };
+        updated.clear_lease();
         self.store.work_unit_transition(
             task_id,
             updated.clone(),

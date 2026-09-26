@@ -1363,6 +1363,21 @@ pub struct WorkUnitRow {
     pub spec: WorkUnitSpec,
     pub created_at: String,
     pub updated_at: String,
+    /// ADR-0074 D1（Phase F2 / migration 0027）: v2 の工程の key（v1・atomic は `None`）。
+    /// 普通の WU は `spec.phase` の写し、統合 WU（`integrate-<phase>`）は自分の工程。
+    pub phase: Option<String>,
+    /// ADR-0074 D1.5: この WU を今実行している run（`acquire_work_unit_lease`）。揮発（replay で比べない）。
+    pub lease_run_id: Option<String>,
+    /// ADR-0074 D1.5: 上の lease の期限（RFC 3339）。揮発。
+    pub lease_expires_at: Option<String>,
+    /// ADR-0074 D1.2: `celeris-wu/<task_id>/<key>`（WU の worktree を切ったときだけ）。
+    pub branch: Option<String>,
+    /// ADR-0074 D1.2: WU の worktree を切った基点 sha。
+    pub base_commit: Option<String>,
+    /// ADR-0074 D1.2: `WorkUnitCommitted` の commit（run が done になったときの決定的な commit）。
+    pub head_commit: Option<String>,
+    /// ADR-0074 D1.4: `PhaseIntegrated` の Task ブランチの HEAD（統合 WU の行だけ）。
+    pub integrated_commit: Option<String>,
 }
 
 impl WorkUnitRow {
@@ -1390,10 +1405,23 @@ impl WorkUnitRow {
             retries: 0,
             last_run_id: None,
             last_checkpoint_run_id: None,
+            phase: spec.phase.clone(),
             spec,
             created_at: created_at.clone(),
             updated_at: created_at,
+            lease_run_id: None,
+            lease_expires_at: None,
+            branch: None,
+            base_commit: None,
+            head_commit: None,
+            integrated_commit: None,
         }
+    }
+
+    /// ADR-0074 D1.5: WU の lease を外す（`running` を離れる遷移で呼ぶ）。
+    pub fn clear_lease(&mut self) {
+        self.lease_run_id = None;
+        self.lease_expires_at = None;
     }
 }
 
