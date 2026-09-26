@@ -20127,3 +20127,10 @@ run 開始部分で、F3 の `quota_begin` を `dispatch_one` に移して解消
 - 取り込み後の release gate は全段成功し、`gate.json.ok = true` とリリースディレクトリが生成された。しかし `prepare.sh` の 3600 秒制限が worktree の掃除中に発火し、verify 前に `result.json.ok = false` となった（`prepare.log`: 09:05:11 開始、10:04:31 release ready、10:05:11 Terminated）。
 - clean 475 秒、全 workspace テスト 2416 秒を要した実測に合わせ、release 全体の上限を 7200 秒に変更。verify の 900 秒上限は維持。軽量なモックテストで両上限と成功・失敗時の結果ファイルを確認する。
 - 修復 SHA `e07cc0f` の release gate では、`task-worker` 内の孤児子プロセス回収テストが並列実行中の別テストの `git commit` を先に reap し、3 件が `No child processes` で落ちた。回収テストを別 integration-test binary へ移し、`waitpid(-1)` が他の unit test の子を横取りできないようにした。
+
+## F5-1 dogfood の結果（2026-09-26 08:32〜12:26Z、タスク 01M3EDF3JEHRQCG6A2EJDRQMXJ）と 2 つの発見
+
+- 結果: done（壁時計 3h55m）。ただし **atomic で走った**（`has_plan: false`）。原因: 本番の `[execution] gate = "shadow"` では、人が `execution: compound` を明示した Task（`source = human`, `rule_id = human/explicit`）も採用されず記録だけになる（dispatcher の `shadow` が一律に効く）。E6 は `gate = on` だったので compound になった。→ 「人の明示は shadow でも採用する」修正を F3（途中確認）担当に追加指示。F5-1 は **F1 の WU ごとの lane の効果を測れていない**（worker 4 run はすべて `standard/default` / gpt-6-sol、これは atomic の従来動作）。修正が本番に入ってから F5-1 をやり直す。
+- 取れたもの: continuation 1 回（E1 の仕組みが本番で 1 回働いた）、retry 0、費用 4.63 USD 相当（`cost_usd_complete = false`）、quota は codex 7 日窓で `measured` 4 run（5 時間窓は unknown）。3 成果（ディスク残量チェック、codex cache usage、API docs）は配送待ち。
+- 発見 2: 終端した dogfood の workspace に `repos/agent-platform/target` が 25G あり、同時に `build-cache/cargo/agent-platform-f1d3fe5cc3`（Celeris が渡す `CARGO_TARGET_DIR`）にも 21G あった。worker か reviewer の cargo が Celeris の `CARGO_TARGET_DIR` を受け取らずに worktree 直下に target を作っている（`~/.cargo/config.toml` の `[build] target-dir` より env が勝つはずなので、env が渡っていない経路がある）。ルートディスクは 88% まで戻った → 両方削除して 69%。提案 P-F5-1: worker / reviewer / checks のすべての cargo 実行に `CARGO_TARGET_DIR` を渡す経路を確認し、終端タスクの prune に `repos/*/target` を含める（P-115-4 と同じ）。
+- 提案 P-F5-2: ルート LVM（252G）は DB + workspaces + build-cache + 実装エージェント 2 本の target で常に 60〜90%。Proxmox 側で 512G へ拡張するか、build-cache を別ボリュームにする（人の判断）。
