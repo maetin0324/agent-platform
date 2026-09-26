@@ -20121,3 +20121,8 @@ run 開始部分で、F3 の `quota_begin` を `dispatch_one` に移して解消
 - `celerisctl build-cache prune [--older-than <days>] [--dry-run]` は設定済み `build_cache_dir/cargo/*` の古い実ディレクトリだけを対象とする。既定 30 日、symlink は除外。
 - Codex CLI `turn.completed.usage.cached_input_tokens` を `Usage.cache_read_tokens` に取り込む。`ExecutionMetrics.total_cache_read_tokens` は観測値のみ合計する。詳細は ADR-0074 の Phase F5-1 節。
 - 実行・計画・再実行 API の型と既定値を `docs/celeris-api-v1.md` に追加した。
+
+### F5-1 配送準備の修復（2026-09-26）
+
+- 取り込み後の release gate は全段成功し、`gate.json.ok = true` とリリースディレクトリが生成された。しかし `prepare.sh` の 3600 秒制限が worktree の掃除中に発火し、verify 前に `result.json.ok = false` となった（`prepare.log`: 09:05:11 開始、10:04:31 release ready、10:05:11 Terminated）。
+- clean 475 秒、全 workspace テスト 2416 秒を要した実測に合わせ、release 全体の上限を 7200 秒に変更。verify の 900 秒上限は維持。軽量なモックテストで両上限と成功・失敗時の結果ファイルを確認する。

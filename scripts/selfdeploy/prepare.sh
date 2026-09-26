@@ -13,6 +13,9 @@ finish() {
     mv "$result_dir/result.json.tmp" "$result_dir/result.json"
 }
 trap finish EXIT
-timeout --signal=TERM --kill-after=30s 3600 bash "$script_dir/release.sh" "$sha"
+# A clean release rebuild can spend most of an hour in Cargo tests alone.
+# Keep the whole release (including packaging and worktree cleanup) bounded,
+# but leave enough headroom after the gate succeeds.
+timeout --signal=TERM --kill-after=30s 7200 bash "$script_dir/release.sh" "$sha"
 timeout --signal=TERM --kill-after=30s 900 bash "$script_dir/verify.sh" "${sha:0:12}"
 ok=true

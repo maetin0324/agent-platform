@@ -670,3 +670,6 @@ scripts/selfdeploy/migrate-to-celeris.sh --rollback
 `{"expected_status":"done"}` を送る。実装をやり直さず、現在のコミットを再判定する。
 競合・承認後の変更は部署へ差し戻し、既存の再開・修正経路を使う。マージ・ビルドの技術的失敗は一度だけ自動で実装担当へ戻し、同じタスクで無限に修正を繰り返さない。
 準備のログは `<releases_dir>/.deliveries/<task-id>/<sha>/prepare.log` に残る。
+`prepare.sh` は release 全体に 7200 秒、verify に 900 秒の上限を掛ける。
+Cargo の clean と全 workspace テストに時間がかかる場合も、gate 成功後の梱包と
+作業ツリーの掃除まで release の期限に含める。
