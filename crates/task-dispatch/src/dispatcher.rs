@@ -1719,6 +1719,11 @@ pub struct Dispatcher {
     tunnel_events: std::collections::VecDeque<TunnelEvent>,
     /// ADR-0053 D3: 最後にトンネルの生存を見た時刻（`refresh_cluster_liveness` と同じ間隔で間引く）。
     last_cluster_tunnel_refresh: Option<Instant>,
+    /// ADR-0074 D4（Phase F3 quota）: run の重なりを追跡し、measured/apportioned/pending を決定する
+    /// （プロセス内メモリのみ。`AccountBook` とは別軸で、replay の対象外）。
+    quota_activity: crate::accounts::QuotaActivity,
+    /// ADR-0074 D4.2（Phase F3 quota）: `estimated` の較正材料（source × 窓ごとの直近 `measured`）。
+    quota_calibration: crate::accounts::QuotaCalibrationBook,
 }
 
 impl Drop for Dispatcher {
@@ -1894,6 +1899,8 @@ impl Dispatcher {
             cluster_login_needed: std::collections::HashSet::new(),
             tunnel_events: std::collections::VecDeque::new(),
             last_cluster_tunnel_refresh: None,
+            quota_activity: crate::accounts::QuotaActivity::new(),
+            quota_calibration: crate::accounts::QuotaCalibrationBook::new(),
         }
     }
 
@@ -3224,6 +3231,324 @@ impl Dispatcher {
         Ok((finished, reviewed))
     }
 
+    /// ADR-0074 D4（Phase F3 quota）: run の開始で、そのアカウントの現在の観測値をグループの
+    /// `before` として `QuotaActivity` に登録する。アカウントプールを使わない run
+    /// （`account`/`account_adapter` が `None`）は何もしない（D4.2 手順 5 の `free` は完了時に
+    /// 決める。プールが無いのでそもそも重なりを追う意味が無い）。**planner run では呼ばない**
+    /// （`is_planner_dispatch`。completion が `on_planner_finished` に分岐し、この worker 用の
+    /// `end` を通らないため。呼ぶと `QuotaActivity` にこの run が開いたまま残ってしまう）。
+    fn quota_begin(
+        &mut self,
+        account: Option<&str>,
+        account_adapter: Option<AccountAdapter>,
+        run_id: &str,
+    ) {
+        let (Some(account_id), Some(adapter)) = (account, account_adapter) else {
+            return;
+        };
+        let before = self.account_book(adapter).and_then(|book| {
+            book.lock()
+                .ok()
+                .and_then(|guard| guard.state(account_id).and_then(|s| s.usage.clone()))
+        });
+        let now = (self.now_unix_fn)();
+        let before_valid = before
+            .as_ref()
+            .is_some_and(|obs| task_core::quota::before_is_valid(obs.observed_at, now, false));
+        self.quota_activity
+            .begin(adapter, account_id, run_id, before, before_valid);
+    }
+
+    /// ADR-0074 D4（Phase F3 quota）: 何も永続化しない早期 return（不明なタスク・stale な結果の
+    /// 破棄）でも `QuotaActivity` の bookkeeping だけは必ず閉じる（さもないと重なりの判定が永遠に
+    /// 狂う）。`is_tracked` で「`quota_begin` を呼んだ run か」を確かめてから呼ぶ（planner run は
+    /// `quota_begin` を呼んでいないので `false`。誤って無関係な他の run のグループを壊さないための
+    /// 防御。`quota_begin` の doc 参照）。戻り値（この run 自身の Event）は捨てる（グループが閉じて
+    /// 他のメンバー分が確定すれば、それらは `resolve_quota_estimate` の中で別タスクへ直接書かれる）。
+    fn release_quota_if_tracked(
+        &mut self,
+        run_id: &str,
+        account: Option<&str>,
+        account_adapter: Option<AccountAdapter>,
+        provider: &ProviderId,
+        task_id: TaskId,
+    ) {
+        let (Some(acct), Some(adapter)) = (account, account_adapter) else {
+            return;
+        };
+        if !self.quota_activity.is_tracked(adapter, acct, run_id) {
+            return;
+        }
+        let _ = self.resolve_quota_estimate(
+            task_id,
+            run_id,
+            None,
+            Some(acct),
+            Some(adapter),
+            provider,
+            "",
+            None,
+        );
+    }
+
+    /// D4.2: `window` 1 つを、measured → apportioned → estimated → unknown の優先順位で決める
+    /// （較正の取得はここでは行わない。呼び出し側が `calibration` を渡す）。
+    #[allow(clippy::too_many_arguments)]
+    fn decide_quota_window(
+        window: task_core::QuotaWindow,
+        before: Option<&RateLimitObservation>,
+        after: Option<&RateLimitObservation>,
+        before_valid: bool,
+        exclusive: bool,
+        apportioned: Option<&task_core::quota::ApportionedInputs>,
+        weighted_tokens: f64,
+        calibration: Option<task_core::QuotaCalibration>,
+    ) -> task_core::QuotaWindowUse {
+        let measured = task_core::quota::MeasuredInputs {
+            before: task_core::quota::snapshot(before, window),
+            after: task_core::quota::snapshot(after, window),
+            before_valid,
+            exclusive,
+        };
+        task_core::quota::decide_window(
+            window,
+            &measured,
+            apportioned,
+            weighted_tokens,
+            calibration,
+        )
+    }
+
+    /// ADR-0074 D4（Phase F3 quota）: run の終了で quota 消費を決定的に見積もり、この run 自身の
+    /// `Event::QuotaEstimated` を返す。重なった run のグループがこの run で閉じた場合は、他の
+    /// メンバーの分の Event を該当タスクへ直接書く（`store.append_event`。「同じ run_id は最後の
+    /// Event が有効」なので、それらの run の以前の暫定 Event を上書きする）。呼び出し側は戻り値を
+    /// 自分の `events` に足す（`WorkerFinished` と同じトランザクション）。
+    ///
+    /// `usage` が `None`（stale な結果の破棄など、`WorkerFinished` 自体を残さない経路）でも呼んでよい
+    /// （`QuotaActivity` の bookkeeping を必ず閉じるため）。戻り値は使わなくてよい。
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_quota_estimate(
+        &mut self,
+        task_id: TaskId,
+        run_id: &str,
+        work_unit_id: Option<String>,
+        account: Option<&str>,
+        account_adapter: Option<AccountAdapter>,
+        provider: &ProviderId,
+        model: &str,
+        usage: Option<&task_core::Usage>,
+    ) -> Event {
+        let usage_owned = usage.copied().unwrap_or_default();
+        let list_price_usd = usage_owned.cost_usd;
+        let weighted_tokens_with_default_r_out = |default_r_out: f64| {
+            let r_out = task_core::output_input_ratio(model).unwrap_or(default_r_out);
+            task_core::quota::weighted_tokens(&usage_owned, r_out)
+        };
+
+        let (Some(account_id), Some(adapter)) = (account, account_adapter) else {
+            // D4.2 手順 5: アカウントプールを使わない run は free（Qwen などローカル/従量でない供給元）。
+            let source = provider.to_string();
+            let weighted_tokens =
+                weighted_tokens_with_default_r_out(task_core::quota::default_r_out(&source));
+            let windows = vec![
+                task_core::quota::free_window(task_core::QuotaWindow::FiveHour),
+                task_core::quota::free_window(task_core::QuotaWindow::SevenDay),
+            ];
+            let method = task_core::quota::representative_method(&windows);
+            return Event::QuotaEstimated {
+                run_id: run_id.to_string(),
+                work_unit_id,
+                source,
+                account: None,
+                windows,
+                weighted_tokens,
+                method,
+                calibration: None,
+                weights_version: task_core::quota::WEIGHTS_VERSION.to_string(),
+                list_price_usd,
+            };
+        };
+
+        let source = crate::accounts::quota_source_label(adapter).to_string();
+        let weighted_tokens =
+            weighted_tokens_with_default_r_out(task_core::quota::default_r_out(&source));
+        let after = self.account_book(adapter).and_then(|book| {
+            book.lock()
+                .ok()
+                .and_then(|guard| guard.state(account_id).and_then(|s| s.usage.clone()))
+        });
+        let member = crate::accounts::QuotaGroupMember {
+            task_id,
+            run_id: run_id.to_string(),
+            work_unit_id: work_unit_id.clone(),
+            source: source.clone(),
+            weighted_tokens,
+            list_price_usd,
+        };
+        let outcome = self.quota_activity.end(adapter, account_id, member);
+
+        match outcome {
+            crate::accounts::QuotaEndOutcome::Exclusive {
+                before,
+                before_valid,
+            } => {
+                let mut calibration_used = None;
+                let windows: Vec<_> = [
+                    task_core::QuotaWindow::FiveHour,
+                    task_core::QuotaWindow::SevenDay,
+                ]
+                .into_iter()
+                .map(|w| {
+                    let calibration = self.quota_calibration.calibration(&source, w);
+                    let qw = Self::decide_quota_window(
+                        w,
+                        before.as_ref(),
+                        after.as_ref(),
+                        before_valid,
+                        true,
+                        None,
+                        weighted_tokens,
+                        calibration,
+                    );
+                    if qw.method == task_core::QuotaMethod::Estimated {
+                        calibration_used = calibration;
+                    }
+                    qw
+                })
+                .collect();
+                for qw in &windows {
+                    if qw.method == task_core::QuotaMethod::Measured
+                        && let Some(pct) = qw.used_pct
+                    {
+                        self.quota_calibration
+                            .record(&source, qw.window, pct, weighted_tokens);
+                    }
+                }
+                let method = task_core::quota::representative_method(&windows);
+                Event::QuotaEstimated {
+                    run_id: run_id.to_string(),
+                    work_unit_id,
+                    source,
+                    account: Some(account_id.to_string()),
+                    windows,
+                    weighted_tokens,
+                    method,
+                    calibration: calibration_used,
+                    weights_version: task_core::quota::WEIGHTS_VERSION.to_string(),
+                    list_price_usd,
+                }
+            }
+            crate::accounts::QuotaEndOutcome::Pending => {
+                // D4.2 手順 2: 「集合の最後の run が終わった時点で決まる。それまでは pending」。
+                // 暫定の unknown を出す（グループが閉じたら `store.append_event` で上書きされる）。
+                let windows = vec![
+                    task_core::quota::decide_window(
+                        task_core::QuotaWindow::FiveHour,
+                        &task_core::quota::MeasuredInputs {
+                            before: None,
+                            after: None,
+                            before_valid: false,
+                            exclusive: false,
+                        },
+                        None,
+                        weighted_tokens,
+                        None,
+                    ),
+                    task_core::quota::decide_window(
+                        task_core::QuotaWindow::SevenDay,
+                        &task_core::quota::MeasuredInputs {
+                            before: None,
+                            after: None,
+                            before_valid: false,
+                            exclusive: false,
+                        },
+                        None,
+                        weighted_tokens,
+                        None,
+                    ),
+                ];
+                Event::QuotaEstimated {
+                    run_id: run_id.to_string(),
+                    work_unit_id,
+                    source,
+                    account: Some(account_id.to_string()),
+                    windows,
+                    weighted_tokens,
+                    method: task_core::QuotaMethod::Unknown,
+                    calibration: None,
+                    weights_version: task_core::quota::WEIGHTS_VERSION.to_string(),
+                    list_price_usd,
+                }
+            }
+            crate::accounts::QuotaEndOutcome::Closed {
+                before,
+                before_valid,
+                members,
+            } => {
+                let total_weighted: f64 = members.iter().map(|m| m.weighted_tokens).sum();
+                let mut own_event = None;
+                for m in &members {
+                    let windows: Vec<_> = [
+                        task_core::QuotaWindow::FiveHour,
+                        task_core::QuotaWindow::SevenDay,
+                    ]
+                    .into_iter()
+                    .map(|w| {
+                        let apportion = task_core::quota::ApportionedInputs {
+                            group_before: task_core::quota::snapshot(before.as_ref(), w),
+                            group_after: task_core::quota::snapshot(after.as_ref(), w),
+                            group_before_valid: before_valid,
+                            member_weighted_tokens: m.weighted_tokens,
+                            group_weighted_tokens_total: total_weighted,
+                        };
+                        Self::decide_quota_window(
+                            w,
+                            None,
+                            None,
+                            false,
+                            false,
+                            Some(&apportion),
+                            m.weighted_tokens,
+                            None,
+                        )
+                    })
+                    .collect();
+                    let method = task_core::quota::representative_method(&windows);
+                    let ev = Event::QuotaEstimated {
+                        run_id: m.run_id.clone(),
+                        work_unit_id: m.work_unit_id.clone(),
+                        source: m.source.clone(),
+                        account: Some(account_id.to_string()),
+                        windows,
+                        weighted_tokens: m.weighted_tokens,
+                        method,
+                        calibration: None,
+                        weights_version: task_core::quota::WEIGHTS_VERSION.to_string(),
+                        list_price_usd: m.list_price_usd,
+                    };
+                    if m.run_id == run_id {
+                        own_event = Some(ev);
+                    } else if let Err(e) = self.store.append_event(m.task_id, &ev) {
+                        tracing::warn!(task_id = %m.task_id, run_id = %m.run_id, error = %e, "failed to record the apportioned quota event for a group member");
+                    }
+                }
+                own_event.unwrap_or_else(|| Event::QuotaEstimated {
+                    run_id: run_id.to_string(),
+                    work_unit_id,
+                    source,
+                    account: Some(account_id.to_string()),
+                    windows: vec![],
+                    weighted_tokens,
+                    method: task_core::QuotaMethod::Unknown,
+                    calibration: None,
+                    weights_version: task_core::quota::WEIGHTS_VERSION.to_string(),
+                    list_price_usd,
+                })
+            }
+        }
+    }
+
     fn on_worker_finished(
         &mut self,
         task_id: TaskId,
@@ -3240,12 +3565,26 @@ impl Dispatcher {
             .unwrap_or((None, None, None));
         let Some(task) = self.store.get(task_id)? else {
             tracing::warn!(%task_id, %run_id, "worker finished for unknown task");
+            self.release_quota_if_tracked(
+                &run_id,
+                account.as_deref(),
+                account_adapter,
+                &provider,
+                task_id,
+            );
             return Ok(());
         };
         let lease_matches = self.run_holds_lease(&task, &run_id)?;
         if !lease_matches {
             // ADR-0002 D9 / ADR-0005 D4: リース回収済み・cancel 済みの古い結果は捨てる。
             tracing::warn!(%task_id, %run_id, status = ?task.status, "stale worker result discarded");
+            self.release_quota_if_tracked(
+                &run_id,
+                account.as_deref(),
+                account_adapter,
+                &provider,
+                task_id,
+            );
             return Ok(());
         }
         // ADR-0072 D6（Phase E2）: 計画のある Task で、この run が `running` の WorkUnit のものなら
@@ -4084,6 +4423,35 @@ impl Dispatcher {
         // ADR-0072 D5/D8（Phase E1）: `CheckpointSaved` は `WorkerFinished` と同じトランザクションで残す。
         if let Some(checkpoint_event) = checkpoint_event {
             events.push(checkpoint_event);
+        }
+        // ADR-0074 D4（Phase F3 quota）: この run の quota 消費を見積もる（`WorkerFinished` と同じ
+        // トランザクションで残す。重なった run のグループがこれで閉じれば、他のメンバー分は
+        // `resolve_quota_estimate` の中で別タスクへ直接書く）。
+        {
+            let model_for_quota = self
+                .store
+                .events_for(task_id)
+                .ok()
+                .and_then(|events_so_far| {
+                    events_so_far.iter().rev().find_map(|(_, e)| match e {
+                        Event::WorkerStarted {
+                            run_id: r, model, ..
+                        } if r == &run_id => Some(model.clone()),
+                        _ => None,
+                    })
+                })
+                .unwrap_or_default();
+            let quota_event = self.resolve_quota_estimate(
+                task_id,
+                &run_id,
+                current_wu.as_ref().map(|wu| wu.id.clone()),
+                account.as_deref(),
+                account_adapter,
+                &provider,
+                &model_for_quota,
+                usage.as_ref(),
+            );
+            events.push(quota_event);
         }
         if let Some(reason) = failure_reason {
             match (&account, account_adapter) {
@@ -7161,6 +7529,12 @@ impl Dispatcher {
         // ADR-0043 D2: 中止されたときに片付けられるよう、この run で使う作業場所を覚えておく。
         if let Some(ws) = &worktree {
             self.task_workspaces.insert(task.id, ws.clone());
+        }
+        // ADR-0074 D4（Phase F3 quota）: 観測の `before` を記録する。planner run は completion が
+        // `on_planner_finished` に分岐し `resolve_quota_estimate`（`end`）を通らないため、ここでは
+        // 呼ばない（`quota_begin` 自身のコメント参照）。
+        if !is_planner_dispatch {
+            self.quota_begin(account.as_deref(), account_adapter, &run_id);
         }
         let handle = self.spawn_worker(
             task.id,
@@ -10893,6 +11267,10 @@ mod tests {
                 Event::WorkerProgress { .. } => "progress".into(),
                 Event::WorkerFinished { outcome, .. } => format!("finished:{outcome}"),
                 Event::ReviewVerdict { pass, .. } => format!("verdict:{pass}"),
+                // ADR-0074 D4（Phase F3 quota）: `finish_worker_result` が毎 run 出す
+                // `QuotaEstimated`（このテストの provider `p1` はアカウントプールを使わないので
+                // `free`）。中身は quota 専用のテストで確かめるので、ここでは種別だけを見る。
+                Event::QuotaEstimated { .. } => "quota_estimated".into(),
                 other => format!("{other:?}"),
             })
             .collect();
@@ -10904,6 +11282,7 @@ mod tests {
                 "progress",
                 "Running->Reviewing:worker_done",
                 "finished:done: ok",
+                "quota_estimated",
                 "Reviewing->Done:review_pass",
                 "verdict:true",
             ]
@@ -16721,6 +17100,95 @@ mod tests {
         assert_eq!(
             dir_value.as_deref(),
             Some(dir.path().join("b").to_string_lossy().as_ref())
+        );
+    }
+
+    /// ADR-0074 D4/§6 F3 (k)（Phase F3 quota）: quota の bookkeeping（`QuotaActivity`/
+    /// `QuotaCalibrationBook`）はアカウント選択にも lane 決定にも影響しない（観測と記録だけ、
+    /// D4「quota で dispatch・選択を変えない」）。同じ観測値・同じ設定で 2 回走らせ、片方だけ事前に
+    /// 「無関係な別 run がまだ重なっている」quota の状態と較正材料を仕込んでおいても、選ばれる
+    /// アカウントと `RoutingDecided` の記録内容（lane）は変わらない。
+    #[tokio::test]
+    async fn quota_bookkeeping_does_not_change_account_or_lane_selection() {
+        async fn run_once(prime_quota_state: bool) -> (Option<String>, Option<task_core::Tier>) {
+            let dir = accounts_fixture();
+            let book_path = dir.path().join(".celeris-usage.json");
+            {
+                let mut book = AccountBook::load(&book_path);
+                book.record_observation("a", usage_window(0.8, 90_000), ObservationSource::Run);
+                book.record_observation("b", usage_window(0.1, 90_000), ObservationSource::Run);
+                book.save().unwrap();
+            }
+            let ws_dir = tempfile::tempdir().unwrap();
+            let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+            let task = new_task(
+                ws_dir.path(),
+                Check::Command {
+                    cmd: "test -f touched".into(),
+                    expect_exit: 0,
+                },
+                0,
+            );
+            store.insert(&task).unwrap();
+            let captured = Arc::new(StdMutex::new(Vec::new()));
+            let adapter = Arc::new(PoolAdapter {
+                terminal_or_throttled: Ok(Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                }),
+                delay: Duration::ZERO,
+                observation: None,
+                env: Vec::new(),
+                captured,
+                spawn_failure: false,
+            });
+            let mut d =
+                pool_dispatcher(store.clone(), adapter, None, dir.path().to_path_buf(), 2, 2);
+            d.set_now_unix_fn(Arc::new(|| 10_000));
+            if prime_quota_state {
+                // 「無関係な別 run がまだ走っている」状態を作る（この run の完了時に apportion 側へ
+                // 倒れうる状態。選択そのものには関わらないはず）。
+                d.quota_activity.begin(
+                    AccountAdapter::ClaudeCode,
+                    "b",
+                    "unrelated-run",
+                    None,
+                    false,
+                );
+                d.quota_calibration.record(
+                    "claude-oauth",
+                    task_core::QuotaWindow::FiveHour,
+                    50.0,
+                    1_000.0,
+                );
+            }
+            let report = run_until_idle(&mut d, 200).await;
+            assert!(report.idle);
+            let events = store.events_for(task.id).unwrap();
+            let account = events.iter().find_map(|(_, e)| match e {
+                Event::WorkerStarted { account, .. } => account.clone(),
+                _ => None,
+            });
+            let event_list: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+            let task_row = store.get(task.id).unwrap().unwrap();
+            let lane = task_core::routing_audit(&task_row, &event_list)
+                .iter()
+                .rev()
+                .find_map(|a| a.lane);
+            (account, lane)
+        }
+
+        let baseline = run_once(false).await;
+        let primed = run_once(true).await;
+        assert_eq!(
+            baseline, primed,
+            "quota state must not change account/lane selection"
+        );
+        assert_eq!(
+            baseline.0.as_deref(),
+            Some("b"),
+            "sanity: the higher-headroom account still wins"
         );
     }
 

@@ -1095,6 +1095,32 @@ pub enum Event {
         class: String,
         origin: crate::execution::RepairOrigin,
     },
+    /// ADR-0074 D4.3（Phase F3 quota）: 1 run の quota 消費の推定（決定的。`task_core::quota` の
+    /// 純粋関数で決める）。`WorkerFinished` には足さない（struct literal の多数の箇所を避けるため、
+    /// ADR-0072 E1/E2 の逸脱節と同じ判断）。状態は変えない（`replay` は無視する）。
+    ///
+    /// `apportioned` は同じ `run_id` にもう 1 件出ることがある（グループの最後の run が終わって
+    /// 按分が確定したとき。**最後の Event が有効**）。
+    QuotaEstimated {
+        run_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        work_unit_id: Option<String>,
+        /// `"claude-oauth"` / `"codex-oauth"` / それ以外（アカウントプールを使わない provider の id。
+        /// D4.2 手順 5 の `free` になりうる）。
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<String>,
+        windows: Vec<crate::quota::QuotaWindowUse>,
+        weighted_tokens: f64,
+        /// `windows` を 1 つに畳み込んだ代表値（`task_core::quota::representative_method`）。
+        method: crate::quota::QuotaMethod,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calibration: Option<crate::quota::QuotaCalibration>,
+        weights_version: String,
+        /// 参考の定価 USD（`Usage.cost_usd` と同じ値。不明なら `None`）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        list_price_usd: Option<f64>,
+    },
     /// ADR-0074 D1.2（Phase F2b）: v2 の WU の run が done になり、daemon が WU の作業ツリーで
     /// 決定的に commit した（`git add -A && git commit -m "wu/<key>: <title>"`。変更が無ければ commit
     /// せず、その時点の HEAD）。`work_units.branch`/`base_commit`/`head_commit` の正本。状態は変えない。

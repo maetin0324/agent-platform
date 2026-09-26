@@ -130,6 +130,18 @@ fn price_for(model: &str) -> Option<Price> {
         .map(|(_, price)| *price)
 }
 
+/// ADR-0074 D4.2（Phase F3 quota）: `r_out`（重み付きトークンの出力/入力比）を単価表から求める。
+/// 単価表にモデルが無い、または入力・出力どちらかの単価が無ければ `None`（呼び出し側は
+/// `task_core::quota::default_r_out` の provider 既定にフォールバックする）。
+pub fn output_input_ratio(model: &str) -> Option<f64> {
+    let price = price_for(model)?;
+    let input = price.input_per_million?;
+    if input <= 0.0 {
+        return None;
+    }
+    Some(price.output_per_million? / input)
+}
+
 /// `model`（前方一致で単価表を引く）と `usage` から USD の推定コストを計算する。
 /// 単価表に無いモデル、もしくは `usage` にトークンが 1 件も無ければ `None`。
 pub fn estimate_cost_usd(model: &str, usage: &Usage) -> Option<f64> {
@@ -233,6 +245,19 @@ mod tests {
             estimate_cost_usd("claude-sonnet-5", &Usage::default()),
             None
         );
+    }
+
+    #[test]
+    fn output_input_ratio_of_a_known_model() {
+        // claude-sonnet-5: output 10.0 / input 2.0 = 5.0
+        let ratio = output_input_ratio("claude-sonnet-5").expect("known model");
+        assert!((ratio - 5.0).abs() < 1e-9, "{ratio}");
+    }
+
+    #[test]
+    fn output_input_ratio_of_an_unpriced_model_is_none() {
+        assert_eq!(output_input_ratio("gpt-6-sol"), None);
+        assert_eq!(output_input_ratio("some-local-llm"), None);
     }
 
     #[test]

@@ -139,7 +139,14 @@ async fn get_task_execution(
             {
                 Some(pv) => {
                     let versions = store.execution_plan_list(task_id).map_err(store_problem)?;
-                    Some(ExecutionPlanView::new(pv.plan, pv.work_units, versions))
+                    // ADR-0074 D4.3（Phase F3 quota）: WU ごとの quota 消費を差し込む。
+                    let events = store.events_for(task_id).map_err(store_problem)?;
+                    let event_list: Vec<task_core::Event> =
+                        events.iter().map(|(_, e)| e.clone()).collect();
+                    let by_wu = task_core::group_quota_by_work_unit(&event_list);
+                    Some(
+                        ExecutionPlanView::new(pv.plan, pv.work_units, versions).with_quota(&by_wu),
+                    )
                 }
                 None => None,
             };
@@ -189,10 +196,33 @@ async fn get_execution_metrics(
     if !crate::stats::EXECUTION_METRICS_GROUP_BY.contains(&group_by.as_str()) {
         return Err(bad_group_by(&group_by));
     }
-    let summary = state
+    let mut summary = state
         .blocking(move |store| {
             crate::stats::execution_metrics_summary(store, since, &group_by).map_err(store_problem)
         })
         .await?;
+    // ADR-0074 D4.3（Phase F3 quota）: 今のアカウントの残量を最上位に足す（`GET /llm/sources` と
+    // 同じ値）。`[llm_proxy]` が無効なら空のまま（quota はここでは判断材料ではなく観測なので、
+    // 409 にはしない。D4）。
+    if let Some(reader) = state.inner.llm_sources.clone() {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let sources = reader.view(now).await;
+        summary.accounts_now = sources
+            .sources
+            .into_iter()
+            .flat_map(|s| {
+                let source = s.id;
+                s.accounts
+                    .into_iter()
+                    .map(move |a| crate::types::AccountNowView {
+                        source: source.clone(),
+                        id: a.id,
+                        remaining_short: a.remaining_short,
+                        remaining_long: a.remaining_long,
+                        cooldown_until: a.cooldown_until,
+                    })
+            })
+            .collect();
+    }
     Ok(json_response(StatusCode::OK, &summary))
 }

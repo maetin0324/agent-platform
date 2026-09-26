@@ -149,7 +149,7 @@ pub(crate) fn parse_snake<T: DeserializeOwned>(what: &str, value: &str) -> Resul
 }
 
 /// `Event` の serde の `type` 名（`types` クエリの語彙）。
-pub(crate) const EVENT_TYPES: [&str; 26] = [
+pub(crate) const EVENT_TYPES: [&str; 27] = [
     "created",
     "transitioned",
     "worker_started",
@@ -186,6 +186,8 @@ pub(crate) const EVENT_TYPES: [&str; 26] = [
     "execution_gated",
     // ADR-0074 D6.2（Phase F1）: repair WU を起こしたこと（class・起こした場所）。
     "repair_scheduled",
+    // ADR-0074 D4.3（Phase F3）: run 1 件の quota 消費の推定。
+    "quota_estimated",
 ];
 
 pub(crate) fn event_type_name(event: &Event) -> &'static str {
@@ -216,6 +218,7 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::WorkUnitTransitioned { .. } => "work_unit_transitioned",
         Event::ExecutionGated { .. } => "execution_gated",
         Event::RepairScheduled { .. } => "repair_scheduled",
+        Event::QuotaEstimated { .. } => "quota_estimated",
         Event::WorkUnitCommitted { .. } => "work_unit_committed",
         Event::PhaseIntegrated { .. } => "phase_integrated",
         Event::WorkUnitsSerialized { .. } => "work_units_serialized",

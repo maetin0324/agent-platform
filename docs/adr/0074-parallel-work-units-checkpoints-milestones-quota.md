@@ -2,7 +2,8 @@
 
 - 日付: 2026-09-26
 - 状態: **Accepted**（Phase F0 = 設計。Phase F1（WU ごとの lane、planner の lane とサイズ、replan の差分、
-  repair の分類、成果物の登録）着手・完了、2026-09-26。F2 以降は未着手）
+  repair の分類、成果物の登録）着手・完了、2026-09-26。Phase F3 の quota 側（(g)〜(k)）着手・完了、
+  2026-09-26。F2・F3 の途中確認・F4 以降は未着手）
 - 関連:
   - ADR-0072（Task / ExecutionPlan / WorkUnit / Run。本 ADR はその D6 の直列規則・D13・D14・D16・D17・D18・D19・D21・D22 と §7 U3 / U4 を改める）
   - `docs/execution-decomposition-report-2026-09-25.md`（E6 dogfood の分析。以下「E6 報告」）
@@ -901,3 +902,79 @@ GUI を触る Phase では `pnpm typecheck` / `lint` / `test` / `gen:types` の�
   ため、`WorkUnitRow` に対応するフィールドを足すのは (c) 以降の区切りに送る、という意図的な
   順序（CLAUDE.md「巨大 1 セッションにしない」の区切りに合わせた）。(b) の受け入れ条件
   「migration 0027 と旧い DB からの移行テスト」はこの範囲で満たしている。
+## Phase F3（quota）実装時の逸脱・明確化（2026-09-26）
+
+D4・§6 F3 の quota 側（(g)〜(k)）を実装しながら見つかった、記述と実装の食い違い・簡略化・明確化。
+branch `worktree-agent-aecde37d6476fb05a`、commit は `docs/PROGRESS.md` の Phase F3（quota）節を参照。
+**途中確認（(a)〜(f)）は本 Phase の対象外**（別の担当。`crates/task-core/src/notify.rs` や
+`Trigger::PhaseGate`/`PhaseResume` は今回触っていない）。
+
+1. **`Event::QuotaEstimated` の `windows` に窓ごとの `method` を持たせた**: D4.3 の JSON 例は
+   `windows: [{window, before, after, resets_at, used_pct}]`（窓ごとの method 無し）+ 事象全体の
+   `method` という形だったが、5 時間枠と 7 日枠で「枠がリセットされたか」等の判定が食い違いうる
+   （例: 7 日枠だけ `resets_at` を跨ぐ）ため、`QuotaWindowUse` に窓ごとの `method` も残した。
+   事象の代表 `method`（`windows` を 1 つに畳み込んだ値。`task_core::quota::representative_method`、
+   優先順位 measured > apportioned > estimated > free > unknown）は ADR どおり別に持つ。
+2. **`before_is_valid` の `other_consumption_since` の実際の決め方**: ADR D4.1 は「観測の後に
+   そのアカウントの他の消費が無ければ使う」とだけ書いていたが、`other_consumption_since` を
+   決定的に判定する材料（過去の消費の履歴）を新しく保持するコストを避けるため、実装は
+   `crates/task-dispatch/src/accounts.rs::QuotaActivity`（run の重なりを追跡する状態機械）で
+   代替した: グループの `before` はグループが「空 → 非空」になった瞬間（= 最初の run の開始）に
+   1 回だけ記録し、`before_is_valid` の純粋関数自体には常に `other_consumption_since = false`
+   （celeris が追跡している他の run による消費は、重なりそのもの＝`ever_multi` で apportioned に
+   倒すため別軸）を渡す。celeris の外（人が同じ Max/ChatGPT アカウントを直接使う）での消費は
+   ADR 自身が「区別する手段が無い」（U-F3）と認めている既知の限界のまま。
+3. **quota の bookkeeping（`QuotaActivity`/`QuotaCalibrationBook`）はプロセス内メモリのみ**:
+   D4.2 は「同じ source の直近 14 日の measured run（最大 20 件）」と書いているが、events を
+   横断して探す store 側の問い合わせは新設せず、dispatcher プロセスの寿命の間だけ保つ
+   リングバッファ（件数の上限 20 だけを守る。日数の上限は無い）にした。再起動すれば較正も
+   run の重なりの追跡もやり直しになり、しばらく `estimated`/`unknown` に倒れる（値を捏造しない、
+   という規律の範囲内の劣化）。
+4. **quota の対象は worker/WU の run だけ**: planner run・reviewer run は本 Phase では
+   `Event::QuotaEstimated` を出さない（`Dispatcher::quota_begin` は `is_planner_dispatch` を除外し、
+   reviewer 用の `spawn_review`/`on_review_finished` は変更していない）。ADR §6 F3 の「触るファイル」
+   一覧が `dispatcher.rs` について「run の開始・終了で usage / アカウントを記録する部分だけ」と
+   範囲を絞っていたことと、reviewer の完了経路が Phase F1 の逸脱節で扱った深さの調査を要すること
+   （`finish_reviewer_run_index` の `usage` 欠落バグ等）を踏まえ、今回は最も run 数の多い経路
+   （worker/WU）に絞った。次の一手として PROGRESS の「未解決事項」に残す。
+5. **アカウントプールを使わない run は一律 `free`**: D4.2 手順 5 は「Qwen などローカル/従量でない
+   供給元」を free としているが、実装は `account_adapter.is_none()`（= claude-oauth/codex-oauth の
+   プールを使わない）を free の判定に使った。この codebase では account pool を持つ供給元が
+   claude-oauth/codex-oauth の 2 つだけなので、両者は現状一致する（`source` は
+   `provider.to_string()`）。将来アカウントプールを持たない有料の供給元を足す場合は、この判定を
+   見直す必要がある。
+6. **apportioned のグループ境界は「同じアカウントの busy period」**: D4.2 は「重なった run の集合」
+   とだけ書いていたが、実装は「そのアカウントの使用中 run が 0 → 1 になってから 1 → 0 に戻るまで」
+   を 1 グループとした（`QuotaActivity`。孤立した重なりのペアごとにグループを分けるのではなく、
+   連鎖的に重なっていれば 1 つの busy period として扱う）。グループが閉じた時点で、按分した
+   `Event::QuotaEstimated` を全メンバー（他の Task の run も含む）へ `store.append_event` で
+   直接書く（「最後の Event が有効」を利用して、先に出した暫定の `unknown` を上書きする）。
+7. **`ExecutionMetricsTaskRow` に `has_quota_events` を追加した**（`crates/task-core/src/store.rs`。
+   ADR §6 F3 の「触るファイル」一覧に `store.rs` は無い）: `GET /metrics/execution` の索引ベースの
+   集計（`crate::stats::execution_metrics_summary`）は、budget/transition の events が無ければ
+   タスクごとの events を読まない（性能のための既存の最適化、ADR-0072 E6）。quota/cost_usd_complete
+   は `summarize_execution_metrics` でしか求まらないため、既存の `has_execution_events`/
+   `has_budget_events`/`has_transition_metrics` と同じ形で `has_quota_events`
+   （`quota_estimated` イベントの有無）を足し、`needs_events` に足した。D4.3 の
+   「`QuotaEstimated` を持つタスクだけ events に落ちる（既存の `needs_events` と同じ形）」という
+   記述を素直に実装した結果であり、逸脱というより明確化（「触るファイル」一覧の抜け）。
+   **性能への影響**: 本 Phase は worker/WU run のたびに `QuotaEstimated` を出すため、run のある
+   タスクはほぼ確実に `has_quota_events = true` になり、`needs_events` の「索引だけで足りる」
+   最適化の効果は縮む。ADR-0072 E6 の「2,000 タスク × 20 events」の合成計測はこの変化を
+   織り込んでいない。実データでの再計測は行っていない（次の一手として残す）。
+
+### F3（quota）の受け入れ条件との対応
+
+- (g) `crates/task-core/src/quota.rs::decide_window`（`measured_used_pct` → `apportioned_used_pct` →
+  `estimated_used_pct` → unknown の順、`free_window` は呼び出し側が先に判定）。21 件の表のテスト。
+- (h) `crates/task-core/src/quota.rs::before_is_valid` + `crates/task-dispatch/src/accounts.rs::QuotaActivity`
+  （観測の有効性と「重なり」の判定を分離。上記逸脱 2）。
+- (i) `ExecutionMetrics.quota`/`quota_unknown_runs`/`cost_usd_complete`
+  （`crates/task-core/src/execution_metrics.rs`）、`WorkUnitView.quota`
+  （`crates/task-api/src/types.rs::ExecutionPlanView::with_quota`）、`GET /metrics/execution` の
+  グループごとの `quota`/`cost_usd_complete` と最上位の `accounts_now`
+  （`crates/task-api/src/{stats.rs,execution.rs}`）。
+- (j) `gui/app/lib/task-execution.ts::{quotaSummaryLines, costReferenceLabel}`、
+  `gui/app/components/ExecutionSection.tsx`（quota が主、定価は「参考」、unknown は「不明」）。
+- (k) `dispatcher::tests::quota_bookkeeping_does_not_change_account_or_lane_selection`
+  （quota の状態を変えても `WorkerStarted.account` と `routing_audit` の lane が変わらないことを確認）。

@@ -568,6 +568,9 @@ pub struct ExecutionMetricsTaskRow {
     pub has_budget_events: bool,
     /// atomic の continue/retry は work_units に記録されない。
     pub has_transition_metrics: bool,
+    /// ADR-0074 D4.3（Phase F3 quota）: `Event::QuotaEstimated` を 1 件でも持つ
+    /// （`ExecutionMetrics.quota`/`cost_usd_complete` を求めるには events を読む必要がある）。
+    pub has_quota_events: bool,
 }
 
 /// ADR-0033 D3: 報告（`reports`）の読み書きは `crate::report::ReportStore` にあり、`TaskStore` はそれを
@@ -5041,7 +5044,9 @@ impl TaskStore for SqliteStore {
                         EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND \
                           json_extract(e.json, '$.type') = 'transitioned' AND \
                           json_extract(e.json, '$.reason') IN \
-                          ('continue', 'work_unit_retry', 'worker_error') LIMIT 1) \
+                          ('continue', 'work_unit_retry', 'worker_error') LIMIT 1), \
+                        EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND \
+                          json_extract(e.json, '$.type') = 'quota_estimated' LIMIT 1) \
                  FROM eligible t \
                  LEFT JOIN wu ON wu.task_id = t.id \
                  LEFT JOIN plans ON plans.task_id = t.id \
@@ -5063,7 +5068,7 @@ impl TaskStore for SqliteStore {
                     row.get::<_, Option<String>>(14)?, row.get::<_, Option<String>>(15)?,
                     row.get::<_, Option<String>>(16)?, row.get::<_, Option<String>>(17)?,
                     row.get::<_, String>(18)?, row.get::<_, bool>(19)?, row.get::<_, bool>(20)?,
-                    row.get::<_, bool>(21)?,
+                    row.get::<_, bool>(21)?, row.get::<_, bool>(22)?,
                 ))
             })?;
             let mut out = Vec::new();
@@ -5071,7 +5076,8 @@ impl TaskStore for SqliteStore {
                 let (id, status, genre, assignee, routing_json, repairs, replans,
                     continuations, retries, runs_count, budget_exhausted_runs, run_id,
                     role, run_status, adapter, model, metrics_json, usage_json, updated_at,
-                    has_execution_events, has_budget_events, has_transition_metrics) = row?;
+                    has_execution_events, has_budget_events, has_transition_metrics,
+                    has_quota_events) = row?;
                 // SQLite julianday has millisecond resolution. Keep a 1 ms candidate margin in
                 // SQL, then apply the original OffsetDateTime comparison exactly here.
                 if let Some(since) = since && parse_rfc3339(&updated_at)? < since {
@@ -5095,7 +5101,7 @@ impl TaskStore for SqliteStore {
                     status: parse_status(&status)?, genre, assignee, routing_json,
                     repairs, replans, continuations, retries, runs_count,
                     budget_exhausted_runs, latest_run, has_execution_events, has_budget_events,
-                    has_transition_metrics,
+                    has_transition_metrics, has_quota_events,
                 });
             }
             Ok(out)
