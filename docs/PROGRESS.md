@@ -20021,3 +20021,10 @@ in_flight: usize, limit: usize) -> Vec<String>` を `crates/task-core/src/execut
 - planner のプロンプトへの v2 `phases` の書き方の追加（`claude_code.rs`）は、v2 を実際に
   planner に出させる `[execution] parallel` の config・dispatcher 側の分岐と合わせて (c)/(d) の
   範囲で行う（今回は v1 のプロンプト・挙動を 1 バイトも変えないことを優先し、着手していない）。
+
+## 障害: ルートディスク満杯（2026-09-26 05:57〜08:30Z）
+
+- 事象: `/`（ローカル LVM 252G。`/var/lib/celeris` の DB・workspaces・build-cache がここ）が 100% になり、本番デーモンが 05:57Z に「knowledge: could not schedule the maintenance runs: sqlite error: database or disk is full」。release `a770bcb5b7b5` の verify は GUI `/org` が 500（API が SQLITE_FULL）で失敗。
+- 原因: NFS 移行後、cargo の target をローカルへ寄せたうえで、並行する実装エージェント（F2b / F3-quota / 開発用）に worktree ごとの `CARGO_TARGET_DIR` を持たせた結果、`/var/lib/celeris/build-cache/cargo/` に 42G + 41G + 30G + 9G が積み上がった（ルートの元の使用量 121G に加算）。
+- 対処: 完了したエージェントの target 3 つを削除 → 使用 242G → 130G（空き 112G）。本番は WAL で継続、エラーは 1 回のみ。verify を再実行。
+- 恒久策: (1) エージェントの branch を main に統合したら、その `CARGO_TARGET_DIR` を必ず削除する（統合の手順に組み込む）。(2) 同時に走らせる実装エージェントは 2 本まで。(3) P-115-6 のディスク残量チェック（dispatch 前に `/` と `/home` を見て閾値未満なら run を始めない）を次の Phase に入れる。(4) ルート LVM の拡張（Proxmox 側、人の判断）。
