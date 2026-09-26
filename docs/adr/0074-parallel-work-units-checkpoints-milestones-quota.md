@@ -3,7 +3,8 @@
 - 日付: 2026-09-26
 - 状態: **Accepted**（Phase F0 = 設計。Phase F1（WU ごとの lane、planner の lane とサイズ、replan の差分、
   repair の分類、成果物の登録）着手・完了、2026-09-26。Phase F3 の quota 側（(g)〜(k)）着手・完了、
-  2026-09-26。F2・F3 の途中確認・F4 以降は未着手）
+  2026-09-26。Phase F2（WU の並列。(a)(b) と (c)〜(l)）着手・完了、2026-09-26（F2b）。F3 の途中確認・
+  F4 以降は未着手）
 - 関連:
   - ADR-0072（Task / ExecutionPlan / WorkUnit / Run。本 ADR はその D6 の直列規則・D13・D14・D16・D17・D18・D19・D21・D22 と §7 U3 / U4 を改める）
   - `docs/execution-decomposition-report-2026-09-25.md`（E6 dogfood の分析。以下「E6 報告」）
@@ -978,3 +979,100 @@ branch `worktree-agent-aecde37d6476fb05a`、commit は `docs/PROGRESS.md` の Ph
   `gui/app/components/ExecutionSection.tsx`（quota が主、定価は「参考」、unknown は「不明」）。
 - (k) `dispatcher::tests::quota_bookkeeping_does_not_change_account_or_lane_selection`
   （quota の状態を変えても `WorkerStarted.account` と `routing_audit` の lane が変わらないことを確認）。
+
+## Phase F2b 実装時の逸脱・明確化（2026-09-26）
+
+F2 の (c)〜(l)（鍵 (task, WU)・WU の worktree・統合 WU・伝播・再起動・Cancel・公平性・並列 1・GUI）を実装しながら
+見つかった、D1・§4・§5 の記述とコードの食い違い・簡略化・明確化。branch `worktree-agent-ac4722421a9ef87da`
+（commit は `docs/PROGRESS.md` の「Phase F2b」節）。
+
+**鍵と lease（D1.5）**
+1. `run_id → RunKey` の索引は別の map を持たず、`running` の値を線形に探す（`take_running_by_run_id`）。
+   並列度の上限（全体の `max_concurrency`）が小さいので、索引の同期ずれを持ち込むよりこちらを選んだ。
+2. `acquire_work_unit_lease` は ADR の `(task_id, wu_id, run_id, ttl)` に `branch` / `base_commit`（`None` なら
+   変えない）を足した。WU の worktree を切った事実を lease と同じトランザクションで行に書くため。
+3. WU の run の heartbeat は `StoreSink` を変えずに、`renew_lease` を一般化して扱う（Task の lease の保持者と
+   一致しなければ、その run が WU の lease を持っているかを見て、WU の lease と Task の lease〈短くしない〉を延ばす）。
+   統合の間は `extend_task_lease`（新設）で延ばす。WU の checks の間も WU の lease を延ばす（照合で戻さないため）。
+4. v2 の計画は、並列 1 に倒した Task でも工程の lease（`phase:<plan_id>:<phase>:<ulid>`）と WU の lease で走る
+   （v1 と atomic だけが従来の「Task の lease = run」）。経路を 1 つにするため。
+
+**Task の遷移（D1.6）**
+5. 兄弟が走っている間に終わった WU の run は、`WorkerFinished` / `CheckpointSaved` / `WorkUnitCommitted` /
+   `QuotaEstimated` を `append_event` で 1 件ずつ残し、Task は遷移させない（遷移のトランザクションが無いため）。
+6. in-flight が 0 になったときの優先順（ADR の表は同時に起きた場合を決めていなかった）: **question → 失敗
+   （failed を先に、次に limit / plan_issue / dependency_failed）→ 起こせる WU → 統合**。人の入力を replan で
+   捨てないため question を先にする。先に止まっていた兄弟の WU の分は、その WU の行（状態・blocked_reason）と
+   最後の `WorkerFinished.outcome` から trigger を作り直す（`deferred_work_unit_trigger`。replan の上限もその時点で見る）。
+   純粋関数 `execution_scheduler::settle_phase` にまとめた。
+7. `Continue{advance}` の代わりに、この run 自身の trigger が `Continue{…}` / `Requeue` / `InfraRequeue` /
+   `WorkerError` なら、それを使う（WU の retry・continuation・供給側失敗の数え方を変えないため）。
+
+**WU の worktree（D1.2）**
+8. WU の worktree は **dispatch の時点で daemon が同期に切る**（tick の中で `git worktree add`。既存の
+   checkpoint の git 読み取りと同じ扱い）。基点は、ブランチが既にあれば使い回し、無ければ同じ工程の依存先の WU
+   ブランチの HEAD（積み上げ。依存先は done）か Task ブランチの HEAD。Task の worktree（基点）も先に用意する。
+9. `runs/` は Task のものを共有し、成果物だけを `<task_dir>/wu/<key>/artifacts` に分ける
+   （`RunExtras.artifacts_dir_override`）。`[commands] setup` は WU の worktree ごとに 1 回（`wu/<key>/runs/setup.log`）。
+10. 統合の repair WU（`kind = repair`）は WU の worktree を持たず Task の worktree で走り、done のときの commit も
+    Task の worktree で行う（`WorkUnitCommitted.branch` は Task のブランチ）。並列 1 に倒した Task では daemon は
+    commit しない（Task の worktree を共有し、v1 と同じ）。
+11. 並列 1 に倒した理由は `work_units` の列ではなく新しい Event **`WorkUnitsSerialized{plan_id, reason}`**
+    （計画ごとに 1 回）に残す（migration 0027 に理由の列が無いため）。API（`ExecutionPlanView.serialized_reason`・
+    `ExecutionPlanOverview.serialized_reason`）と GUI に出す。
+12. 並列数の上限は `[execution] max_parallel_work_units`（既定 3、1..=6）だけを実装した。
+    **Task（`NewTaskSpec.execution`）・CoS・profile の `budget.max_parallel_work_units` で狭める経路は未実装**
+    （それらの型に欄がまだ無い。F4/F5 の申し送り）。
+
+**統合 WU（D1.4）**
+13. `integrate-<phase>` は計画の spec（`ExecutionPlanned.plan`）に入れず、採用時と replay の両方で同じ純粋関数
+    `task_core::materialize_work_units` が工程の末尾に足す。v2 の計画では `integrate-` で始まる key を
+    `PlanValidationError::ReservedKey` で拒否する。工程の障壁は `newly_ready` に入れた（前の工程の有効な行
+    〈統合 WU を含む〉がすべて done になるまで上げない）。統合 WU は `ready` にも runnable にもならない。
+14. `PhaseIntegrated.checks[]` は `{cmd, pass, summary}`（ADR は `{cmd, exit, summary}`）。
+    `review::run_work_unit_checks` は exit code を返さず `(pass, reason)` を返すため。`merged[]` には
+    冪等なやり直しで飛ばしたことを示す `skipped` を足した。
+15. 衝突の repair の class は **`merge_conflict`**（`RepairClass::MergeConflict`、予算は merge_base と同じ 30/1800）、
+    origin は `integration`。依頼文は class を `integration` と書いていたが、ADR D1.4 3. と §4 の表
+    （`merge_conflict`）に合わせ、`integration` は origin の値にした。repair WU には決定的な検査
+    `git merge-base --is-ancestor <WU ブランチ> HEAD` を付ける。
+16. 統合後の検査の repair WU の key は `repair-<phase>-<n>`（ADR は名前を決めていなかった）。`max_repairs` と
+    同じ class の上限は最終レビューの repair と同じ数え方（title の `repair (<class>)`）。
+17. 統合を諦めるとき（merge の repair の上限・分類に当たらない検査の失敗・git の失敗）は、統合 WU を `failed`
+    にして `Continue{replan}`（`settle_phase` が失敗として replan に回す。replan は統合 WU を pending に戻す）。
+    replan の上限なら統合 WU を `blocked(question)` にして `WorkerQuestion`（人の回答で再開できる）。
+18. 並列 1 に倒した Task の統合は no-op（`PhaseIntegrated{merged: [], head: ""}`、検査もしない）。
+
+**再起動の照合（D1.7）**
+19. 「WU の lease が切れていて、このインスタンスの run でもない」WU だけを戻す（ADR の「`lease_run_id` の run が
+    `running` に無い」だけでは、引き継ぎ〈ADR-0040〉の最中に別インスタンスの run を奪うため）。
+    「統合が running で spawn が無い」は Task の lease の失効（全部が死んだ）を待ち、既存の
+    `reclaim_expired_leases` → `InfraRequeue` の中で `reconcile_integration` が pending に戻す。
+    「Task が Running で何も走っていない」は、このインスタンスが何も持っていないときだけ `Continue{advance}`。
+20. 統合をやり直すとき（Ready の Task で工程の WU がすべて done）は、`InfraRequeue` のバックオフを待たずに
+    工程の lease を取って始める（LLM run ではなく、失敗していたのは統合ではないため）。
+
+**Cancel・公平性**
+21. Cancel は、この tick で run（または統合）を止めた Task について、未完了の WU を `cancelled` にし、WU の
+    worktree とブランチを消す（ADR-0043 D2 の中止の規則）。**何も走っていない（Ready の）Task の Cancel では
+    WU の行はそのまま**（従来どおり。Task が終端なので scheduler は触らない）。
+22. 2 本目以降（`running_tasks_with_runnable_work_units`）は、**このインスタンスが既に run を持っている Task
+    だけ**を対象にする（工程の lease の持ち主。引き継ぎ中の別インスタンスの Task に手を出さない）。
+
+**replan（D1.6）**
+23. daemon が足した WU（統合 WU・統合の repair WU。計画の spec に無い）は done の不変条件の対象から外し、行はそのまま
+    持ち越す。v2 の replan は、統合済み（done）の工程の統合 WU を持ち越し、未統合の工程の統合 WU を新しい版の
+    工程の WU に依存し直して pending に戻し、工程の障壁つきで ready を決め直す（`seq` も materialize の順に振り直す）。
+
+**監査・API・GUI（§5）**
+24. replay（`rebuild_work_units_and_runs`）は統合 WU を足し、`WorkUnitCommitted` から `branch`/`base_commit`/
+    `head_commit`、`PhaseIntegrated` から `integrated_commit` を復元する。突き合わせ（`diff_execution`）は
+    `phase`・`head_commit`・`integrated_commit` を比べる（`branch`/`base_commit` は WU の worktree を切った時点で
+    行に入り、events には commit のときに初めて出るので比べない。lease は揮発）。統合の repair WU の行は
+    （最終レビューの repair WU と同じく）spec が events に無いので作り直せない（既知の限界、未解決に記録）。
+25. API: `WorkUnitView` と `ExecutionWorkUnitView` に `phase`/`branch`/`head_commit`/`integrated_commit`/
+    `running_run_id`（lease の保持者。running のときだけ）、`ExecutionPlanOverview` に `phases`/`serialized_reason`、
+    `ExecutionPlanView` に `serialized_reason`。すべて追加のみ。
+26. planner の v2 の書き方は `ExecutionPlannerContext.parallel`（`[execution] parallel = true` のときだけ `true`）の
+    ときだけプロンプトに足す（v1 のプロンプトは不変）。worker への「WU のブランチに commit してよい・他の WU の
+    ファイルに触らない」は `preamble::work_unit_branch_section`（`WorkUnitPromptContext.branch` があるときだけ）。

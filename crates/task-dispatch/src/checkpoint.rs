@@ -25,10 +25,23 @@ pub fn gather_repo_facts(
     cwd: Option<&Path>,
     branch: &str,
 ) -> (Option<RepoState>, Vec<CheckpointFileChange>) {
+    gather_repo_facts_from(cwd, branch, None)
+}
+
+/// ADR-0074 D1.6（Phase F2b）: `base` を明示する版（v2 の WU は WU の `base_commit` を base にする。
+/// `None` なら従来どおり既定のブランチとの merge-base）。
+pub fn gather_repo_facts_from(
+    cwd: Option<&Path>,
+    branch: &str,
+    base: Option<&str>,
+) -> (Option<RepoState>, Vec<CheckpointFileChange>) {
     let Some(dir) = cwd else {
         return (None, Vec::new());
     };
-    let default_branch = task_ops::changes::default_branch(dir, None);
+    let default_branch = match base {
+        Some(b) => b.to_string(),
+        None => task_ops::changes::default_branch(dir, None),
+    };
     let changes = task_ops::changes::changes(dir, Some(dir), branch, &default_branch, None);
     if changes.missing {
         return (None, Vec::new());
@@ -141,7 +154,17 @@ pub fn tests_and_activity(activity: &[ToolActivity]) -> (Vec<CheckpointTestRun>,
 
 /// [`gather_repo_facts`] と [`tests_and_activity`] をまとめた [`MechanicalCheckpoint`]。
 pub fn gather(cwd: Option<&Path>, branch: &str, activity: &[ToolActivity]) -> MechanicalCheckpoint {
-    let (repo_state, files_changed) = gather_repo_facts(cwd, branch);
+    gather_from(cwd, branch, None, activity)
+}
+
+/// ADR-0074 D1.6（Phase F2b）: [`gather`] の `base` を明示する版。
+pub fn gather_from(
+    cwd: Option<&Path>,
+    branch: &str,
+    base: Option<&str>,
+    activity: &[ToolActivity],
+) -> MechanicalCheckpoint {
+    let (repo_state, files_changed) = gather_repo_facts_from(cwd, branch, base);
     let (tests_run, recent_activity) = tests_and_activity(activity);
     MechanicalCheckpoint {
         repo_state,

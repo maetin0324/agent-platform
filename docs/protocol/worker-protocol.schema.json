@@ -797,11 +797,21 @@
           },
           "type": "array"
         },
+        "max_phases": {
+          "description": "ADR-0074 §4: v2 の工程の数の上限（`parallel` のときだけ意味を持つ）。",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
         "max_work_units": {
           "description": "D18: 1 つの計画が持てる WorkUnit の数の上限。",
           "format": "uint",
           "minimum": 0,
           "type": "integer"
+        },
+        "parallel": {
+          "description": "ADR-0074 D1.1（Phase F2b）: `[execution] parallel = true` のときだけ `true`。planner に\n`celeris.execution-plan/2`（工程と並列の WU）を出させる。`false` ならプロンプトは変わらない。",
+          "type": "boolean"
         },
         "preserve_done_keys": {
           "description": "`done` の WorkUnit の key（新しい版でも変えてはいけない。D14「replan のときは done の WU の\nkey と spec が変わっていないこと」）。",
@@ -2417,6 +2427,13 @@
     "WorkUnitPromptContext": {
       "description": "`context.work_unit`（ADR-0072 D9/D21。Phase E2）。",
       "properties": {
+        "branch": {
+          "description": "ADR-0074 D1.2（Phase F2b）: v2 の WU の run が WU ごとの worktree で走るときの作業ブランチ\n（`celeris-wu/<task_id>/<key>`）。v1・並列 1 の run では `None`（プロンプトは変わらない）。",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "dependency_summaries": {
           "description": "D9: 依存する WU の最終 checkpoint の要約（`\"<title>: <completed の最後の1件、または「完了」>\"`\nの形。依存が無ければ空）。",
           "items": {
@@ -2437,6 +2454,13 @@
         },
         "objective": {
           "type": "string"
+        },
+        "parallel_siblings": {
+          "description": "ADR-0074 D1.2: 同じ工程で並行しうる他の WU（`\"<key>: <title>\"`）。`branch` があるときだけ。",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "plan_overview": {
           "description": "D9: 計画の中の WU 一覧（key・title・status を 1 行ずつ）。",

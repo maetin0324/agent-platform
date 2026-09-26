@@ -498,6 +498,34 @@ export type Event =
       weights_version: string;
       windows: QuotaWindowUse[];
       work_unit_id?: string | null;
+    }
+  | {
+      base?: string | null;
+      /**
+       * `celeris-wu/<task_id>/<key>`（統合の repair WU のように Task の worktree で走った WU は
+       * Task のブランチ）。
+       */
+      branch: string;
+      commit: string;
+      key: string;
+      type: "work_unit_committed";
+      work_unit_id: string;
+    }
+  | {
+      checks?: PhaseCheckResult[];
+      /**
+       * 統合後の Task ブランチの HEAD（WU の worktree を持たない並列 1 の工程では空文字列）。
+       */
+      head: string;
+      merged: PhaseMerged[];
+      phase: string;
+      type: "phase_integrated";
+      work_unit_id: string;
+    }
+  | {
+      plan_id: string;
+      reason: string;
+      type: "work_units_serialized";
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -3176,6 +3204,28 @@ export interface QuotaWindowUse {
   window: QuotaWindow;
 }
 /**
+ * `Event::PhaseIntegrated.checks[]`（ADR-0074 D1.4 の 4）。
+ */
+export interface PhaseCheckResult {
+  cmd: string;
+  pass: boolean;
+  summary: string;
+}
+/**
+ * `Event::PhaseIntegrated.merged[]`（ADR-0074 D1.4）。
+ */
+export interface PhaseMerged {
+  /**
+   * merge した WU ブランチの HEAD。
+   */
+  commit: string;
+  key: string;
+  /**
+   * 既に Task ブランチに入っていたので飛ばした（冪等なやり直し）。
+   */
+  skipped?: boolean;
+}
+/**
  * `GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`。
  */
 export interface ExecutionMetricsSummary {
@@ -3268,6 +3318,11 @@ export interface ExecutionPlanView {
   origin: PlanOrigin;
   plan: ExecutionPlanSpec;
   planner_run_id?: string | null;
+  /**
+   * ADR-0074 D1.2（Phase F2b）: v2 の計画を並列 1 に倒した理由（`WorkUnitsSerialized`。無ければ
+   * 並列で走る／v1）。
+   */
+  serialized_reason?: string | null;
   status: PlanStatus;
   superseded_at?: string | null;
   task_id: string;
@@ -3295,21 +3350,42 @@ export interface ExecutionPlanVersionView {
  * 1 WorkUnit の現在の状態（`work_units` 行の写し）。
  */
 export interface WorkUnitView {
+  base_commit?: string | null;
   blocked_reason?: WorkUnitBlockedReason | null;
+  /**
+   * ADR-0074 D1.2: WU のブランチ（`celeris-wu/<task_id>/<key>`。WU の worktree を切ったときだけ）。
+   */
+  branch?: string | null;
   continuations: number;
   created_at: string;
   depends_on: string[];
+  /**
+   * ADR-0074 D1.2: `WorkUnitCommitted` の commit。
+   */
+  head_commit?: string | null;
   id: string;
+  /**
+   * ADR-0074 D1.4: 統合 WU の `PhaseIntegrated` の Task ブランチの HEAD。
+   */
+  integrated_commit?: string | null;
   key: string;
   kind: WorkUnitKind;
   last_checkpoint_run_id?: string | null;
   last_run_id?: string | null;
+  /**
+   * ADR-0074 D1（Phase F2b）: v2 の工程の key（v1・atomic は無し）。
+   */
+  phase?: string | null;
   /**
    * ADR-0074 D4.3（Phase F3 quota）: この WU の run の quota 消費の合計
    * （`ExecutionPlanView::with_quota` が events から埋める。既定は空）。
    */
   quota?: QuotaUse[];
   retries: number;
+  /**
+   * ADR-0074 D1.5: 今この WU を実行している run（WU の lease の保持者）。
+   */
+  running_run_id?: string | null;
   runs: number;
   seq: number;
   spec: WorkUnitSpec;
@@ -5813,7 +5889,16 @@ export interface ExecutionMetrics {
 export interface ExecutionPlanOverview {
   id: string;
   origin: PlanOrigin;
+  /**
+   * ADR-0074 D1.1（Phase F2b）: v2 の工程（配列の順が実行順。v1 は空）。GUI は WU の表を工程ごとの
+   * 見出しでまとめる。
+   */
+  phases?: PhaseSpec[];
   rationale: string;
+  /**
+   * ADR-0074 D1.2（Phase F2b）: v2 の計画を並列 1 に倒した理由（`WorkUnitsSerialized`）。
+   */
+  serialized_reason?: string | null;
   version: number;
   /**
    * D17(f): 版の履歴（`version` 昇順。superseded を含む）。
@@ -5845,11 +5930,23 @@ export interface ExecutionWorkUnitView {
    */
   assignee?: string | null;
   blocked_reason?: WorkUnitBlockedReason | null;
+  /**
+   * ADR-0074 D1.2: WU のブランチ（`celeris-wu/<task_id>/<key>`）。
+   */
+  branch?: string | null;
   continuations: number;
   created_at: string;
   depends_on: string[];
   harness?: string | null;
+  /**
+   * ADR-0074 D1.2: `WorkUnitCommitted` の commit。
+   */
+  head_commit?: string | null;
   id: string;
+  /**
+   * ADR-0074 D1.4: 統合 WU の統合後の Task ブランチの HEAD。
+   */
+  integrated_commit?: string | null;
   key: string;
   kind: WorkUnitKind;
   lane?: Tier | null;
@@ -5865,7 +5962,15 @@ export interface ExecutionWorkUnitView {
    * 直近の run の routing（`RoutingDecided`）から。まだ 1 度も走っていなければ `None`。
    */
   model?: string | null;
+  /**
+   * ADR-0074 D1（Phase F2b）: v2 の工程の key（v1 は無し）。
+   */
+  phase?: string | null;
   retries: number;
+  /**
+   * ADR-0074 D1.5: 今この WU を実行している run（同時に走っている run を GUI に出す）。
+   */
+  running_run_id?: string | null;
   runs: number;
   seq: number;
   status: WorkUnitStatus;
@@ -6038,6 +6143,11 @@ export interface ExecutionPlanView1 {
   origin: PlanOrigin;
   plan: ExecutionPlanSpec;
   planner_run_id?: string | null;
+  /**
+   * ADR-0074 D1.2（Phase F2b）: v2 の計画を並列 1 に倒した理由（`WorkUnitsSerialized`。無ければ
+   * 並列で走る／v1）。
+   */
+  serialized_reason?: string | null;
   status: PlanStatus;
   superseded_at?: string | null;
   task_id: string;

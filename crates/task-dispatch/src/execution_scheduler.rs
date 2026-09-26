@@ -95,6 +95,10 @@ pub fn decide(
 
 fn now_wu(mut wu: WorkUnitRow, status: WorkUnitStatus) -> WorkUnitRow {
     wu.status = status;
+    // ADR-0074 D1.5（Phase F2）: `running` を離れたら WU の lease を外す（v1 では常に空のまま）。
+    if status != WorkUnitStatus::Running {
+        wu.clear_lease();
+    }
     if status != WorkUnitStatus::Blocked {
         wu.blocked_reason = None;
     }
@@ -283,6 +287,100 @@ fn failed(
     }
 }
 
+/// ADR-0074 D1.6（Phase F2b）: v2 の WU の run が終わって WU の行を書いた後（`units` はその後の
+/// 全行）、Task をどうするか。純粋関数（`dispatcher.rs` がこれを見て遷移・統合を行う）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhaseSettle {
+    /// 同じ Task の他の WU の run（または統合）が走っている。Task は遷移しない（兄弟は止めない）。
+    Wait,
+    /// 現在の工程に起こせる WU がある（走っているものは無い）。`Continue{advance}`（今と同じ）。
+    Advance,
+    /// 現在の工程の WU がすべて done。この統合 WU（id）を走らせる（Task は遷移しない）。
+    Integrate(String),
+    /// 現在の工程に `blocked(question)` の WU（id）がある。`WorkerQuestion`。
+    Question(String),
+    /// 現在の工程に failed / `blocked(limit|plan_issue|dependency_failed)` の WU（id）がある。
+    /// replan できれば `Continue{replan}`、できなければ D12。
+    Failure(String),
+    /// 有効な WU がすべて done（最後の工程の統合まで済んだ）。`WorkerDone`。
+    AllDone,
+}
+
+/// ADR-0074 D1.6: [`PhaseSettle`] を決める。
+///
+/// - 走っている WU（`running`。統合 WU を含む）があれば `Wait`（in-flight が 0 になってから決める）。
+/// - 現在の工程（有効で終端でない行のうち `seq` 最小の行の工程。`runnable_work_units` と同じ）で、
+///   question → 失敗（failed を先に、次に limit / plan_issue / dependency_failed）→ 起こせる WU →
+///   統合の順に見る。人の入力（question）を先にするのは、replan で質問を捨てないため。
+pub fn settle_phase(units: &[WorkUnitRow]) -> PhaseSettle {
+    let active: Vec<&WorkUnitRow> = units.iter().filter(|u| u.status.is_active()).collect();
+    if active.iter().any(|u| u.status == WorkUnitStatus::Running) {
+        return PhaseSettle::Wait;
+    }
+    let in_play: Vec<&WorkUnitRow> = active
+        .iter()
+        .copied()
+        .filter(|u| !u.status.is_terminal())
+        .collect();
+    let Some(current) = in_play.iter().min_by_key(|u| u.seq) else {
+        return PhaseSettle::AllDone;
+    };
+    let phase = current.phase.clone();
+    let mut in_phase: Vec<&WorkUnitRow> = in_play
+        .iter()
+        .copied()
+        .filter(|u| u.phase == phase)
+        .collect();
+    in_phase.sort_by_key(|u| u.seq);
+    if let Some(q) = in_phase.iter().find(|u| {
+        u.status == WorkUnitStatus::Blocked
+            && u.blocked_reason == Some(WorkUnitBlockedReason::Question)
+    }) {
+        return PhaseSettle::Question(q.id.clone());
+    }
+    if let Some(f) = in_phase
+        .iter()
+        .find(|u| u.status == WorkUnitStatus::Failed)
+        .or_else(|| {
+            in_phase.iter().find(|u| {
+                u.status == WorkUnitStatus::Blocked
+                    && matches!(
+                        u.blocked_reason,
+                        Some(WorkUnitBlockedReason::Limit)
+                            | Some(WorkUnitBlockedReason::PlanIssue)
+                            | Some(WorkUnitBlockedReason::DependencyFailed)
+                    )
+            })
+        })
+    {
+        return PhaseSettle::Failure(f.id.clone());
+    }
+    if in_phase.iter().any(|u| {
+        u.kind != task_core::WorkUnitKind::Integrate
+            && matches!(
+                u.status,
+                WorkUnitStatus::Ready | WorkUnitStatus::NeedsContinuation
+            )
+    }) {
+        return PhaseSettle::Advance;
+    }
+    let phase_done = active
+        .iter()
+        .filter(|u| u.phase == phase && u.kind != task_core::WorkUnitKind::Integrate)
+        .all(|u| u.status == WorkUnitStatus::Done);
+    if phase_done
+        && let Some(integ) = in_phase.iter().find(|u| {
+            u.kind == task_core::WorkUnitKind::Integrate
+                && matches!(u.status, WorkUnitStatus::Pending | WorkUnitStatus::Ready)
+        })
+    {
+        return PhaseSettle::Integrate(integ.id.clone());
+    }
+    // ここに来るのは「pending だけが残り、依存も統合も進められない」一瞬の不整合だけ（通常の
+    // 経路に戻して gate に任せる）。
+    PhaseSettle::Advance
+}
+
 /// D18: 人の回答（`Trigger::Answer`）で `blocked` の WU を再開する（窓は 0 に戻す。D18「回答の時点
 /// から数え直す」）。`blocked_reason = Limit` なら `needs_continuation`（continuation の続き）、
 /// `Question` なら `ready`（最初から）に戻す。`DependencyFailed` は人の回答では戻らない（依存先の
@@ -324,6 +422,87 @@ mod tests {
             status,
             "2026-09-24T00:00:00Z".into(),
         )
+    }
+
+    fn prow(
+        key: &str,
+        seq: u32,
+        phase: &str,
+        status: WorkUnitStatus,
+        depends_on: &[&str],
+    ) -> WorkUnitRow {
+        let mut r = row(key, status, depends_on);
+        r.seq = seq;
+        r.phase = Some(phase.to_string());
+        r.spec.phase = Some(phase.to_string());
+        r
+    }
+
+    fn integ(phase: &str, seq: u32, status: WorkUnitStatus, deps: &[&str]) -> WorkUnitRow {
+        let mut r = prow(&format!("integrate-{phase}"), seq, phase, status, deps);
+        r.kind = task_core::WorkUnitKind::Integrate;
+        r.spec.kind = task_core::WorkUnitKind::Integrate;
+        r
+    }
+
+    #[test]
+    fn settle_waits_while_a_sibling_is_running_then_reports_the_question() {
+        use WorkUnitStatus::*;
+        let mut q = prow("a", 0, "build", Blocked, &[]);
+        q.blocked_reason = Some(WorkUnitBlockedReason::Question);
+        let units = vec![
+            q.clone(),
+            prow("b", 1, "build", Running, &[]),
+            integ("build", 2, Pending, &["a", "b"]),
+        ];
+        assert_eq!(settle_phase(&units), PhaseSettle::Wait);
+        let units = vec![
+            q,
+            prow("b", 1, "build", Done, &[]),
+            integ("build", 2, Pending, &["a", "b"]),
+        ];
+        assert_eq!(settle_phase(&units), PhaseSettle::Question("id-a".into()));
+    }
+
+    #[test]
+    fn settle_reports_a_failure_after_in_flight_reaches_zero() {
+        use WorkUnitStatus::*;
+        let units = vec![
+            prow("a", 0, "build", Failed, &[]),
+            prow("b", 1, "build", Done, &[]),
+            prow("c", 2, "build", Ready, &[]),
+            integ("build", 3, Pending, &["a", "b", "c"]),
+        ];
+        assert_eq!(settle_phase(&units), PhaseSettle::Failure("id-a".into()));
+    }
+
+    #[test]
+    fn settle_advances_integrates_and_finishes() {
+        use WorkUnitStatus::*;
+        let units = vec![
+            prow("a", 0, "build", Done, &[]),
+            prow("b", 1, "build", Ready, &[]),
+            integ("build", 2, Pending, &["a", "b"]),
+            prow("c", 3, "verify", Pending, &["a"]),
+            integ("verify", 4, Pending, &["c"]),
+        ];
+        assert_eq!(settle_phase(&units), PhaseSettle::Advance);
+        let units = vec![
+            prow("a", 0, "build", Done, &[]),
+            prow("b", 1, "build", Done, &[]),
+            integ("build", 2, Pending, &["a", "b"]),
+            prow("c", 3, "verify", Pending, &["a"]),
+            integ("verify", 4, Pending, &["c"]),
+        ];
+        assert_eq!(
+            settle_phase(&units),
+            PhaseSettle::Integrate("id-integrate-build".into())
+        );
+        let units = vec![
+            prow("a", 0, "build", Done, &[]),
+            integ("build", 1, Done, &["a"]),
+        ];
+        assert_eq!(settle_phase(&units), PhaseSettle::AllDone);
     }
 
     fn limits() -> WuLimits {

@@ -11,11 +11,14 @@ import {
   EXECUTION_SECTION_LABEL,
   gateModeLabel,
   isRepairWorkUnit,
+  parallelSummaryLine,
   planSummaryLine,
   planVersionLabel,
   quotaSummaryLines,
+  shortCommit,
   WORK_UNIT_KIND_LABEL,
   WORK_UNIT_STATUS_TONE,
+  workUnitGroups,
 } from "~/lib/task-execution";
 import { cn } from "~/lib/utils";
 
@@ -84,6 +87,11 @@ export function ExecutionSection({ execution }: { execution: ExecutionView | nul
             </p>
           ) : (
             <>
+              {parallelSummaryLine(plan) && (
+                <p className="text-sm text-fg-muted" data-testid="execution-parallel">
+                  {parallelSummaryLine(plan)}
+                </p>
+              )}
               {/* ADR-0072 D20（Phase E5）: モバイル幅（393px）は表ではなくカードの一覧に折り返す
                   （`max-sm:`。`~/routes/projects.tsx` の案件一覧と同じ技法）。表のまま横スクロールさせると、
                   この中の `<details>`（checkpoint の折り畳み）へのキーボードフォーカスがブラウザの
@@ -94,6 +102,7 @@ export function ExecutionSection({ execution }: { execution: ExecutionView | nul
                   <thead className={cn(theadClass, "max-sm:hidden")}>
                     <tr>
                       <th className={thClass}>key</th>
+                      <th className={thClass}>工程</th>
                       <th className={thClass}>title</th>
                       <th className={thClass}>status</th>
                       <th className={thClass}>依存</th>
@@ -106,13 +115,28 @@ export function ExecutionSection({ execution }: { execution: ExecutionView | nul
                       <th className={thClass}>checkpoint / 理由</th>
                     </tr>
                   </thead>
-                  <tbody className="max-sm:block">
-                    {[...plan.work_units]
-                      .sort((a, b) => a.seq - b.seq)
-                      .map((wu) => (
+                  {/* ADR-0074 D1（Phase F2b）: v2 の計画は工程ごとに見出しを付けてまとめる。 */}
+                  {workUnitGroups(plan).map((group) => (
+                    <tbody key={group.key || "all"} className="max-sm:block" data-testid="work-unit-group">
+                      {group.label && (
+                        <tr className="max-sm:block" data-testid="work-unit-phase-heading">
+                          <th
+                            colSpan={12}
+                            scope="colgroup"
+                            className={cn(
+                              thClass,
+                              "bg-surface-2/60 text-left max-sm:block max-sm:border-t max-sm:border-border max-sm:px-3",
+                            )}
+                          >
+                            {group.label}
+                          </th>
+                        </tr>
+                      )}
+                      {group.units.map((wu) => (
                         <WorkUnitRow key={wu.id} wu={wu} isCurrent={currentWorkUnit(plan)?.id === wu.id} />
                       ))}
-                  </tbody>
+                    </tbody>
+                  ))}
                 </table>
               </div>
 
@@ -161,6 +185,19 @@ function WorkUnitRow({ wu, isCurrent }: { wu: ExecutionWorkUnitView; isCurrent: 
             repair
           </Badge>
         )}
+        {wu.branch && (
+          <span className="mt-0.5 block break-all text-fg-subtle" data-testid="work-unit-branch">
+            <CellLabel>ブランチ</CellLabel>
+            <Mono>{wu.branch}</Mono>
+            {shortCommit(wu.head_commit ?? wu.integrated_commit) && (
+              <span className="ml-1">@{shortCommit(wu.head_commit ?? wu.integrated_commit)}</span>
+            )}
+          </span>
+        )}
+      </td>
+      <td className={cn(tdClass, cardCellClass)} data-testid="work-unit-phase">
+        <CellLabel>工程</CellLabel>
+        {wu.phase ?? "-"}
       </td>
       <td className={cn(tdClass, cardCellClass)}>
         <span className="break-words">{wu.title}</span>
@@ -172,6 +209,11 @@ function WorkUnitRow({ wu, isCurrent }: { wu: ExecutionWorkUnitView; isCurrent: 
           {wu.status}
         </Badge>
         {wu.blocked_reason && <span className="ml-1.5 text-fg-subtle">（{wu.blocked_reason}）</span>}
+        {wu.running_run_id && (
+          <span className="mt-0.5 block break-all text-fg-subtle" data-testid="work-unit-running-run">
+            run <Mono>{wu.running_run_id}</Mono>
+          </span>
+        )}
       </td>
       <td className={cn(tdClass, cardCellClass)}>
         <CellLabel>依存</CellLabel>

@@ -219,6 +219,9 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::ExecutionGated { .. } => "execution_gated",
         Event::RepairScheduled { .. } => "repair_scheduled",
         Event::QuotaEstimated { .. } => "quota_estimated",
+        Event::WorkUnitCommitted { .. } => "work_unit_committed",
+        Event::PhaseIntegrated { .. } => "phase_integrated",
+        Event::WorkUnitsSerialized { .. } => "work_units_serialized",
     }
 }
 

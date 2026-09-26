@@ -1255,6 +1255,23 @@ pub struct WorkUnitView {
     /// （`ExecutionPlanView::with_quota` が events から埋める。既定は空）。
     #[serde(default)]
     pub quota: Vec<task_core::QuotaUse>,
+    /// ADR-0074 D1（Phase F2b）: v2 の工程の key（v1・atomic は無し）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// ADR-0074 D1.2: WU のブランチ（`celeris-wu/<task_id>/<key>`。WU の worktree を切ったときだけ）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    /// ADR-0074 D1.2: `WorkUnitCommitted` の commit。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<String>,
+    /// ADR-0074 D1.4: 統合 WU の `PhaseIntegrated` の Task ブランチの HEAD。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrated_commit: Option<String>,
+    /// ADR-0074 D1.5: 今この WU を実行している run（WU の lease の保持者）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_run_id: Option<String>,
 }
 
 impl From<task_core::WorkUnitRow> for WorkUnitView {
@@ -1276,6 +1293,16 @@ impl From<task_core::WorkUnitRow> for WorkUnitView {
             created_at: row.created_at,
             updated_at: row.updated_at,
             quota: Vec::new(),
+            phase: row.phase,
+            branch: row.branch,
+            base_commit: row.base_commit,
+            head_commit: row.head_commit,
+            integrated_commit: row.integrated_commit,
+            running_run_id: if row.status == task_core::WorkUnitStatus::Running {
+                row.lease_run_id
+            } else {
+                None
+            },
         }
     }
 }
@@ -1327,6 +1354,10 @@ pub struct ExecutionPlanView {
     /// ADR-0072 D17（Phase E4）: 版の履歴（`version` 昇順。superseded を含む。監査用）。
     #[serde(default)]
     pub versions: Vec<ExecutionPlanVersionView>,
+    /// ADR-0074 D1.2（Phase F2b）: v2 の計画を並列 1 に倒した理由（`WorkUnitsSerialized`。無ければ
+    /// 並列で走る／v1）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serialized_reason: Option<String>,
 }
 
 impl ExecutionPlanView {
@@ -1350,7 +1381,19 @@ impl ExecutionPlanView {
                 .into_iter()
                 .map(ExecutionPlanVersionView::from)
                 .collect(),
+            serialized_reason: None,
         }
+    }
+
+    /// ADR-0074 D1.2（Phase F2b）: この版を並列 1 に倒した理由を events から差し込む。
+    pub fn with_serialized_reason(mut self, events: &[task_core::Event]) -> Self {
+        self.serialized_reason = events.iter().rev().find_map(|e| match e {
+            task_core::Event::WorkUnitsSerialized { plan_id, reason } if *plan_id == self.id => {
+                Some(reason.clone())
+            }
+            _ => None,
+        });
+        self
     }
 
     /// ADR-0074 D4.3（Phase F3 quota）: WU ごとの quota 消費を差し込む（`work_unit_id` が無い

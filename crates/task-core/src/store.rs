@@ -991,6 +991,44 @@ pub trait TaskStore:
         event: Event,
     ) -> Result<(), StoreError>;
 
+    /// ADR-0074 D1.5（Phase F2）: WU の lease を取る。1 トランザクションで「Task が `Running`」
+    /// 「WU が `ready` / `needs_continuation`」を確かめ、WU を `running` にし（`runs + 1`、
+    /// `last_run_id = run_id`、lease 列）、`WorkUnitTransitioned{to: running, reason: "dispatch"}` を
+    /// 追記し、**Task の lease の期限を WU の lease の期限まで延ばす**（短くはしない）。
+    /// `branch` / `base_commit` が `Some` なら WU の行にも書く（WU の worktree を切ったとき）。
+    /// 条件に合わなければ `Ok(false)`（何も書かない）。
+    #[allow(clippy::too_many_arguments)]
+    fn acquire_work_unit_lease(
+        &self,
+        task_id: TaskId,
+        work_unit_id: &str,
+        run_id: &str,
+        ttl: StdDuration,
+        branch: Option<String>,
+        base_commit: Option<String>,
+    ) -> Result<bool, StoreError>;
+
+    /// ADR-0074 D1.4（Phase F2b）: WU の行の追加（`inserted`）と書き換え（`updated`）と `events` を
+    /// 1 トランザクションで書く（統合の repair WU を足し、統合 WU の依存を付け足す、など）。
+    /// Task の状態は変えない。
+    fn work_units_apply(
+        &self,
+        task_id: TaskId,
+        inserted: Vec<WorkUnitRow>,
+        updated: Vec<WorkUnitRow>,
+        events: Vec<Event>,
+    ) -> Result<(), StoreError>;
+
+    /// ADR-0074 D1.4（Phase F2）: Task の lease（工程の保持者）の期限を `ttl` 先まで延ばす
+    /// （短くはしない）。`Running` でなければ `Ok(false)`。統合の間の延長に使う。
+    fn extend_task_lease(&self, task_id: TaskId, ttl: StdDuration) -> Result<bool, StoreError>;
+
+    /// ADR-0074 D1.3 3.（Phase F2）: `Running` で、`phase` のある（v2 の）WU に `ready` /
+    /// `needs_continuation` のものを持つ Task（`created_at` 昇順、最大 `limit` 件）。
+    /// 公平性: `dispatch_ready` はこの Task たちの 2 本目以降を、Ready の Task の 1 本目の後に回す。
+    fn running_tasks_with_runnable_work_units(&self, limit: usize)
+    -> Result<Vec<Task>, StoreError>;
+
     /// D5: run 開始時に `runs` の行を 1 件作る（`status = running`）。`Event::WorkerStarted` と同じ
     /// トランザクションでは**ない**（既存コードの慣習に合わせ、`append_event` の直後に呼ぶ。監査上の
     /// 実害は無い: 再起動時の照合は `work_units.status` を正とする）。
@@ -2558,8 +2596,10 @@ impl SqliteStore {
         tx.execute(
             "INSERT INTO work_units (id, task_id, plan_id, key, seq, kind, status, \
              blocked_reason, depends_on_json, runs, continuations, retries, last_run_id, \
-             last_checkpoint_run_id, json, created_at, updated_at) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             last_checkpoint_run_id, json, created_at, updated_at, phase, lease_run_id, \
+             lease_expires_at, branch, base_commit, head_commit, integrated_commit) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,\
+             ?21,?22,?23,?24)",
             params![
                 wu.id,
                 wu.task_id,
@@ -2578,6 +2618,13 @@ impl SqliteStore {
                 serde_json::to_string(&wu.spec)?,
                 wu.created_at,
                 wu.updated_at,
+                wu.phase,
+                wu.lease_run_id,
+                wu.lease_expires_at,
+                wu.branch,
+                wu.base_commit,
+                wu.head_commit,
+                wu.integrated_commit,
             ],
         )?;
         Ok(())
@@ -2622,7 +2669,9 @@ impl SqliteStore {
         tx.execute(
             "UPDATE work_units SET plan_id = ?1, status = ?2, blocked_reason = ?3, \
              depends_on_json = ?4, runs = ?5, continuations = ?6, retries = ?7, \
-             last_run_id = ?8, last_checkpoint_run_id = ?9, json = ?10, updated_at = ?11 \
+             last_run_id = ?8, last_checkpoint_run_id = ?9, json = ?10, updated_at = ?11, \
+             phase = ?13, lease_run_id = ?14, lease_expires_at = ?15, branch = ?16, \
+             base_commit = ?17, head_commit = ?18, integrated_commit = ?19 \
              WHERE id = ?12",
             params![
                 wu.plan_id,
@@ -2637,6 +2686,13 @@ impl SqliteStore {
                 serde_json::to_string(&wu.spec)?,
                 wu.updated_at,
                 wu.id,
+                wu.phase,
+                wu.lease_run_id,
+                wu.lease_expires_at,
+                wu.branch,
+                wu.base_commit,
+                wu.head_commit,
+                wu.integrated_commit,
             ],
         )?;
         Ok(())
@@ -2700,6 +2756,13 @@ impl SqliteStore {
         let json: String = row.get(14)?;
         let created_at: String = row.get(15)?;
         let updated_at: String = row.get(16)?;
+        let phase: Option<String> = row.get(17)?;
+        let lease_run_id: Option<String> = row.get(18)?;
+        let lease_expires_at: Option<String> = row.get(19)?;
+        let branch: Option<String> = row.get(20)?;
+        let base_commit: Option<String> = row.get(21)?;
+        let head_commit: Option<String> = row.get(22)?;
+        let integrated_commit: Option<String> = row.get(23)?;
         Ok((|| -> Result<WorkUnitRow, StoreError> {
             let Some(kind) = WorkUnitKind::parse(&kind_s) else {
                 return Err(StoreError::Invalid(format!(
@@ -2738,6 +2801,13 @@ impl SqliteStore {
                 spec,
                 created_at,
                 updated_at,
+                phase,
+                lease_run_id,
+                lease_expires_at,
+                branch,
+                base_commit,
+                head_commit,
+                integrated_commit,
             })
         })())
     }
@@ -3302,13 +3372,42 @@ impl TaskStore for SqliteStore {
         let Some(mut task) = Self::get_locked(&tx, task_id)? else {
             return Ok(false);
         };
+        let expires_at = OffsetDateTime::now_utc()
+            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
         let ours = task.status == Status::Running
             && task.lease.as_ref().map(|l| l.worker_run_id.as_str()) == Some(worker_run_id);
         if !ours {
-            return Ok(false);
+            // ADR-0074 D1.5（Phase F2）: v2 の並列 WU の run は Task の lease の保持者ではなく
+            // WU の lease（`work_units.lease_run_id`）を持つ。その WU の lease を延ばし、Task の
+            // lease の期限も（短くせずに）そこまで延ばす。
+            if task.status != Status::Running {
+                return Ok(false);
+            }
+            let expires_str = format_rfc3339(expires_at)?;
+            let n = tx.execute(
+                "UPDATE work_units SET lease_expires_at = ?1 WHERE task_id = ?2 \
+                 AND lease_run_id = ?3 AND status = 'running'",
+                params![expires_str, task_id.to_string(), worker_run_id],
+            )?;
+            if n == 0 {
+                return Ok(false);
+            }
+            if let Some(lease) = task.lease.as_mut()
+                && lease.expires_at < expires_at
+            {
+                lease.expires_at = expires_at;
+                tx.execute(
+                    "UPDATE tasks SET lease_expires_at = ?1, json = ?2 WHERE id = ?3",
+                    params![
+                        expires_str,
+                        serde_json::to_string(&task)?,
+                        task_id.to_string(),
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            return Ok(true);
         }
-        let expires_at = OffsetDateTime::now_utc()
-            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
         task.lease = Some(crate::model::Lease {
             worker_run_id: worker_run_id.to_string(),
             expires_at,
@@ -4662,7 +4761,8 @@ impl TaskStore for SqliteStore {
             let mut stmt = conn.prepare(
                 "SELECT id, task_id, plan_id, key, seq, kind, status, blocked_reason, \
                  depends_on_json, runs, continuations, retries, last_run_id, \
-                 last_checkpoint_run_id, json, created_at, updated_at FROM work_units \
+                 last_checkpoint_run_id, json, created_at, updated_at, phase, lease_run_id, \
+                 lease_expires_at, branch, base_commit, head_commit, integrated_commit FROM work_units \
                  WHERE task_id = ?1 ORDER BY seq ASC",
             )?;
             let rows = stmt.query_map(params![task_id.to_string()], Self::row_to_work_unit)?;
@@ -4679,7 +4779,8 @@ impl TaskStore for SqliteStore {
             conn.query_row(
                 "SELECT id, task_id, plan_id, key, seq, kind, status, blocked_reason, \
                  depends_on_json, runs, continuations, retries, last_run_id, \
-                 last_checkpoint_run_id, json, created_at, updated_at FROM work_units WHERE id = ?1",
+                 last_checkpoint_run_id, json, created_at, updated_at, phase, lease_run_id, \
+                 lease_expires_at, branch, base_commit, head_commit, integrated_commit FROM work_units WHERE id = ?1",
                 params![id],
                 Self::row_to_work_unit,
             )
@@ -4700,6 +4801,165 @@ impl TaskStore for SqliteStore {
         Self::append_event_tx(&tx, task_id, &event)?;
         tx.commit()?;
         Ok(())
+    }
+
+    fn acquire_work_unit_lease(
+        &self,
+        task_id: TaskId,
+        work_unit_id: &str,
+        run_id: &str,
+        ttl: StdDuration,
+        branch: Option<String>,
+        base_commit: Option<String>,
+    ) -> Result<bool, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(mut task) = Self::get_locked(&tx, task_id)? else {
+            return Ok(false);
+        };
+        if task.status != Status::Running {
+            return Ok(false);
+        }
+        let Some(current) = tx
+            .query_row(
+                "SELECT id, task_id, plan_id, key, seq, kind, status, blocked_reason, \
+                 depends_on_json, runs, continuations, retries, last_run_id, \
+                 last_checkpoint_run_id, json, created_at, updated_at, phase, lease_run_id, \
+                 lease_expires_at, branch, base_commit, head_commit, integrated_commit \
+                 FROM work_units WHERE id = ?1 AND task_id = ?2",
+                params![work_unit_id, task_id.to_string()],
+                Self::row_to_work_unit,
+            )
+            .optional()?
+            .transpose()?
+        else {
+            return Ok(false);
+        };
+        if !matches!(
+            current.status,
+            WorkUnitStatus::Ready | WorkUnitStatus::NeedsContinuation
+        ) {
+            return Ok(false);
+        }
+        let now = OffsetDateTime::now_utc();
+        let expires_at = now + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
+        let mut updated = current.clone();
+        updated.status = WorkUnitStatus::Running;
+        updated.blocked_reason = None;
+        updated.runs += 1;
+        updated.last_run_id = Some(run_id.to_string());
+        updated.updated_at = format_rfc3339(now)?;
+        updated.lease_run_id = Some(run_id.to_string());
+        updated.lease_expires_at = Some(format_rfc3339(expires_at)?);
+        if branch.is_some() {
+            updated.branch = branch;
+        }
+        if base_commit.is_some() {
+            updated.base_commit = base_commit;
+        }
+        Self::update_work_unit_tx(&tx, &updated)?;
+        Self::append_event_tx(
+            &tx,
+            task_id,
+            &Event::WorkUnitTransitioned {
+                work_unit_id: current.id.clone(),
+                key: current.key.clone(),
+                from: current.status,
+                to: WorkUnitStatus::Running,
+                reason: "dispatch".to_string(),
+                run_id: Some(run_id.to_string()),
+            },
+        )?;
+        // Task の lease の期限を延ばす（保持者はそのまま。短くはしない）。
+        if let Some(lease) = task.lease.as_mut()
+            && lease.expires_at < expires_at
+        {
+            lease.expires_at = expires_at;
+            tx.execute(
+                "UPDATE tasks SET lease_expires_at = ?1, json = ?2 WHERE id = ?3",
+                params![
+                    format_rfc3339(expires_at)?,
+                    serde_json::to_string(&task)?,
+                    task_id.to_string(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn work_units_apply(
+        &self,
+        task_id: TaskId,
+        inserted: Vec<WorkUnitRow>,
+        updated: Vec<WorkUnitRow>,
+        events: Vec<Event>,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for wu in &inserted {
+            Self::insert_work_unit_tx(&tx, wu)?;
+        }
+        for wu in &updated {
+            Self::update_work_unit_tx(&tx, wu)?;
+        }
+        for ev in &events {
+            Self::append_event_tx(&tx, task_id, ev)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn extend_task_lease(&self, task_id: TaskId, ttl: StdDuration) -> Result<bool, StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(mut task) = Self::get_locked(&tx, task_id)? else {
+            return Ok(false);
+        };
+        if task.status != Status::Running {
+            return Ok(false);
+        }
+        let expires_at = OffsetDateTime::now_utc()
+            + time::Duration::new(ttl.as_secs() as i64, ttl.subsec_nanos() as i32);
+        let Some(lease) = task.lease.as_mut() else {
+            return Ok(false);
+        };
+        if lease.expires_at < expires_at {
+            lease.expires_at = expires_at;
+            tx.execute(
+                "UPDATE tasks SET lease_expires_at = ?1, json = ?2 WHERE id = ?3",
+                params![
+                    format_rfc3339(expires_at)?,
+                    serde_json::to_string(&task)?,
+                    task_id.to_string(),
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    fn running_tasks_with_runnable_work_units(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<Task>, StoreError> {
+        self.with_read_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT t.json FROM tasks t WHERE t.status = ?1 AND EXISTS ( \
+                 SELECT 1 FROM work_units w WHERE w.task_id = t.id AND w.phase IS NOT NULL \
+                 AND w.kind != 'integrate' AND w.status IN ('ready', 'needs_continuation')) \
+                 ORDER BY t.created_at ASC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(
+                params![status_str(Status::Running), usize_to_i64(limit)],
+                |row| row.get::<_, String>(0),
+            )?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(Self::row_to_task(row?)?);
+            }
+            Ok(out)
+        })
     }
 
     fn run_index_start(&self, row: RunRow) -> Result<(), StoreError> {
@@ -9057,6 +9317,214 @@ mod tests {
     }
 
     /// D6/D5: `work_unit_transition` は行の更新と `WorkUnitTransitioned` を同じトランザクションで書く。
+    /// ADR-0074 D1.5（Phase F2 (c-1)）: 新しい列の読み書き・WU の lease・Task の lease の延長。
+    fn adopt_sample_plan_with_running_task(store: &SqliteStore) -> Task {
+        let task = sample_task(Status::Ready);
+        store.insert(&task).unwrap();
+        let validated =
+            crate::execution_plan::validate(&sample_plan_spec(), Default::default(), &[]).unwrap();
+        let plan = ExecutionPlanRow {
+            id: "p1".into(),
+            task_id: task.id.to_string(),
+            version: 1,
+            origin: PlanOrigin::Human,
+            planner_run_id: None,
+            status: PlanStatus::Active,
+            spec: validated.spec.clone(),
+            created_at: "2026-09-24T00:00:00Z".into(),
+            superseded_at: None,
+        };
+        let mut units = sample_work_units(task.id, "p1");
+        units[0].phase = Some("build".into());
+        units[1].phase = Some("build".into());
+        units[1].status = WorkUnitStatus::Ready;
+        store
+            .execution_plan_adopt(
+                task.id,
+                plan,
+                units,
+                Event::ExecutionPlanned {
+                    plan_id: "p1".into(),
+                    version: 1,
+                    origin: PlanOrigin::Human,
+                    supersedes: None,
+                    reason: None,
+                    plan: Box::new(validated.spec),
+                },
+            )
+            .unwrap();
+        assert!(
+            store
+                .acquire_lease(task.id, "phase:p1:build:01X", StdDuration::from_secs(10))
+                .unwrap()
+        );
+        task
+    }
+
+    #[test]
+    fn work_unit_parallel_columns_round_trip() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = adopt_sample_plan_with_running_task(&store);
+        let mut wu = store.work_unit_get("wu-a").unwrap().unwrap();
+        assert_eq!(wu.phase.as_deref(), Some("build"));
+        assert!(wu.lease_run_id.is_none() && wu.branch.is_none());
+        wu.branch = Some(format!("celeris-wu/{}/a", task.id));
+        wu.base_commit = Some("b".repeat(40));
+        wu.head_commit = Some("c".repeat(40));
+        wu.integrated_commit = Some("d".repeat(40));
+        store
+            .work_unit_transition(
+                task.id,
+                wu.clone(),
+                Event::WorkUnitTransitioned {
+                    work_unit_id: "wu-a".into(),
+                    key: "a".into(),
+                    from: WorkUnitStatus::Ready,
+                    to: WorkUnitStatus::Ready,
+                    reason: "test".into(),
+                    run_id: None,
+                },
+            )
+            .unwrap();
+        let back = store.work_unit_get("wu-a").unwrap().unwrap();
+        assert_eq!(back, wu);
+        let listed = store.work_units_for(task.id).unwrap();
+        assert_eq!(listed[0], wu);
+    }
+
+    #[test]
+    fn acquire_work_unit_lease_marks_running_and_extends_the_task_lease() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = adopt_sample_plan_with_running_task(&store);
+        let before = store.get(task.id).unwrap().unwrap().lease.unwrap();
+        assert!(
+            store
+                .acquire_work_unit_lease(
+                    task.id,
+                    "wu-a",
+                    "run-a",
+                    StdDuration::from_secs(3600),
+                    Some("celeris-wu/x/a".into()),
+                    Some("abc".into()),
+                )
+                .unwrap()
+        );
+        let wu = store.work_unit_get("wu-a").unwrap().unwrap();
+        assert_eq!(wu.status, WorkUnitStatus::Running);
+        assert_eq!(wu.runs, 1);
+        assert_eq!(wu.last_run_id.as_deref(), Some("run-a"));
+        assert_eq!(wu.lease_run_id.as_deref(), Some("run-a"));
+        assert!(wu.lease_expires_at.is_some());
+        assert_eq!(wu.branch.as_deref(), Some("celeris-wu/x/a"));
+        assert_eq!(wu.base_commit.as_deref(), Some("abc"));
+        let after = store.get(task.id).unwrap().unwrap().lease.unwrap();
+        assert_eq!(
+            after.worker_run_id, before.worker_run_id,
+            "保持者は工程のまま"
+        );
+        assert!(
+            after.expires_at > before.expires_at,
+            "期限は WU の lease まで延びる"
+        );
+        // 2 回目（既に running）は取れない。
+        assert!(
+            !store
+                .acquire_work_unit_lease(
+                    task.id,
+                    "wu-a",
+                    "run-a2",
+                    StdDuration::from_secs(10),
+                    None,
+                    None
+                )
+                .unwrap()
+        );
+        // 2 本目の WU は取れる（Task は Running のまま）。
+        assert!(
+            store
+                .acquire_work_unit_lease(
+                    task.id,
+                    "wu-b",
+                    "run-b",
+                    StdDuration::from_secs(10),
+                    None,
+                    None
+                )
+                .unwrap()
+        );
+        // renew_lease は WU の lease を持つ run でも効き、Task の lease を延ばす。
+        assert!(
+            store
+                .renew_lease(task.id, "run-b", StdDuration::from_secs(7200))
+                .unwrap()
+        );
+        let renewed = store.get(task.id).unwrap().unwrap().lease.unwrap();
+        assert!(renewed.expires_at > after.expires_at);
+        assert!(
+            !store
+                .renew_lease(task.id, "run-unknown", StdDuration::from_secs(7200))
+                .unwrap()
+        );
+        let events = store.events_for(task.id).unwrap();
+        let dispatched = events
+            .iter()
+            .filter(|(_, e)| {
+                matches!(e, Event::WorkUnitTransitioned { to: WorkUnitStatus::Running, reason, .. } if reason == "dispatch")
+            })
+            .count();
+        assert_eq!(dispatched, 2);
+    }
+
+    #[test]
+    fn acquire_work_unit_lease_requires_a_running_task() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = adopt_sample_plan_with_running_task(&store);
+        store
+            .apply_transition(task.id, Trigger::Cancel, None)
+            .unwrap();
+        assert!(
+            !store
+                .acquire_work_unit_lease(
+                    task.id,
+                    "wu-a",
+                    "run-a",
+                    StdDuration::from_secs(10),
+                    None,
+                    None
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn running_tasks_with_runnable_work_units_lists_only_running_v2_tasks() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = adopt_sample_plan_with_running_task(&store);
+        let listed = store.running_tasks_with_runnable_work_units(10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, task.id);
+        for (id, run) in [("wu-a", "r1"), ("wu-b", "r2")] {
+            assert!(
+                store
+                    .acquire_work_unit_lease(
+                        task.id,
+                        id,
+                        run,
+                        StdDuration::from_secs(10),
+                        None,
+                        None
+                    )
+                    .unwrap()
+            );
+        }
+        assert!(
+            store
+                .running_tasks_with_runnable_work_units(10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     #[test]
     fn work_unit_transition_updates_the_row_and_appends_the_event() {
         let store = SqliteStore::open_in_memory().unwrap();

@@ -10,6 +10,8 @@ pub mod checkpoint;
 pub mod dispatcher;
 /// ADR-0072 D6/D11/D12/D15（Phase E2）: WorkUnit の状態遷移の決定（純粋関数）。
 pub mod execution_scheduler;
+/// ADR-0074 D1.2 / D1.4（Phase F2）: WU の worktree と工程の統合（daemon 側の git 操作だけ。LLM なし）。
+pub mod integration;
 pub mod policy;
 /// ADR-0033 D3（Phase 25）: run の終端から決定的に作る報告。
 pub(crate) mod reports;

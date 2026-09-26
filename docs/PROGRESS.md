@@ -19891,7 +19891,7 @@ target-dir を repo-key 化する等）は本 Phase の範囲外として提案�
   の高負荷時のタイミング依存の flake（既知。単体では常に pass）は今回の実行では発生しなかった）。
 - `cargo clippy --workspace --all-targets -- -D warnings`: warning 0。
 
-## Phase F2「WU の並列実行: schema v2、WU ごとの worktree、統合 WU、鍵 (task, WU)」（進行中、checkpoint 1）
+## Phase F2「WU の並列実行: schema v2、WU ごとの worktree、統合 WU、鍵 (task, WU)」（(a)(b) と下ごしらえ。(c)〜(l) は末尾の Phase F2b 節で完了 2026-09-26）
 
 ADR-0074 §6 F2 の受け入れ条件 (a)〜(l) のうち、本 checkpoint では **(a) と (b)** を実装した。
 branch `worktree-agent-a5ad8285d9e9540a2`（着手前に `git merge main` で F1 の統合を取り込み済み。
@@ -20028,3 +20028,84 @@ in_flight: usize, limit: usize) -> Vec<String>` を `crates/task-core/src/execut
 - 原因: NFS 移行後、cargo の target をローカルへ寄せたうえで、並行する実装エージェント（F2b / F3-quota / 開発用）に worktree ごとの `CARGO_TARGET_DIR` を持たせた結果、`/var/lib/celeris/build-cache/cargo/` に 42G + 41G + 30G + 9G が積み上がった（ルートの元の使用量 121G に加算）。
 - 対処: 完了したエージェントの target 3 つを削除 → 使用 242G → 130G（空き 112G）。本番は WAL で継続、エラーは 1 回のみ。verify を再実行。
 - 恒久策: (1) エージェントの branch を main に統合したら、その `CARGO_TARGET_DIR` を必ず削除する（統合の手順に組み込む）。(2) 同時に走らせる実装エージェントは 2 本まで。(3) P-115-6 のディスク残量チェック（dispatch 前に `/` と `/home` を見て閾値未満なら run を始めない）を次の Phase に入れる。(4) ルート LVM の拡張（Proxmox 側、人の判断）。
+## Phase F2b「WU の並列の本体: 鍵 (task, WU)、WU ごとの worktree、統合 WU、伝播・再起動・Cancel・公平性・GUI」（完了日 2026-09-26）
+
+ADR-0074 §6 F2 の (c)〜(l)。branch `worktree-agent-ac4722421a9ef87da`（着手時に main b53130e へ fast-forward、途中で
+coordinator の指示により main b009c88〈F3 quota〉を merge。衝突は `model.rs`・`query.rs`・`dispatcher.rs` の
+run 開始部分で、F3 の `quota_begin` を `dispatch_one` に移して解消）。ビルドは coordinator の指示で
+`CARGO_TARGET_DIR=/var/lib/celeris/build-cache/cargo/agent-platform-f2b`。
+
+### 区切りと commit
+- (c-1) `cdcaa68`: `WorkUnitRow` に phase / lease_run_id / lease_expires_at / branch / base_commit / head_commit /
+  integrated_commit、store の読み書き、`acquire_work_unit_lease`・`extend_task_lease`・
+  `running_tasks_with_runnable_work_units`、`renew_lease` の WU lease 対応。
+- (c-2) `021512e`: `running: HashMap<RunKey, RunEntry>`（`RunKey{task, work_unit}`）、`run_holds_lease`、
+  `reclaim_expired_leases` / `abort_stale_runs` / drain / snapshot の鍵対応（v1・atomic は不変）。
+- (c-3) `ebdda50`: 新規 `crates/task-dispatch/src/integration.rs`（WU の worktree・ブランチ・commit・冪等な統合）。
+- (c-4 前半) `109f4d5` → merge `d85aade` → (c-4)(c-5)(d)〜(k) `e6cac7b`（dispatcher の状態機械の変更が絡み合うため
+  1 commit にまとめた）→ replay/API/prompt `b42fccb` → (l) GUI と ADR `b580413` → 本節の commit。
+
+### 受け入れ条件ごとの証拠
+- (c) 3 つの独立 WU が並列 3 で同時に走り、各 `celeris-wu/<task>/<key>` で commit、統合 WU が決定的に merge して
+  `PhaseIntegrated`。並列 2 なら 2 本ずつ、provider `concurrency = 1` なら 1 本ずつ。v1 は不変。
+  - `cargo test -p task-dispatch --lib -- three_independent two_parallel provider_concurrency_one a_parallel_unit a_v1_plan`
+    → 5 passed（`three_independent_units_run_in_parallel_and_integrate`: 最大同時 3、WU ブランチの最終 commit の作者
+    `celeris`・件名 `wu/<key>: …`、merge の件名 `integrate wu/<key> (phase build)` が seq 順、`WorkUnitCommitted` 3 件、
+    `PhaseIntegrated` 1 件、Task の遷移は dispatch 1 回と worker_done、replay の突き合わせで WU/計画の差分 0）。
+  - store: `cargo test -p task-core --lib store::tests::acquire_work_unit_lease store::tests::work_unit_parallel store::tests::running_tasks_with`
+    ほか → 全 pass。`integration::tests` 5 passed。
+- (d) 積み上げ: `stacked_unit_branches_from_its_dependency` → ok（b の base_commit = a の head_commit、b の作業ツリーに
+  a.txt がある、`PhaseIntegrated.merged = ["b"]`）。純粋関数 `phase_leaves_are_the_units_nobody_in_the_phase_depends_on` ok。
+- (e) 衝突: `integration_conflict_creates_a_merge_repair_and_resumes` → ok（`merge-build-b`〈kind repair、Task の
+  worktree〉、`RepairScheduled{class: merge_conflict, origin: integration}`、再開した統合は全部 skipped、a の merge は 1 回）。
+  `integration::tests::merge_is_idempotent_after_restart` ok。
+- (f) 統合後の検査: `integration_check_failure_is_repaired_when_classified`（`rustfmt` を含む検査 → class `format` の
+  `repair-build-1`、修復後に検査 pass で Done）と `integration_check_failure_replans_when_not_classified`
+  （分類に当たらない → 統合 WU failed → `replan` の遷移、repair は作らない）→ ok。
+- (g) `sibling_failure_waits_for_in_flight_units_before_replan` / `sibling_question_waits_for_in_flight_units_before_blocking`
+  → ok（a の失敗・質問の時点で Task は Running のまま、b は完走、b の `WorkerFinished` と同じトランザクションで
+  `replan` / `worker_question`）。純粋関数 `execution_scheduler::tests::settle_*` 3 passed。
+- (h) `parallel_units_survive_dispatcher_restart`（デーモンを作り直し → Task の lease 失効で `infra_requeue`、WU 2 本が
+  `restart_reconcile` で ready → 完走）と `an_interrupted_integration_is_redone_idempotently_after_restart`
+  （統合の途中で作り直し → 統合 WU が `restart_reconcile` で pending → やり直し、merge commit は重複せず 2 件、
+  `PhaseIntegrated` 1 件）→ ok。
+- (i) `cancel_stops_every_work_unit_run` → ok（走っていた 2 run が止まり `running_for_task == 0`、全 WU cancelled、
+  WU の worktree とブランチが消える）。
+- (j) `ready_task_first_run_beats_a_second_parallel_unit` → ok（全体 2 枠で、並列 WU の 2 本目より Ready の別 Task の
+  1 本目が先）。
+- (k) `shared_workspace_falls_back_to_serial`（`Shared` → 最大同時 1、`WorkUnitsSerialized` 1 回〈理由に shared〉、
+  WU のブランチ無し、統合は no-op の `PhaseIntegrated{merged: [], head: ""}`）と
+  `remote_workspace_falls_back_to_serial`（remote・git でない dir → 並列 1 と理由、v1 → 理由なしの並列 1）→ ok。
+- planner / worker: `claude_code::tests::the_planner_prompt_explains_v2_phases_only_when_parallel`、
+  `a_parallel_work_unit_prompt_names_its_branch_and_forbids_touching_siblings` → ok。
+  task-core: `materialize_adds_integration_units_and_only_the_first_phase_is_ready`、`v2_rejects_a_key_reserved_for_integration_units` ok。
+- (l) GUI（`cd gui`、`corepack pnpm@11.27.0`）: `gen:types` 後 `git diff --exit-code -- gui/app/celeris/types.ts` 差分 0、
+  `typecheck` exit 0、`lint` exit 0（既存の info 2 件のみ）、`test` 1099 passed、`build` exit 0、
+  `mobile-audit` → `routes=27 schemes=2 violations=0`（fixture を v2 の計画〈工程 2・ブランチ・running の run・統合 WU〉に更新）。
+
+### 最終ゲート
+- `cargo fmt --all -- --check`: 差分なし。
+- `cargo clippy --workspace --all-targets -- -D warnings`: warning 0。
+- `cargo test --workspace --no-fail-fast`: **FAILED 0**（92 の test result、2,423 passed、exit 0）。1 回目の実行では既知の
+  高負荷時の flake `e2e::provider_admin_scenarios::reload_clears_provider_cooldown` が 1 回落ちた（単体で 3 回連続 pass、
+  再実行の全体でも pass。本 Phase は provider の cooldown に触れていない）。
+- `UPDATE_SCHEMA=1 cargo test --workspace committed_schema_matches_generated` で再生成（`api-v1.schema.json`・
+  `event.schema.json`・`worker-protocol.schema.json`）、再生成なしで 3 つの schema テスト pass。
+
+### ADR-0074 との差分（詳細は ADR の「Phase F2b 実装時の逸脱・明確化」26 項）
+- 衝突の repair の class は `merge_conflict`（依頼文の `integration` は origin の値にした）。
+- `PhaseIntegrated.checks[]` は `{cmd, pass, summary}`（exit code は取れない）。並列 1 の理由は新 Event `WorkUnitsSerialized`。
+- in-flight 0 のときの優先順は question → 失敗 → 起こせる WU → 統合。
+- 再起動の照合は WU の lease の失効だけを見る（引き継ぎ中の別インスタンスの run を奪わない）。統合のやり直しは Task の
+  lease の失効 → 既存の `InfraRequeue` の中で。
+- `max_parallel_work_units` は `[execution]` だけ（Task・CoS・profile で狭める経路は未実装）。
+- `runs/` は共有、成果物は `wu/<key>/artifacts`、setup は WU の worktree ごと。
+
+### 未解決・申し送り
+- Task / CoS / profile の `max_parallel_work_units`（型に欄が無い）。F4/F5 で型を足すときに配線する。
+- 統合の repair WU・最終レビューの repair WU は spec が events に無く、replay で行を作り直せない（突き合わせで
+  「stored にだけある」差分になる。既存の E4 の repair と同じ限界）。`RepairScheduled` に spec を載せるのが次の一手。
+- 何も走っていない（Ready の）v2 Task の Cancel では WU の行は cancelled にならない（従来どおり）。
+- F3 途中確認（D2）への申し送り: 工程の統合の成功（`finish_phase_integration`）が `Continue{advance}` / `WorkerDone`
+  を選ぶ場所に `pause_after` の判定を差し込む。`PhaseIntegrated` は途中報告の材料になる。
+- F4 への申し送り: `ExecutionPlanSpec.children` は空のまま。並列の既定は `[execution] parallel = false`（F5 で人が切り替える）。

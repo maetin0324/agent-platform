@@ -1149,6 +1149,12 @@ pub struct ExecutionTomlConfig {
     /// （`"task"` | `"none"`。既定 `"task"`）。
     #[serde(default = "default_work_unit_lane_cap")]
     pub work_unit_lane_cap: String,
+    /// ADR-0074 D1.1/§4（Phase F2b）: `true` で planner に v2（工程と並列 WU）を出させる（既定 `false`）。
+    #[serde(default)]
+    pub parallel: bool,
+    /// ADR-0074 D1.3/§4（Phase F2b）: Task ごとの同時 WU 数の上限（既定 3、1..=6）。
+    #[serde(default = "default_max_parallel_work_units")]
+    pub max_parallel_work_units: usize,
 }
 
 impl Default for ExecutionTomlConfig {
@@ -1163,6 +1169,8 @@ impl Default for ExecutionTomlConfig {
             max_repairs_per_class: default_max_repairs_per_class(),
             max_replans: default_max_replans(),
             work_unit_lane_cap: default_work_unit_lane_cap(),
+            parallel: false,
+            max_parallel_work_units: default_max_parallel_work_units(),
         }
     }
 }
@@ -1190,6 +1198,9 @@ fn default_max_replans() -> u32 {
 }
 fn default_work_unit_lane_cap() -> String {
     "task".to_string()
+}
+fn default_max_parallel_work_units() -> usize {
+    3
 }
 
 /// `[execution.planner]`（ADR-0072 D14, Phase E3; ADR-0074 D5.3, Phase F1）: task-local な計画 run の
@@ -2241,6 +2252,16 @@ impl Config {
                 self.execution.work_unit_lane_cap
             )));
         }
+        // ADR-0074 §4（Phase F2b）: max_parallel_work_units は 1..=6。
+        if !(1..=task_dispatch::dispatcher::MAX_PARALLEL_WORK_UNITS_CAP)
+            .contains(&self.execution.max_parallel_work_units)
+        {
+            return Err(ConfigError::Invalid(format!(
+                "[execution] max_parallel_work_units must be between 1 and {} (got {})",
+                task_dispatch::dispatcher::MAX_PARALLEL_WORK_UNITS_CAP,
+                self.execution.max_parallel_work_units
+            )));
+        }
         // ADR-0043 D3: runtime は 3 つだけ（綴り間違いで黙ってホスト実行に倒れないように）。
         if task_worker::RuntimePreference::parse(&self.containers.runtime).is_none() {
             return Err(ConfigError::Invalid(format!(
@@ -2962,6 +2983,8 @@ impl Config {
                     &self.execution.work_unit_lane_cap,
                 )
                 .unwrap_or_default(),
+                parallel: self.execution.parallel,
+                max_parallel_work_units: self.execution.max_parallel_work_units,
             },
         }
     }

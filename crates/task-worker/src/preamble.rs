@@ -38,6 +38,30 @@ use crate::protocol::{ConversationAddressee, MilestoneReviewContext, RunContext}
 /// 前置き（役割の指示文を含む）。`claude-code` / `codex` / `acp` / `paperqa` が使う。
 /// `artifacts` は成果物ディレクトリの workspace 相対表記（`RunRequest::artifacts_rel`。ADR-0036 D3。
 /// 単独タスクでは `artifacts` なので出力は Phase 34 までとバイト単位で同じ）。
+/// ADR-0074 D1.2（Phase F2b）: v2 の WU の run が WU ごとの worktree で走るときの節（作業ブランチに
+/// commit してよい・push しない・並行する他の WU のファイルに触らない）。`branch` が無い run では空
+/// （v1・並列 1・atomic のプロンプトは 1 バイトも変わらない）。
+pub fn work_unit_branch_section(wu: &crate::protocol::WorkUnitPromptContext) -> String {
+    let Some(branch) = &wu.branch else {
+        return String::new();
+    };
+    let mut out = String::from("## 作業ブランチ（並列の WorkUnit）\n");
+    out.push_str(&format!(
+        "- この WorkUnit は専用のブランチ `{branch}` の作業ツリーで走っています。変更はこのブランチに commit してかまいません（push はしないこと）。終わった時点で残っている変更は celeris が commit します。\n"
+    ));
+    out.push_str(
+        "- 同じ工程の他の WorkUnit が別の作業ツリーで並行して走っています。**他の WorkUnit が担当するファイルには触らないでください**（自分の Objective の範囲だけを変更する）。工程の最後に celeris が各ブランチを決定的に merge します。\n",
+    );
+    if !wu.parallel_siblings.is_empty() {
+        out.push_str("- 並行しうる WorkUnit:\n");
+        for s in &wu.parallel_siblings {
+            out.push_str(&format!("  - {s}\n"));
+        }
+    }
+    out.push('\n');
+    out
+}
+
 pub fn render(context: &RunContext, artifacts: &str) -> String {
     // ADR-0044 D2（Phase 53）: コメントは**前置きの先頭**（人が割り込んだら最初に目に入る）。
     // コメントが 1 件も無ければ何も出さないので、Phase 52 までの出力とバイト単位で同じ。

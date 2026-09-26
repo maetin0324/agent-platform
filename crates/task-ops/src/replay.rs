@@ -222,29 +222,28 @@ pub fn rebuild_work_units_and_runs(
                     .or_insert_with(|| work_unit_id.clone());
             }
         }
-        for (seq, &idx) in topological_order(&spec).iter().enumerate() {
-            let wu_spec = spec.work_units[idx].clone();
-            let id = key_to_id
-                .get(&wu_spec.key)
-                .cloned()
-                .unwrap_or_else(|| format!("rebuilt-{task_id}-{}", wu_spec.key));
-            let status = if wu_spec.depends_on.is_empty() {
-                WorkUnitStatus::Ready
-            } else {
-                WorkUnitStatus::Pending
-            };
-            let row = WorkUnitRow::new(
-                id.clone(),
-                task_id.to_string(),
-                plan_id.clone(),
-                seq as u32,
-                wu_spec,
-                status,
-                plan_ts.clone(),
-            );
-            wu_rows.insert(id, row);
+        // ADR-0074 D1.4（Phase F2b）: v2 は採用時と同じ規則（`materialize_work_units`）で統合 WU を
+        // 足し、工程の障壁つきで初期状態を決める（v1 は従来と同じ結果）。
+        let order = topological_order(&spec);
+        for row in task_core::materialize_work_units(
+            &task_id.to_string(),
+            &plan_id,
+            &spec,
+            &order,
+            &plan_ts,
+            &mut |w| {
+                key_to_id
+                    .get(&w.key)
+                    .cloned()
+                    .unwrap_or_else(|| format!("rebuilt-{task_id}-{}", w.key))
+            },
+        ) {
+            wu_rows.insert(row.id.clone(), row);
         }
     }
+    // ADR-0074 D1.4: 統合の repair（`RepairScheduled{origin: integration}`）の直前に統合 WU が
+    // pending に戻った（`merge_conflict` / `integration_check_failed`）なら、その統合 WU は repair に依存する。
+    let mut pending_integration: Option<String> = None;
 
     let mut run_order: Vec<String> = Vec::new();
     let mut runs: BTreeMap<String, RunRow> = BTreeMap::new();
@@ -265,9 +264,16 @@ pub fn rebuild_work_units_and_runs(
                 let Some(wu) = wu_rows.get_mut(work_unit_id) else {
                     continue;
                 };
+                if matches!(
+                    reason.as_str(),
+                    "merge_conflict" | "integration_check_failed"
+                ) {
+                    pending_integration = Some(work_unit_id.clone());
+                }
                 let blocked_reason = if *to == WorkUnitStatus::Blocked {
                     match reason.as_str() {
-                        "question" => Some(WorkUnitBlockedReason::Question),
+                        "question" | "integration_failed" => Some(WorkUnitBlockedReason::Question),
+                        "plan_issue" => Some(WorkUnitBlockedReason::PlanIssue),
                         "dependency_failed" => Some(WorkUnitBlockedReason::DependencyFailed),
                         "limit" => Some(WorkUnitBlockedReason::Limit),
                         _ => wu.blocked_reason,
@@ -348,6 +354,45 @@ pub fn rebuild_work_units_and_runs(
             } => {
                 if let Some(r) = runs.get_mut(run_id) {
                     r.checkpoint = Some((**checkpoint).clone());
+                }
+            }
+            // ADR-0074 D1.2（Phase F2b）: WU の commit（WU のブランチ・基点・HEAD の正本）。
+            Event::WorkUnitCommitted {
+                work_unit_id,
+                branch,
+                base,
+                commit,
+                ..
+            } => {
+                if let Some(wu) = wu_rows.get_mut(work_unit_id) {
+                    if branch.starts_with("celeris-wu/") {
+                        wu.branch = Some(branch.clone());
+                        wu.base_commit = base.clone();
+                    }
+                    wu.head_commit = Some(commit.clone());
+                }
+            }
+            // ADR-0074 D1.4: 統合後の Task ブランチの HEAD。
+            Event::PhaseIntegrated {
+                work_unit_id, head, ..
+            } => {
+                if let Some(wu) = wu_rows.get_mut(work_unit_id)
+                    && !head.is_empty()
+                {
+                    wu.integrated_commit = Some(head.clone());
+                }
+            }
+            Event::RepairScheduled {
+                key,
+                origin: task_core::execution::RepairOrigin::Integration,
+                ..
+            } => {
+                if let Some(integ_id) = pending_integration.take()
+                    && let Some(integ) = wu_rows.get_mut(&integ_id)
+                    && !integ.depends_on.contains(key)
+                {
+                    integ.depends_on.push(key.clone());
+                    integ.spec.depends_on.push(key.clone());
                 }
             }
             Event::WorkerFinished {
@@ -459,6 +504,23 @@ fn wu_field_pairs(w: &WorkUnitRow) -> Vec<(&'static str, String)> {
         (
             "spec_json",
             serde_json::to_string(&w.spec).unwrap_or_default(),
+        ),
+        // ADR-0074 D1（Phase F2b）: events から復元できる v2 の列（lease は揮発なので比べない。
+        // `branch`/`base_commit` は WU の worktree を切った時点で行に入り、events には commit の
+        // ときに初めて出るので比べない）。
+        (
+            "phase",
+            w.phase.clone().unwrap_or_else(|| "none".to_string()),
+        ),
+        (
+            "head_commit",
+            w.head_commit.clone().unwrap_or_else(|| "none".to_string()),
+        ),
+        (
+            "integrated_commit",
+            w.integrated_commit
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
         ),
     ]
 }

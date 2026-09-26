@@ -193,6 +193,13 @@ pub struct ExecutionPlanOverview {
     pub work_units: Vec<ExecutionWorkUnitView>,
     /// D17(f): 版の履歴（`version` 昇順。superseded を含む）。
     pub versions: Vec<ExecutionPlanVersionSummary>,
+    /// ADR-0074 D1.1（Phase F2b）: v2 の工程（配列の順が実行順。v1 は空）。GUI は WU の表を工程ごとの
+    /// 見出しでまとめる。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub phases: Vec<task_core::PhaseSpec>,
+    /// ADR-0074 D1.2（Phase F2b）: v2 の計画を並列 1 に倒した理由（`WorkUnitsSerialized`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serialized_reason: Option<String>,
 }
 
 /// D20: WU の表の 1 行。
@@ -228,6 +235,21 @@ pub struct ExecutionWorkUnitView {
     pub last_reason: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// ADR-0074 D1（Phase F2b）: v2 の工程の key（v1 は無し）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// ADR-0074 D1.2: WU のブランチ（`celeris-wu/<task_id>/<key>`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// ADR-0074 D1.2: `WorkUnitCommitted` の commit。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<String>,
+    /// ADR-0074 D1.4: 統合 WU の統合後の Task ブランチの HEAD。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub integrated_commit: Option<String>,
+    /// ADR-0074 D1.5: 今この WU を実行している run（同時に走っている run を GUI に出す）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_run_id: Option<String>,
 }
 
 /// D17(f): `execution_plans` の 1 版（監査用）。
@@ -1099,6 +1121,15 @@ fn build_execution_view(
                 last_reason,
                 created_at: u.created_at.clone(),
                 updated_at: u.updated_at.clone(),
+                phase: u.phase.clone(),
+                branch: u.branch.clone(),
+                head_commit: u.head_commit.clone(),
+                integrated_commit: u.integrated_commit.clone(),
+                running_run_id: if u.status == task_core::WorkUnitStatus::Running {
+                    u.lease_run_id.clone()
+                } else {
+                    None
+                },
             });
         }
         work_units.sort_by_key(|w| w.seq);
@@ -1126,24 +1157,39 @@ fn build_execution_view(
             .collect();
 
         let active_plan_row = store.execution_plan_active(task.id)?;
+        let serialized_reason_of = |plan_id: &str| {
+            event_list.iter().rev().find_map(|e| match e {
+                Event::WorkUnitsSerialized { plan_id: p, reason } if p == plan_id => {
+                    Some(reason.clone())
+                }
+                _ => None,
+            })
+        };
         match active_plan_row {
-            Some(row) => Some(ExecutionPlanOverview {
-                id: row.id,
-                version: row.version,
-                origin: row.origin,
-                rationale: row.spec.rationale,
-                work_units,
-                versions,
-            }),
+            Some(row) => {
+                let serialized_reason = serialized_reason_of(&row.id);
+                Some(ExecutionPlanOverview {
+                    id: row.id,
+                    version: row.version,
+                    origin: row.origin,
+                    rationale: row.spec.rationale,
+                    work_units,
+                    versions,
+                    phases: row.spec.phases,
+                    serialized_reason,
+                })
+            }
             None => {
                 let latest = versions.last().cloned();
                 latest.map(|latest| ExecutionPlanOverview {
+                    serialized_reason: serialized_reason_of(&latest.id),
                     id: latest.id,
                     version: latest.version,
                     origin: latest.origin,
                     rationale: String::new(),
                     work_units,
                     versions,
+                    phases: Vec::new(),
                 })
             }
         }

@@ -12,11 +12,16 @@ import {
   directExecutionSummary,
   gateModeLabel,
   isRepairWorkUnit,
+  parallelSummaryLine,
   planSummaryLine,
   planVersionLabel,
   quotaSummaryLines,
   runEndLabel,
   runEndTone,
+  runningWorkUnitRuns,
+  shortCommit,
+  WORK_UNIT_KIND_LABEL,
+  workUnitGroups,
 } from "~/lib/task-execution";
 
 /**
@@ -256,6 +261,57 @@ describe("task-execution", () => {
   it("quota: 記録が無ければ空配列", () => {
     expect(quotaSummaryLines(metrics())).toEqual([]);
     expect(quotaSummaryLines(metrics({ quota: [] }))).toEqual([]);
+  });
+
+  // ---- celeris ADR-0074 D1（Phase F2b）: 並列 WU（工程・ブランチ・同時に走っている run） ----
+  const V2 = plan({
+    phases: [
+      { key: "build", kind: "implement", title: "実装" },
+      { key: "verify", kind: "test", title: "検証" },
+    ],
+    work_units: [
+      wu({ id: "i", key: "integrate-build", seq: 2, kind: "integrate", phase: "build", status: "pending" }),
+      wu({
+        id: "a",
+        key: "a",
+        seq: 0,
+        phase: "build",
+        status: "running",
+        running_run_id: "RUN-A",
+        branch: "celeris-wu/T/a",
+      }),
+      wu({ id: "b", key: "b", seq: 1, phase: "build", status: "running", running_run_id: "RUN-B" }),
+      wu({ id: "c", key: "c", seq: 3, phase: "verify", status: "pending" }),
+    ],
+  });
+
+  it("v2: WU の表を工程の順にまとめ、見出しを付ける（統合 WU も工程の中）", () => {
+    const groups = workUnitGroups(V2);
+    expect(groups.map((g) => g.label)).toEqual(["工程 実装（build）", "工程 検証（verify）"]);
+    expect(groups[0]?.units.map((w) => w.key)).toEqual(["a", "b", "integrate-build"]);
+    expect(groups[1]?.units.map((w) => w.key)).toEqual(["c"]);
+    expect(WORK_UNIT_KIND_LABEL.integrate).toBe("統合");
+  });
+
+  it("v1: 見出しの無い 1 つのまとまり", () => {
+    const groups = workUnitGroups(WITH_PLAN.plan as ExecutionPlanOverview);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.label).toBe("");
+    expect(groups[0]?.units.map((w) => w.key)).toEqual(["survey", "build", "test"]);
+  });
+
+  it("同時に走っている run の本数、並列 1 に倒した理由", () => {
+    expect(runningWorkUnitRuns(V2)).toEqual([
+      { key: "a", runId: "RUN-A" },
+      { key: "b", runId: "RUN-B" },
+    ]);
+    expect(parallelSummaryLine(V2)).toBe("同時に走っている run: 2 本（a, b）");
+    expect(parallelSummaryLine({ ...V2, serialized_reason: "workspace_mode = shared" })).toBe(
+      "並列 1 で実行（workspace_mode = shared）",
+    );
+    expect(parallelSummaryLine(WITH_PLAN.plan as ExecutionPlanOverview)).toBeNull();
+    expect(shortCommit("0123456789abcdef0123")).toBe("0123456789ab");
+    expect(shortCommit(null)).toBeNull();
   });
 
   it("定価 USD: 参考値として、不完全なら明示する", () => {

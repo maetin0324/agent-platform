@@ -1121,6 +1121,55 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         list_price_usd: Option<f64>,
     },
+    /// ADR-0074 D1.2（Phase F2b）: v2 の WU の run が done になり、daemon が WU の作業ツリーで
+    /// 決定的に commit した（`git add -A && git commit -m "wu/<key>: <title>"`。変更が無ければ commit
+    /// せず、その時点の HEAD）。`work_units.branch`/`base_commit`/`head_commit` の正本。状態は変えない。
+    WorkUnitCommitted {
+        work_unit_id: String,
+        key: String,
+        /// `celeris-wu/<task_id>/<key>`（統合の repair WU のように Task の worktree で走った WU は
+        /// Task のブランチ）。
+        branch: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
+        commit: String,
+    },
+    /// ADR-0074 D1.4（Phase F2b）: 工程の統合が済んだ（葉の WU の merge と検査の再実行が通った）。
+    /// 状態は変えない（Task の遷移は同じトランザクションの `Transitioned`）。
+    PhaseIntegrated {
+        phase: String,
+        work_unit_id: String,
+        merged: Vec<PhaseMerged>,
+        /// 統合後の Task ブランチの HEAD（WU の worktree を持たない並列 1 の工程では空文字列）。
+        head: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        checks: Vec<PhaseCheckResult>,
+    },
+    /// ADR-0074 D1.2（Phase F2b）: v2 の計画だが並列 1 に倒した（remote / 書き込み可能な `dir` の
+    /// repo / `Shared`）。計画ごとに 1 回だけ残す。状態は変えない。
+    WorkUnitsSerialized {
+        plan_id: String,
+        reason: String,
+    },
+}
+
+/// `Event::PhaseIntegrated.merged[]`（ADR-0074 D1.4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PhaseMerged {
+    pub key: String,
+    /// merge した WU ブランチの HEAD。
+    pub commit: String,
+    /// 既に Task ブランチに入っていたので飛ばした（冪等なやり直し）。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
+}
+
+/// `Event::PhaseIntegrated.checks[]`（ADR-0074 D1.4 の 4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PhaseCheckResult {
+    pub cmd: String,
+    pub pass: bool,
+    pub summary: String,
 }
 
 impl Event {
