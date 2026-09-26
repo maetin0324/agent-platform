@@ -233,6 +233,43 @@
       ],
       "type": "object"
     },
+    "AccountNowView": {
+      "description": "ADR-0074 D4.3（Phase F3 quota）: `GET /metrics/execution` の最上位に足す「今の残量」\n（`GET /llm/sources` の accounts と同じ値）。`source` は `sources[].id`（`claude-oauth` /\n`codex-oauth` / `openai-compatible:<id>`）。",
+      "properties": {
+        "cooldown_until": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "remaining_long": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "remaining_short": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "id"
+      ],
+      "type": "object"
+    },
     "AccountStats": {
       "description": "`WorkerStarted.account` / `WorkerFinished` から集計（task-api のメモリ内の観測値。再起動で再計算）。",
       "properties": {
@@ -5043,6 +5080,79 @@
             "origin"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0074 D4.3（Phase F3 quota）: 1 run の quota 消費の推定（決定的。`task_core::quota` の\n純粋関数で決める）。`WorkerFinished` には足さない（struct literal の多数の箇所を避けるため、\nADR-0072 E1/E2 の逸脱節と同じ判断）。状態は変えない（`replay` は無視する）。\n\n`apportioned` は同じ `run_id` にもう 1 件出ることがある（グループの最後の run が終わって\n按分が確定したとき。**最後の Event が有効**）。",
+          "properties": {
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "calibration": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/QuotaCalibration"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "list_price_usd": {
+              "description": "参考の定価 USD（`Usage.cost_usd` と同じ値。不明なら `None`）。",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "method": {
+              "$ref": "#/$defs/QuotaMethod",
+              "description": "`windows` を 1 つに畳み込んだ代表値（`task_core::quota::representative_method`）。"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "source": {
+              "description": "`\"claude-oauth\"` / `\"codex-oauth\"` / それ以外（アカウントプールを使わない provider の id。\nD4.2 手順 5 の `free` になりうる）。",
+              "type": "string"
+            },
+            "type": {
+              "const": "quota_estimated",
+              "type": "string"
+            },
+            "weighted_tokens": {
+              "format": "double",
+              "type": "number"
+            },
+            "weights_version": {
+              "type": "string"
+            },
+            "windows": {
+              "items": {
+                "$ref": "#/$defs/QuotaWindowUse"
+              },
+              "type": "array"
+            },
+            "work_unit_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "source",
+            "windows",
+            "weighted_tokens",
+            "method",
+            "weights_version"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -5218,6 +5328,11 @@
             "null"
           ]
         },
+        "cost_usd_complete": {
+          "default": true,
+          "description": "D4.3: 定価 USD（`cost_usd`）が完全か。単価不明のモデルを使った run（token はあるのに\n`Usage.cost_usd` が無い run）が 1 件でもあれば `false`（`cost_usd` はその分だけ過小）。\nrun が 1 件も無ければ `true`（欠けようがない）。",
+          "type": "boolean"
+        },
         "final_status": {
           "$ref": "#/$defs/Status"
         },
@@ -5256,6 +5371,21 @@
             "integer",
             "null"
           ]
+        },
+        "quota": {
+          "default": [],
+          "description": "ADR-0074 D4.3（Phase F3 quota）: アカウント × 窓ごとの quota 消費の合計\n（`Event::QuotaEstimated` から。同じ `run_id` は最後の Event が有効）。",
+          "items": {
+            "$ref": "#/$defs/QuotaUse"
+          },
+          "type": "array"
+        },
+        "quota_unknown_runs": {
+          "default": 0,
+          "description": "D4.3: quota が `unknown`（measured/apportioned/estimated のいずれでも決められなかった）\nだった run の数。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
         },
         "repairs_by_class": {
           "additionalProperties": {
@@ -5361,6 +5491,11 @@
           "minimum": 0,
           "type": "integer"
         },
+        "cost_usd_complete": {
+          "default": true,
+          "description": "D4.3: このグループの全タスクで定価 USD が完全だったか（単価不明のモデルを使った run が\n1 件でもあれば `false`）。",
+          "type": "boolean"
+        },
         "done": {
           "format": "uint64",
           "minimum": 0,
@@ -5385,6 +5520,14 @@
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "quota": {
+          "default": [],
+          "description": "ADR-0074 D4.3（Phase F3 quota）: このグループの (source, account, window) ごとの quota 消費の合計。",
+          "items": {
+            "$ref": "#/$defs/QuotaUse"
+          },
+          "type": "array"
         },
         "repairs": {
           "format": "uint64",
@@ -5418,6 +5561,14 @@
     "ExecutionMetricsSummary": {
       "description": "`GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`。",
       "properties": {
+        "accounts_now": {
+          "default": [],
+          "description": "ADR-0074 D4.3（Phase F3 quota）: 今のアカウントの残量（`GET /llm/sources` と同じ値）。\n`[llm_proxy]` が無効なら空。",
+          "items": {
+            "$ref": "#/$defs/AccountNowView"
+          },
+          "type": "array"
+        },
         "group_by": {
           "type": "string"
         },
@@ -9873,6 +10024,155 @@
       ],
       "type": "object"
     },
+    "QuotaCalibration": {
+      "description": "D4.2 の較正値 `k_w`（同じ source の直近の `measured` run から求めた比の和）。",
+      "properties": {
+        "k": {
+          "format": "double",
+          "type": "number"
+        },
+        "samples": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "k",
+        "samples"
+      ],
+      "type": "object"
+    },
+    "QuotaMethod": {
+      "description": "D4.2: この窓の消費をどうやって決めたか（confidence）。",
+      "oneOf": [
+        {
+          "const": "measured",
+          "description": "`before`/`after` が両方有効・排他・同じ窓インスタンス。",
+          "type": "string"
+        },
+        {
+          "const": "apportioned",
+          "description": "重なった run の集合に、重み付きトークンの比で按分。",
+          "type": "string"
+        },
+        {
+          "const": "estimated",
+          "description": "直近の `measured` から較正した比率 `k_w` にトークン数を掛けた値。",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "上のどれでも決められなかった（`None` であって `0` ではない）。",
+          "type": "string"
+        },
+        {
+          "const": "free",
+          "description": "Qwen など定額でも従量でもない供給元（`q = 0` だが「消費なし」を意味であって未知ではない）。",
+          "type": "string"
+        }
+      ]
+    },
+    "QuotaUse": {
+      "description": "D4.3: アカウント × 窓の合計（`ExecutionMetrics.quota` / WU ごとの quota に使う集計行）。",
+      "properties": {
+        "account": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method_counts": {
+          "additionalProperties": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "runs": {
+          "description": "この (source, account, window) にこの窓の値を持つ run の数（`unknown` も含む）。",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "used_pct": {
+          "description": "決められた run だけの合計（`unknown` の run は寄与しない）。全部 `unknown`/`free` なら\n`free` は `0.0` を寄与するので `Some(0.0)`、`unknown` だけなら `None`。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "window": {
+          "$ref": "#/$defs/QuotaWindow"
+        }
+      },
+      "required": [
+        "source",
+        "window",
+        "runs",
+        "method_counts"
+      ],
+      "type": "object"
+    },
+    "QuotaWindow": {
+      "description": "D4.2: 窓の種別（ADR-0024 と同じ 2 窓）。",
+      "enum": [
+        "five_hour",
+        "seven_day"
+      ],
+      "type": "string"
+    },
+    "QuotaWindowUse": {
+      "description": "D4.3: run 1 件・窓 1 つの消費。",
+      "properties": {
+        "after": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "before": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/QuotaMethod",
+          "description": "**ADR からの逸脱**（`docs/adr/0074-...md` の「Phase F3（quota）実装時の逸脱・明確化」参照）:\nD4.3 の JSON 例は窓ごとの `method` を書いていないが、5 時間 / 7 日で窓リセットの有無により\n決め方が食い違いうる（例: 7 日枠だけ `resets_at` を跨ぐ）ため、窓ごとにも残す。\n`Event::QuotaEstimated.method` はこれらのうち最も確からしいものを 1 つに畳み込んだ値。"
+        },
+        "resets_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "used_pct": {
+          "description": "0〜100（パーセントポイント）。決められなければ `None`（`0` と混同しない。D4.2 4./unknown_is_never_zero）。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "window": {
+          "$ref": "#/$defs/QuotaWindow"
+        }
+      },
+      "required": [
+        "window",
+        "method"
+      ],
+      "type": "object"
+    },
     "RateWindow": {
       "description": "1 つの枠（5 時間 / 7 日）の観測値。",
       "properties": {
@@ -14267,6 +14567,14 @@
             "string",
             "null"
           ]
+        },
+        "quota": {
+          "default": [],
+          "description": "ADR-0074 D4.3（Phase F3 quota）: この WU の run の quota 消費の合計\n（`ExecutionPlanView::with_quota` が events から埋める。既定は空）。",
+          "items": {
+            "$ref": "#/$defs/QuotaUse"
+          },
+          "type": "array"
         },
         "retries": {
           "format": "uint32",

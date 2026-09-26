@@ -1215,6 +1215,27 @@ mod tests {
     }
 }
 
+/// ADR-0053 D4.1（Phase 66/F3）: 1 枠だけの残り（`measured_remaining` と同じ「観測が新しく、枠が
+/// 有効」という規律を 1 枠に適用する）。観測が古い（300 秒超）・未来（壁時計のずれ）・枠が無い／
+/// 期限切れ／範囲外の `utilization` はすべて `None`（測れない、を捏造しない）。
+///
+/// ADR-0074 D4.1（Phase F3）: `llm-proxy::sources_view` にあった同名の私的関数をここに移した
+/// （`dispatcher` と `GET /llm/sources` の両方が同じ関数で読む。値を捏造しない規律を 1 か所にする）。
+pub fn window_remaining(
+    obs: &RateLimitObservation,
+    now: i64,
+    window: Option<RateWindow>,
+) -> Option<f64> {
+    if now < obs.observed_at || now - obs.observed_at > 300 {
+        return None;
+    }
+    let w = window?;
+    if w.resets_at <= now || !w.utilization.is_finite() || !(0.0..=1.0).contains(&w.utilization) {
+        return None;
+    }
+    Some(1.0 - w.utilization)
+}
+
 /// Conservative quota evidence: require both unexpired windows and a recent observation.
 /// Missing/expired/stale values are unknown, never estimated as a full allowance.
 pub fn measured_remaining(obs: &RateLimitObservation, now: i64) -> Option<f64> {
@@ -1233,6 +1254,55 @@ pub fn measured_remaining(obs: &RateLimitObservation, now: i64) -> Option<f64> {
 #[cfg(test)]
 mod routing_tests {
     use super::*;
+
+    /// ADR-0074 D4.1（Phase F3）: `window_remaining` を `sources_view.rs` から移した回帰
+    /// （元のテスト精神と同じ規律: 新しい・有効な観測だけ、古い/未来/リセット済みは `None`）。
+    #[test]
+    fn window_remaining_table() {
+        let obs = RateLimitObservation {
+            five_hour: Some(RateWindow {
+                utilization: 0.3,
+                resets_at: 2_000,
+            }),
+            seven_day: None,
+            status: None,
+            resets_at: None,
+            observed_at: 1_000,
+        };
+        assert_eq!(
+            window_remaining(&obs, 1_100, obs.five_hour),
+            Some(0.7),
+            "fresh and valid"
+        );
+        assert_eq!(
+            window_remaining(&obs, 1_301, obs.five_hour),
+            None,
+            "stale (>300s)"
+        );
+        assert_eq!(
+            window_remaining(&obs, 999, obs.five_hour),
+            None,
+            "future observation"
+        );
+        assert_eq!(
+            window_remaining(&obs, 1_100, obs.seven_day),
+            None,
+            "no window"
+        );
+        assert_eq!(
+            window_remaining(
+                &obs,
+                2_000,
+                Some(RateWindow {
+                    utilization: 0.3,
+                    resets_at: 2_000
+                })
+            ),
+            None,
+            "window already reset"
+        );
+    }
+
     #[test]
     fn missing_stale_and_expired_quota_are_unknown() {
         let mut obs = RateLimitObservation {
@@ -1255,5 +1325,415 @@ mod routing_tests {
         assert_eq!(measured_remaining(&obs, 2000), None);
         obs.seven_day = None;
         assert_eq!(measured_remaining(&obs, 1999), None);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0074 D4（Phase F3 quota）: run の前後の観測を quota 消費の推定に使うための、アカウントの
+// 使用状況の追跡。`AccountBook` の観測値そのものとは別軸（こちらは「誰が今そのアカウントを
+// 使っているか」という揮発的な状態機械で、replay の対象外）。
+// ---------------------------------------------------------------------------
+
+use std::collections::BTreeSet;
+use std::collections::VecDeque;
+
+/// D4.2:「重なった run の集合」1 メンバー（run が終わった時点で確定する情報。`QuotaActivity::end`
+/// の引数）。
+#[derive(Debug, Clone)]
+pub struct QuotaGroupMember {
+    pub task_id: task_core::TaskId,
+    pub run_id: String,
+    pub work_unit_id: Option<String>,
+    pub source: String,
+    pub weighted_tokens: f64,
+    /// 参考の定価 USD（`Usage.cost_usd`）。グループが閉じたときに他タスクへ書く
+    /// `Event::QuotaEstimated.list_price_usd` に使う（この run の `Usage` はもう手元に無いため、
+    /// `begin`/`end` の時点で持っていた値をここに保存しておく）。
+    pub list_price_usd: Option<f64>,
+}
+
+/// ADR-0053/ADR-0074: `AccountAdapter` を quota の `source` 文字列に写す
+/// （`llm-proxy::server::source_label` と同じ語彙。プールを使うのはこの 2 つだけ）。
+pub fn quota_source_label(adapter: AccountAdapter) -> &'static str {
+    match adapter {
+        AccountAdapter::ClaudeCode => "claude-oauth",
+        AccountAdapter::Codex => "codex-oauth",
+    }
+}
+
+#[derive(Debug, Clone)]
+struct QuotaGroup {
+    before: Option<RateLimitObservation>,
+    before_valid: bool,
+    open_run_ids: BTreeSet<String>,
+    finished: Vec<QuotaGroupMember>,
+    ever_multi: bool,
+}
+
+/// `QuotaActivity::end` の結果（D4.2 手順 1/2 のどちらを試すべきかを呼び出し側に伝える）。
+#[derive(Debug, Clone)]
+pub enum QuotaEndOutcome {
+    /// この run は開始から終了まで、同じアカウントを使う他の run と一度も重ならなかった
+    /// （`measured` の対象になりうる。`before`/`before_valid` はグループ開始〈= この run の
+    /// 開始〉時点のスナップショット）。
+    Exclusive {
+        before: Option<RateLimitObservation>,
+        before_valid: bool,
+    },
+    /// 重なりがあった。グループはまだ閉じていない（他に走っている run がある。D4.2 手順 2 の
+    /// 「集合の最後の run が終わった時点で決まる。それまでは pending」）。
+    Pending,
+    /// 重なりがあり、この run でグループが閉じた（全メンバーの重み付きトークンで按分できる）。
+    Closed {
+        before: Option<RateLimitObservation>,
+        before_valid: bool,
+        members: Vec<QuotaGroupMember>,
+    },
+}
+
+/// D4.2 手順 1/2 の入力を決めるための、アカウントの使用中 run の追跡（決定的な状態機械）。
+/// **どのメソッドも保存しない**（`AccountBook` と違い、揮発データ。プロセスの再起動で失われても、
+/// D4.2 の優先順位により次の run は `estimated`/`unknown` に倒れるだけで、値を捏造しない）。
+#[derive(Debug, Default)]
+pub struct QuotaActivity {
+    groups: std::collections::HashMap<(AccountAdapter, String), QuotaGroup>,
+}
+
+impl QuotaActivity {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `run_id` がこのアカウントで `begin` 済み（まだ `end` していない）かどうか。
+    /// `begin` を呼ばなかった run（例: planner run。`Dispatcher::quota_begin` の doc 参照）に対して
+    /// 誤って `end` を呼び、無関係な他の run のグループを壊さないための、呼び出し側の防御に使う。
+    pub fn is_tracked(&self, adapter: AccountAdapter, account_id: &str, run_id: &str) -> bool {
+        self.groups
+            .get(&(adapter, account_id.to_string()))
+            .is_some_and(|g| g.open_run_ids.contains(run_id))
+    }
+
+    /// run の開始。`snapshot` はこの時点で `AccountBook` から読んだ観測値、`snapshot_valid` は
+    /// D4.1 の有効性（`task_core::quota::before_is_valid`）。同じアカウントで既に開いている
+    /// グループがあれば、それに参加する（そのグループの `before` は最初の run のものを保つ）。
+    pub fn begin(
+        &mut self,
+        adapter: AccountAdapter,
+        account_id: &str,
+        run_id: &str,
+        snapshot: Option<RateLimitObservation>,
+        snapshot_valid: bool,
+    ) {
+        let key = (adapter, account_id.to_string());
+        let group = self.groups.entry(key).or_insert_with(|| QuotaGroup {
+            before: snapshot,
+            before_valid: snapshot_valid,
+            open_run_ids: BTreeSet::new(),
+            finished: Vec::new(),
+            ever_multi: false,
+        });
+        group.open_run_ids.insert(run_id.to_string());
+        if group.open_run_ids.len() > 1 {
+            group.ever_multi = true;
+        }
+    }
+
+    /// run の終了。`member.run_id` は `begin` に渡したものと一致させること。`begin` を呼んでいない
+    /// run（呼び出し側の不具合。通常は起きない）は `Exclusive { before: None, before_valid: false }`
+    /// を返す（unknown に落ちるだけで、値を捏造しない）。
+    pub fn end(
+        &mut self,
+        adapter: AccountAdapter,
+        account_id: &str,
+        member: QuotaGroupMember,
+    ) -> QuotaEndOutcome {
+        let key = (adapter, account_id.to_string());
+        let Some(group) = self.groups.get_mut(&key) else {
+            return QuotaEndOutcome::Exclusive {
+                before: None,
+                before_valid: false,
+            };
+        };
+        group.open_run_ids.remove(&member.run_id);
+        if !group.ever_multi && group.open_run_ids.is_empty() {
+            let group = self
+                .groups
+                .remove(&key)
+                .expect("key was just matched above");
+            return QuotaEndOutcome::Exclusive {
+                before: group.before,
+                before_valid: group.before_valid,
+            };
+        }
+        group.finished.push(member);
+        if group.open_run_ids.is_empty() {
+            let group = self
+                .groups
+                .remove(&key)
+                .expect("key was just matched above");
+            QuotaEndOutcome::Closed {
+                before: group.before,
+                before_valid: group.before_valid,
+                members: group.finished,
+            }
+        } else {
+            QuotaEndOutcome::Pending
+        }
+    }
+}
+
+/// D4.2 手順 3 の較正材料: `(source, window)` ごとの直近 `measured` の `(used_pct, weighted_tokens)`
+/// の組（最大 `task_core::quota::CALIBRATION_MAX_SAMPLES` 件のリングバッファ）。
+///
+/// **ADR からの逸脱**（`docs/adr/0074-...md` の「Phase F3（quota）実装時の逸脱・明確化」参照）:
+/// D4.2 は「同じ source の直近 14 日の `measured` run（最大 20 件）」と書いているが、events を
+/// 横断して探す store 側の問い合わせは今回作らず、dispatcher プロセスの寿命の間だけ持つ
+/// in-memory のリングバッファ（件数の上限だけを守る。日数の上限は無い）にした。再起動すれば
+/// 較正はやり直しになり、しばらく `unknown` に倒れる（値を捏造しない、という規律の範囲内）。
+#[derive(Debug, Default)]
+pub struct QuotaCalibrationBook {
+    by_key: BTreeMap<String, VecDeque<(f64, f64)>>,
+}
+
+fn calibration_key(source: &str, window: task_core::QuotaWindow) -> String {
+    format!("{source}:{}", window.as_str())
+}
+
+impl QuotaCalibrationBook {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record(
+        &mut self,
+        source: &str,
+        window: task_core::QuotaWindow,
+        used_pct: f64,
+        weighted_tokens: f64,
+    ) {
+        if weighted_tokens <= 0.0 {
+            return;
+        }
+        let entry = self
+            .by_key
+            .entry(calibration_key(source, window))
+            .or_default();
+        entry.push_back((used_pct, weighted_tokens));
+        while entry.len() > task_core::quota::CALIBRATION_MAX_SAMPLES {
+            entry.pop_front();
+        }
+    }
+
+    pub fn calibration(
+        &self,
+        source: &str,
+        window: task_core::QuotaWindow,
+    ) -> Option<task_core::QuotaCalibration> {
+        let samples = self.by_key.get(&calibration_key(source, window))?;
+        let pairs: Vec<(f64, f64)> = samples.iter().copied().collect();
+        task_core::quota::calibrate(&pairs)
+    }
+}
+
+#[cfg(test)]
+mod quota_activity_tests {
+    use super::*;
+    use task_core::TaskId;
+
+    fn member(run_id: &str, weighted_tokens: f64) -> QuotaGroupMember {
+        QuotaGroupMember {
+            task_id: TaskId::new(),
+            run_id: run_id.to_string(),
+            work_unit_id: None,
+            source: "claude-oauth".to_string(),
+            weighted_tokens,
+            list_price_usd: None,
+        }
+    }
+
+    #[test]
+    fn quota_source_label_maps_adapters() {
+        assert_eq!(
+            quota_source_label(AccountAdapter::ClaudeCode),
+            "claude-oauth"
+        );
+        assert_eq!(quota_source_label(AccountAdapter::Codex), "codex-oauth");
+    }
+
+    #[test]
+    fn a_solo_run_is_exclusive() {
+        let mut activity = QuotaActivity::new();
+        activity.begin(AccountAdapter::ClaudeCode, "a", "r1", None, true);
+        let outcome = activity.end(AccountAdapter::ClaudeCode, "a", member("r1", 100.0));
+        assert!(matches!(outcome, QuotaEndOutcome::Exclusive { .. }));
+    }
+
+    #[test]
+    fn overlapping_runs_form_a_group_that_closes_when_the_last_one_ends() {
+        let mut activity = QuotaActivity::new();
+        activity.begin(AccountAdapter::ClaudeCode, "a", "r1", None, true);
+        activity.begin(AccountAdapter::ClaudeCode, "a", "r2", None, true); // r1 と重なる
+        let first = activity.end(AccountAdapter::ClaudeCode, "a", member("r1", 300.0));
+        assert!(
+            matches!(first, QuotaEndOutcome::Pending),
+            "r2 がまだ走っているので pending"
+        );
+        let second = activity.end(AccountAdapter::ClaudeCode, "a", member("r2", 700.0));
+        match second {
+            QuotaEndOutcome::Closed { members, .. } => {
+                assert_eq!(members.len(), 2);
+                let total: f64 = members.iter().map(|m| m.weighted_tokens).sum();
+                assert!((total - 1_000.0).abs() < 1e-9);
+            }
+            other => panic!("expected Closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_third_run_that_starts_after_the_first_two_close_gets_its_own_group() {
+        let mut activity = QuotaActivity::new();
+        activity.begin(AccountAdapter::ClaudeCode, "a", "r1", None, true);
+        activity.begin(AccountAdapter::ClaudeCode, "a", "r2", None, true);
+        let _ = activity.end(AccountAdapter::ClaudeCode, "a", member("r1", 100.0));
+        let _ = activity.end(AccountAdapter::ClaudeCode, "a", member("r2", 100.0));
+        // グループが閉じた後の新しい run は、単独なら排他的。
+        activity.begin(AccountAdapter::ClaudeCode, "a", "r3", None, true);
+        let outcome = activity.end(AccountAdapter::ClaudeCode, "a", member("r3", 100.0));
+        assert!(matches!(outcome, QuotaEndOutcome::Exclusive { .. }));
+    }
+
+    #[test]
+    fn different_accounts_do_not_share_a_group() {
+        let mut activity = QuotaActivity::new();
+        activity.begin(AccountAdapter::ClaudeCode, "a", "r1", None, true);
+        activity.begin(AccountAdapter::ClaudeCode, "b", "r2", None, true);
+        let outcome_a = activity.end(AccountAdapter::ClaudeCode, "a", member("r1", 100.0));
+        let outcome_b = activity.end(AccountAdapter::ClaudeCode, "b", member("r2", 100.0));
+        assert!(matches!(outcome_a, QuotaEndOutcome::Exclusive { .. }));
+        assert!(matches!(outcome_b, QuotaEndOutcome::Exclusive { .. }));
+    }
+
+    #[test]
+    fn ending_a_run_that_never_began_is_exclusive_with_no_observation() {
+        let mut activity = QuotaActivity::new();
+        let outcome = activity.end(AccountAdapter::ClaudeCode, "a", member("ghost", 100.0));
+        match outcome {
+            QuotaEndOutcome::Exclusive {
+                before,
+                before_valid,
+            } => {
+                assert!(before.is_none());
+                assert!(!before_valid);
+            }
+            other => panic!("expected Exclusive, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod quota_calibration_tests {
+    use super::*;
+
+    /// `QuotaCalibrationBook::calibration` 自体は最小件数を強制しない（`task_core::quota::calibrate`
+    /// と同じ契約）。3 件未満でも較正値を返すが、`estimated_used_pct` 側が
+    /// `MIN_CALIBRATION_SAMPLES` 未満を拒む（`quota.rs` の `estimated_requires_at_least_three_measured_samples`
+    /// で確認済み）。ここでは `samples` が正しく積み上がることだけを確かめる。
+    #[test]
+    fn calibration_accumulates_samples_and_computes_the_ratio_of_sums() {
+        let mut book = QuotaCalibrationBook::new();
+        book.record(
+            "claude-oauth",
+            task_core::QuotaWindow::FiveHour,
+            4.0,
+            1_000.0,
+        );
+        book.record(
+            "claude-oauth",
+            task_core::QuotaWindow::FiveHour,
+            8.0,
+            2_000.0,
+        );
+        let two = book
+            .calibration("claude-oauth", task_core::QuotaWindow::FiveHour)
+            .expect("2 samples still produce a ratio");
+        assert_eq!(two.samples, 2);
+        assert!(
+            task_core::quota::estimated_used_pct(500.0, Some(two)).is_none(),
+            "but estimated_used_pct rejects fewer than 3 samples"
+        );
+
+        book.record(
+            "claude-oauth",
+            task_core::QuotaWindow::FiveHour,
+            3.0,
+            1_500.0,
+        );
+        let cal = book
+            .calibration("claude-oauth", task_core::QuotaWindow::FiveHour)
+            .expect("3 samples");
+        assert_eq!(cal.samples, 3);
+        assert!((cal.k - (15.0 / 4_500.0)).abs() < 1e-9, "{}", cal.k);
+        assert!(task_core::quota::estimated_used_pct(500.0, Some(cal)).is_some());
+    }
+
+    #[test]
+    fn calibration_is_scoped_to_source_and_window() {
+        let mut book = QuotaCalibrationBook::new();
+        book.record(
+            "claude-oauth",
+            task_core::QuotaWindow::FiveHour,
+            4.0,
+            1_000.0,
+        );
+        book.record(
+            "claude-oauth",
+            task_core::QuotaWindow::SevenDay,
+            1.0,
+            1_000.0,
+        );
+        book.record(
+            "codex-oauth",
+            task_core::QuotaWindow::FiveHour,
+            9.0,
+            1_000.0,
+        );
+        // seven_day/codex-oauth への record はここでは効かない: five_hour/claude-oauth はまだ 1 件。
+        let one = book
+            .calibration("claude-oauth", task_core::QuotaWindow::FiveHour)
+            .expect("1 sample still returns a ratio");
+        assert_eq!(one.samples, 1);
+        assert_eq!(
+            book.calibration("codex-oauth", task_core::QuotaWindow::SevenDay),
+            None,
+            "no samples recorded for this (source, window)"
+        );
+    }
+
+    #[test]
+    fn ring_buffer_caps_at_the_maximum_sample_count() {
+        let mut book = QuotaCalibrationBook::new();
+        for i in 0..(task_core::quota::CALIBRATION_MAX_SAMPLES + 5) {
+            book.record(
+                "claude-oauth",
+                task_core::QuotaWindow::FiveHour,
+                i as f64,
+                100.0,
+            );
+        }
+        let samples = book.by_key.get("claude-oauth:five_hour").expect("key");
+        assert_eq!(samples.len(), task_core::quota::CALIBRATION_MAX_SAMPLES);
+        // 最も古い 5 件が落ちている（先頭は 5 のはず）。
+        assert_eq!(samples.front().copied().map(|(q, _)| q), Some(5.0));
+    }
+
+    #[test]
+    fn zero_weighted_tokens_are_not_recorded() {
+        let mut book = QuotaCalibrationBook::new();
+        book.record("claude-oauth", task_core::QuotaWindow::FiveHour, 4.0, 0.0);
+        assert!(
+            book.by_key
+                .get("claude-oauth:five_hour")
+                .is_none_or(|q| q.is_empty())
+        );
     }
 }

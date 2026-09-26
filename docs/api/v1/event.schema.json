@@ -1152,6 +1152,79 @@
             "origin"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0074 D4.3（Phase F3 quota）: 1 run の quota 消費の推定（決定的。`task_core::quota` の\n純粋関数で決める）。`WorkerFinished` には足さない（struct literal の多数の箇所を避けるため、\nADR-0072 E1/E2 の逸脱節と同じ判断）。状態は変えない（`replay` は無視する）。\n\n`apportioned` は同じ `run_id` にもう 1 件出ることがある（グループの最後の run が終わって\n按分が確定したとき。**最後の Event が有効**）。",
+          "properties": {
+            "account": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "calibration": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/QuotaCalibration"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "list_price_usd": {
+              "description": "参考の定価 USD（`Usage.cost_usd` と同じ値。不明なら `None`）。",
+              "format": "double",
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            "method": {
+              "$ref": "#/$defs/QuotaMethod",
+              "description": "`windows` を 1 つに畳み込んだ代表値（`task_core::quota::representative_method`）。"
+            },
+            "run_id": {
+              "type": "string"
+            },
+            "source": {
+              "description": "`\"claude-oauth\"` / `\"codex-oauth\"` / それ以外（アカウントプールを使わない provider の id。\nD4.2 手順 5 の `free` になりうる）。",
+              "type": "string"
+            },
+            "type": {
+              "const": "quota_estimated",
+              "type": "string"
+            },
+            "weighted_tokens": {
+              "format": "double",
+              "type": "number"
+            },
+            "weights_version": {
+              "type": "string"
+            },
+            "windows": {
+              "items": {
+                "$ref": "#/$defs/QuotaWindowUse"
+              },
+              "type": "array"
+            },
+            "work_unit_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "type",
+            "run_id",
+            "source",
+            "windows",
+            "weighted_tokens",
+            "method",
+            "weights_version"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1517,6 +1590,109 @@
     "ProjectId": {
       "description": "案件の一意識別子（ULID）。`TaskId` と同じ形。",
       "type": "string"
+    },
+    "QuotaCalibration": {
+      "description": "D4.2 の較正値 `k_w`（同じ source の直近の `measured` run から求めた比の和）。",
+      "properties": {
+        "k": {
+          "format": "double",
+          "type": "number"
+        },
+        "samples": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "k",
+        "samples"
+      ],
+      "type": "object"
+    },
+    "QuotaMethod": {
+      "description": "D4.2: この窓の消費をどうやって決めたか（confidence）。",
+      "oneOf": [
+        {
+          "const": "measured",
+          "description": "`before`/`after` が両方有効・排他・同じ窓インスタンス。",
+          "type": "string"
+        },
+        {
+          "const": "apportioned",
+          "description": "重なった run の集合に、重み付きトークンの比で按分。",
+          "type": "string"
+        },
+        {
+          "const": "estimated",
+          "description": "直近の `measured` から較正した比率 `k_w` にトークン数を掛けた値。",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "上のどれでも決められなかった（`None` であって `0` ではない）。",
+          "type": "string"
+        },
+        {
+          "const": "free",
+          "description": "Qwen など定額でも従量でもない供給元（`q = 0` だが「消費なし」を意味であって未知ではない）。",
+          "type": "string"
+        }
+      ]
+    },
+    "QuotaWindow": {
+      "description": "D4.2: 窓の種別（ADR-0024 と同じ 2 窓）。",
+      "enum": [
+        "five_hour",
+        "seven_day"
+      ],
+      "type": "string"
+    },
+    "QuotaWindowUse": {
+      "description": "D4.3: run 1 件・窓 1 つの消費。",
+      "properties": {
+        "after": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "before": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "method": {
+          "$ref": "#/$defs/QuotaMethod",
+          "description": "**ADR からの逸脱**（`docs/adr/0074-...md` の「Phase F3（quota）実装時の逸脱・明確化」参照）:\nD4.3 の JSON 例は窓ごとの `method` を書いていないが、5 時間 / 7 日で窓リセットの有無により\n決め方が食い違いうる（例: 7 日枠だけ `resets_at` を跨ぐ）ため、窓ごとにも残す。\n`Event::QuotaEstimated.method` はこれらのうち最も確からしいものを 1 つに畳み込んだ値。"
+        },
+        "resets_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "used_pct": {
+          "description": "0〜100（パーセントポイント）。決められなければ `None`（`0` と混同しない。D4.2 4./unknown_is_never_zero）。",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "window": {
+          "$ref": "#/$defs/QuotaWindow"
+        }
+      },
+      "required": [
+        "window",
+        "method"
+      ],
+      "type": "object"
     },
     "RepairOrigin": {
       "description": "ADR-0074 D6.2（Phase F1）: `Event::RepairScheduled.origin`（repair WU を起こした場所）。",

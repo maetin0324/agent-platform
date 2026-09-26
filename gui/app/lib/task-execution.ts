@@ -6,6 +6,7 @@ import type {
   ExecutionPlanVersionSummary,
   ExecutionView,
   ExecutionWorkUnitView,
+  QuotaUse,
   RunEnd,
   WorkUnitKind,
   WorkUnitStatus,
@@ -151,4 +152,55 @@ export function gateModeLabel(execution: ExecutionView | null | undefined): stri
   if (!gate) return null;
   const shadow = gate.shadow ? "（shadow）" : "";
   return `${gate.mode}${shadow} — ${gate.rule_id}`;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0074 D4（Phase F3 quota）: quota 消費が主指標、定価 USD は参考。
+// ---------------------------------------------------------------------------
+
+const QUOTA_WINDOW_LABEL: Record<QuotaUse["window"], string> = {
+  five_hour: "5h",
+  seven_day: "7d",
+};
+
+/**
+ * D4.2 の method の内訳から、この行の確からしさを 1 語で表す。celeris が決めた `method_counts` を
+ * そのまま読むだけで、GUI 側では判定しない（D4「観測と記録だけ」）。複数の method が混じっていれば
+ * 一番弱いもの（`unknown` > `estimated` > `apportioned` > `measured`）を見せる。
+ */
+function quotaConfidenceLabel(row: QuotaUse): string {
+  const counts = row.method_counts ?? {};
+  const has = (method: string) => (counts[method] ?? 0) > 0;
+  if (has("unknown")) return "一部不明";
+  if (has("estimated")) return "推定";
+  if (has("apportioned")) return "按分";
+  if (has("free")) return "無料";
+  if (has("measured")) return "実測";
+  return "不明";
+}
+
+/**
+ * D4.3/D4（GUI (j)）: quota が主表示。1 行 = 1 (source, account, window)。`used_pct` が無い
+ * （`unknown` だけの行）は「不明」と書き、`0` とは書かない（unknown_is_never_zero と同じ規律）。
+ */
+export function quotaSummaryLines(metrics: ExecutionMetrics): string[] {
+  const rows = metrics.quota ?? [];
+  return rows.map((row) => {
+    const label = row.account ? `${row.source}（${row.account}）` : row.source;
+    const window = QUOTA_WINDOW_LABEL[row.window] ?? row.window;
+    const pct = row.used_pct == null ? "不明" : `${row.used_pct.toFixed(1)}pt`;
+    return `${label} ${window} ${pct}（${quotaConfidenceLabel(row)}）`;
+  });
+}
+
+/**
+ * D4.3/D4（GUI (j)）: 定価 USD は参考値。`cost_usd_complete === false`（単価不明のモデルが混ざる）
+ * なら「不完全」を明示する（E6 report 問題 5 の再発防止）。`cost_usd` 自体が無ければ `null`。
+ */
+export function costReferenceLabel(metrics: ExecutionMetrics): string | null {
+  if (metrics.cost_usd == null) return null;
+  const amount = `$${metrics.cost_usd.toFixed(2)}`;
+  return metrics.cost_usd_complete === false
+    ? `参考 ${amount}（一部のモデルの単価が不明なため過小）`
+    : `参考 ${amount}`;
 }

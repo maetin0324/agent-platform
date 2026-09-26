@@ -1251,6 +1251,10 @@ pub struct WorkUnitView {
     pub spec: task_core::WorkUnitSpec,
     pub created_at: String,
     pub updated_at: String,
+    /// ADR-0074 D4.3（Phase F3 quota）: この WU の run の quota 消費の合計
+    /// （`ExecutionPlanView::with_quota` が events から埋める。既定は空）。
+    #[serde(default)]
+    pub quota: Vec<task_core::QuotaUse>,
 }
 
 impl From<task_core::WorkUnitRow> for WorkUnitView {
@@ -1271,6 +1275,7 @@ impl From<task_core::WorkUnitRow> for WorkUnitView {
             spec: row.spec,
             created_at: row.created_at,
             updated_at: row.updated_at,
+            quota: Vec::new(),
         }
     }
 }
@@ -1346,6 +1351,21 @@ impl ExecutionPlanView {
                 .map(ExecutionPlanVersionView::from)
                 .collect(),
         }
+    }
+
+    /// ADR-0074 D4.3（Phase F3 quota）: WU ごとの quota 消費を差し込む（`work_unit_id` が無い
+    /// run — atomic/暗黙の WorkUnit — の分はこのタスクに WU が 1 つしか無い場合を除いて捨てる。
+    /// `task_core::group_quota_by_work_unit` の `None` キーは WU の id では引けないため）。
+    pub fn with_quota(
+        mut self,
+        by_work_unit: &std::collections::BTreeMap<Option<String>, Vec<task_core::QuotaUse>>,
+    ) -> Self {
+        for wu in &mut self.work_units {
+            if let Some(q) = by_work_unit.get(&Some(wu.id.clone())) {
+                wu.quota = q.clone();
+            }
+        }
+        self
     }
 }
 
@@ -1824,6 +1844,32 @@ pub struct ExecutionMetricsGroup {
     pub max_turn_failures: u64,
     pub repairs: u64,
     pub replans: u64,
+    /// ADR-0074 D4.3（Phase F3 quota）: このグループの (source, account, window) ごとの quota 消費の合計。
+    #[serde(default)]
+    pub quota: Vec<task_core::QuotaUse>,
+    /// D4.3: このグループの全タスクで定価 USD が完全だったか（単価不明のモデルを使った run が
+    /// 1 件でもあれば `false`）。
+    #[serde(default = "default_true")]
+    pub cost_usd_complete: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// ADR-0074 D4.3（Phase F3 quota）: `GET /metrics/execution` の最上位に足す「今の残量」
+/// （`GET /llm/sources` の accounts と同じ値）。`source` は `sources[].id`（`claude-oauth` /
+/// `codex-oauth` / `openai-compatible:<id>`）。
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct AccountNowView {
+    pub source: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_short: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remaining_long: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_until: Option<i64>,
 }
 
 /// `GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`。
@@ -1835,4 +1881,8 @@ pub struct ExecutionMetricsSummary {
     /// `since` 以降に更新された（フィルタを満たした）タスクの総数。
     pub total_tasks: u64,
     pub groups: Vec<ExecutionMetricsGroup>,
+    /// ADR-0074 D4.3（Phase F3 quota）: 今のアカウントの残量（`GET /llm/sources` と同じ値）。
+    /// `[llm_proxy]` が無効なら空。
+    #[serde(default)]
+    pub accounts_now: Vec<AccountNowView>,
 }

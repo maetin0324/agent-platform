@@ -1,12 +1,20 @@
 import { describe, expect, it } from "vitest";
-import type { ExecutionMetrics, ExecutionPlanOverview, ExecutionView, ExecutionWorkUnitView } from "~/celeris/types";
+import type {
+  ExecutionMetrics,
+  ExecutionPlanOverview,
+  ExecutionView,
+  ExecutionWorkUnitView,
+  QuotaUse,
+} from "~/celeris/types";
 import {
+  costReferenceLabel,
   currentWorkUnit,
   directExecutionSummary,
   gateModeLabel,
   isRepairWorkUnit,
   planSummaryLine,
   planVersionLabel,
+  quotaSummaryLines,
   runEndLabel,
   runEndTone,
 } from "~/lib/task-execution";
@@ -201,5 +209,60 @@ describe("task-execution", () => {
     expect(runEndLabel(null)).toBeNull();
     expect(runEndTone({ type: "failed", retryable: false })).toBe("danger");
     expect(runEndTone(null)).toBe("neutral");
+  });
+
+  // ---- ADR-0074 D4（Phase F3 quota）: quota が主、定価 USD は参考 ----
+
+  function quotaRow(over: Partial<QuotaUse> = {}): QuotaUse {
+    return {
+      source: "claude-oauth",
+      account: "a",
+      window: "five_hour",
+      used_pct: 4.0,
+      runs: 1,
+      method_counts: { measured: 1 },
+      ...over,
+    };
+  }
+
+  it("quota: measured の行は「実測」、値は 1 桁小数 + pt", () => {
+    const lines = quotaSummaryLines(metrics({ quota: [quotaRow()] }));
+    expect(lines).toEqual(["claude-oauth（a） 5h 4.0pt（実測）"]);
+  });
+
+  it("quota: unknown だけの行は「不明」であって「0」ではない", () => {
+    const lines = quotaSummaryLines(
+      metrics({
+        quota: [quotaRow({ used_pct: null, method_counts: { unknown: 1 }, window: "seven_day" })],
+      }),
+    );
+    expect(lines).toEqual(["claude-oauth（a） 7d 不明（一部不明）"]);
+  });
+
+  it("quota: estimated/apportioned/free もそれぞれの一言になる", () => {
+    expect(quotaSummaryLines(metrics({ quota: [quotaRow({ method_counts: { estimated: 1 } })] }))).toEqual([
+      "claude-oauth（a） 5h 4.0pt（推定）",
+    ]);
+    expect(quotaSummaryLines(metrics({ quota: [quotaRow({ method_counts: { apportioned: 1 } })] }))).toEqual([
+      "claude-oauth（a） 5h 4.0pt（按分）",
+    ]);
+    expect(
+      quotaSummaryLines(
+        metrics({ quota: [quotaRow({ account: undefined, used_pct: 0, method_counts: { free: 1 } })] }),
+      ),
+    ).toEqual(["claude-oauth 5h 0.0pt（無料）"]);
+  });
+
+  it("quota: 記録が無ければ空配列", () => {
+    expect(quotaSummaryLines(metrics())).toEqual([]);
+    expect(quotaSummaryLines(metrics({ quota: [] }))).toEqual([]);
+  });
+
+  it("定価 USD: 参考値として、不完全なら明示する", () => {
+    expect(costReferenceLabel(metrics({ cost_usd: 11.21 }))).toBe("参考 $11.21");
+    expect(costReferenceLabel(metrics({ cost_usd: 11.21, cost_usd_complete: false }))).toBe(
+      "参考 $11.21（一部のモデルの単価が不明なため過小）",
+    );
+    expect(costReferenceLabel(metrics())).toBeNull();
   });
 });

@@ -5,6 +5,7 @@ import { tableClass, tdClass, thClass, theadClass } from "~/components/ui/form";
 import { Mono } from "~/components/ui/misc";
 import {
   checkpointSummary as checkpointSummaryLine,
+  costReferenceLabel,
   currentWorkUnit,
   directExecutionSummary,
   EXECUTION_SECTION_LABEL,
@@ -12,6 +13,7 @@ import {
   isRepairWorkUnit,
   planSummaryLine,
   planVersionLabel,
+  quotaSummaryLines,
   WORK_UNIT_KIND_LABEL,
   WORK_UNIT_STATUS_TONE,
 } from "~/lib/task-execution";
@@ -26,6 +28,9 @@ export function ExecutionSection({ execution }: { execution: ExecutionView | nul
   if (!execution) return null;
   const { plan, metrics } = execution;
   const gate = gateModeLabel(execution);
+  // ADR-0074 D4（Phase F3 quota）: quota が主指標、定価 USD は参考（GUI (j)）。
+  const quotaLines = quotaSummaryLines(metrics);
+  const costLabel = costReferenceLabel(metrics);
 
   return (
     <section aria-labelledby="execution-heading" data-testid="execution-section">
@@ -49,6 +54,29 @@ export function ExecutionSection({ execution }: { execution: ExecutionView | nul
             <p className="text-sm text-fg-muted" data-testid="execution-gate">
               gate: {gate}
             </p>
+          )}
+          {(quotaLines.length > 0 || costLabel) && (
+            <div data-testid="execution-quota" className="text-sm text-fg-muted">
+              <p className="font-medium text-fg-subtle lg:text-xs">quota 消費</p>
+              {quotaLines.length > 0 ? (
+                <ul className="mt-1 space-y-0.5">
+                  {quotaLines.map((line) => (
+                    <li key={line} data-testid="execution-quota-line">
+                      {line}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-1 text-fg-subtle" data-testid="execution-quota-none">
+                  quota の記録はありません。
+                </p>
+              )}
+              {costLabel && (
+                <p className="mt-1 text-fg-subtle" data-testid="execution-cost-reference">
+                  {costLabel}
+                </p>
+              )}
+            </div>
           )}
           {!plan ? (
             <p className="text-sm text-fg-muted" data-testid="execution-no-plan">
