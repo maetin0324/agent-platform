@@ -19494,3 +19494,212 @@ repair 化）と (b) 問題5（モデル単価欠損の費用集計への影響�
 - F1 の最初に上記の clippy `result_large_err`（codex_account.rs。`Box` 化）を直し、`cargo test --workspace` の基準値を取り直す。
 - F1 → F2 → F3（quota は F1 の後すぐ、途中確認は F2 の schema の後に並行）→ F4 → F5（F1 の後に 1 回、F4 の後に 1 回）。
 - F5a を流すまで本番の `[execution] gate` は `shadow` のまま（E6 分析の推奨どおり）。`parallel` の既定は F5b の結果を見て人が決める。
+
+## Phase F1「WU ごとの lane、planner の lane とサイズ、replan の差分、repair の分類、成果物の登録」（完了日 2026-09-26）
+
+ADR-0074 §6 F1 の受け入れ条件 (a)〜(k) を実装した。branch `worktree-agent-abdca7309a6944c0a`。
+commit: `ad165d3`（環境修正、着手前に既に他コミットで解消済みだったことを確認）→
+`e4e922f`（(a)-(f)）→ `7b3821c`（(g)-(k)）→ 本コミット（テスト追補・ADR/PROGRESS 更新・schema 再生成）。
+ADR-0074 の Status を `Proposed` → `Accepted` に変更した。
+
+### 環境（着手前の確認）
+
+- NFS 移行後の toolchain（cargo/rustc 1.98.1）で `crates/task-worker/src/codex_account.rs` に出ていた
+  `clippy::result_large_err` は、着手時点で既に別コミット `ad165d3`（`rpc`/`read_account_limits` への
+  `#[allow(clippy::result_large_err)]` + 理由コメント）で解消済みだった。
+  `cargo clippy --workspace --all-targets -- -D warnings` は着手直後から warning 0 を確認できたため、
+  本 Phase での追加修正は無し。
+
+### 受け入れ条件ごとの証拠
+
+**(a) planner プロンプトに WU ごとの `features` の説明と例**
+- 実装: `crates/task-worker/src/claude_code.rs` の `work_unit_features_section`（5 軸の定義・例、
+  JSON 例に `"features"` 欄を追加）。`build_execution_plan_prompt` から呼ぶ。
+- コマンド: `cargo test -p task-worker --lib claude_code::tests::execution_plan_prompt_asks_for_per_unit_features claude_code::tests::build_prompt_selects_the_execution_plan_prompt_when_execution_planner_is_present`
+- 結果: 2 passed; 0 failed（5 軸すべての名前・`"features"` 欄・「Do not write \`lane\`」の文言をスナップショットで確認）。
+
+**(b) `features` が `TaskFeatureHints` として読めない計画は検証エラー（1 回再試行 → atomic）。v1 の保存済み計画は読める**
+- 実装: `TaskFeatureHints` に `#[serde(deny_unknown_fields)]` を追加。
+  `execution_plan::validate` に `PlanValidationError::InvalidFeatures` を追加し、`WorkUnitSpec.features`
+  が `Some` なら `TaskFeatureHints` として parse できるか検査する。
+  `dispatcher.rs::on_planner_finished` は既存の `give_up_or_retry_planner`（1 回再試行 → atomic）を
+  そのまま通る。読み取り時（`decide_for_work_unit`）は今までどおり `.ok()` で寛容に読む（変更なし）。
+- コマンド:
+  - `cargo test -p task-core --lib execution_plan::tests::features_must_parse_as_task_feature_hints`
+    → 1 passed（部分的な features は valid、未知の欄・型違反は `InvalidFeatures`）。
+  - `cargo test -p task-dispatch --lib dispatcher::tests::plan_with_unreadable_features_retries_once_then_falls_back_to_atomic`
+    → 1 passed（`features.lane` を書いた出力が 1 回再試行の後 atomic に倒れ、planner run が
+    ちょうど 2 回であることを確認）。
+
+**(c) 機械的な WU（judgment/ambiguity=low、verifiability/reversibility=high、`checks` あり）が cheap。features 無しは Task の lane。Task が standard なら WU の frontier は standard に丸まり `clamped_by` を残す**
+- 実装: `model_policy::decide_for_work_unit` に `task_lane: Option<Tier>` 引数と `WorkUnitLaneCap`
+  （`[execution] work_unit_lane_cap = "task" | "none"`、既定 `task`）を追加。
+  上限 = `max(task_lane, standard)`、下げる方向（cheap）は制限しない。
+- コマンド: `cargo test -p task-core --lib model_policy::tests::work_unit_features_lower_a_mechanical_unit_to_cheap model_policy::tests::work_unit_lane_is_capped_by_the_task_lane model_policy::tests::work_unit_lane_cap_does_not_prevent_routing_cheaper_than_the_task model_policy::tests::work_unit_lane_cap_follows_a_frontier_task model_policy::tests::work_unit_without_features_inherits_the_task_hints model_policy::tests::partial_work_unit_features_are_noted_as_partial`
+- 結果: 6 passed; 0 failed。
+
+**(d) planner run が standard（`rule_id = planner/system-standard`）、`max_turns` 24 / `max_wall_secs` 900、`[execution.planner] tier` で変更可。人の明示 `tier:frontier` では frontier**
+- 実装: `task_core::PlannerConfig` に `tier: Tier`（既定 `Standard`）を追加、既定 `max_turns` 40→24、
+  `max_wall_secs` 1200→900。`crates/celeris/src/config.rs` の `[execution.planner] tier`（TOML の
+  `Tier` 型そのまま、`"standard"/"frontier"/"cheap"`）。`dispatcher.rs` の planner dispatch 分岐で
+  `task.routing.tier_source == Human && task.worker_hint.tier == Frontier` のときだけ frontier を通す
+  （`rule_id = planner/human-frontier`）。
+- コマンド: `cargo test -p task-dispatch --lib dispatcher::tests::planner_run_uses_the_standard_lane_by_default dispatcher::tests::planner_run_uses_frontier_when_the_task_explicitly_sets_it`
+- 結果: 2 passed; 0 failed。
+
+**(e) 計画のサイズ上限を超えた出力が拒否 → 再試行 → atomic**
+- 実装: `ExecutionLimits` に `max_rationale_chars`(1500) / `max_title_chars`(120) /
+  `max_objective_chars`(2000) / `max_done_when_items`(8) / `max_done_when_chars`(300) /
+  `max_checks`(6) / `max_plan_json_bytes`(24 KiB) を追加。`validate` で全項目を検査。
+- コマンド:
+  - `cargo test -p task-core --lib execution_plan::tests::plan_size_limits_reject_oversized_rationale execution_plan::tests::plan_size_limits_reject_oversized_work_unit_fields execution_plan::tests::plan_size_limits_reject_the_whole_json_being_too_large`
+    → 3 passed。
+  - `cargo test -p task-dispatch --lib dispatcher::tests::oversized_plan_retries_once_then_falls_back_to_atomic`
+    → 1 passed（`rationale` 1,501 文字の出力が 1 回再試行の後 atomic に倒れる）。
+
+**(f) replan の差分出力（add/modify/remove）が旧版に当てられ、done の WU を書かずに v(n+1) が採用される。全体形式も受け付ける。`ExecutionPlanned.reason` に差分の件数**
+- 実装: `task_core::execution_plan` に `celeris.execution-plan-delta/1`（`WorkUnitPatch`・
+  `ExecutionPlanDelta`・`apply_delta`）を新設。`docs/protocol/execution-plan-delta.schema.json` を
+  新規生成。`dispatcher.rs::parse_planner_output` が出力の `schema` を見て、delta なら
+  `active` な計画の `base_version` と突き合わせて `apply_delta` で全体に展開し、それ以外は今までどおり
+  全体形式として読む（後方互換）。`task_ops::execution::replan` が `reason` の後ろに
+  `(added=N, changed=N, removed=N)` を決定的に追記。replan のプロンプト
+  （`replan_context_section`）は差分形式を優先するよう文面を変えた（全体形式でもよいと明記）。
+- コマンド:
+  - `cargo test -p task-core --lib execution_plan::tests::apply_delta_adds_modifies_and_removes_without_restating_untouched_units execution_plan::tests::apply_delta_rejects_modifying_an_unknown_or_removed_key execution_plan::tests::apply_delta_rejects_adding_a_key_that_still_exists execution_plan::tests::delta_committed_schema_matches_generated`
+    → 4 passed。
+  - `cargo test -p task-dispatch --lib dispatcher::tests::replan_delta_carries_done_units_without_restating_them`
+    → 1 passed（差分だけの出力から v2 が採用され、`reason` に `added=0, changed=2, removed=0` が
+    残ることを確認。`changed=2` は `b` の spec 変更 + `c` の `blocked→pending` 遷移。既存の
+    `a_failed_work_unit_triggers_a_replan_instead_of_failing_the_task` は全体形式のまま）。
+  - `cargo test -p task-ops --lib execution::tests` → 11 passed（既存の replan テスト、
+    `reason` の diff 件数付与を含め全 pass）。
+
+**(g) `command timed out after` の不合格で daemon が 2 倍の timeout で 1 回再実行、通れば attempts 不変で合格へ。通らなければ `review_timeout` の repair WU**
+- 実装: `crates/task-dispatch/src/review.rs` に `exec_check_with_repair_retries`（`review_task` の
+  `Check::Command`・workspace.toml check・`run_work_unit_checks` の 3 箇所で共通化。ADR が指す
+  `review.rs:295, 407, 531` の 3 箇所に一致）。timeout なら 2 倍（上限 1,800 秒）で 1 回だけ再実行し、
+  結果を差し替える。`execution::RepairClass::ReviewTimeout`（`review_timeout`、max_turns 20、
+  wall 1200）を追加、`classify_command` が `reason` が `command timed out after` で始まれば
+  最優先でこの class にする。
+- コマンド:
+  - `cargo test -p task-dispatch --lib review::tests::review_timeout_reruns_once_with_double_timeout_before_repair review::tests::review_timeout_still_times_out_after_the_retry_keeps_the_timeout_reason review::tests::review_timeout_retry_is_capped_at_1800_seconds`
+    → 3 passed（偽の `Workspace` で timeout→合格、timeout→timeout（`review_timeout` に分類）、
+    上限 1,800 秒で再試行しないことを確認）。
+  - `cargo test -p task-dispatch --lib dispatcher::tests::command_timeout_check_reruns_once_with_double_timeout_and_passes`
+    → 1 passed（実際の `sleep`/マーカーファイルで daemon の tick を通した end-to-end。
+    attempts 不変・repair WU 無し・最終 `ReviewVerdict` が合格であることを確認。実時間で約 1 秒）。
+
+**(h) `merge-base --is-ancestor` の不合格で、衝突なしなら daemon の merge → 再レビュー、衝突ありなら `merge_base` の repair WU**
+- 実装: 同じ `exec_check_with_repair_retries` に `merge_base_ancestor_ref`（cmd から `<ref>` を
+  字句解析）と `git merge --no-edit <ref>` の 1 回だけの試行を追加。衝突なければ再実行して判定を
+  差し替え、衝突（または merge 自体の失敗）なら `git merge --abort` して元の不合格のまま返す。
+  `classify_command` が `merge-base` と `--is-ancestor` を両方含む cmd を `RepairClass::MergeBase`
+  にする（配送の `[delivery-repair]` は変更していない、別経路のまま）。
+- コマンド:
+  - `cargo test -p task-dispatch --lib review::tests::merge_base_failure_merges_base_deterministically review::tests::merge_base_conflict_aborts_the_merge_and_keeps_the_failure`
+    → 2 passed（偽の `Workspace` で衝突なし→合格、衝突あり→`git merge --abort`→
+    `RepairClass::MergeBase` に分類されることを確認）。
+  - `cargo test -p task-dispatch --lib dispatcher::tests::merge_base_check_merges_main_deterministically_when_there_is_no_conflict`
+    → 1 passed（実際の git リポジトリで、worker が別ファイルを変更している間に `main` が
+    別ファイルへ 1 コミット先行 → 最終レビューの `merge-base --is-ancestor main HEAD` が
+    daemon の実 `git merge` で直り、repair WU も `RepairScheduled` も出ずに Task が `done` に
+    なることを確認）。
+
+**(i) `Event::RepairScheduled{class, …}` が残り、`repairs_by_class` に `unknown` が出ない。planner の repair は `planner`**
+- 実装: `Event::RepairScheduled { work_unit_id, key, class, origin }` を新設
+  （`execution::RepairOrigin { Review, Integration, Delivery, Planner }`。F1 では `Review`
+  （`try_review_repair`）と `Planner`（`task_ops::execution::replan` が `kind = repair` の新規 WU に
+  発行）だけを実際に使う）。`execution_metrics::summarize` が `RepairScheduled` を優先して
+  `repairs_by_class` を組み立て、無ければ従来の title 接頭辞へフォールバックする。
+- コマンド:
+  - `cargo test -p task-core --lib execution_metrics::tests::repair_scheduled_event_names_the_class execution_metrics::tests::planner_authored_repair_work_units_are_classified_as_planner execution_metrics::tests::repairs_without_a_recoverable_title_fall_back_to_unknown`
+    → 3 passed（新しい経路は `unknown` にならない、旧データは今までどおりフォールバックすることを
+    確認）。
+  - `cargo test -p task-ops --lib execution::tests::replan_records_repair_scheduled_for_a_planner_authored_repair_unit`
+    → 1 passed。
+  - `cargo test -p task-dispatch --lib dispatcher::tests::a_format_only_review_failure_is_repaired_without_consuming_attempts`
+    → 1 passed（既存の E4 のテストに `RepairScheduled{class:"format", origin:Review}` の確認と
+    `execution_metrics::summarize` を通した `repairs_by_class.get("format") == 1`、
+    `unknown` が無いことのアサーションを追加）。
+
+**(j) git worktree の Task で run 後に `artifacts/` を走査し、`report.md` 等を `ArtifactProduced{declared:false}` として登録。`GET /tasks/{id}/artifacts` に出る**
+- 実装: `undeclared_artifacts::scan_undeclared_artifacts_in_dir`（git worktree の Task 専用。
+  リポジトリ全体ではなく run の `artifacts_dir` の中だけを、人が読む拡張子
+  （md/html/pdf/csv/png）で走査。`checkpoint.json`/`result.json`/`request.json`/`prompt.txt`/
+  `execution-plan*.json`/`project-plan*.json`/`phase-reports/` は除外）。`dispatcher.rs::run_worker`
+  の既存フック（ADR-0067 D3）を `worktree.is_some()` のときこちらに分岐。
+  `crates/task-api/src/files.rs::artifact_views` は `Event::ArtifactProduced` を宣言の有無に関わらず
+  一律で読むため、API 側の変更は不要（確認のみ）。
+- コマンド:
+  - `cargo test -p task-dispatch --lib undeclared_artifacts::tests::git_worktree_task_registers_report_md_as_an_artifact undeclared_artifacts::tests::git_worktree_task_registers_other_human_readable_extensions undeclared_artifacts::tests::git_worktree_task_skips_already_declared_paths`
+    → 3 passed。
+  - `cargo test -p task-dispatch --lib dispatcher::tests::git_worktree_task_registers_report_md_as_an_artifact`
+    → 1 passed（実際の git worktree を使った daemon の tick を通した end-to-end。
+    `artifacts/report.md` が `ArtifactProduced{declared:false, kind:"md"}` として events に残ることを
+    確認）。
+
+**(k) reviewer run の `runs` 索引の欠落（`finished_at`/`usage`/`end`）を直す。`replay --check` の fixture**
+- 実装: `finish_reviewer_run_index` が `usage` を常に `None` にしていたバグを修正（引数で受け取り
+  そのまま `store.run_index_finish` に渡す）。加えて調査の過程で、reviewer run の
+  `Event::WorkerFinished.end` も常に `None` だったため `task_ops::replay::rebuild_work_units_and_runs`
+  が `status` を常に `harness_error` に誤復元することを発見し（ADR の (k) が `end` も挙げていたため
+  本 Phase の範囲内として）、正常完了・実質的な不合格・供給側/インフラ都合の deferred・discarded の
+  4 経路それぞれで `RunIndexStatus` と同じ `RunEnd` を event にも書き戻すよう修正した。
+- コマンド: `cargo test -p task-dispatch --lib dispatcher::tests::reviewer_run_usage_is_recorded_in_the_runs_index_and_survives_replay_check`
+- 結果: 1 passed（`usage`/`finished_at` が `runs` 索引に残ることを確認したうえで、
+  `task_ops::replay::rebuild_work_units_and_runs` + `diff_execution`（`celerisctl replay --check` と
+  同じ突き合わせ）で reviewer run の再構築結果が store の確定値と食い違わないことを確認。
+  fixture は reviewer run のみに絞って比較している。理由は下記「見つけたが直していない別の不具合」）。
+
+### schema 再生成
+
+- `UPDATE_SCHEMA=1 cargo test -p task-core -p task-api -p task-worker --lib schema` → 全 pass。
+  差分: `docs/api/v1/event.schema.json`（`TaskFeatureHints.additionalProperties: false`、
+  `Event::RepairScheduled` の定義）、`docs/api/v1/api-v1.schema.json`（同じ理由）、
+  `docs/protocol/worker-protocol.schema.json`（TaskFeatureHints の変更の波及）。新規:
+  `docs/protocol/execution-plan-delta.schema.json`。`docs/protocol/execution-plan.schema.json` は
+  変更なし（`ExecutionPlanSpec` 自体の構造は変えていない）。
+
+### ADR-0074 からの逸脱・明確化（詳細は ADR 本文の「Phase F1 実装時の逸脱・明確化」節）
+
+1. `TaskFeatureHints` に `deny_unknown_fields` を追加（ADR は「読めなければエラー」とだけ書いていたが、
+   型自体が寛容だと `{"lane":"frontier"}` を「空の hints」として読めてしまうため）。
+2. D5.2 の「Task の lane」は、エスカレーション前の `decide_for_task` の結果を使う。
+3. replan プロンプトを差分形式優先に変更（全体形式も引き続き受け付ける）。
+4. `WorkUnitPatch` は欄を「消す」ことができない（`Option<T>` の限界。空に戻したいなら
+   `remove` + `add`）。
+5. Task 内部の merge は `--no-ff` を付けない（F2 の工程統合とは別の判断）。
+6. `RepairOrigin::Delivery`/`Integration` は型だけ用意し、F1 では発行しない
+   （`crates/celeris/src/delivery.rs` は ADR §6 F1 の対象ファイルに無く、今回変更していない）。
+7. (k) の調査中に見つけた別の不具合（`dispatcher.rs` の暗黙 WU worker run の `runs` 索引 `seq` が
+   `current_run_seq` の契約と食い違って +1 大きい。ADR-0072 Phase E2b 由来）は**本 Phase では
+   直していない**。ADR-0074 §6 F1 の受け入れ条件・テスト表に無いスコープ外の欠陥のため。
+
+### 未解決事項・F2/F3 への申し送り
+
+- 上記「逸脱 7」（暗黙 WU の worker run の `seq` が実際より 1 大きい不具合）を次の一手として直す
+  ことを提案する。`crates/task-dispatch/src/dispatcher.rs` の
+  `current_run_seq(&self.store.events_for(task.id)?) + 1`（`run_index_start` の直前、
+  `WorkerStarted` 追記の**あと**に呼んでいる箇所）から `+ 1` を外す（`current_run_seq` の他の
+  2 箇所の呼び出しと同じ契約に揃える）。`celerisctl replay --check` を本番の適当なタスクに対して
+  実行すれば再現できるはず。
+- `RepairOrigin::Delivery` への `RepairScheduled` の発行は F2/F3 の課題として残す
+  （配送の repair WU は今のところ title 接頭辞の規約で `unknown` を回避できているため緊急ではない）。
+- `WorkUnitPatch` で欄を「消す」操作ができない制約（U 節候補）。F2/F3 で困る場面が出れば
+  `serde_with::rust::double_option` の導入を検討する。
+- F2 の WU 並列実装では、D1.4 の統合後の検査の repair 分類にも本 Phase の
+  `classify_command`（`review_timeout`/`merge_base` を含む）と `RepairScheduled`
+  （`origin: Integration`）をそのまま再利用できる設計にしてある。
+- F2 の execution-plan/2（`phases`）が入ったら、`work_unit_features_section` の JSON 例と
+  `parse_planner_output` の delta スキーマ判定はそのまま両立する（`ExecutionPlanSpec` の
+  schema 判定と独立している）。
+
+### コマンド・出力の要点（本チェックポイントの最終ゲート）
+
+- `cargo fmt --all -- --check`: 差分なし。
+- `cargo test --workspace --no-fail-fast`: **FAILED 0**（81 個の test result ブロック合計 2,324 tests
+  passed、failed 0。task-core/task-ops/task-api/task-worker/task-dispatch/llm-proxy/celeris/
+  celerisctl/e2e の全クレート。以前 1 度だけ観測した `provider_admin_scenarios::reload_clears_provider_cooldown`
+  の高負荷時のタイミング依存の flake（既知。単体では常に pass）は今回の実行では発生しなかった）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: warning 0。

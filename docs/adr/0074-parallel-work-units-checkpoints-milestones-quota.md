@@ -1,7 +1,8 @@
 # ADR-0074: WorkUnit の並列実行・工程ごとの途中確認・案件レベルの計画（マイルストーン Task の DAG）・quota を主にした費用指標
 
 - 日付: 2026-09-26
-- 状態: **Proposed**（Phase F0 = 設計。コードは変えていない。F1 で着手するときに Accepted にする）
+- 状態: **Accepted**（Phase F0 = 設計。Phase F1（WU ごとの lane、planner の lane とサイズ、replan の差分、
+  repair の分類、成果物の登録）着手・完了、2026-09-26。F2 以降は未着手）
 - 関連:
   - ADR-0072（Task / ExecutionPlan / WorkUnit / Run。本 ADR はその D6 の直列規則・D13・D14・D16・D17・D18・D19・D21・D22 と §7 U3 / U4 を改める）
   - `docs/execution-decomposition-report-2026-09-25.md`（E6 dogfood の分析。以下「E6 報告」）
@@ -775,3 +776,80 @@ GUI を触る Phase では `pnpm typecheck` / `lint` / `test` / `gen:types` の�
 - ADR-0072 §7 の U1（context 超過の文言）・U2（codex の peak context）・U7（idle timeout）・U8（上限到達の質問のボタン）・U9（remote の
   mechanical checkpoint）・U10（gate の閾値）は本 ADR では扱わない（F5 で機会があれば記録する）。U3（WU 並列）は D1、U4（WU の commit）は
   D1.2 で v2 について解消する。U5（部をまたぐ WU）は D3.7 の children で「別の Task」にする既定を保つ。
+
+## Phase F1 実装時の逸脱・明確化（2026-09-26）
+
+実装しながら見つかった、D5・D6 の記述とコードの食い違い・簡略化・明確化。黙って逸脱せず、ここに記録する
+（branch `worktree-agent-abdca7309a6944c0a`、commit は `docs/PROGRESS.md` の Phase F1 節を参照）。
+
+- **環境修正**: 着手前に確認したところ、NFS 移行後の toolchain（cargo/rustc 1.98.1）で
+  `crates/task-worker/src/codex_account.rs` の `clippy::result_large_err` は既に別コミット
+  （`ad165d3`、`rpc`/`read_account_limits` への `#[allow(clippy::result_large_err)]` + 理由コメント）
+  で解消済みだった。F1 の着手時点で `cargo clippy --workspace --all-targets -- -D warnings` は
+  warning 0 を確認済み（このコミットへの追加変更はしていない）。
+- **D5.1 の `deny_unknown_fields`**: ADR は「`features` が `TaskFeatureHints` として読めなければ
+  検証エラー」とだけ書いていたが、`TaskFeatureHints` 自体に `#[serde(deny_unknown_fields)]` が
+  無かった（他の欄と違って寛容に読む型のまま）。これでは `{"lane": "frontier"}` のような
+  D5.1 が禁じたい欄も「空の `TaskFeatureHints` として読める」ことになってしまうため、
+  `TaskFeatureHints` に `deny_unknown_fields` を追加した（`docs/api/v1/event.schema.json` の
+  `TaskFeatureHints` に `additionalProperties: false` が付く。`NewTaskSpec.features` 等、
+  他の呼び出し元も同じ型を使っているので、そちらも自動的に厳格になる。既存の呼び出し元は
+  すべて既知の欄しか書いていないため後方互換は壊れない）。
+- **D5.2 の WU lane 上限の実装位置**: ADR は「WU の lane ≤ max(Task の lane, standard)」とだけ
+  決めていたが、「Task の lane」をどの時点のどの計算から取るかは明示していなかった。
+  `model_policy::decide_for_work_unit` に `task_lane: Option<Tier>` 引数を追加し、呼び出し側
+  （`Dispatcher::decide_lane_for_work_unit`）が `[execution] work_unit_lane_cap` の設定に応じて
+  `decide_for_task(task, ceiling)`（**エスカレーション前**の policy の結果）を渡す、という形にした。
+  リトライのエスカレーション（D6「WU の run はエスカレーションを行わない」）を Task の上限にも
+  持ち込まない、という既存方針に合わせた選択。
+- **D5.3 の replan プロンプト**: 「replan は差分だけを出す」という決定を、プロンプトにも反映した
+  （`replan_context_section` が `celeris.execution-plan-delta/1` の形を示し、差分で書けなければ
+  全体形式でもよいと明記）。ADR 本文はプロンプト文面までは指定していなかったため、これは実装上の
+  補足（受け入れ条件は「差分を受け付ける」であって「プロンプトを変える」ではないが、D5.3 の
+  「replan は差分だけを出す」という決定の趣旨に沿わせた）。
+- **D5.3 の差分パッチの「欄を消す」制約**: `WorkUnitPatch` の各欄は `Option<T>`
+  （`Some` = 上書き、欠落 = 変えない）にした。素の `serde`/`serde_json` は `Option<Option<T>>` で
+  「欄が無い」と「明示的に `null`」を区別できない（`serde_with::rust::double_option` のような
+  追加クレートが要る）ため、`harness`/`features`/`budget` のような既に `Option` 型の欄を
+  **空に戻す**ことは差分ではできない（新しい値を書く、または `remove` + `add` で作り直す）、
+  という制約を型コメントと `docs/protocol/execution-plan-delta.schema.json` の説明に明記した。
+  ADR 本文はこの制約に触れていなかったので、Phase F1 の簡略化として記録する。F2/F3 で困る場面が
+  出たら見直す（U 節に追記候補）。
+- **D6.1/D6.2 の実装位置**: timeout の 2 倍再実行と merge-base の決定的な merge は、
+  「daemon が判定を差し替えて続ける」という書き方だったので、`try_review_repair`
+  （repair WU を作る層）ではなく、その手前の `review_task`/`run_work_unit_checks`
+  （`crates/task-dispatch/src/review.rs` の `exec_check_with_repair_retries`）の中に実装した。
+  結果として、1 回目の（失敗した）試行そのものは別の Event として残らず、**最終的な**
+  `Event::ReviewVerdict` だけが記録される（「判定を差し替える」を文字どおり実装した形。
+  1 回目の timeout の証跡が欲しい場合は `WorkerProgress` に足すことを F2/F3 の課題として残す）。
+- **D6.2 の merge コマンド**: Task 内部の最終レビューでの決定的な merge は `git merge --no-edit <ref>`
+  を使った（D1.4 の工程統合が使う `--no-ff` は付けない）。Task 内部では複数 WU の統合ではなく
+  「base に追いついているか」だけを見ているため、fast-forward できるならそれでよい、という判断。
+  F2 で D1.4 の統合を実装するときに、そちらは ADR どおり `--no-ff` を使う。
+- **D6.2 の origin の対応範囲**: `execution::RepairOrigin` に `Integration`/`Delivery` を型として
+  用意したが、F1 では **`Review`（Task 内部の最終レビュー）と `Planner`（replan が自ら書いた
+  repair WU）だけ**を実際に発行する。`Integration` は F2 の工程統合が無いと発生しない。
+  `Delivery`（`crates/celeris/src/delivery.rs` の `[delivery-repair]`）は ADR-0074 §6 F1 の
+  触るファイル一覧に無く、今回は変更していない（`Event::RepairScheduled` を出さない）。
+  配送側の repair WU は Phase E6 の実装のとおり `"repair (<bucket>): …"` という題名の規約に
+  従っているため、`execution_metrics::summarize` の**旧経路**（title の接頭辞からの復元）で
+  今までどおり分類でき、`unknown` への退行は無い（F1 で新しく `unknown` になるのは、
+  `RepairScheduled` も題名の規約も無い、既存の replan 由来 repair WU だけで、これは本 Phase の
+  変更で解消済み）。配送側にも `RepairScheduled` を出すかは F2/F3 の課題として残す。
+- **(k) で追加で見つかった不具合（本 Phase で修正）**: `Event::WorkerFinished.end` は reviewer
+  run では常に `None` だった（`usage` だけでなく）ため、`task_ops::replay::rebuild_work_units_and_runs`
+  はこれを常に `RunIndexStatus::HarnessError` として復元し、実際の判定（`completed`/`failed`）と
+  食い違っていた。ADR の (k) は `finished_at`/`usage`/`end` の 3 つを挙げていたので、この
+  `end` の食い違いも本 Phase の範囲内として直した（正常完了・実質的な不合格・供給側/インフラ都合の
+  deferred・discarded の 4 経路それぞれで、`finish_reviewer_run_index` に渡す `RunIndexStatus` と
+  同じ判定を `Event::WorkerFinished.end` にも書き戻す）。
+- **(k) で見つかったが本 Phase では直していない別の不具合**: 上記の調査中、`dispatcher.rs` の
+  「計画の無い Task（暗黙の WorkUnit）の worker run」の `runs` 索引書き込みが、
+  `current_run_seq(&events) + 1` を呼んでいる箇所（Phase E2b で追加。`WorkerStarted` を追記した
+  **あとに**呼んでいる）で `seq` が実際より 1 大きく記録される不具合を見つけた
+  （`task_ops::derive::current_run_seq` の他の 2 箇所の呼び出しは「`WorkerStarted` が既に
+  events に入っている前提で、その番号をそのまま返す」という契約で `+1` しておらず、この 1 箇所だけ
+  契約を誤って `+1` している）。ADR-0074 §6 F1 の受け入れ条件にもテスト表にも無い、
+  ADR-0072 Phase E2b 由来の別の欠陥のため、本 Phase では直さず、`docs/PROGRESS.md` の
+  「提案」に記録する（`reviewer_run_usage_is_recorded_in_the_runs_index_and_survives_replay_check`
+  テストは worker run の `seq` を比較対象から意図的に外している）。

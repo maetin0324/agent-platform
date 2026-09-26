@@ -11542,6 +11542,56 @@ mod tests {
         assert!(run_mismatches.is_empty(), "{run_mismatches:?}");
     }
 
+    /// ADR-0074 §6 F1 (g): 決定的な検査が `command timed out after` で不合格になっても、daemon が
+    /// 2 倍の timeout で 1 回だけ黙って再実行して直す（attempts は不変、repair WU も作らない）。
+    /// マーカーファイルが無ければ sleep して timeout し、あれば即座に exit 0 になるコマンドで、
+    /// 「1 回目は本当に時間切れ、2 回目は速い」を決定的に再現する。
+    #[tokio::test]
+    async fn command_timeout_check_reruns_once_with_double_timeout_and_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "test -f review-marker && exit 0 || (touch review-marker && sleep 5)".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: "ok".into(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::from_millis(1),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.review_timeout = Duration::from_secs(1);
+        let report = run_until_idle(&mut d, 400).await;
+        let events = store.events_for(task_id).unwrap();
+        assert!(report.idle, "{report:?}");
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{events:?}");
+        assert_eq!(stored.attempts, 0, "the retry must not consume attempts");
+        assert!(
+            !events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::RepairScheduled { .. })),
+            "a successful retry must not create a repair WU: {events:?}"
+        );
+        // 判定は差し替えられ、記録される `ReviewVerdict` は 2 回目（合格）の結果だけ
+        // （1 回目の timeout は再試行の中間結果で、別の Event としては残さない設計）。
+        assert!(
+            events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: true, .. })),
+            "{events:?}"
+        );
+    }
+
     #[tokio::test]
     async fn reviewer_run_shares_concurrency_and_is_deferred_when_at_capacity() {
         let dir = tempfile::tempdir().unwrap();
@@ -19354,6 +19404,90 @@ mod tests {
         git_out(dir, &["rev-parse", "HEAD"])
     }
 
+    /// (h) の偽アダプタ: worker run の中で自分のブランチに 1 コミットし、**別のファイル**を触る
+    /// コミットを `repo_dir`（`main`）にも積む（main が worker の作業中に先行した状態を作る。
+    /// 触るファイルが違うので merge は衝突しない）。
+    struct AdvancesMainWhileWorkingAdapter {
+        repo_dir: PathBuf,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for AdvancesMainWhileWorkingAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            let cwd = req.cwd().to_path_buf();
+            std::fs::write(cwd.join("worker-side.txt"), b"x").unwrap();
+            git_out(&cwd, &["add", "-A"]);
+            git_out(&cwd, &["commit", "-q", "-m", "worker change"]);
+            std::fs::write(self.repo_dir.join("main-side.txt"), b"y").unwrap();
+            git_out(&self.repo_dir, &["add", "-A"]);
+            git_out(&self.repo_dir, &["commit", "-q", "-m", "advance main"]);
+            Ok(RunOutcome {
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// ADR-0074 §6 F1 (h): `git merge-base --is-ancestor main HEAD` が不成立（main が worktree の
+    /// 作業中に先行した）でも、衝突が無ければ daemon が worktree の中で決定的に merge し、再実行して
+    /// 合格に差し替える（repair WU は作らない）。
+    #[tokio::test]
+    async fn merge_base_check_merges_main_deterministically_when_there_is_no_conflict() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "git merge-base --is-ancestor main HEAD".into(),
+                expect_exit: 0,
+            },
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(AdvancesMainWhileWorkingAdapter {
+            repo_dir: repo_dir.path().to_path_buf(),
+        });
+        let mut d = worktree_dispatcher(store.clone(), adapter, root.path(), None);
+        let report = run_until_idle(&mut d, 400).await;
+        let events = store.events_for(task_id).unwrap();
+        assert!(report.idle, "{report:?}");
+        assert_eq!(
+            store.get(task_id).unwrap().unwrap().status,
+            Status::Done,
+            "{events:?}"
+        );
+        // repair WU は作られない（衝突が無いので merge だけで直った）。
+        let units = store.work_units_for(task_id).unwrap();
+        assert!(
+            units
+                .iter()
+                .all(|u| u.kind != task_core::WorkUnitKind::Repair),
+            "{units:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|(_, e)| matches!(e, Event::RepairScheduled { .. })),
+            "{events:?}"
+        );
+    }
+
     /// `git -C <dir> <args...>` の stdout（trim 済み）。失敗したら panic。
     fn git_out(dir: &std::path::Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
@@ -22629,6 +22763,119 @@ mod tests {
             gated, 2,
             "the original decision plus the atomic fallback: {events:?}"
         );
+    }
+
+    /// ADR-0074 §6 F1 (b): WU の `features` が `TaskFeatureHints` として読めない計画（未知の欄
+    /// `"lane"` を書いた）は検証エラーになり、1 回だけ再試行してそれでも駄目なら atomic に倒れる
+    /// （`invalid_planner_output_retries_once_then_falls_back_to_atomic` と同じ経路）。
+    #[tokio::test]
+    async fn plan_with_unreadable_features_retries_once_then_falls_back_to_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = compound_task(dir.path());
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+
+        // `features.lane` は `TaskFeatureHints` に無い欄（`deny_unknown_fields`）。
+        let bad_plan = r#"{"schema":"celeris.execution-plan/1","rationale":"r","work_units":[
+            {"key":"a","kind":"implement","title":"t","objective":"o","depends_on":[],
+             "done_when":[],"checks":[],
+             "context":{"paths":[],"from_work_units":[],"knowledge":[]},"outputs":[],
+             "features":{"lane":"frontier"}}
+        ]}"#
+        .to_string();
+        let adapter = Arc::new(PlannerScriptAdapter::new(
+            vec![Some(bad_plan), None],
+            HashMap::new(),
+        ));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.gate = task_core::GateMode::On;
+        d.config.execution.planner.adapter = "instant".to_string();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            Status::Done,
+            "an invalid plan must not fail the task: {stored:?}"
+        );
+        assert!(
+            store.execution_plan_active(task_id).unwrap().is_none(),
+            "no plan should have been adopted"
+        );
+        let decision = stored
+            .routing
+            .as_ref()
+            .and_then(|r| r.execution.as_ref())
+            .expect("gate decision recorded");
+        assert_eq!(
+            decision.mode,
+            task_core::ExecutionMode::Atomic,
+            "{decision:?}"
+        );
+        let planner_attempts = adapter
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.execution_planner.is_some())
+            .count();
+        assert_eq!(planner_attempts, 2, "exactly one retry (2 attempts total)");
+    }
+
+    /// ADR-0074 §6 F1 (e): 計画のサイズ上限（`rationale` ≤ 1,500 文字）を超えた出力は拒否され、
+    /// 1 回だけ再試行してそれでも駄目なら atomic に倒れる。
+    #[tokio::test]
+    async fn oversized_plan_retries_once_then_falls_back_to_atomic() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = compound_task(dir.path());
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+
+        let too_long_rationale = "x".repeat(1_501);
+        let bad_plan = serde_json::json!({
+            "schema": task_core::EXECUTION_PLAN_SCHEMA,
+            "rationale": too_long_rationale,
+            "work_units": [wu_spec("a", &[])],
+        })
+        .to_string();
+        let adapter = Arc::new(PlannerScriptAdapter::new(
+            vec![Some(bad_plan), None],
+            HashMap::new(),
+        ));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.gate = task_core::GateMode::On;
+        d.config.execution.planner.adapter = "instant".to_string();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(
+            stored.status,
+            Status::Done,
+            "an invalid plan must not fail the task: {stored:?}"
+        );
+        assert!(store.execution_plan_active(task_id).unwrap().is_none());
+        let decision = stored
+            .routing
+            .as_ref()
+            .and_then(|r| r.execution.as_ref())
+            .expect("gate decision recorded");
+        assert_eq!(
+            decision.mode,
+            task_core::ExecutionMode::Atomic,
+            "{decision:?}"
+        );
+        let planner_attempts = adapter
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.execution_planner.is_some())
+            .count();
+        assert_eq!(planner_attempts, 2, "exactly one retry (2 attempts total)");
     }
 
     /// ADR-0074 §6 F1 (d): planner run は既定で `standard` lane（`rule_id = planner/system-standard`）、
