@@ -56,6 +56,7 @@ export const WORK_UNIT_KIND_LABEL: Record<WorkUnitKind, string> = {
   release: "リリース",
   repair: "修復",
   other: "その他",
+  integrate: "統合",
 };
 
 const RUN_END_LABEL: Record<RunEnd["type"], string> = {
@@ -139,6 +140,60 @@ export function checkpointSummary(cp: Checkpoint | null | undefined): string {
 export function planVersionLabel(v: ExecutionPlanVersionSummary): string {
   const reason = v.reason ? ` — ${v.reason}` : "";
   return `v${v.version}（${v.origin} / ${v.status}）${reason}`;
+}
+
+// ---------------------------------------------------------------------------
+// ADR-0074 D1（Phase F2b）: WU の並列実行（工程・WU のブランチ・同時に走っている run）。
+// celeris が記録した値（`phase`/`branch`/`running_run_id`/`serialized_reason`）を並べるだけ。
+// ---------------------------------------------------------------------------
+
+/** WU の表の 1 まとまり（v2 は工程ごと、v1 は見出しの無い 1 つ）。 */
+export interface WorkUnitGroup {
+  /** 工程の key（見出しの無いまとまりは空文字列）。 */
+  key: string;
+  /** 見出しの文言（見出しの無いまとまりは空文字列）。 */
+  label: string;
+  units: ExecutionWorkUnitView[];
+}
+
+/** WU の表を工程（`plan.phases` の順）ごとにまとめる。工程の無い計画（v1）は見出しの無い 1 つ。 */
+export function workUnitGroups(plan: ExecutionPlanOverview): WorkUnitGroup[] {
+  const sorted = [...plan.work_units].sort((a, b) => a.seq - b.seq);
+  const phases = plan.phases ?? [];
+  if (phases.length === 0) return [{ key: "", label: "", units: sorted }];
+  const groups: WorkUnitGroup[] = phases.map((p) => ({
+    key: p.key,
+    label: `工程 ${p.title}（${p.key}）`,
+    units: sorted.filter((w) => w.phase === p.key),
+  }));
+  const known = new Set(phases.map((p) => p.key));
+  const rest = sorted.filter((w) => !w.phase || !known.has(w.phase));
+  if (rest.length > 0) groups.push({ key: "", label: "工程なし", units: rest });
+  return groups;
+}
+
+/** 今走っている WU の run（`running_run_id` を持つ WU、seq 順）。 */
+export function runningWorkUnitRuns(plan: ExecutionPlanOverview): { key: string; runId: string }[] {
+  return [...plan.work_units]
+    .sort((a, b) => a.seq - b.seq)
+    .flatMap((w) => (w.running_run_id ? [{ key: w.key, runId: w.running_run_id }] : []));
+}
+
+/**
+ * 並列実行の 1 行（並列 1 に倒した理由、または同時に走っている run の本数）。どちらでも無ければ `null`。
+ */
+export function parallelSummaryLine(plan: ExecutionPlanOverview): string | null {
+  if (plan.serialized_reason) return `並列 1 で実行（${plan.serialized_reason}）`;
+  const running = runningWorkUnitRuns(plan);
+  if (running.length > 1) {
+    return `同時に走っている run: ${running.length} 本（${running.map((r) => r.key).join(", ")}）`;
+  }
+  return null;
+}
+
+/** commit の短縮表示（先頭 12 桁）。 */
+export function shortCommit(sha: string | null | undefined): string | null {
+  return sha ? sha.slice(0, 12) : null;
 }
 
 /** repair WU の印（D16「repair WU の印」）。 */
