@@ -254,10 +254,9 @@ fn spawn_group_reaper(pgid: i32, grace: Duration, container: Option<Arc<dyn Cont
 mod tests {
     use super::*;
 
-    /// Phase 119 D2: `reap_finished_children` は `waitpid(-1, WNOHANG)` — プロセス全体で共有された
-    /// 資源なので、他のテストが自分の子をまだ reap し切っていない一瞬に重なると、その子の終了ステータスを
-    /// 横取りしうる。すべての「本物の子プロセスを spawn するテスト」（`reap_finished_children` を呼ぶ
-    /// テストを含む）はこの lock を握ってから spawn する（cargo test はデフォルトでテストを並列に走らせる）。
+    /// このモジュールの実プロセスを使う非同期テストを直列化する。
+    /// `reap_finished_children` のテストは process 全体を対象とするため、
+    /// 別の integration-test binary で実行する。
     /// `tokio::sync::Mutex` を使うのは、await をまたいでガードを持ち続ける `#[tokio::test]` が
     /// `std::sync::Mutex` だと clippy（`await_holding_lock`）に落ちるため。
     fn child_test_lock() -> &'static tokio::sync::Mutex<()> {
@@ -268,11 +267,6 @@ mod tests {
     /// 非同期テスト（`#[tokio::test]`）用。
     async fn serialize_child_process_tests() -> tokio::sync::MutexGuard<'static, ()> {
         child_test_lock().lock().await
-    }
-
-    /// 同期テスト（`#[test]`。tokio runtime の外）用。
-    fn serialize_child_process_tests_blocking() -> tokio::sync::MutexGuard<'static, ()> {
-        child_test_lock().blocking_lock()
     }
 
     #[test]
@@ -354,44 +348,6 @@ mod tests {
     #[test]
     fn killing_an_unknown_run_is_a_no_op() {
         assert!(!kill_tree("no-such-run", Duration::from_millis(1)));
-    }
-
-    /// Phase 119 D2: 本番の `[codex] <defunct>` を再現する — 子プロセスが終了したのに誰も `wait(2)`
-    /// していない（`tokio::process::Child` を drop も `.wait()` もせず leak させる）状態を作り、
-    /// `reap_finished_children` がそれを回収することを確かめる。
-    #[test]
-    fn reap_finished_children_collects_an_unwaited_zombie() {
-        let _serial = serialize_child_process_tests_blocking();
-        let child = std::process::Command::new("true")
-            .spawn()
-            .unwrap_or_else(|e| panic!("spawn: {e}"));
-        let pid = child.id();
-        // 終了するまで少し待つ（`wait()` は呼ばない — それを呼ぶと reap されてしまい、再現にならない）。
-        for _ in 0..200 {
-            if matches!(
-                std::fs::read_to_string(format!("/proc/{pid}/stat")),
-                Ok(s) if s.split(' ').nth(2) == Some("Z")
-            ) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let reaped = reap_finished_children();
-        assert!(reaped >= 1, "expected to reap at least the zombie we made");
-        // 本当に回収済みなら、同じ pid をもう一度 `waitpid` しても子として見つからない
-        // （`std::process::Child` の drop 自体は `wait()` を呼ばないので、二重 reap の心配は無い）。
-        assert!(
-            std::process::Command::new("kill")
-                .arg("-0")
-                .arg(pid.to_string())
-                .status()
-                .map(|s| !s.success())
-                .unwrap_or(true),
-            "the zombie should be gone from /proc after reaping"
-        );
-        // `std::process::Child::drop` は `wait(2)` を呼ばない（呼ぶのはこのテストか
-        // `reap_finished_children` だけ）ので、既に reap 済みのここで drop しても二重 reap は起きない。
-        drop(child);
     }
 
     /// 実プロセスで一族ごと止まることを見る（孫まで）。

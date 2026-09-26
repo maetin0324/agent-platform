@@ -20126,3 +20126,4 @@ run 開始部分で、F3 の `quota_begin` を `dispatch_one` に移して解消
 
 - 取り込み後の release gate は全段成功し、`gate.json.ok = true` とリリースディレクトリが生成された。しかし `prepare.sh` の 3600 秒制限が worktree の掃除中に発火し、verify 前に `result.json.ok = false` となった（`prepare.log`: 09:05:11 開始、10:04:31 release ready、10:05:11 Terminated）。
 - clean 475 秒、全 workspace テスト 2416 秒を要した実測に合わせ、release 全体の上限を 7200 秒に変更。verify の 900 秒上限は維持。軽量なモックテストで両上限と成功・失敗時の結果ファイルを確認する。
+- 修復 SHA `e07cc0f` の release gate では、`task-worker` 内の孤児子プロセス回収テストが並列実行中の別テストの `git commit` を先に reap し、3 件が `No child processes` で落ちた。回収テストを別 integration-test binary へ移し、`waitpid(-1)` が他の unit test の子を横取りできないようにした。
