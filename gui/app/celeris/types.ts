@@ -464,6 +464,17 @@ export type Event =
   | {
       decision: ExecutionGateDecision;
       type: "execution_gated";
+    }
+  | {
+      /**
+       * `RepairClass::bucket()`（`format`/`lint`/`test_small`/`reviewer_local`/`merge_base`/
+       * `review_timeout`）、または planner が replan で自ら書いた repair WU の `"planner"`。
+       */
+      class: string;
+      key: string;
+      origin: RepairOrigin;
+      type: "repair_scheduled";
+      work_unit_id: string;
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -596,6 +607,10 @@ export type PlanOrigin = "planner" | "human" | "repair" | "fixture";
 export type WorkUnitKind = "investigate" | "design" | "implement" | "test" | "release" | "repair" | "other";
 export type WorkUnitStatus =
   "pending" | "ready" | "needs_continuation" | "running" | "done" | "failed" | "blocked" | "superseded" | "cancelled";
+/**
+ * ADR-0074 D6.2（Phase F1）: `Event::RepairScheduled.origin`（repair WU を起こした場所）。
+ */
+export type RepairOrigin = "review" | "integration" | "delivery" | "planner";
 /**
  * D5: `execution_plans.status`。
  */
@@ -2764,6 +2779,8 @@ export interface ExecutionHintSpec {
 /**
  * ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の
  * `create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。
+ * ADR-0074 D5.1（Phase F1）: `deny_unknown_fields`（`lane`/`assignee`/`tier`/`model` のような
+ * 担当・モデルの選択を紛れ込ませない。書けば schema 違反として計画の検証エラーになる）。
  */
 export interface TaskFeatureHints {
   ambiguity?: Level | null;
@@ -5592,9 +5609,12 @@ export interface ExecutionMetrics {
    */
   peak_context_tokens?: number | null;
   /**
-   * D16: repair の class ごとの回数。`"unknown"` は、計画に既存だった repair WU
-   * （`ExecutionPlanned` に載らない）で class が復元できなかったもの（events だけからの
-   * 復元の既知の限界。ADR の逸脱節を参照）。
+   * D16/ADR-0074 D6.2（Phase F1）: repair の class ごとの回数。`Event::RepairScheduled` から読む
+   * （`"planner"` は replan が自ら書いた `kind = repair` の WU）。この Event が無い旧いタスク
+   * （F1 より前に起きた repair）だけ、`ExecutionPlanned` の title の接頭辞から復元する
+   * フォールバックに倒れ、それでも復元できなければ `"unknown"`（events だけからの復元の
+   * 既知の限界。ADR-0072 の逸脱節を参照）。F1 以降に起きた repair はすべて `RepairScheduled` を
+   * 持つので `unknown` は出ない。
    */
   repairs_by_class?: {
     [k: string]: number;
