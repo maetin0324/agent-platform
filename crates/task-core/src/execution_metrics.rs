@@ -18,6 +18,7 @@ use crate::execution::{BudgetKind, RunEnd};
 use crate::execution_gate::ExecutionMode;
 use crate::execution_plan::{WorkUnitKind, WorkUnitStatus};
 use crate::model::{Event, RunRole, Status, Task};
+use crate::quota::{QuotaMethod, QuotaRunRecord, QuotaUse, QuotaWindowUse, aggregate_quota_use};
 
 /// D19: Task 単位の実行メトリクス（`GET /tasks/{id}/execution` と `GET /metrics/execution` の材料）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -75,12 +76,88 @@ pub struct ExecutionMetrics {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wall_ms: Option<u64>,
     pub final_status: Status,
+    /// ADR-0074 D4.3（Phase F3 quota）: アカウント × 窓ごとの quota 消費の合計
+    /// （`Event::QuotaEstimated` から。同じ `run_id` は最後の Event が有効）。
+    #[serde(default)]
+    pub quota: Vec<QuotaUse>,
+    /// D4.3: quota が `unknown`（measured/apportioned/estimated のいずれでも決められなかった）
+    /// だった run の数。
+    #[serde(default)]
+    pub quota_unknown_runs: u32,
+    /// D4.3: 定価 USD（`cost_usd`）が完全か。単価不明のモデルを使った run（token はあるのに
+    /// `Usage.cost_usd` が無い run）が 1 件でもあれば `false`（`cost_usd` はその分だけ過小）。
+    /// run が 1 件も無ければ `true`（欠けようがない）。
+    #[serde(default = "default_true")]
+    pub cost_usd_complete: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// `work_units.spec.title` の `"repair (<bucket>): …"` から bucket 名を読む
 /// （`task_dispatch::Dispatcher::repair_bucket_of_title` と同じ字句規則。決定的な文字列解析のみ）。
 fn repair_bucket_of_title(title: &str) -> Option<&str> {
     title.strip_prefix("repair (")?.split(')').next()
+}
+
+/// ADR-0074 D4.3（Phase F3 quota）: `Event::QuotaEstimated` 1 件分の、所有権を持つコピー
+/// （run_id ごとに「最後の Event が有効」で畳み込むための中間表現）。
+#[derive(Debug, Clone)]
+struct QuotaRunSnapshot {
+    work_unit_id: Option<String>,
+    source: String,
+    account: Option<String>,
+    windows: Vec<QuotaWindowUse>,
+}
+
+/// D4.3: events から `Event::QuotaEstimated` を run_id ごとに畳み込む（同じ `run_id` は
+/// 後から来た Event で上書き。`events` は古い順という契約なので、これで「最後の Event が有効」になる）。
+fn latest_quota_by_run(events: &[Event]) -> BTreeMap<String, QuotaRunSnapshot> {
+    let mut by_run: BTreeMap<String, QuotaRunSnapshot> = BTreeMap::new();
+    for event in events {
+        if let Event::QuotaEstimated {
+            run_id,
+            work_unit_id,
+            source,
+            account,
+            windows,
+            ..
+        } = event
+        {
+            by_run.insert(
+                run_id.clone(),
+                QuotaRunSnapshot {
+                    work_unit_id: work_unit_id.clone(),
+                    source: source.clone(),
+                    account: account.clone(),
+                    windows: windows.clone(),
+                },
+            );
+        }
+    }
+    by_run
+}
+
+/// ADR-0074 D4.3（Phase F3）: WU ごとの quota 消費（`TaskExecutionView` の WU に足す）。
+/// `work_unit_id` が無い run（atomic/暗黙の WorkUnit）は `None` キーにまとめる。
+pub fn group_quota_by_work_unit(events: &[Event]) -> BTreeMap<Option<String>, Vec<QuotaUse>> {
+    let by_run = latest_quota_by_run(events);
+    let mut by_wu: BTreeMap<Option<String>, Vec<QuotaRunRecord<'_>>> = BTreeMap::new();
+    for snapshot in by_run.values() {
+        by_wu
+            .entry(snapshot.work_unit_id.clone())
+            .or_default()
+            .push(QuotaRunRecord {
+                source: &snapshot.source,
+                account: snapshot.account.as_deref(),
+                windows: &snapshot.windows,
+            });
+    }
+    by_wu
+        .into_iter()
+        .map(|(key, records)| (key, aggregate_quota_use(records)))
+        .collect()
 }
 
 /// D19: `Task` と、そのタスクの events（古い順）から `ExecutionMetrics` を組み立てる純粋関数。
@@ -104,6 +181,8 @@ pub fn summarize(task: &Task, events: &[Event]) -> ExecutionMetrics {
     let mut total_input_tokens: Option<u64> = None;
     let mut total_output_tokens: Option<u64> = None;
     let mut cost_usd: Option<f64> = None;
+    // ADR-0074 D4.3（Phase F3 quota）: token を持つのに `cost_usd` が無い run が 1 件でもあれば false。
+    let mut cost_usd_complete = true;
 
     for event in events {
         match event {
@@ -169,6 +248,14 @@ pub fn summarize(task: &Task, events: &[Event]) -> ExecutionMetrics {
                     }
                     if let Some(v) = u.cost_usd {
                         cost_usd = Some(cost_usd.unwrap_or(0.0) + v);
+                    } else if u.input_tokens.is_some()
+                        || u.output_tokens.is_some()
+                        || u.cache_read_tokens.is_some()
+                        || u.cache_creation_tokens.is_some()
+                    {
+                        // ADR-0074 D4.3（Phase F3 quota）: token はあるのに単価が無い
+                        // （単価表に無いモデル。E6 report 問題 5）。
+                        cost_usd_complete = false;
                     }
                 }
                 if let Some(m) = metrics
@@ -221,6 +308,19 @@ pub fn summarize(task: &Task, events: &[Event]) -> ExecutionMetrics {
         None
     };
 
+    // ADR-0074 D4.3（Phase F3 quota）: `Event::QuotaEstimated` は「同じ run_id は最後の Event が
+    // 有効」（apportioned の再送）なので、専用の畳み込みを 1 回行ってから集計する。
+    let quota_by_run = latest_quota_by_run(events);
+    let quota_unknown_runs = quota_by_run
+        .values()
+        .filter(|s| crate::quota::representative_method(&s.windows) == QuotaMethod::Unknown)
+        .count() as u32;
+    let quota = aggregate_quota_use(quota_by_run.values().map(|s| QuotaRunRecord {
+        source: &s.source,
+        account: s.account.as_deref(),
+        windows: &s.windows,
+    }));
+
     ExecutionMetrics {
         gate_mode,
         gate_shadow,
@@ -241,6 +341,9 @@ pub fn summarize(task: &Task, events: &[Event]) -> ExecutionMetrics {
         cost_usd,
         wall_ms,
         final_status: task.status,
+        quota,
+        quota_unknown_runs,
+        cost_usd_complete,
     }
 }
 
@@ -580,5 +683,198 @@ mod tests {
         task.updated_at = task.created_at + time::Duration::seconds(30);
         let m = summarize(&task, &[]);
         assert_eq!(m.wall_ms, Some(30_000));
+    }
+
+    // ---- ADR-0074 D4.3（Phase F3 quota）----
+
+    fn quota_event(
+        run_id: &str,
+        work_unit_id: Option<&str>,
+        source: &str,
+        account: Option<&str>,
+        windows: Vec<crate::quota::QuotaWindowUse>,
+    ) -> Event {
+        let weighted_tokens = 100.0;
+        Event::QuotaEstimated {
+            run_id: run_id.to_string(),
+            work_unit_id: work_unit_id.map(str::to_string),
+            source: source.to_string(),
+            account: account.map(str::to_string),
+            method: crate::quota::representative_method(&windows),
+            windows,
+            weighted_tokens,
+            calibration: None,
+            weights_version: crate::quota::WEIGHTS_VERSION.to_string(),
+            list_price_usd: None,
+        }
+    }
+
+    fn measured_window(
+        window: crate::quota::QuotaWindow,
+        used_pct: f64,
+    ) -> crate::quota::QuotaWindowUse {
+        crate::quota::QuotaWindowUse {
+            window,
+            before: Some(0.1),
+            after: Some(0.1 + used_pct / 100.0),
+            resets_at: Some(5_000),
+            used_pct: Some(used_pct),
+            method: QuotaMethod::Measured,
+        }
+    }
+
+    #[test]
+    fn cost_usd_complete_is_false_with_an_unpriced_model() {
+        let task = sample_task("x", vec![]);
+        let priced = Event::WorkerFinished {
+            run_id: "r1".to_string(),
+            outcome: "done: ok".to_string(),
+            usage: Some(Usage {
+                input_tokens: Some(100),
+                output_tokens: Some(10),
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                cost_usd: Some(1.0),
+            }),
+            role: None,
+            metrics: None,
+            end: Some(RunEnd::Completed),
+        };
+        let unpriced = Event::WorkerFinished {
+            run_id: "r2".to_string(),
+            outcome: "done: ok".to_string(),
+            usage: Some(Usage {
+                input_tokens: Some(1_000_000),
+                output_tokens: Some(200_000),
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                cost_usd: None, // 単価表に無いモデル（例: gpt-6-sol）
+            }),
+            role: None,
+            metrics: None,
+            end: Some(RunEnd::Completed),
+        };
+        let m = summarize(&task, std::slice::from_ref(&priced));
+        assert!(m.cost_usd_complete, "priced-only は complete");
+
+        let m = summarize(&task, &[priced, unpriced]);
+        assert!(!m.cost_usd_complete, "unpriced な run が混じれば false");
+        assert_eq!(
+            m.cost_usd,
+            Some(1.0),
+            "cost_usd 自体は priced 分だけ合計する"
+        );
+    }
+
+    #[test]
+    fn cost_usd_complete_defaults_true_with_no_runs() {
+        let task = sample_task("x", vec![]);
+        let m = summarize(&task, &[]);
+        assert!(m.cost_usd_complete);
+    }
+
+    #[test]
+    fn quota_is_aggregated_by_source_account_and_window() {
+        let task = sample_task("x", vec![]);
+        let events = vec![
+            quota_event(
+                "r1",
+                None,
+                "claude-oauth",
+                Some("a"),
+                vec![measured_window(crate::quota::QuotaWindow::FiveHour, 4.0)],
+            ),
+            quota_event(
+                "r2",
+                None,
+                "claude-oauth",
+                Some("a"),
+                vec![measured_window(crate::quota::QuotaWindow::FiveHour, 6.0)],
+            ),
+        ];
+        let m = summarize(&task, &events);
+        assert_eq!(m.quota.len(), 1, "{:?}", m.quota);
+        let row = &m.quota[0];
+        assert_eq!(row.source, "claude-oauth");
+        assert_eq!(row.account.as_deref(), Some("a"));
+        assert_eq!(row.runs, 2);
+        assert_eq!(row.used_pct, Some(10.0));
+        assert_eq!(m.quota_unknown_runs, 0);
+    }
+
+    /// D4.3: `apportioned` は同じ `run_id` にもう 1 件出ることがある（グループが閉じたとき）。
+    /// 「最後の Event が有効」なので、`unknown`（先の暫定値）は上書きされて消える。
+    #[test]
+    fn quota_estimated_reemission_for_the_same_run_id_keeps_only_the_last_event() {
+        let task = sample_task("x", vec![]);
+        let pending = crate::quota::QuotaWindowUse {
+            window: crate::quota::QuotaWindow::FiveHour,
+            before: None,
+            after: None,
+            resets_at: None,
+            used_pct: None,
+            method: QuotaMethod::Unknown,
+        };
+        let resolved = measured_window(crate::quota::QuotaWindow::FiveHour, 9.0);
+        let events = vec![
+            quota_event("r1", None, "claude-oauth", Some("a"), vec![pending]),
+            quota_event("r1", None, "claude-oauth", Some("a"), vec![resolved]),
+        ];
+        let m = summarize(&task, &events);
+        assert_eq!(m.quota_unknown_runs, 0, "{:?}", m.quota);
+        assert_eq!(m.quota[0].used_pct, Some(9.0));
+        assert_eq!(
+            m.quota[0].runs, 1,
+            "1 回だけ数える（同じ run_id は畳み込む）"
+        );
+    }
+
+    #[test]
+    fn quota_unknown_runs_counts_runs_that_never_resolved() {
+        let task = sample_task("x", vec![]);
+        let unknown_window = crate::quota::QuotaWindowUse {
+            window: crate::quota::QuotaWindow::FiveHour,
+            before: None,
+            after: None,
+            resets_at: None,
+            used_pct: None,
+            method: QuotaMethod::Unknown,
+        };
+        let events = vec![quota_event(
+            "r1",
+            Some("wu-a"),
+            "codex-oauth",
+            Some("b"),
+            vec![unknown_window],
+        )];
+        let m = summarize(&task, &events);
+        assert_eq!(m.quota_unknown_runs, 1);
+        assert_eq!(m.quota[0].used_pct, None, "unknown は 0 ではない");
+    }
+
+    #[test]
+    fn group_quota_by_work_unit_splits_atomic_and_work_unit_runs() {
+        let events = vec![
+            quota_event(
+                "r1",
+                None,
+                "claude-oauth",
+                Some("a"),
+                vec![measured_window(crate::quota::QuotaWindow::FiveHour, 2.0)],
+            ),
+            quota_event(
+                "r2",
+                Some("wu-a"),
+                "claude-oauth",
+                Some("a"),
+                vec![measured_window(crate::quota::QuotaWindow::FiveHour, 3.0)],
+            ),
+        ];
+        let by_wu = group_quota_by_work_unit(&events);
+        assert_eq!(by_wu.get(&None).map(|v| v[0].used_pct), Some(Some(2.0)));
+        assert_eq!(
+            by_wu.get(&Some("wu-a".to_string())).map(|v| v[0].used_pct),
+            Some(Some(3.0))
+        );
     }
 }

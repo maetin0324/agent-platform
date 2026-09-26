@@ -42,6 +42,7 @@ pub mod org;
 pub mod plan;
 /// ADR-0046 D1（Phase 59）: 組織 = Agent Profile の継承木。
 pub mod profile;
+pub mod quota;
 pub mod report;
 /// ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ（`project_repos`）とタスクの `repos`。
 pub mod repos;
@@ -108,7 +109,7 @@ pub use model::{
 // ---- ADR-0061（Phase 104）: harness routing 基盤（cost 推定・タスク特性ベースの routing）----
 pub mod pricing;
 pub mod routing;
-pub use pricing::estimate_cost_usd;
+pub use pricing::{estimate_cost_usd, output_input_ratio};
 pub use routing::{RoutingDecision, RoutingPolicy, RoutingSignals, StaticRoutingPolicy};
 // ---- ADR-0043 D1 / D2（Phase 52）: 案件のリポジトリ ----
 // ---- ADR-0054 D1（Phase 67）: ノードごとの継続セッション ----
@@ -170,7 +171,14 @@ pub use execution_gate::{
     PlannerConfig, decide as decide_execution_gate, out_of_scope_rule,
 };
 // ---- ADR-0072 D19（Phase E5）: Task 単位の実行メトリクス ----
-pub use execution_metrics::{ExecutionMetrics, summarize as summarize_execution_metrics};
+pub use execution_metrics::{
+    ExecutionMetrics, group_quota_by_work_unit, summarize as summarize_execution_metrics,
+};
+// ---- ADR-0074 D4（Phase F3 quota）: quota 消費の推定 ----
+pub use quota::{
+    QuotaCalibration, QuotaMethod, QuotaRunRecord, QuotaUse, QuotaWindow, QuotaWindowUse,
+    WindowSnapshot, aggregate_quota_use,
+};
 
 pub mod model_routing;
 // ---- ADR-0069（Phase 114）: routing の 4 層（lane policy・retry/escalation・監査）----

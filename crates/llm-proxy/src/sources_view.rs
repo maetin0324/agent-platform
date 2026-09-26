@@ -6,7 +6,7 @@
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use task_dispatch::accounts::{measured_remaining, scan_accounts};
+use task_dispatch::accounts::{measured_remaining, scan_accounts, window_remaining};
 
 use crate::server::ProxyState;
 
@@ -26,23 +26,8 @@ pub struct AccountSourceView {
     pub cooldown_reason: Option<String>,
 }
 
-/// ADR-0053 D4: 1 枠だけの残り（`measured_remaining` と同じ「観測が新しく、枠が有効」という規律を
-/// 1 枠に適用する）。観測が古い（300 秒超）・未来（壁時計のずれ）・枠が無い／期限切れ／範囲外の
-/// `utilization` はすべて `None`（測れない、を捏造しない）。
-fn window_remaining(
-    obs: &task_core::RateLimitObservation,
-    now: i64,
-    window: Option<task_core::RateWindow>,
-) -> Option<f64> {
-    if now < obs.observed_at || now - obs.observed_at > 300 {
-        return None;
-    }
-    let w = window?;
-    if w.resets_at <= now || !w.utilization.is_finite() || !(0.0..=1.0).contains(&w.utilization) {
-        return None;
-    }
-    Some(1.0 - w.utilization)
-}
+// ADR-0074 D4.1（Phase F3）: `window_remaining` は `task_dispatch::accounts` に移した（dispatcher と
+// この画面が同じ関数で読む）。
 
 /// ADR-0053 D4: `celeris/<tier>` が今どこに解決するか（表示専用。副作用なし）。
 #[derive(Debug, Clone, Serialize, JsonSchema)]
