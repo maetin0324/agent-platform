@@ -424,6 +424,14 @@ where
 }
 
 /// RFC 3339 の文字列（デーモンのスナップショット用）。書式化に失敗することは実質無いが、その場合は空文字列。
+/// ADR-0074 D1.5（Phase F2）: v2 の Task の lease の保持者（run ではなく工程）の接頭辞。
+const PHASE_LEASE_PREFIX: &str = "phase:";
+
+/// ADR-0074 D1.5: Task の lease の保持者が工程（`phase:<plan_id>:<phase>:<ulid>`）か。
+fn is_phase_lease_holder(holder: &str) -> bool {
+    holder.starts_with(PHASE_LEASE_PREFIX)
+}
+
 fn rfc3339(t: OffsetDateTime) -> String {
     t.format(&Rfc3339).unwrap_or_default()
 }
@@ -717,6 +725,23 @@ enum Completion {
         /// `(pass, reason)` の 1 件ずつ（`review::run_work_unit_checks` の結果そのまま）。
         check_results: Vec<(bool, String)>,
     },
+}
+
+/// ADR-0074 D1.5（Phase F2）: `running` の鍵。`work_unit` は v2 の並列 WU の run だけ `Some(work_units.id)`
+/// （atomic・planner・v1 の WU の run は `None`。v1 の挙動は 1 バイトも変えない）。
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct RunKey {
+    task: TaskId,
+    work_unit: Option<String>,
+}
+
+impl RunKey {
+    fn task(task: TaskId) -> Self {
+        RunKey {
+            task,
+            work_unit: None,
+        }
+    }
 }
 
 struct RunEntry {
@@ -1571,7 +1596,8 @@ pub struct Dispatcher {
     /// プロバイダ（= アカウント）ごとのアダプタのインスタンス（ADR-0012 D1）。
     adapters: HashMap<ProviderId, Arc<dyn WorkerAdapter>>,
     config: DispatchConfig,
-    running: HashMap<TaskId, RunEntry>,
+    /// ADR-0074 D1.5（Phase F2）: 鍵は (task, WU)。Task 単位の問いは `running_for_task`。
+    running: HashMap<RunKey, RunEntry>,
     reviewing: HashMap<TaskId, ReviewEntry>,
     /// レビューを開始できなかった（`Reviewer` run の枠が無い）タスクの `done` 内容。次 tick で使う。
     pending_subjects: HashMap<TaskId, ReviewSubject>,
@@ -1965,7 +1991,8 @@ impl Dispatcher {
         // （プロセスグループへ SIGTERM → `kill_grace_secs` → SIGKILL）。
         let kill_grace = self.config.kill_grace;
         let mut aborted = 0;
-        for (task_id, entry) in self.running.drain() {
+        for (key, entry) in self.running.drain() {
+            let task_id = key.task;
             tracing::warn!(task_id = %task_id, run_id = %entry.run_id, "drain timeout; aborting the run (the lease will expire and the new active will reclaim it)");
             // Phase 55/56 の合流: コンテナで走っている run はラベル越しにも止める（P55-4 / P56-7）。
             task_worker::kill_tree_with(&entry.run_id, kill_grace, entry.container);
@@ -2926,8 +2953,8 @@ impl Dispatcher {
         let mut in_flight: Vec<InFlight> = self
             .running
             .iter()
-            .map(|(task_id, e)| InFlight {
-                task_id: *task_id,
+            .map(|(key, e)| InFlight {
+                task_id: key.task,
                 run_id: e.run_id.clone(),
                 provider: e.provider.clone(),
                 kind: InFlightKind::Worker,
@@ -3208,16 +3235,14 @@ impl Dispatcher {
         // どちらに向けるかを後で決める。
         // ADR-0061（Phase 104）: `since`（dispatch した時刻）も一緒に取り出し、run の wall time を計算する。
         let (account, account_adapter, run_since) = self
-            .running
-            .remove(&task_id)
+            .take_running_by_run_id(&run_id)
             .map(|e| (e.account, e.account_adapter, Some(e.since)))
             .unwrap_or((None, None, None));
         let Some(task) = self.store.get(task_id)? else {
             tracing::warn!(%task_id, %run_id, "worker finished for unknown task");
             return Ok(());
         };
-        let lease_matches = task.status == Status::Running
-            && task.lease.as_ref().map(|l| l.worker_run_id.as_str()) == Some(run_id.as_str());
+        let lease_matches = self.run_holds_lease(&task, &run_id)?;
         if !lease_matches {
             // ADR-0002 D9 / ADR-0005 D4: リース回収済み・cancel 済みの古い結果は捨てる。
             tracing::warn!(%task_id, %run_id, status = ?task.status, "stale worker result discarded");
@@ -3360,8 +3385,7 @@ impl Dispatcher {
         };
         // ADR-0002 D9 / ADR-0005 D4: checks の実行中にリースが失効・タスクが cancel されていたら、
         // stale worker result と同じ扱いで捨てる。
-        let lease_matches = task.status == Status::Running
-            && task.lease.as_ref().map(|l| l.worker_run_id.as_str()) == Some(run_id.as_str());
+        let lease_matches = self.run_holds_lease(&task, &run_id)?;
         if !lease_matches {
             tracing::warn!(%task_id, %run_id, status = ?task.status, "stale work unit check result discarded");
             return Ok(());
@@ -5623,9 +5647,16 @@ impl Dispatcher {
             if lease.expires_at > now {
                 continue;
             }
-            if let Some(entry) = self.running.get(&task.id)
-                && task_worker::process_group::group_alive(&entry.run_id)
-            {
+            // ADR-0074 D1.5（Phase F2）: v2 の並列 WU では同じ Task の run が複数ありうる。
+            // どれか 1 本でも生きていれば、その run の lease（WU の lease）を延ばす
+            // （`renew_lease` が Task の lease も延ばす）。
+            let alive_entry = self
+                .running
+                .iter()
+                .filter(|(k, _)| k.task == task.id)
+                .map(|(_, e)| e)
+                .find(|e| task_worker::process_group::group_alive(&e.run_id));
+            if let Some(entry) = alive_entry {
                 let ttl = Duration::from_secs(task.budget.max_wall_secs) + self.config.lease_grace;
                 match self.store.renew_lease(task.id, &entry.run_id, ttl) {
                     Ok(true) => {
@@ -5643,12 +5674,37 @@ impl Dispatcher {
             }
             // ADR-0061（Phase 104）: `entry` を消費する前に `since`（wall time 計算用）を取っておく。
             let mut run_since: Option<OffsetDateTime> = None;
-            if let Some(entry) = self.running.remove(&task.id) {
-                run_since = Some(entry.since);
-                // ADR-0044 Phase 53 追記: リース喪失も同じ止め方（プロセスグループごと。
-                // コンテナで走っていればラベル越しにも同じ 2 段を送る）。
-                self.stop_run(&entry.run_id, entry.handle, entry.container);
+            let keys: Vec<RunKey> = self
+                .running
+                .keys()
+                .filter(|k| k.task == task.id)
+                .cloned()
+                .collect();
+            for key in keys {
+                if let Some(entry) = self.running.remove(&key) {
+                    run_since = run_since.or(Some(entry.since));
+                    // ADR-0044 Phase 53 追記: リース喪失も同じ止め方（プロセスグループごと。
+                    // コンテナで走っていればラベル越しにも同じ 2 段を送る）。
+                    self.stop_run(&entry.run_id, entry.handle, entry.container);
+                }
             }
+            // ADR-0074 D1.5/D1.7（Phase F2）: 工程の lease（v2）なら、lease を持っていた run は
+            // `running` の WU の run（`lease_run_id`）。それぞれに `WorkerFinished` を残し、WU を
+            // 照合で戻す（統合の途中なら `integrate-<phase>` も pending に戻す）。
+            let phase_lease = is_phase_lease_holder(&lease.worker_run_id);
+            let wu_runs: Vec<String> = if phase_lease {
+                self.store
+                    .work_units_for(task.id)?
+                    .into_iter()
+                    .filter(|u| {
+                        u.status == task_core::WorkUnitStatus::Running
+                            && u.kind != task_core::WorkUnitKind::Integrate
+                    })
+                    .filter_map(|u| u.lease_run_id.or(u.last_run_id))
+                    .collect()
+            } else {
+                vec![lease.worker_run_id.clone()]
+            };
             let metrics = run_since.map(|since| task_core::RunMetrics {
                 wall_ms: wall_ms_since(since),
                 retries: task.attempts,
@@ -5673,19 +5729,22 @@ impl Dispatcher {
                     ),
                 )
             };
-            let finished = Event::WorkerFinished {
-                run_id: lease.worker_run_id.clone(),
-                outcome: outcome_text,
-                usage: None,
-                role: None,
-                metrics,
-                end: Some(task_core::RunEnd::HarnessError {
-                    class: task_core::HarnessErrorClass::LeaseExpired,
-                }),
-            };
+            let finished: Vec<Event> = wu_runs
+                .iter()
+                .map(|run_id| Event::WorkerFinished {
+                    run_id: run_id.clone(),
+                    outcome: outcome_text.clone(),
+                    usage: None,
+                    role: None,
+                    metrics,
+                    end: Some(task_core::RunEnd::HarnessError {
+                        class: task_core::HarnessErrorClass::LeaseExpired,
+                    }),
+                })
+                .collect();
             match self
                 .store
-                .apply_transition_with_events(task.id, trigger, vec![finished])
+                .apply_transition_with_events(task.id, trigger, finished)
             {
                 Ok(outcome) => {
                     tracing::warn!(task_id = %task.id, run_id = %lease.worker_run_id, next = ?outcome.next, attempts = outcome.attempts, "lease expired; reclaimed");
@@ -5696,12 +5755,17 @@ impl Dispatcher {
                     // ADR-0072 D15（Phase E2）: この run が計画のある Task の WU のものだったなら、
                     // その WU の行も `running` のまま残さず、checkpoint があれば `needs_continuation`、
                     // 無ければ `ready` に戻す（`WorkUnitTransitioned{reason: "restart_reconcile"}`）。
-                    if let Err(e) = self.reconcile_work_unit_run(
-                        task.id,
-                        &lease.worker_run_id,
-                        "restart_reconcile",
-                    ) {
-                        tracing::warn!(task_id = %task.id, run_id = %lease.worker_run_id, error = %e, "failed to reconcile the work unit for a reclaimed lease");
+                    for run_id in &wu_runs {
+                        if let Err(e) =
+                            self.reconcile_work_unit_run(task.id, run_id, "restart_reconcile")
+                        {
+                            tracing::warn!(task_id = %task.id, run_id = %run_id, error = %e, "failed to reconcile the work unit for a reclaimed lease");
+                        }
+                    }
+                    if phase_lease
+                        && let Err(e) = self.reconcile_integration(task.id, "restart_reconcile")
+                    {
+                        tracing::warn!(task_id = %task.id, error = %e, "failed to reconcile the phase integration for a reclaimed lease");
                     }
                     count += 1;
                 }
@@ -5753,22 +5817,29 @@ impl Dispatcher {
     /// 強制終了する。打ち切ったタスクは `just_aborted` に入れ、**この tick では dispatch し直さない**。
     fn abort_stale_runs(&mut self) -> Result<(), DispatchError> {
         self.just_aborted.clear();
-        let ids: Vec<TaskId> = self.running.keys().copied().collect();
-        for id in ids {
+        let keys: Vec<RunKey> = self.running.keys().cloned().collect();
+        for key in keys {
+            let id = key.task;
             let current = self.store.get(id)?;
-            let still_ours = match (&current, self.running.get(&id)) {
-                (Some(t), Some(entry)) => {
-                    t.status == Status::Running
-                        && t.lease.as_ref().map(|l| l.worker_run_id.as_str())
-                            == Some(entry.run_id.as_str())
-                }
+            let still_ours = match (&current, self.running.get(&key)) {
+                (Some(t), Some(entry)) => self.run_holds_lease(t, &entry.run_id)?,
                 _ => false,
             };
-            if !still_ours && let Some(entry) = self.running.remove(&id) {
+            if !still_ours && let Some(entry) = self.running.remove(&key) {
                 tracing::warn!(task_id = %id, run_id = %entry.run_id, "aborting run (task no longer running under this lease)");
                 // ADR-0044 Phase 53 追記: プロセスグループごと止める（孫まで。コンテナならその中も）。
                 self.stop_run(&entry.run_id, entry.handle, entry.container);
                 self.just_aborted.insert(id);
+                // ADR-0074 D1.6/D1.7（Phase F2）: v2 の WU の run を止めたなら、WU を `running` の
+                // まま残さない（割り込み・lease 喪失なら checkpoint の有無で needs_continuation /
+                // ready に戻す。Cancel は `cancel_open_work_units` が cancelled にする）。
+                if key.work_unit.is_some()
+                    && let Some(t) = &current
+                    && !t.status.is_terminal()
+                    && let Err(e) = self.reconcile_work_unit_run(id, &entry.run_id, "aborted")
+                {
+                    tracing::warn!(task_id = %id, run_id = %entry.run_id, error = %e, "failed to reconcile the work unit of an aborted run");
+                }
             }
         }
         // レビュー中に cancel されたタスクの判定（Reviewer run を含む）も中断する。
@@ -5815,6 +5886,22 @@ impl Dispatcher {
             }
         }
         Ok(())
+    }
+
+    /// ADR-0074 D1.5（Phase F2）: その Task の鍵を持つ run の数（v1・atomic なら 0 か 1）。
+    fn running_for_task(&self, task_id: TaskId) -> usize {
+        self.running.keys().filter(|k| k.task == task_id).count()
+    }
+
+    /// ADR-0074 D1.5: `run_id` の run を `running` から取り除いて返す（`Completion` は `run_id` を
+    /// 運ぶので、終わった run の鍵はここで引く。並列度の上限は小さいので線形探索でよい）。
+    fn take_running_by_run_id(&mut self, run_id: &str) -> Option<RunEntry> {
+        let key = self
+            .running
+            .iter()
+            .find(|(_, e)| e.run_id == run_id)
+            .map(|(k, _)| k.clone())?;
+        self.running.remove(&key)
     }
 
     /// 実行中の run と、プロバイダを使っているレビュー run の合計（並列度の分母）。
@@ -5881,6 +5968,57 @@ impl Dispatcher {
     /// ADR-0072 D15（Phase E2）: `run_id` の run が「まだ `running` の WU」に属していたら、
     /// checkpoint があれば `needs_continuation`、無ければ `ready` に戻す
     /// （`WorkUnitTransitioned{reason}`）。属していなければ何もしない（`Ok(())`）。
+    /// ADR-0074 D1.5（Phase F2）: `run_id` の run がまだこの Task の lease を持っているか。
+    /// v1・atomic は従来どおり Task の lease の保持者と比べる。v2（工程の lease）では WU の
+    /// `lease_run_id` と比べる（lease を失った WU の run の結果を捨てる判定）。
+    fn run_holds_lease(&self, task: &Task, run_id: &str) -> Result<bool, DispatchError> {
+        if task.status != Status::Running {
+            return Ok(false);
+        }
+        let Some(lease) = task.lease.as_ref() else {
+            return Ok(false);
+        };
+        if lease.worker_run_id == run_id {
+            return Ok(true);
+        }
+        if !is_phase_lease_holder(&lease.worker_run_id) {
+            return Ok(false);
+        }
+        Ok(self.store.work_units_for(task.id)?.iter().any(|u| {
+            u.status == task_core::WorkUnitStatus::Running
+                && u.lease_run_id.as_deref() == Some(run_id)
+        }))
+    }
+
+    /// ADR-0074 D1.7（Phase F2）: 走らせている spawn の無い `integrate-<phase>`（running）を pending に
+    /// 戻す（次の tick で冪等な手順でやり直す）。
+    fn reconcile_integration(&self, task_id: TaskId, reason: &str) -> Result<(), DispatchError> {
+        for wu in self.store.work_units_for(task_id)? {
+            if wu.kind != task_core::WorkUnitKind::Integrate
+                || wu.status != task_core::WorkUnitStatus::Running
+            {
+                continue;
+            }
+            let mut updated = wu.clone();
+            updated.status = task_core::WorkUnitStatus::Pending;
+            updated.clear_lease();
+            updated.updated_at = rfc3339(OffsetDateTime::now_utc());
+            self.store.work_unit_transition(
+                task_id,
+                updated,
+                Event::WorkUnitTransitioned {
+                    work_unit_id: wu.id.clone(),
+                    key: wu.key.clone(),
+                    from: task_core::WorkUnitStatus::Running,
+                    to: task_core::WorkUnitStatus::Pending,
+                    reason: reason.to_string(),
+                    run_id: None,
+                },
+            )?;
+        }
+        Ok(())
+    }
+
     fn reconcile_work_unit_run(
         &self,
         task_id: TaskId,
@@ -6409,7 +6547,7 @@ impl Dispatcher {
             if self.workers_in_flight() >= self.config.max_concurrency {
                 break;
             }
-            if self.running.contains_key(&task.id) {
+            if self.running_for_task(task.id) > 0 {
                 continue;
             }
             // ADR-0044 D2: この tick で打ち切ったばかりの run と同じ worktree に、すぐ次の run を
@@ -7025,7 +7163,7 @@ impl Dispatcher {
                 container,
             );
             self.running.insert(
-                task.id,
+                RunKey::task(task.id),
                 RunEntry {
                     run_id,
                     provider: provider_id,
@@ -9551,7 +9689,7 @@ impl Dispatcher {
         let ids: Vec<TaskId> = self.task_workspaces.keys().copied().collect();
         for id in ids {
             // まだ走っている／判定中なら触らない（やり直しは同じ worktree を使い回す）。
-            if self.running.contains_key(&id) || self.reviewing.contains_key(&id) {
+            if self.running_for_task(id) > 0 || self.reviewing.contains_key(&id) {
                 continue;
             }
             let status = match self.store.get(id)? {
@@ -12991,7 +13129,7 @@ mod tests {
             "the lease was extended instead of reclaimed"
         );
         assert!(
-            d.running.contains_key(&task.id),
+            d.running_for_task(task.id) > 0,
             "the run entry is still tracked (not removed by reclaim)"
         );
 
@@ -19616,7 +19754,7 @@ mod tests {
         // 次の tick で走っていた run が止まり、同じ tick で走り直す。
         d.tick().unwrap();
         assert!(
-            !d.running.contains_key(&task.id)
+            d.running_for_task(task.id) == 0
                 || store.get(task.id).unwrap().unwrap().status == Status::Running,
             "古い run は捨てられている"
         );
