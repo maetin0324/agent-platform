@@ -82,6 +82,12 @@ fn failed_check(result: AccountCheckResult, detail: &str) -> AccountCheck {
     }
 }
 
+// clippy::result_large_err: `AccountCheck` (>=128 bytes) is the shared vocabulary type for both the
+// success and failure path of account checks (`claude_account::AccountCheck`); boxing it here would
+// force every caller in this short RPC chain (`rpc` -> `read_account_limits` -> `check_account_codex`)
+// to unwrap/rebox across `?`, for a value that only ever lives briefly on the stack of a single
+// short-lived async call. Allowing is smaller and clearer than threading `Box<AccountCheck>` through.
+#[allow(clippy::result_large_err)]
 async fn rpc(
     input: &mut tokio::process::ChildStdin,
     output: &mut BufReader<tokio::process::ChildStdout>,
@@ -127,6 +133,11 @@ async fn rpc(
     }
 }
 
+// clippy::result_large_err: same rationale as `rpc` above -- both variants are `AccountCheck` by
+// design (an early "ok" result and a failure result share the type), and this function's only caller
+// (`check_account_codex`) immediately merges `Ok`/`Err` into a single value, so boxing would add
+// churn without shrinking anything that outlives this call.
+#[allow(clippy::result_large_err)]
 async fn read_account_limits(child: &mut Child) -> Result<AccountCheck, AccountCheck> {
     let mut input = child
         .stdin
