@@ -55,28 +55,16 @@ pub fn adopt_plan(
     let plan_id = new_id();
     let created_at = format_rfc3339(now)?;
 
-    let work_units: Vec<WorkUnitRow> = validated
-        .topological_order
-        .iter()
-        .enumerate()
-        .map(|(seq, &idx)| {
-            let wu_spec = validated.spec.work_units[idx].clone();
-            let status = if wu_spec.depends_on.is_empty() {
-                WorkUnitStatus::Ready
-            } else {
-                WorkUnitStatus::Pending
-            };
-            WorkUnitRow::new(
-                new_id(),
-                task_id.to_string(),
-                plan_id.clone(),
-                seq as u32,
-                wu_spec,
-                status,
-                created_at.clone(),
-            )
-        })
-        .collect();
+    // ADR-0074 D1.4（Phase F2b）: v2 は工程ごとに統合 WU（`integrate-<phase>`）を足し、工程の障壁
+    // つきで ready を決める。v1 は従来どおり（依存が無ければ ready）。
+    let work_units: Vec<WorkUnitRow> = task_core::materialize_work_units(
+        &task_id.to_string(),
+        &plan_id,
+        &validated.spec,
+        &validated.topological_order,
+        &created_at,
+        &mut |_| new_id(),
+    );
 
     let plan = ExecutionPlanRow {
         id: plan_id.clone(),
@@ -151,9 +139,22 @@ pub fn replan(
         .filter(|u| u.status.is_active())
         .cloned()
         .collect();
+    // ADR-0074 D1.4（Phase F2b）: daemon が足した WU（統合 WU、統合の repair WU）は計画の spec に
+    // 無いので、done の不変条件（`validate`）の対象にしない（行はそのまま持ち越す）。
+    let plan_keys: BTreeSet<&str> = active
+        .spec
+        .work_units
+        .iter()
+        .map(|w| w.key.as_str())
+        .collect();
+    let v2 = spec.schema == task_core::EXECUTION_PLAN_SCHEMA_V2;
+    let daemon_added = |u: &WorkUnitRow| -> bool {
+        u.kind == task_core::WorkUnitKind::Integrate
+            || (v2 && u.phase.is_some() && !plan_keys.contains(u.key.as_str()))
+    };
     let done_work_units: Vec<(String, task_core::WorkUnitSpec)> = current
         .iter()
-        .filter(|u| u.status == WorkUnitStatus::Done)
+        .filter(|u| u.status == WorkUnitStatus::Done && !daemon_added(u))
         .map(|u| (u.key.clone(), u.spec.clone()))
         .collect();
     let validated = validate(&spec, limits, &done_work_units)
@@ -187,7 +188,11 @@ pub fn replan(
     let mut extra_events = Vec::new();
 
     // 削除: 現在アクティブだが新しい版に無い（done では起き得ない。validate が検証済み）。
+    // 統合 WU は下で工程ごとにまとめて扱う。
     for u in &current {
+        if u.kind == task_core::WorkUnitKind::Integrate {
+            continue;
+        }
         if u.status != WorkUnitStatus::Done && !new_keys.contains(u.key.as_str()) {
             let mut row = u.clone();
             let from = row.status;
@@ -283,6 +288,142 @@ pub fn replan(
                     });
                 }
                 new_work_units.push(row);
+            }
+        }
+    }
+
+    // ADR-0074 D1.4/D1.6（Phase F2b）: v2 の統合 WU。統合済み（done）の工程はそのまま持ち越し、
+    // 未統合の工程は新しい版の工程の WU に依存し直して pending に戻す。無くなった工程の統合 WU は
+    // superseded、新しい工程には新しい統合 WU を足す。最後に、工程の障壁つきで ready を決め直す。
+    if v2 {
+        let base_seq = validated.topological_order.len() as u32;
+        for (i, integ) in task_core::integration_work_unit_specs(&validated.spec)
+            .into_iter()
+            .enumerate()
+        {
+            match current.iter().find(|u| u.key == integ.key) {
+                Some(existing) if existing.status == WorkUnitStatus::Done => {}
+                Some(existing) => {
+                    let mut row = existing.clone();
+                    let mut deps = integ.depends_on.clone();
+                    // 統合の repair WU（daemon が足したもの）への依存は持ち越す。
+                    for d in &existing.depends_on {
+                        if !deps.contains(d) && !plan_keys.contains(d.as_str()) {
+                            deps.push(d.clone());
+                        }
+                    }
+                    row.plan_id = new_plan_id.clone();
+                    row.depends_on = deps.clone();
+                    row.spec = integ;
+                    row.spec.depends_on = deps;
+                    row.status = WorkUnitStatus::Pending;
+                    row.blocked_reason = None;
+                    row.updated_at = created_at.clone();
+                    if existing.status != WorkUnitStatus::Pending {
+                        extra_events.push(Event::WorkUnitTransitioned {
+                            work_unit_id: row.id.clone(),
+                            key: row.key.clone(),
+                            from: existing.status,
+                            to: WorkUnitStatus::Pending,
+                            reason: format!("replan v{new_version}"),
+                            run_id: None,
+                        });
+                    }
+                    updated_work_units.push(row);
+                }
+                None => {
+                    new_work_units.push(WorkUnitRow::new(
+                        new_id(),
+                        task_id.to_string(),
+                        new_plan_id.clone(),
+                        base_seq + i as u32,
+                        integ,
+                        WorkUnitStatus::Pending,
+                        created_at.clone(),
+                    ));
+                }
+            }
+        }
+        let new_phase_keys: BTreeSet<String> = validated
+            .spec
+            .phases
+            .iter()
+            .map(|p| task_core::integrate_key(&p.key))
+            .collect();
+        for u in &current {
+            if u.kind == task_core::WorkUnitKind::Integrate
+                && u.status != WorkUnitStatus::Done
+                && !new_phase_keys.contains(&u.key)
+            {
+                let mut row = u.clone();
+                row.status = WorkUnitStatus::Superseded;
+                row.updated_at = created_at.clone();
+                extra_events.push(Event::WorkUnitTransitioned {
+                    work_unit_id: row.id.clone(),
+                    key: row.key.clone(),
+                    from: u.status,
+                    to: WorkUnitStatus::Superseded,
+                    reason: format!("replan v{new_version}"),
+                    run_id: None,
+                });
+                updated_work_units.push(row);
+            }
+        }
+        // 工程の障壁つきで ready を決め直す（依存が done でも前の工程の統合が済んでいなければ pending）。
+        let mut projected: Vec<WorkUnitRow> = all_units
+            .iter()
+            .filter(|u| {
+                !updated_work_units.iter().any(|w| w.id == u.id)
+                    && !new_work_units.iter().any(|w| w.id == u.id)
+            })
+            .cloned()
+            .collect();
+        projected.extend(updated_work_units.iter().cloned());
+        projected.extend(new_work_units.iter().cloned());
+        for u in projected.iter_mut() {
+            if u.status == WorkUnitStatus::Ready {
+                u.status = WorkUnitStatus::Pending;
+            }
+        }
+        let ready = task_core::newly_ready(&projected);
+        let order: std::collections::BTreeMap<String, u32> =
+            task_core::materialized_order(&validated.spec, &validated.topological_order)
+                .into_iter()
+                .enumerate()
+                .map(|(i, w)| (w.key, i as u32))
+                .collect();
+        for rows in [&mut updated_work_units, &mut new_work_units] {
+            for row in rows.iter_mut() {
+                if let Some(seq) = order.get(&row.key) {
+                    row.seq = *seq;
+                }
+                if row.status == WorkUnitStatus::Ready || row.status == WorkUnitStatus::Pending {
+                    let status = if ready.contains(&row.id) {
+                        WorkUnitStatus::Ready
+                    } else {
+                        WorkUnitStatus::Pending
+                    };
+                    if status != row.status {
+                        row.status = status;
+                        // 先に積んだ遷移の event の `to` を合わせる（同じなら落とす）。
+                        let from = all_units.iter().find(|u| u.id == row.id).map(|u| u.status);
+                        extra_events.retain(|e| {
+                            !matches!(e, Event::WorkUnitTransitioned { work_unit_id, .. } if *work_unit_id == row.id)
+                        });
+                        if let Some(from) = from
+                            && from != status
+                        {
+                            extra_events.push(Event::WorkUnitTransitioned {
+                                work_unit_id: row.id.clone(),
+                                key: row.key.clone(),
+                                from,
+                                to: status,
+                                reason: format!("replan v{new_version}"),
+                                run_id: None,
+                            });
+                        }
+                    }
+                }
             }
         }
     }

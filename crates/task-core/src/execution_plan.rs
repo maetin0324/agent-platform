@@ -501,6 +501,11 @@ pub enum PlanValidationError {
     ReservedKind {
         key: String,
     },
+    /// ADR-0074 D1.4（Phase F2b）: `integrate-` で始まる key は daemon が足す統合 WU
+    /// （`integrate-<phase>`）の予約語。
+    ReservedKey {
+        key: String,
+    },
 }
 
 impl std::fmt::Display for PlanValidationError {
@@ -636,6 +641,12 @@ impl std::fmt::Display for PlanValidationError {
                     "work unit {key}: kind \"integrate\" is reserved for daemon-created integration work units"
                 )
             }
+            PlanValidationError::ReservedKey { key } => {
+                write!(
+                    f,
+                    "work unit {key}: keys starting with \"{INTEGRATE_KEY_PREFIX}\" are reserved for daemon-created integration work units"
+                )
+            }
         }
     }
 }
@@ -757,6 +768,12 @@ pub fn validate(
     for wu in &spec.work_units {
         if wu.kind == WorkUnitKind::Integrate {
             errors.push(PlanValidationError::ReservedKind {
+                key: wu.key.clone(),
+            });
+        }
+        // ADR-0074 D1.4（Phase F2b）: `integrate-<phase>` の key も予約（v2 のみ。v1 は不変）。
+        if spec.schema == EXECUTION_PLAN_SCHEMA_V2 && wu.key.starts_with(INTEGRATE_KEY_PREFIX) {
+            errors.push(PlanValidationError::ReservedKey {
                 key: wu.key.clone(),
             });
         }
@@ -1555,18 +1572,198 @@ pub fn runnable_work_units(units: &[WorkUnitRow], in_flight: usize, limit: usize
 
 /// D15: 依存の解決。`depends_on` が全て `done` になった `pending` の WU を `ready` にする（`id` の集合を返す。
 /// 呼び出し側が状態を書き換える）。
+///
+/// ADR-0074 D1.3（Phase F2b）: v2（`phase` のある行）では「前の工程の統合が done」を追加の条件にする
+/// （工程の境は障壁。前の工程の有効な行〈統合 WU を含む〉がすべて `done` になるまで上げない）。
+/// 統合 WU（`kind = integrate`）は `ready` にしない（scheduler が工程の完了を見て直接走らせる）。
+/// v1（`phase` が無い行）は従来と同じ。
 pub fn newly_ready(units: &[WorkUnitRow]) -> Vec<String> {
     let done: BTreeSet<&str> = units
         .iter()
         .filter(|u| u.status == WorkUnitStatus::Done)
         .map(|u| u.key.as_str())
         .collect();
+    let ranks = phase_ranks(units);
     units
         .iter()
         .filter(|u| u.status == WorkUnitStatus::Pending)
+        .filter(|u| u.kind != WorkUnitKind::Integrate)
         .filter(|u| u.depends_on.iter().all(|d| done.contains(d.as_str())))
+        .filter(|u| earlier_phases_done(units, &ranks, u))
         .map(|u| u.id.clone())
         .collect()
+}
+
+/// ADR-0074 D1.3（Phase F2b）: 工程の key → 順位（その工程の行の `seq` の最小値。`topo_sort` が
+/// 工程順を保証し、統合 WU は工程の末尾に置くので、`seq` の最小値で工程の順が引ける）。
+pub fn phase_ranks(units: &[WorkUnitRow]) -> BTreeMap<String, u32> {
+    let mut ranks: BTreeMap<String, u32> = BTreeMap::new();
+    for u in units.iter().filter(|u| u.status.is_active()) {
+        if let Some(p) = &u.phase {
+            let e = ranks.entry(p.clone()).or_insert(u.seq);
+            if u.seq < *e {
+                *e = u.seq;
+            }
+        }
+    }
+    ranks
+}
+
+fn earlier_phases_done(
+    units: &[WorkUnitRow],
+    ranks: &BTreeMap<String, u32>,
+    u: &WorkUnitRow,
+) -> bool {
+    let Some(rank) = u.phase.as_ref().and_then(|p| ranks.get(p)) else {
+        return true;
+    };
+    units
+        .iter()
+        .filter(|o| o.status.is_active())
+        .filter(|o| {
+            o.phase
+                .as_ref()
+                .and_then(|p| ranks.get(p))
+                .is_some_and(|r| r < rank)
+        })
+        .all(|o| o.status == WorkUnitStatus::Done)
+}
+
+/// ADR-0074 D1.4（Phase F2b）: 統合 WU の key の接頭辞（`integrate-<phase>`）。
+pub const INTEGRATE_KEY_PREFIX: &str = "integrate-";
+
+/// `integrate-<phase>`。
+pub fn integrate_key(phase: &str) -> String {
+    format!("{INTEGRATE_KEY_PREFIX}{phase}")
+}
+
+/// ADR-0074 D1.4（Phase F2b）: v2 の工程ごとの統合 WU の spec（`kind = integrate`、依存は
+/// その工程のすべての WU）。計画の spec（`ExecutionPlanned.plan`）には入れない（daemon が足す
+/// system WU。`max_work_units` にも数えない）。v1 は空。
+pub fn integration_work_unit_specs(spec: &ExecutionPlanSpec) -> Vec<WorkUnitSpec> {
+    if spec.schema != EXECUTION_PLAN_SCHEMA_V2 {
+        return Vec::new();
+    }
+    spec.phases
+        .iter()
+        .map(|p| WorkUnitSpec {
+            key: integrate_key(&p.key),
+            kind: WorkUnitKind::Integrate,
+            title: format!("工程 {} の統合", p.title),
+            objective: format!(
+                "工程 {} の WorkUnit のブランチを Task のブランチへ決定的に merge し、検査を再実行する（daemon が行う。LLM run は起こさない）",
+                p.key
+            ),
+            depends_on: spec
+                .work_units
+                .iter()
+                .filter(|w| w.phase.as_deref() == Some(p.key.as_str()))
+                .map(|w| w.key.clone())
+                .collect(),
+            done_when: Vec::new(),
+            checks: Vec::new(),
+            context: WorkUnitContext::default(),
+            harness: None,
+            features: None,
+            budget: None,
+            outputs: Vec::new(),
+            phase: Some(p.key.clone()),
+        })
+        .collect()
+}
+
+/// ADR-0074 D1.1/D1.4（Phase F2b）: 採用する計画の WU の並び（`seq` の順）。v1 はトポロジカル順
+/// そのまま（従来どおり）。v2 は工程ごとに「その工程の WU（トポロジカル順）→ `integrate-<phase>`」。
+pub fn materialized_order(
+    spec: &ExecutionPlanSpec,
+    topological_order: &[usize],
+) -> Vec<WorkUnitSpec> {
+    let in_order: Vec<WorkUnitSpec> = topological_order
+        .iter()
+        .filter_map(|&i| spec.work_units.get(i).cloned())
+        .collect();
+    if spec.schema != EXECUTION_PLAN_SCHEMA_V2 {
+        return in_order;
+    }
+    let integrations = integration_work_unit_specs(spec);
+    let mut out = Vec::with_capacity(in_order.len() + integrations.len());
+    for (phase, integrate) in spec.phases.iter().zip(integrations) {
+        out.extend(
+            in_order
+                .iter()
+                .filter(|w| w.phase.as_deref() == Some(phase.key.as_str()))
+                .cloned(),
+        );
+        out.push(integrate);
+    }
+    out
+}
+
+/// ADR-0074 D1.1/D1.4（Phase F2b）: 採用する計画の `work_units` の行を作る（純粋関数）。`id_of` は
+/// 行の id を決める（`adopt_plan` は新しい ULID、replay は events から復元した id）。
+/// v1 は「依存が無ければ ready、あれば pending」（従来どおり）。v2 は統合 WU を足し、
+/// 工程の障壁つきの [`newly_ready`] で ready を決める（最初の工程の依存の無い WU だけが ready）。
+pub fn materialize_work_units(
+    task_id: &str,
+    plan_id: &str,
+    spec: &ExecutionPlanSpec,
+    topological_order: &[usize],
+    created_at: &str,
+    id_of: &mut dyn FnMut(&WorkUnitSpec) -> String,
+) -> Vec<WorkUnitRow> {
+    let v2 = spec.schema == EXECUTION_PLAN_SCHEMA_V2;
+    let mut rows: Vec<WorkUnitRow> = materialized_order(spec, topological_order)
+        .into_iter()
+        .enumerate()
+        .map(|(seq, wu_spec)| {
+            let status = if !v2 && wu_spec.depends_on.is_empty() {
+                WorkUnitStatus::Ready
+            } else {
+                WorkUnitStatus::Pending
+            };
+            WorkUnitRow::new(
+                id_of(&wu_spec),
+                task_id.to_string(),
+                plan_id.to_string(),
+                seq as u32,
+                wu_spec,
+                status,
+                created_at.to_string(),
+            )
+        })
+        .collect();
+    if v2 {
+        let ready = newly_ready(&rows);
+        for r in rows.iter_mut() {
+            if ready.contains(&r.id) {
+                r.status = WorkUnitStatus::Ready;
+            }
+        }
+    }
+    rows
+}
+
+/// ADR-0074 D1.4（Phase F2b）: 工程 `phase` の葉の WU（同じ工程の他の有効な WU に依存されていない、
+/// 統合 WU 以外、ブランチを持つもの）を `seq` 順で。積み上げた依存先は葉に含まれる。
+pub fn phase_leaves<'a>(units: &'a [WorkUnitRow], phase: &str) -> Vec<&'a WorkUnitRow> {
+    let in_phase: Vec<&WorkUnitRow> = units
+        .iter()
+        .filter(|u| u.status.is_active())
+        .filter(|u| u.kind != WorkUnitKind::Integrate)
+        .filter(|u| u.phase.as_deref() == Some(phase))
+        .collect();
+    let mut leaves: Vec<&WorkUnitRow> = in_phase
+        .iter()
+        .copied()
+        .filter(|u| u.branch.is_some())
+        .filter(|u| {
+            !in_phase
+                .iter()
+                .any(|o| o.id != u.id && o.depends_on.iter().any(|d| d == &u.key))
+        })
+        .collect();
+    leaves.sort_by_key(|u| u.seq);
+    leaves
 }
 
 /// D15: WU が `failed` になったとき、それに（直接・間接に）依存する未着手の WU を

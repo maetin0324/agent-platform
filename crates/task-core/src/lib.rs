@@ -98,12 +98,12 @@ pub use message::{
 };
 pub use model::{
     ArtifactRef, Budget, Check, Criterion, DEFAULT_PRIORITY, Event, GenreSpec, HARNESS_ADAPTERS,
-    Lease, MAX_LABELS, MAX_SKILLS, PRIORITY_LABELS, PROGRESS_DETAIL_MAX_BYTES, ProgressFields,
-    ProgressKind, RoleSpec, RunMetrics, RunRole, Status, Task, TaskCategory, TaskId, TaskKind,
-    TaskMode, TaskRouting, Tier, TierSource, Usage, WorkerHint, WorkspaceMode, WorkspaceSpec,
-    artifact_entry_description, artifact_entry_name, expand_home, home_dir, is_valid_label,
-    normalize_labels, normalize_skills, priority_from_label, priority_label,
-    validate_human_checks_have_deliverable,
+    Lease, MAX_LABELS, MAX_SKILLS, PRIORITY_LABELS, PROGRESS_DETAIL_MAX_BYTES, PhaseCheckResult,
+    PhaseMerged, ProgressFields, ProgressKind, RoleSpec, RunMetrics, RunRole, Status, Task,
+    TaskCategory, TaskId, TaskKind, TaskMode, TaskRouting, Tier, TierSource, Usage, WorkerHint,
+    WorkspaceMode, WorkspaceSpec, artifact_entry_description, artifact_entry_name, expand_home,
+    home_dir, is_valid_label, normalize_labels, normalize_skills, priority_from_label,
+    priority_label, validate_human_checks_have_deliverable,
 };
 // ---- ADR-0061（Phase 104）: harness routing 基盤（cost 推定・タスク特性ベースの routing）----
 pub mod pricing;
@@ -158,10 +158,12 @@ pub use execution::{
 };
 pub use execution_plan::{
     EXECUTION_PLAN_SCHEMA, EXECUTION_PLAN_SCHEMA_V2, ExecutionLimits, ExecutionPlanRow,
-    ExecutionPlanSpec, NextStep, PhaseSpec, PlanOrigin, PlanStatus, PlanValidationError,
-    RunIndexRole, RunIndexStatus, RunRow, ValidatedPlan, WorkUnitBlockedReason, WorkUnitBudget,
-    WorkUnitCheck, WorkUnitContext, WorkUnitKind, WorkUnitRow, WorkUnitSpec, WorkUnitStatus,
-    dependents_to_block, new_id, newly_ready, next_work_unit, runnable_work_units, validate,
+    ExecutionPlanSpec, INTEGRATE_KEY_PREFIX, NextStep, PhaseSpec, PlanOrigin, PlanStatus,
+    PlanValidationError, RunIndexRole, RunIndexStatus, RunRow, ValidatedPlan,
+    WorkUnitBlockedReason, WorkUnitBudget, WorkUnitCheck, WorkUnitContext, WorkUnitKind,
+    WorkUnitRow, WorkUnitSpec, WorkUnitStatus, dependents_to_block, integrate_key,
+    integration_work_unit_specs, materialize_work_units, materialized_order, new_id, newly_ready,
+    next_work_unit, phase_leaves, phase_ranks, runnable_work_units, validate,
 };
 // ---- ADR-0072 D13（Phase E3）: Complexity Gate ----
 pub use execution_gate::{
