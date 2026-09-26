@@ -1950,7 +1950,8 @@
       "type": "string"
     },
     "TaskFeatureHints": {
-      "description": "ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の\n`create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。",
+      "additionalProperties": false,
+      "description": "ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の\n`create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。\nADR-0074 D5.1（Phase F1）: `deny_unknown_fields`（`lane`/`assignee`/`tier`/`model` のような\n担当・モデルの選択を紛れ込ませない。書けば schema 違反として計画の検証エラーになる）。",
       "properties": {
         "ambiguity": {
           "anyOf": [

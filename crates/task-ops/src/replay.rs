@@ -164,6 +164,13 @@ fn topological_order(spec: &ExecutionPlanSpec) -> Vec<usize> {
         max_work_units: usize::MAX,
         work_unit_max_turns: u32::MAX,
         work_unit_max_wall_secs: u64::MAX,
+        max_rationale_chars: usize::MAX,
+        max_title_chars: usize::MAX,
+        max_objective_chars: usize::MAX,
+        max_done_when_items: usize::MAX,
+        max_done_when_chars: usize::MAX,
+        max_checks: usize::MAX,
+        max_plan_json_bytes: usize::MAX,
     };
     match validate(spec, permissive, &[]) {
         Ok(v) => v.topological_order,

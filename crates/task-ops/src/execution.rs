@@ -284,12 +284,20 @@ pub fn replan(
         created_at: created_at.clone(),
         superseded_at: None,
     };
+    // ADR-0074 D5.3（Phase F1）: 版の差分の件数を `reason` の後ろに決定的な形で足す（E5 の未実装
+    // 「版の差分の件数」の解消）。
+    let reason_with_diff = format!(
+        "{reason} (added={}, changed={}, removed={})",
+        diff.added.len(),
+        diff.changed.len(),
+        diff.removed.len()
+    );
     let plan_event = Event::ExecutionPlanned {
         plan_id: new_plan_id,
         version: new_version,
         origin,
         supersedes: Some(active.id.clone()),
-        reason: Some(reason),
+        reason: Some(reason_with_diff),
         plan: Box::new(validated.spec),
     };
     store.execution_plan_replan(

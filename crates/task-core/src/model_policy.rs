@@ -63,7 +63,10 @@ pub struct TaskFeatures {
 
 /// ADR-0069 D3: `TaskFeatures` の明示の上書き（書いた軸だけが勝つ）。API の `features` と CoS の
 /// `create_task.features` から入る（features は「仕事の性質の記述」であってモデルの選択ではない）。
+/// ADR-0074 D5.1（Phase F1）: `deny_unknown_fields`（`lane`/`assignee`/`tier`/`model` のような
+/// 担当・モデルの選択を紛れ込ませない。書けば schema 違反として計画の検証エラーになる）。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct TaskFeatureHints {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judgment: Option<Level>,
@@ -722,17 +725,52 @@ fn work_unit_view(task: &Task, wu: &crate::execution_plan::WorkUnitRow) -> Task 
     view
 }
 
-/// ADR-0072 D21（Phase E3）: WU の `harness`（無ければ Task の genre）と WU の `features` の上書きで、
-/// その WU の lane を決める（`RoutingDecided.record.work_unit_id` に残すための `LaneDecision`）。
-/// `decide_for_task` と同じ規則（Task が `routing` を持たない・execute でなければ `None`）。
+/// ADR-0074 D5.2（Phase F1）: `[execution] work_unit_lane_cap`。既定 `Task`（WU の lane は
+/// `max(Task の lane, standard)` を超えない）。`None` は上限を掛けない（デバッグ・実験用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkUnitLaneCap {
+    #[default]
+    Task,
+    None,
+}
+
+impl WorkUnitLaneCap {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkUnitLaneCap::Task => "task",
+            WorkUnitLaneCap::None => "none",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "task" => Some(WorkUnitLaneCap::Task),
+            "none" => Some(WorkUnitLaneCap::None),
+            _ => None,
+        }
+    }
+}
+
+/// ADR-0072 D21（Phase E3）/ ADR-0074 D5.1/D5.2（Phase F1）: WU の `harness`（無ければ Task の genre）と
+/// WU の `features` の上書きで、その WU の lane を決める（`RoutingDecided.record.work_unit_id` に残す
+/// ための `LaneDecision`）。`decide_for_task` と同じ規則（Task が `routing` を持たない・execute で
+/// なければ `None`）。
+///
+/// `task_lane`: D5.2 の上限に使う「Task の lane」（呼び出し側が Task 自身の `decide_for_task` から
+/// 渡す）。`work_unit_lane_cap = "task"` のときだけ `Some` を渡す。WU の lane が
+/// `max(task_lane, standard)` を超えていれば standard 側に丸め、`clamped_by` に理由を残す（下げる
+/// 方向 = cheap は制限しない）。
 pub fn decide_for_work_unit(
     task: &Task,
     wu: &crate::execution_plan::WorkUnitRow,
     ceiling: &LaneCeiling,
+    task_lane: Option<Tier>,
 ) -> Option<LaneDecision> {
     let mut view = work_unit_view(task, wu);
     // D21: WU の `features` があれば、Task の `routing.features` の代わりにそれを使う（WU 単位の
-    // 上書き）。無ければ Task の hints をそのまま継ぐ。
+    // 上書き）。無ければ Task の hints をそのまま継ぐ。読めない値は寛容に無視する（v1 の保存済み
+    // 計画をそのまま読めるようにするため。読めるかどうかの検証は `execution_plan::validate` が
+    // 採用時に行う。ADR-0074 D5.1）。
     let wu_hints: Option<TaskFeatureHints> = wu
         .spec
         .features
@@ -741,7 +779,43 @@ pub fn decide_for_work_unit(
     if let (Some(routing), Some(hints)) = (&mut view.routing, wu_hints) {
         routing.features = Some(hints);
     }
-    decide_for_task(&view, ceiling)
+    let mut decision = decide_for_task(&view, ceiling)?;
+    if let Some(task_lane) = task_lane {
+        let cap = if lane_rank(task_lane) > lane_rank(Tier::Standard) {
+            task_lane
+        } else {
+            Tier::Standard
+        };
+        if lane_rank(decision.lane) > lane_rank(cap) {
+            let note = format!(
+                "work-unit lane cap (task lane {}): {} -> {}",
+                lane_name(task_lane),
+                lane_name(decision.lane),
+                lane_name(cap)
+            );
+            decision.clamped_by = Some(match decision.clamped_by.take() {
+                Some(prev) => format!("{prev}; {note}"),
+                None => note.clone(),
+            });
+            decision.reasons.push(note);
+            decision.lane = cap;
+        }
+    }
+    // ADR-0074 D5.1: 5 軸のどれかが欠けていれば「WU の features は部分上書きだった」と残す
+    // （`wu_hints` は `TaskFeatureHints: Copy` なので上の代入の後もそのまま読める）。
+    if let Some(hints) = &wu_hints {
+        let complete = hints.judgment.is_some()
+            && hints.ambiguity.is_some()
+            && hints.verifiability.is_some()
+            && hints.reversibility.is_some()
+            && hints.consequence.is_some();
+        if !complete {
+            decision
+                .reasons
+                .push("features_source: work_unit(partial)".to_string());
+        }
+    }
+    Some(decision)
 }
 
 #[cfg(test)]
@@ -1010,5 +1084,178 @@ pub(crate) mod tests {
         old.as_object_mut().unwrap().remove("routing");
         let back: Task = serde_json::from_value(old).unwrap();
         assert!(back.routing.is_none());
+    }
+
+    // ---- ADR-0074 D5.1/D5.2（Phase F1）: WU ごとの features と lane の上限 ----
+
+    fn wu_row(features: Option<serde_json::Value>, checks: Vec<Criterion>) -> crate::WorkUnitRow {
+        use crate::execution_plan::{
+            WorkUnitCheck, WorkUnitContext, WorkUnitKind, WorkUnitSpec, WorkUnitStatus,
+        };
+        let spec = WorkUnitSpec {
+            key: "a".to_string(),
+            kind: WorkUnitKind::Implement,
+            title: "a".to_string(),
+            objective: "do a".to_string(),
+            depends_on: vec![],
+            done_when: vec![],
+            checks: checks
+                .into_iter()
+                .filter_map(|c| match c.check {
+                    Check::Command { cmd, expect_exit } => Some(WorkUnitCheck { cmd, expect_exit }),
+                    _ => None,
+                })
+                .collect(),
+            context: WorkUnitContext::default(),
+            harness: None,
+            features,
+            budget: None,
+            outputs: vec![],
+        };
+        crate::WorkUnitRow::new(
+            "wu-a".to_string(),
+            "task".to_string(),
+            "plan".to_string(),
+            0,
+            spec,
+            WorkUnitStatus::Ready,
+            "2026-09-26T00:00:00Z".to_string(),
+        )
+    }
+
+    /// ADR-0074 §6 F1 (c): judgment=low/ambiguity=low/verifiability=high/reversibility=high と
+    /// `checks` を持つ WU は cheap になる。
+    #[test]
+    fn work_unit_features_lower_a_mechanical_unit_to_cheap() {
+        let t = task(
+            "設計方針を比較検討する（Task 自体は判断が重い）",
+            vec![reviewer()],
+        );
+        let wu = wu_row(
+            Some(serde_json::json!({
+                "judgment": "low", "ambiguity": "low", "verifiability": "high",
+                "reversibility": "high", "consequence": "low"
+            })),
+            vec![cmd()],
+        );
+        let d = decide_for_work_unit(&t, &wu, &LaneCeiling::default(), None)
+            .expect("decision for execute task");
+        assert_eq!(d.lane, Tier::Cheap, "{d:?}");
+    }
+
+    /// features が無い WU は、Task の `routing.features`（明示のヒント）をそのまま継ぐ
+    /// （WU 自身の `features` が上書きするのは、WU にそれがあるときだけ）。
+    #[test]
+    fn work_unit_without_features_inherits_the_task_hints() {
+        let mut t = task("do a", vec![cmd()]);
+        t.routing = Some(TaskRouting {
+            features: Some(TaskFeatureHints {
+                judgment: Some(Level::High),
+                ambiguity: Some(Level::High),
+                ..TaskFeatureHints::default()
+            }),
+            ..TaskRouting::default()
+        });
+        let wu = wu_row(None, vec![cmd()]);
+        let d = decide_for_work_unit(&t, &wu, &LaneCeiling::default(), None).unwrap();
+        assert_eq!(d.lane, Tier::Frontier, "{d:?}");
+    }
+
+    /// (c): Task が standard のとき、WU の features が frontier を示しても standard に丸まり、
+    /// `clamped_by` に理由が残る（D5.2 の上限 = max(Task の lane, standard)）。
+    #[test]
+    fn work_unit_lane_is_capped_by_the_task_lane() {
+        let t = task(
+            "API に新しいエンドポイントを足してテストを書く。既存のハンドラと同じ形にする。",
+            vec![cmd(), reviewer()],
+        );
+        // Task 自身は standard（判断も曖昧さも中程度）。
+        let task_decision = decide_for_task(&t, &LaneCeiling::default()).unwrap();
+        assert_eq!(task_decision.lane, Tier::Standard, "{task_decision:?}");
+
+        let wu = wu_row(
+            Some(serde_json::json!({
+                "judgment": "high", "ambiguity": "high", "verifiability": "medium",
+                "reversibility": "high", "consequence": "medium"
+            })),
+            vec![],
+        );
+        // 上限を掛けない（`work_unit_lane_cap = "none"` に相当）: そのまま frontier。
+        let uncapped = decide_for_work_unit(&t, &wu, &LaneCeiling::default(), None).unwrap();
+        assert_eq!(uncapped.lane, Tier::Frontier, "{uncapped:?}");
+        assert!(uncapped.clamped_by.is_none());
+
+        // 上限を掛ける（既定 `work_unit_lane_cap = "task"`）: standard に丸まる。
+        let capped =
+            decide_for_work_unit(&t, &wu, &LaneCeiling::default(), Some(task_decision.lane))
+                .unwrap();
+        assert_eq!(capped.lane, Tier::Standard, "{capped:?}");
+        assert!(
+            capped
+                .clamped_by
+                .as_deref()
+                .is_some_and(|c| c.contains("work-unit lane cap")),
+            "{capped:?}"
+        );
+    }
+
+    /// D5.2: 上限は「下げる」方向には効かない。Task が standard でも、WU の features が cheap を
+    /// 示せば cheap のまま。
+    #[test]
+    fn work_unit_lane_cap_does_not_prevent_routing_cheaper_than_the_task() {
+        let t = task(
+            "API に新しいエンドポイントを足してテストを書く。既存のハンドラと同じ形にする。",
+            vec![cmd(), reviewer()],
+        );
+        let task_decision = decide_for_task(&t, &LaneCeiling::default()).unwrap();
+        assert_eq!(task_decision.lane, Tier::Standard, "{task_decision:?}");
+        let wu = wu_row(
+            Some(serde_json::json!({
+                "judgment": "low", "ambiguity": "low", "verifiability": "high",
+                "reversibility": "high", "consequence": "low"
+            })),
+            vec![cmd()],
+        );
+        let d = decide_for_work_unit(&t, &wu, &LaneCeiling::default(), Some(task_decision.lane))
+            .unwrap();
+        assert_eq!(d.lane, Tier::Cheap, "{d:?}");
+    }
+
+    /// Task 自身が frontier のとき、WU の上限は `max(frontier, standard) = frontier` になる
+    /// （frontier の WU をさらに下げない）。
+    #[test]
+    fn work_unit_lane_cap_follows_a_frontier_task() {
+        let mut t = task(
+            "ルーティングの方針を設計し、トレードオフを比較検討する",
+            vec![reviewer()],
+        );
+        t.genre = Some("writing".into());
+        let task_decision = decide_for_task(&t, &LaneCeiling::default()).unwrap();
+        assert_eq!(task_decision.lane, Tier::Frontier, "{task_decision:?}");
+        let wu = wu_row(
+            Some(serde_json::json!({
+                "judgment": "high", "ambiguity": "high", "verifiability": "low",
+                "reversibility": "high", "consequence": "medium"
+            })),
+            vec![],
+        );
+        let d = decide_for_work_unit(&t, &wu, &LaneCeiling::default(), Some(task_decision.lane))
+            .unwrap();
+        assert_eq!(d.lane, Tier::Frontier, "{d:?}");
+    }
+
+    /// D5.1: 5 軸のうち一部だけを書いた WU は拒否されず（`execution_plan::validate` の役目とは別）、
+    /// `reasons` に `features_source: work_unit(partial)` が残る。
+    #[test]
+    fn partial_work_unit_features_are_noted_as_partial() {
+        let t = task("x", vec![cmd()]);
+        let wu = wu_row(Some(serde_json::json!({"judgment": "low"})), vec![cmd()]);
+        let d = decide_for_work_unit(&t, &wu, &LaneCeiling::default(), None).unwrap();
+        assert!(
+            d.reasons
+                .iter()
+                .any(|r| r == "features_source: work_unit(partial)"),
+            "{d:?}"
+        );
     }
 }

@@ -1145,6 +1145,10 @@ pub struct ExecutionTomlConfig {
     /// ADR-0072 D17/D18（Phase E4）: Task ごとの replan（計画の版の更新）の上限（既定 3）。
     #[serde(default = "default_max_replans")]
     pub max_replans: u32,
+    /// ADR-0074 D5.2（Phase F1）: WU の lane の上限を Task の lane に合わせるか
+    /// （`"task"` | `"none"`。既定 `"task"`）。
+    #[serde(default = "default_work_unit_lane_cap")]
+    pub work_unit_lane_cap: String,
 }
 
 impl Default for ExecutionTomlConfig {
@@ -1158,6 +1162,7 @@ impl Default for ExecutionTomlConfig {
             max_repairs: default_max_repairs(),
             max_repairs_per_class: default_max_repairs_per_class(),
             max_replans: default_max_replans(),
+            work_unit_lane_cap: default_work_unit_lane_cap(),
         }
     }
 }
@@ -1183,8 +1188,12 @@ fn default_max_repairs_per_class() -> u32 {
 fn default_max_replans() -> u32 {
     3
 }
+fn default_work_unit_lane_cap() -> String {
+    "task".to_string()
+}
 
-/// `[execution.planner]`（ADR-0072 D14, Phase E3）: task-local な計画 run の harness と上限。
+/// `[execution.planner]`（ADR-0072 D14, Phase E3; ADR-0074 D5.3, Phase F1）: task-local な計画 run の
+/// harness と上限。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlannerTomlConfig {
@@ -1194,6 +1203,11 @@ pub struct ExecutionPlannerTomlConfig {
     /// アダプタ既定の `permission_mode` のまま。ADR-0072 Phase E3 実装時の逸脱・明確化を参照）。
     #[serde(default = "default_planner_permission_mode")]
     pub permission_mode: String,
+    /// ADR-0074 D5.3（Phase F1）: planner run の lane。既定 `standard`（E3〜E6 の固定 `frontier` から
+    /// 変更。E6-4 の時間の多くが探索に費やされた分析を受けての判断）。人が Task に `tier:frontier` を
+    /// 明示していれば、それが優先される（`dispatcher.rs` の配線）。
+    #[serde(default = "default_planner_tier")]
+    pub tier: Tier,
     #[serde(default = "default_planner_max_turns")]
     pub max_turns: u32,
     #[serde(default = "default_planner_max_wall_secs")]
@@ -1205,6 +1219,7 @@ impl Default for ExecutionPlannerTomlConfig {
         Self {
             adapter: default_planner_adapter(),
             permission_mode: default_planner_permission_mode(),
+            tier: default_planner_tier(),
             max_turns: default_planner_max_turns(),
             max_wall_secs: default_planner_max_wall_secs(),
         }
@@ -1217,11 +1232,16 @@ fn default_planner_adapter() -> String {
 fn default_planner_permission_mode() -> String {
     "plan".to_string()
 }
-fn default_planner_max_turns() -> u32 {
-    40
+fn default_planner_tier() -> Tier {
+    Tier::Standard
 }
+/// ADR-0074 D5.3（Phase F1）: 40 -> 24（既定）。
+fn default_planner_max_turns() -> u32 {
+    24
+}
+/// ADR-0074 D5.3（Phase F1）: 1,200 -> 900 秒（既定）。
 fn default_planner_max_wall_secs() -> u64 {
-    1200
+    900
 }
 fn default_retry_backoff_base_secs() -> u64 {
     10
@@ -2214,6 +2234,13 @@ impl Config {
                 self.execution.gate
             )));
         }
+        // ADR-0074 D5.2（Phase F1）: work_unit_lane_cap は 2 つだけ。
+        if task_core::WorkUnitLaneCap::parse(&self.execution.work_unit_lane_cap).is_none() {
+            return Err(ConfigError::Invalid(format!(
+                "[execution] work_unit_lane_cap must be one of [\"task\", \"none\"] (got {:?})",
+                self.execution.work_unit_lane_cap
+            )));
+        }
         // ADR-0043 D3: runtime は 3 つだけ（綴り間違いで黙ってホスト実行に倒れないように）。
         if task_worker::RuntimePreference::parse(&self.containers.runtime).is_none() {
             return Err(ConfigError::Invalid(format!(
@@ -2924,12 +2951,17 @@ impl Config {
                 planner: task_core::PlannerConfig {
                     adapter: self.execution.planner.adapter.clone(),
                     permission_mode: self.execution.planner.permission_mode.clone(),
+                    tier: self.execution.planner.tier,
                     max_turns: self.execution.planner.max_turns,
                     max_wall_secs: self.execution.planner.max_wall_secs,
                 },
                 max_repairs: self.execution.max_repairs,
                 max_repairs_per_class: self.execution.max_repairs_per_class,
                 max_replans: self.execution.max_replans,
+                work_unit_lane_cap: task_core::WorkUnitLaneCap::parse(
+                    &self.execution.work_unit_lane_cap,
+                )
+                .unwrap_or_default(),
             },
         }
     }

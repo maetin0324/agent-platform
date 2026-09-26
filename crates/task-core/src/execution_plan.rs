@@ -141,15 +141,166 @@ pub fn schema_value() -> serde_json::Value {
 }
 
 // ---------------------------------------------------------------------------
+// ADR-0074 D5.3（Phase F1）: replan の差分出力 `celeris.execution-plan-delta/1`
+// ---------------------------------------------------------------------------
+
+/// D5.3: 差分の schema 版（`docs/protocol/execution-plan-delta.schema.json`）。
+pub const EXECUTION_PLAN_DELTA_SCHEMA: &str = "celeris.execution-plan-delta/1";
+
+/// D5.3: 既存の WorkUnit の変える欄だけを書く（`key` は必須、他は書いた欄だけが上書きされる）。
+/// 書かなかった欄は変わらない。**欄を「消す」ことはできない**（`harness`/`features`/`budget` を
+/// 空に戻したいときは、値を書き換えるのではなく `remove` + `add` で作り直す。Phase F1 の簡略化。
+/// `Option<Option<T>>` の二重オプションは素の serde では「省略」と「明示 null」を区別できないため）。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkUnitPatch {
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<WorkUnitKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_when: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<Vec<WorkUnitCheck>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<WorkUnitContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<WorkUnitBudget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Vec<String>>,
+}
+
+/// D5.3: replan の差分出力。`base_version` は差分を当てる旧版（`ExecutionPlanRow.version`）。
+/// `done` の WU・統合済みの工程は書かない（daemon が旧版から持ち越す）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionPlanDelta {
+    pub schema: String,
+    pub base_version: u32,
+    pub rationale: String,
+    #[serde(default)]
+    pub add: Vec<WorkUnitSpec>,
+    #[serde(default)]
+    pub modify: Vec<WorkUnitPatch>,
+    #[serde(default)]
+    pub remove: Vec<String>,
+}
+
+/// 生成したスキーマ（`docs/protocol/execution-plan-delta.schema.json`）。
+pub fn delta_schema_value() -> serde_json::Value {
+    let schema = schemars::schema_for!(ExecutionPlanDelta);
+    serde_json::to_value(schema).unwrap_or(serde_json::Value::Null)
+}
+
+/// D5.3: 差分を旧版（`base`）に当てて新しい版の全体を作る（純粋関数。検証は呼び出し側が
+/// `validate` で行う）。`remove` → `modify` → `add` の順に適用する。
+///
+/// - `remove` に無い key の WU は `base` のまま残る（`done` の WU を書かなくても持ち越される）。
+/// - `modify` は既知の key だけに適用できる（`remove` された直後の key、または存在しない key を
+///   指せば拒否する）。
+/// - `add` の key が既存（`base` に残っているもの）と衝突すれば拒否する。
+pub fn apply_delta(
+    base: &ExecutionPlanSpec,
+    delta: &ExecutionPlanDelta,
+) -> Result<ExecutionPlanSpec, String> {
+    let mut units: Vec<WorkUnitSpec> = base.work_units.clone();
+
+    let remove_set: BTreeSet<&str> = delta.remove.iter().map(|s| s.as_str()).collect();
+    units.retain(|w| !remove_set.contains(w.key.as_str()));
+
+    for patch in &delta.modify {
+        let Some(existing) = units.iter_mut().find(|w| w.key == patch.key) else {
+            return Err(format!(
+                "modify: work unit {:?} does not exist in the base plan (or was removed)",
+                patch.key
+            ));
+        };
+        if let Some(v) = patch.kind {
+            existing.kind = v;
+        }
+        if let Some(v) = &patch.title {
+            existing.title = v.clone();
+        }
+        if let Some(v) = &patch.objective {
+            existing.objective = v.clone();
+        }
+        if let Some(v) = &patch.depends_on {
+            existing.depends_on = v.clone();
+        }
+        if let Some(v) = &patch.done_when {
+            existing.done_when = v.clone();
+        }
+        if let Some(v) = &patch.checks {
+            existing.checks = v.clone();
+        }
+        if let Some(v) = &patch.context {
+            existing.context = v.clone();
+        }
+        if let Some(v) = &patch.harness {
+            existing.harness = Some(v.clone());
+        }
+        if let Some(v) = &patch.features {
+            existing.features = Some(v.clone());
+        }
+        if let Some(v) = patch.budget {
+            existing.budget = Some(v);
+        }
+        if let Some(v) = &patch.outputs {
+            existing.outputs = v.clone();
+        }
+    }
+
+    for spec in &delta.add {
+        if units.iter().any(|w| w.key == spec.key) {
+            return Err(format!(
+                "add: work unit key {:?} already exists in the base plan",
+                spec.key
+            ));
+        }
+        units.push(spec.clone());
+    }
+
+    Ok(ExecutionPlanSpec {
+        schema: base.schema.clone(),
+        rationale: delta.rationale.clone(),
+        work_units: units,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // D14: 検証
 // ---------------------------------------------------------------------------
 
 /// D18: 検証・丸めに使う上限（既定値は ADR-0072 D18 の表）。
+/// ADR-0074 D5.3（Phase F1）: 計画のサイズ上限（§4）を足す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExecutionLimits {
     pub max_work_units: usize,
     pub work_unit_max_turns: u32,
     pub work_unit_max_wall_secs: u64,
+    /// `rationale` の文字数上限（既定 1,500）。
+    pub max_rationale_chars: usize,
+    /// WU の `title` の文字数上限（既定 120）。
+    pub max_title_chars: usize,
+    /// WU の `objective` の文字数上限（既定 2,000）。
+    pub max_objective_chars: usize,
+    /// WU の `done_when` の件数上限（既定 8）。
+    pub max_done_when_items: usize,
+    /// WU の `done_when` の 1 件あたりの文字数上限（既定 300）。
+    pub max_done_when_chars: usize,
+    /// WU の `checks` の件数上限（既定 6）。
+    pub max_checks: usize,
+    /// 計画の JSON 全体の大きさの上限（バイト、既定 24 KiB）。
+    pub max_plan_json_bytes: usize,
 }
 
 impl Default for ExecutionLimits {
@@ -158,6 +309,13 @@ impl Default for ExecutionLimits {
             max_work_units: 8,
             work_unit_max_turns: 80,
             work_unit_max_wall_secs: 3600,
+            max_rationale_chars: 1_500,
+            max_title_chars: 120,
+            max_objective_chars: 2_000,
+            max_done_when_items: 8,
+            max_done_when_chars: 300,
+            max_checks: 6,
+            max_plan_json_bytes: 24 * 1024,
         }
     }
 }
@@ -198,6 +356,53 @@ pub enum PlanValidationError {
     DoneWorkUnitChanged {
         key: String,
     },
+    /// ADR-0074 D5.1（Phase F1）: WU の `features` が `TaskFeatureHints` として読めない
+    /// （`deny_unknown_fields` を含む型として不正）。
+    InvalidFeatures {
+        key: String,
+        detail: String,
+    },
+    /// ADR-0074 D5.3（Phase F1）: `rationale` が上限を超える。
+    RationaleTooLong {
+        len: usize,
+        max: usize,
+    },
+    /// ADR-0074 D5.3（Phase F1）: WU の `title` が上限を超える。
+    TitleTooLong {
+        key: String,
+        len: usize,
+        max: usize,
+    },
+    /// ADR-0074 D5.3（Phase F1）: WU の `objective` が上限を超える。
+    ObjectiveTooLong {
+        key: String,
+        len: usize,
+        max: usize,
+    },
+    /// ADR-0074 D5.3（Phase F1）: WU の `done_when` の件数が上限を超える。
+    TooManyDoneWhen {
+        key: String,
+        count: usize,
+        max: usize,
+    },
+    /// ADR-0074 D5.3（Phase F1）: WU の `done_when` の 1 件が上限を超える。
+    DoneWhenItemTooLong {
+        key: String,
+        index: usize,
+        len: usize,
+        max: usize,
+    },
+    /// ADR-0074 D5.3（Phase F1）: WU の `checks` の件数が上限を超える。
+    TooManyChecks {
+        key: String,
+        count: usize,
+        max: usize,
+    },
+    /// ADR-0074 D5.3（Phase F1）: 計画の JSON 全体が上限を超える。
+    PlanTooLarge {
+        bytes: usize,
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for PlanValidationError {
@@ -230,6 +435,50 @@ impl std::fmt::Display for PlanValidationError {
             }
             PlanValidationError::DoneWorkUnitChanged { key } => {
                 write!(f, "done work unit {key} must not change on replan")
+            }
+            PlanValidationError::InvalidFeatures { key, detail } => {
+                write!(
+                    f,
+                    "work unit {key}: features must parse as TaskFeatureHints: {detail}"
+                )
+            }
+            PlanValidationError::RationaleTooLong { len, max } => {
+                write!(f, "rationale is too long: {len} > {max} characters")
+            }
+            PlanValidationError::TitleTooLong { key, len, max } => {
+                write!(
+                    f,
+                    "work unit {key}: title is too long: {len} > {max} characters"
+                )
+            }
+            PlanValidationError::ObjectiveTooLong { key, len, max } => {
+                write!(
+                    f,
+                    "work unit {key}: objective is too long: {len} > {max} characters"
+                )
+            }
+            PlanValidationError::TooManyDoneWhen { key, count, max } => {
+                write!(
+                    f,
+                    "work unit {key}: too many done_when items: {count} > {max}"
+                )
+            }
+            PlanValidationError::DoneWhenItemTooLong {
+                key,
+                index,
+                len,
+                max,
+            } => {
+                write!(
+                    f,
+                    "work unit {key}: done_when[{index}] is too long: {len} > {max} characters"
+                )
+            }
+            PlanValidationError::TooManyChecks { key, count, max } => {
+                write!(f, "work unit {key}: too many checks: {count} > {max}")
+            }
+            PlanValidationError::PlanTooLarge { bytes, max } => {
+                write!(f, "execution plan JSON is too large: {bytes} > {max} bytes")
             }
         }
     }
@@ -334,6 +583,79 @@ pub fn validate(
                 });
             }
         }
+    }
+
+    // ADR-0074 D5.1（Phase F1）: `features` は書かれていれば `TaskFeatureHints` として読めなければ
+    // ならない（黙って捨てない）。5 軸のうちいくつか欠けているだけなら拒否しない
+    // （`decide_for_work_unit` が Task から推定した値のまま補う）。
+    for wu in &spec.work_units {
+        if let Some(features) = &wu.features
+            && let Err(e) =
+                serde_json::from_value::<crate::model_policy::TaskFeatureHints>(features.clone())
+        {
+            errors.push(PlanValidationError::InvalidFeatures {
+                key: wu.key.clone(),
+                detail: e.to_string(),
+            });
+        }
+    }
+
+    // ADR-0074 D5.3（Phase F1）: 計画のサイズ上限（§4）。
+    if spec.rationale.chars().count() > limits.max_rationale_chars {
+        errors.push(PlanValidationError::RationaleTooLong {
+            len: spec.rationale.chars().count(),
+            max: limits.max_rationale_chars,
+        });
+    }
+    for wu in &spec.work_units {
+        let title_len = wu.title.chars().count();
+        if title_len > limits.max_title_chars {
+            errors.push(PlanValidationError::TitleTooLong {
+                key: wu.key.clone(),
+                len: title_len,
+                max: limits.max_title_chars,
+            });
+        }
+        let objective_len = wu.objective.chars().count();
+        if objective_len > limits.max_objective_chars {
+            errors.push(PlanValidationError::ObjectiveTooLong {
+                key: wu.key.clone(),
+                len: objective_len,
+                max: limits.max_objective_chars,
+            });
+        }
+        if wu.done_when.len() > limits.max_done_when_items {
+            errors.push(PlanValidationError::TooManyDoneWhen {
+                key: wu.key.clone(),
+                count: wu.done_when.len(),
+                max: limits.max_done_when_items,
+            });
+        }
+        for (index, item) in wu.done_when.iter().enumerate() {
+            let len = item.chars().count();
+            if len > limits.max_done_when_chars {
+                errors.push(PlanValidationError::DoneWhenItemTooLong {
+                    key: wu.key.clone(),
+                    index,
+                    len,
+                    max: limits.max_done_when_chars,
+                });
+            }
+        }
+        if wu.checks.len() > limits.max_checks {
+            errors.push(PlanValidationError::TooManyChecks {
+                key: wu.key.clone(),
+                count: wu.checks.len(),
+                max: limits.max_checks,
+            });
+        }
+    }
+    let plan_bytes = serde_json::to_vec(spec).map(|v| v.len()).unwrap_or(0);
+    if plan_bytes > limits.max_plan_json_bytes {
+        errors.push(PlanValidationError::PlanTooLarge {
+            bytes: plan_bytes,
+            max: limits.max_plan_json_bytes,
+        });
     }
 
     // トポロジカルソート（循環の検出も兼ねる。Kahn's algorithm、決定的に `key` 昇順で tie-break）。
@@ -1053,6 +1375,107 @@ mod tests {
         );
     }
 
+    /// ADR-0074 D5.1（Phase F1）: `features` は `TaskFeatureHints` として読めなければ検証エラー
+    /// （黙って `.ok()` で捨てない）。
+    #[test]
+    fn features_must_parse_as_task_feature_hints() {
+        let mut a = spec("a", &[]);
+        a.features = Some(serde_json::json!({"judgment": "low", "ambiguity": "low"}));
+        let p = plan(vec![a]);
+        validate(&p, ExecutionLimits::default(), &[]).expect("valid partial features");
+
+        let mut b = spec("b", &[]);
+        // `lane` は `TaskFeatureHints` に無い欄（`deny_unknown_fields`）。
+        b.features = Some(serde_json::json!({"lane": "frontier"}));
+        let p = plan(vec![b]);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(
+                |e| matches!(e, PlanValidationError::InvalidFeatures { key, .. } if key == "b")
+            ),
+            "{errs:?}"
+        );
+
+        let mut c = spec("c", &[]);
+        // 型が違う（配列であるべき欄が文字列）。
+        c.features = Some(serde_json::json!({"judgment": "not-a-level"}));
+        let p = plan(vec![c]);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(
+                |e| matches!(e, PlanValidationError::InvalidFeatures { key, .. } if key == "c")
+            ),
+            "{errs:?}"
+        );
+    }
+
+    /// ADR-0074 D5.3（Phase F1）: 計画のサイズ上限（§4）。
+    #[test]
+    fn plan_size_limits_reject_oversized_rationale() {
+        let mut p = plan(vec![spec("a", &[])]);
+        p.rationale = "x".repeat(1_501);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(
+                |e| matches!(e, PlanValidationError::RationaleTooLong { len, max } if *len == 1_501 && *max == 1_500)
+            ),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn plan_size_limits_reject_oversized_work_unit_fields() {
+        let mut a = spec("a", &[]);
+        a.title = "x".repeat(121);
+        a.objective = "y".repeat(2_001);
+        a.done_when = (0..9).map(|i| format!("done {i}")).collect();
+        a.checks = (0..7)
+            .map(|i| WorkUnitCheck {
+                cmd: format!("cmd {i}"),
+                expect_exit: 0,
+            })
+            .collect();
+        let p = plan(vec![a]);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::TitleTooLong { key, .. } if key == "a")),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter().any(
+                |e| matches!(e, PlanValidationError::ObjectiveTooLong { key, .. } if key == "a")
+            ),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter().any(
+                |e| matches!(e, PlanValidationError::TooManyDoneWhen { key, .. } if key == "a")
+            ),
+            "{errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::TooManyChecks { key, .. } if key == "a")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn plan_size_limits_reject_the_whole_json_being_too_large() {
+        let limits = ExecutionLimits {
+            max_plan_json_bytes: 200,
+            ..ExecutionLimits::default()
+        };
+        let p = plan(vec![spec("a", &[]), spec("b", &["a"])]);
+        let errs = validate(&p, limits, &[]).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::PlanTooLarge { .. })),
+            "{errs:?}"
+        );
+    }
+
     fn row(key: &str, seq: u32, status: WorkUnitStatus, depends_on: &[&str]) -> WorkUnitRow {
         WorkUnitRow::new(
             format!("wu-{key}"),
@@ -1134,5 +1557,100 @@ mod tests {
             committed, generated,
             "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-core`"
         );
+    }
+
+    /// ADR-0074 D5.3（Phase F1）: `execution-plan-delta/1` の生成スキーマとコミット済みファイルの一致。
+    #[test]
+    fn delta_committed_schema_matches_generated() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/protocol/execution-plan-delta.schema.json"
+        );
+        let generated = serde_json::to_string_pretty(&delta_schema_value()).unwrap() + "\n";
+        if std::env::var_os("UPDATE_SCHEMA").is_some() {
+            std::fs::write(path, &generated).unwrap();
+        }
+        let committed = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("read {path}: {e} (run with UPDATE_SCHEMA=1 to generate)"));
+        assert_eq!(
+            committed, generated,
+            "schema drift: run `UPDATE_SCHEMA=1 cargo test -p task-core`"
+        );
+    }
+
+    // ---- ADR-0074 D5.3（Phase F1）: replan の差分 (add/modify/remove) ----
+
+    fn delta(
+        base_version: u32,
+        add: Vec<WorkUnitSpec>,
+        modify: Vec<WorkUnitPatch>,
+        remove: Vec<&str>,
+    ) -> ExecutionPlanDelta {
+        ExecutionPlanDelta {
+            schema: EXECUTION_PLAN_DELTA_SCHEMA.to_string(),
+            base_version,
+            rationale: "delta test".to_string(),
+            add,
+            modify,
+            remove: remove.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn apply_delta_adds_modifies_and_removes_without_restating_untouched_units() {
+        let base = plan(vec![spec("a", &[]), spec("b", &["a"]), spec("c", &["b"])]);
+        let d = delta(
+            1,
+            vec![spec("m", &[])],
+            vec![WorkUnitPatch {
+                key: "b".to_string(),
+                depends_on: Some(vec!["a".to_string(), "m".to_string()]),
+                ..WorkUnitPatch::default()
+            }],
+            vec!["c"],
+        );
+        let applied = apply_delta(&base, &d).expect("delta applies");
+        let keys: Vec<&str> = applied.work_units.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(keys, vec!["a", "b", "m"], "{keys:?}");
+        let b = applied.work_units.iter().find(|w| w.key == "b").unwrap();
+        assert_eq!(b.depends_on, vec!["a".to_string(), "m".to_string()]);
+        // `a` は modify/remove の対象ではないので、`base` の spec のまま（書き写していない）。
+        let a = applied.work_units.iter().find(|w| w.key == "a").unwrap();
+        assert_eq!(a, &spec("a", &[]));
+    }
+
+    #[test]
+    fn apply_delta_rejects_modifying_an_unknown_or_removed_key() {
+        let base = plan(vec![spec("a", &[])]);
+        let d = delta(
+            1,
+            vec![],
+            vec![WorkUnitPatch {
+                key: "ghost".to_string(),
+                title: Some("x".to_string()),
+                ..WorkUnitPatch::default()
+            }],
+            vec![],
+        );
+        assert!(apply_delta(&base, &d).is_err());
+
+        let d2 = delta(
+            1,
+            vec![],
+            vec![WorkUnitPatch {
+                key: "a".to_string(),
+                title: Some("x".to_string()),
+                ..WorkUnitPatch::default()
+            }],
+            vec!["a"],
+        );
+        assert!(apply_delta(&base, &d2).is_err(), "removed then modified");
+    }
+
+    #[test]
+    fn apply_delta_rejects_adding_a_key_that_still_exists() {
+        let base = plan(vec![spec("a", &[])]);
+        let d = delta(1, vec![spec("a", &[])], vec![], vec![]);
+        assert!(apply_delta(&base, &d).is_err());
     }
 }

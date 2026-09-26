@@ -586,6 +586,8 @@ pub struct ExecutionConfig {
     pub max_repairs_per_class: u32,
     /// ADR-0072 D17/D18（Phase E4）: Task ごとの replan（計画の版の更新）の上限（既定 3）。
     pub max_replans: u32,
+    /// ADR-0074 D5.2（Phase F1）: `[execution] work_unit_lane_cap`。既定 `task`。
+    pub work_unit_lane_cap: task_core::WorkUnitLaneCap,
 }
 
 impl Default for ExecutionConfig {
@@ -599,6 +601,7 @@ impl Default for ExecutionConfig {
             max_repairs: 3,
             max_repairs_per_class: 2,
             max_replans: 3,
+            work_unit_lane_cap: task_core::WorkUnitLaneCap::default(),
         }
     }
 }
@@ -805,6 +808,38 @@ fn finish_reviewer_run_index(
         OffsetDateTime::now_utc(),
     ) {
         tracing::warn!(%run_id, error = %e, "failed to finish the reviewer run in the runs index");
+    }
+}
+
+/// ADR-0074 D5.3（Phase F1）: planner の出力を読む。`schema` が `celeris.execution-plan-delta/1`
+/// なら差分として `active` な計画に当て、全体に展開する（`base_version` は `active` の版と一致
+/// しなければならない。それ以外は「移行期間」として `celeris.execution-plan/1` の全体形式で読む
+/// （D5.3「旧形式（全体）の replan 出力も受け付ける」）。
+fn parse_planner_output(
+    text: &str,
+    active: Option<&task_core::ExecutionPlanRow>,
+) -> Result<task_core::ExecutionPlanSpec, String> {
+    let raw: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("execution-plan.json の形式が不正: {e}"))?;
+    let schema = raw.get("schema").and_then(|v| v.as_str()).unwrap_or("");
+    if schema == task_core::execution_plan::EXECUTION_PLAN_DELTA_SCHEMA {
+        let Some(active) = active else {
+            return Err(
+                "execution-plan-delta/1 は replan（既に計画がある Task）でだけ受け付ける"
+                    .to_string(),
+            );
+        };
+        let delta: task_core::execution_plan::ExecutionPlanDelta = serde_json::from_value(raw)
+            .map_err(|e| format!("execution-plan-delta.json の形式が不正: {e}"))?;
+        if delta.base_version != active.version {
+            return Err(format!(
+                "execution-plan-delta.json の base_version {} が現在の版 {} と一致しない",
+                delta.base_version, active.version
+            ));
+        }
+        task_core::execution_plan::apply_delta(&active.spec, &delta)
+    } else {
+        serde_json::from_value(raw).map_err(|e| format!("execution-plan.json の形式が不正: {e}"))
     }
 }
 
@@ -4228,8 +4263,8 @@ impl Dispatcher {
                 .and_then(|p| std::fs::read_to_string(p).ok())
             {
                 None => Err("artifacts/execution-plan.json が見つからない".to_string()),
-                Some(text) => match serde_json::from_str::<task_core::ExecutionPlanSpec>(&text) {
-                    Err(e) => Err(format!("execution-plan.json の形式が不正: {e}")),
+                Some(text) => match parse_planner_output(&text, active_plan.as_ref()) {
+                    Err(e) => Err(e),
                     Ok(spec) => match validate_plan_harnesses(&spec, &self.config.genres) {
                         Err(e) => Err(e),
                         Ok(()) => task_core::execution_plan::validate(
@@ -6353,10 +6388,22 @@ impl Dispatcher {
                         == Some(task_core::ExecutionMode::Compound));
             // D18/D14: 上書きする前の Task の予算（WU/planner の既定の計算に使う。ADR-0072 D14）。
             let original_task_budget = task.budget;
+            // ADR-0074 D5.3（Phase F1）: planner run は `[execution.planner] tier`（既定 standard）で
+            // 走る。人が Task に `tier:frontier` を明示していれば、それが優先される
+            // （`TierSource::Human` かつ `worker_hint.tier == Frontier`）。
+            let planner_human_frontier = task
+                .routing
+                .as_ref()
+                .is_some_and(|r| r.tier_source == task_core::TierSource::Human)
+                && task.worker_hint.tier == task_core::Tier::Frontier;
             if is_planner_dispatch {
                 // D14: harness/adapter は `[execution.planner]`、lane は固定（下の `lane_decision` で
-                // `TierSource::System` にする）。
-                task.worker_hint.tier = task_core::Tier::Frontier;
+                // `TierSource::System`／人の明示なら `TierSource::Human` にする）。
+                task.worker_hint.tier = if planner_human_frontier {
+                    task_core::Tier::Frontier
+                } else {
+                    self.config.execution.planner.tier
+                };
                 task.worker_hint.adapter = Some(self.config.execution.planner.adapter.clone());
                 task.budget.max_turns = self.config.execution.planner.max_turns;
                 task.budget.max_wall_secs = self.config.execution.planner.max_wall_secs;
@@ -6507,21 +6554,44 @@ impl Dispatcher {
             // ADR-0069 D3 / D6（Phase 114）: `routing` を持つ execute タスクは、lane を決定的な policy
             // （TaskFeatures → 規則表 → 組織の天井）とリトライのエスカレーションで決める。人の明示・
             // System の tier はそのまま（記録だけ）。残量による調整はこの後の `select_tier`（別の層）。
-            // ADR-0072 D14（Phase E3）: planner run は lane を丸めない固定の frontier（`TierSource::
-            // System`）。D21: WU の run は WU の view（objective/acceptance/budget/genre/features を
-            // 差し替えたもの）で lane を決める。
+            // ADR-0074 D5.3（Phase F1）: planner run は lane を丸めない固定の `[execution.planner]
+            // tier`（既定 standard。E3〜E6 は frontier 固定だった）。人が Task に `tier:frontier` を
+            // 明示していれば `TierSource::Human` として記録する。D21: WU の run は WU の view
+            // （objective/acceptance/budget/genre/features を差し替えたもの）で lane を決める。
             let lane_decision = if is_planner_dispatch {
+                let tier = task.worker_hint.tier;
+                let (source, rule_id, reason) = if planner_human_frontier {
+                    (
+                        task_core::TierSource::Human,
+                        "planner/human-frontier".to_string(),
+                        "human explicitly set tier:frontier on this task; the planner run \
+                         inherits it (ADR-0074 D5.3)"
+                            .to_string(),
+                    )
+                } else {
+                    (
+                        task_core::TierSource::System,
+                        format!(
+                            "planner/system-{}",
+                            match tier {
+                                task_core::Tier::Frontier => "frontier",
+                                task_core::Tier::Standard => "standard",
+                                task_core::Tier::Cheap => "cheap",
+                            }
+                        ),
+                        "ADR-0074 D5.3: planner run runs at [execution.planner] tier, fixed by \
+                         celeris code"
+                            .to_string(),
+                    )
+                };
                 Some(task_core::LaneDecision {
-                    lane: task_core::Tier::Frontier,
-                    proposed: task_core::Tier::Frontier,
-                    source: task_core::TierSource::System,
-                    rule_id: "planner/system-frontier".to_string(),
+                    lane: tier,
+                    proposed: tier,
+                    source,
+                    rule_id,
                     policy_version: task_core::LANE_POLICY_VERSION.to_string(),
                     features: task_core::TaskFeatures::infer(&task),
-                    reasons: vec![
-                        "ADR-0072 D14: planner run runs at frontier, fixed by celeris code"
-                            .to_string(),
-                    ],
+                    reasons: vec![reason],
                     clamped_by: None,
                     hint: None,
                     escalation: None,
@@ -9208,6 +9278,9 @@ impl Dispatcher {
     /// profile）を使うが、`TaskFeatures` は WU の view（`decide_for_work_unit`）で計算する。
     /// エスカレーション（リトライでの lane の引き上げ）は WU の retries を数えないので、E3 では
     /// 行わない（`task.attempts` は計画のある Task では WU の失敗で増えない。D11）。
+    /// ADR-0074 D5.2（Phase F1）: `[execution] work_unit_lane_cap = "task"`（既定）のときは、Task
+    /// 自身の（policy が決めた、エスカレーション前の）lane を上限の材料として渡す。`"none"` なら
+    /// 上限を掛けない。
     fn decide_lane_for_work_unit(
         &self,
         task: &Task,
@@ -9226,8 +9299,14 @@ impl Dispatcher {
             .as_ref()
             .map(|p| p.lane_ceiling())
             .unwrap_or_default();
+        let task_lane = match self.config.execution.work_unit_lane_cap {
+            task_core::WorkUnitLaneCap::Task => {
+                task_core::model_policy::decide_for_task(task, &ceiling).map(|d| d.lane)
+            }
+            task_core::WorkUnitLaneCap::None => None,
+        };
         Ok(task_core::model_policy::decide_for_work_unit(
-            task, wu, &ceiling,
+            task, wu, &ceiling, task_lane,
         ))
     }
 
@@ -22292,6 +22371,97 @@ mod tests {
         );
     }
 
+    /// ADR-0074 §6 F1 (d): planner run は既定で `standard` lane（`rule_id = planner/system-standard`）、
+    /// `[execution.planner] max_turns`/`max_wall_secs`（テストでは既定 24/900）が予算に反映される。
+    #[tokio::test]
+    async fn planner_run_uses_the_standard_lane_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = compound_task(dir.path());
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+
+        let valid_plan = plan_json(vec![wu_spec("a", &[])]);
+        let adapter = Arc::new(PlannerScriptAdapter::new(
+            vec![Some(valid_plan)],
+            HashMap::new(),
+        ));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.gate = task_core::GateMode::On;
+        d.config.execution.planner.adapter = "instant".to_string();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let events = store.events_for(task_id).unwrap();
+        let planner_record = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::RoutingDecided { record, .. }
+                    if record.decision.rule_id.starts_with("planner/") =>
+                {
+                    Some((**record).clone())
+                }
+                _ => None,
+            })
+            .expect("a planner RoutingDecided event");
+        assert_eq!(
+            planner_record.decision.lane,
+            Tier::Standard,
+            "{planner_record:?}"
+        );
+        assert_eq!(planner_record.decision.rule_id, "planner/system-standard");
+        assert_eq!(
+            planner_record.decision.source,
+            task_core::TierSource::System
+        );
+    }
+
+    /// ADR-0074 §6 F1 (d): 人が Task に `tier:frontier` を明示していれば、planner run も frontier で
+    /// 走る（`[execution.planner] tier` の既定 standard より優先）。
+    #[tokio::test]
+    async fn planner_run_uses_frontier_when_the_task_explicitly_sets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let mut task = compound_task(dir.path());
+        task.worker_hint.tier = Tier::Frontier;
+        if let Some(routing) = &mut task.routing {
+            routing.tier_source = task_core::TierSource::Human;
+        }
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+
+        let valid_plan = plan_json(vec![wu_spec("a", &[])]);
+        let adapter = Arc::new(PlannerScriptAdapter::new(
+            vec![Some(valid_plan)],
+            HashMap::new(),
+        ));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.gate = task_core::GateMode::On;
+        d.config.execution.planner.adapter = "instant".to_string();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let events = store.events_for(task_id).unwrap();
+        let planner_record = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::RoutingDecided { record, .. }
+                    if record.decision.rule_id.starts_with("planner/") =>
+                {
+                    Some((**record).clone())
+                }
+                _ => None,
+            })
+            .expect("a planner RoutingDecided event");
+        assert_eq!(
+            planner_record.decision.lane,
+            Tier::Frontier,
+            "{planner_record:?}"
+        );
+        assert_eq!(planner_record.decision.rule_id, "planner/human-frontier");
+        assert_eq!(planner_record.decision.source, task_core::TierSource::Human);
+    }
+
     // ========== ADR-0072（Phase E4）: reviewer repair ==========
 
     #[tokio::test]
@@ -22814,6 +22984,107 @@ mod tests {
                 .any(|s| s.starts_with("b (") && s.contains("status=failed")),
             "{:?}",
             planner_ctx.work_unit_summaries
+        );
+    }
+
+    /// ADR-0074 §6 F1 (f): replan の出力が **差分**（`celeris.execution-plan-delta/1`）でも、
+    /// done の WU（`a`）を書き写さずに v2 が採用される。`ExecutionPlanned.reason` に差分の件数が残る。
+    #[tokio::test]
+    async fn replan_delta_carries_done_units_without_restating_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+            1,
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        adopt_three_step_plan(&store, task_id);
+
+        let mut wu_script = HashMap::new();
+        wu_script.insert(
+            "b".to_string(),
+            vec![
+                Terminal::Error {
+                    message: "boom".into(),
+                    retryable: true,
+                },
+                Terminal::Error {
+                    message: "boom again".into(),
+                    retryable: true,
+                },
+                Terminal::Done {
+                    summary: "b fixed".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
+            ],
+        );
+        // 差分だけを出す: `b` の objective を変える（`modify`）。`a`/`c` は書かない（done の `a` を
+        // 書き写さない。`c` は未完了だが変わらないので、それも書かないだけで持ち越される）。
+        let delta = serde_json::json!({
+            "schema": task_core::execution_plan::EXECUTION_PLAN_DELTA_SCHEMA,
+            "base_version": 1,
+            "rationale": "b を直す",
+            "add": [],
+            "modify": [{"key": "b", "objective": "do b, this time correctly"}],
+            "remove": []
+        })
+        .to_string();
+        let adapter = Arc::new(PlannerScriptAdapter::new(vec![Some(delta)], wu_script));
+        let mut d = dispatcher(store.clone(), adapter.clone(), 1);
+        d.config.execution.planner.adapter = "instant".to_string();
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+
+        let stored = store.get(task_id).unwrap().unwrap();
+        assert_eq!(stored.status, Status::Done, "{stored:?}");
+
+        let plans = store.execution_plan_list(task_id).unwrap();
+        assert_eq!(plans.len(), 2, "{plans:?}");
+        assert_eq!(plans[1].status, task_core::PlanStatus::Active);
+        // 差分を当てた結果、v2 の spec には `a`/`b`/`c` すべてが揃っている（daemon が持ち越した）。
+        let v2_keys: Vec<&str> = plans[1]
+            .spec
+            .work_units
+            .iter()
+            .map(|w| w.key.as_str())
+            .collect();
+        assert_eq!(v2_keys, vec!["a", "b", "c"], "{v2_keys:?}");
+        let b_spec = plans[1]
+            .spec
+            .work_units
+            .iter()
+            .find(|w| w.key == "b")
+            .unwrap();
+        assert_eq!(b_spec.objective, "do b, this time correctly");
+
+        let units = store.work_units_for(task_id).unwrap();
+        let a = units.iter().find(|u| u.key == "a").unwrap();
+        assert_eq!(a.status, task_core::WorkUnitStatus::Done);
+        assert_eq!(a.plan_id, plans[0].id, "done の a は差分でも元の版のまま");
+
+        // ExecutionPlanned.reason に差分の件数が残る（(f)）。
+        let events = store.events_for(task_id).unwrap();
+        let reason = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::ExecutionPlanned {
+                    version: 2, reason, ..
+                } => reason.clone(),
+                _ => None,
+            })
+            .expect("v2 ExecutionPlanned with a reason");
+        // `b`（spec の変更）に加え、`c` も `b` の失敗で blocked(dependency_failed) になっていたのが
+        // pending へ戻る（`from != status`）ので、diff の `changed` に含まれる（replan の既存の規則。
+        // ADR-0072 D17 のまま）。
+        assert!(
+            reason.contains("added=0, changed=2, removed=0"),
+            "{reason:?}"
         );
     }
 

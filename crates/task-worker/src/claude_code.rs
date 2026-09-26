@@ -753,22 +753,27 @@ fn build_execution_plan_prompt(
          \"done_when\":[\"...\"],\"checks\":[{{\"cmd\":\"...\",\"expect_exit\":0}}],\
          \"context\":{{\"paths\":[\"...\"],\"from_work_units\":[\"<key>\"],\"knowledge\":[\"...\"]}},\
          \"harness\":\"<genre id, or omit to inherit this task's genre>\",\
+         \"features\":{{\"judgment\":\"low\"|\"medium\"|\"high\",\"ambiguity\":\"low\"|\"medium\"|\"high\",\
+         \"verifiability\":\"low\"|\"medium\"|\"high\",\"reversibility\":\"low\"|\"medium\"|\"high\",\
+         \"consequence\":\"low\"|\"medium\"|\"high\"}} (see below),\
          \"budget\":{{\"max_turns\":40,\"max_wall_secs\":1800}} (optional),\
          \"outputs\":[\"...\"]}}]}}\n\
          ```\n\
-         Do not write `assignee`, `tier`, or `model`: the owner never changes (WorkUnits inherit this \
-         task's owner) and the model lane is decided by celeris from each WorkUnit's nature (ADR-0069). \
-         Unknown fields are rejected, so do not add any field not shown above. `key` must match \
-         `[a-z0-9-]{{1,32}}` and be unique within this plan. `depends_on` refers to other `key`s in this \
-         same array and must form a DAG (no cycles). `checks` may only be `{{\"cmd\":\"...\",\
-         \"expect_exit\":0}}` (a deterministic command check; do not fabricate one you have not actually \
-         run — it will really be executed later). `harness`, if set, must be one of the genre ids listed \
-         below (available genres); an unset `harness` inherits this task's own genre. Plan at most \
-         {max_work_units} WorkUnits (a plan with more will be rejected and this run retried once). If \
-         you write a `budget` for a WorkUnit, `max_turns` will be capped at {work_unit_max_turns} and \
-         `max_wall_secs` at {work_unit_max_wall_secs}; if you omit it, the default is \
-         max({default_max_turns}, task budget) turns and max({default_max_wall_secs}, task budget) \
-         seconds.\n\n"
+         Do not write `assignee`, `tier`, `model`, or `lane`: the owner never changes (WorkUnits inherit \
+         this task's owner) and the model lane is decided by celeris from each WorkUnit's nature \
+         (ADR-0069, ADR-0074). Unknown fields are rejected, so do not add any field not shown above. \
+         `key` must match `[a-z0-9-]{{1,32}}` and be unique within this plan. `depends_on` refers to \
+         other `key`s in this same array and must form a DAG (no cycles). `checks` may only be \
+         `{{\"cmd\":\"...\",\"expect_exit\":0}}` (a deterministic command check; do not fabricate one \
+         you have not actually run — it will really be executed later). Give every mechanically \
+         checkable WorkUnit an executable `checks` entry: it raises that WorkUnit's verifiability and \
+         lets it route to a cheaper lane instead of defaulting to this task's own lane. `harness`, if \
+         set, must be one of the genre ids listed below (available genres); an unset `harness` inherits \
+         this task's own genre. Plan at most {max_work_units} WorkUnits (a plan with more will be \
+         rejected and this run retried once). If you write a `budget` for a WorkUnit, `max_turns` will \
+         be capped at {work_unit_max_turns} and `max_wall_secs` at {work_unit_max_wall_secs}; if you \
+         omit it, the default is max({default_max_turns}, task budget) turns and \
+         max({default_max_wall_secs}, task budget) seconds.\n\n"
     ));
     let schema = serde_json::to_string(&task_core::execution_plan::schema_value())
         .unwrap_or_else(|_| "{}".to_string());
@@ -777,6 +782,7 @@ fn build_execution_plan_prompt(
     ));
     out.push_str(&schema);
     out.push_str("\n```\n\n");
+    out.push_str(&work_unit_features_section());
     if let Some(planner) = &context.execution_planner {
         out.push_str(&format!(
             "## Why this task was judged compound (Complexity Gate, rule `{}`, score {})\n",
@@ -809,6 +815,44 @@ fn build_execution_plan_prompt(
     out
 }
 
+/// ADR-0074 D5.1（Phase F1）: WU ごとの `features`（`TaskFeatureHints` の軸）の説明と例。planner
+/// プロンプトの JSON 例の直後に足す（E6-1: 例に無く、planner は書かなかった。書かせても
+/// `.ok()` で黙って捨てていた。今は `execution_plan::validate` が読めない `features` を拒否する）。
+fn work_unit_features_section() -> String {
+    let mut out = String::from(
+        "### `features` (per-WorkUnit routing hints, ADR-0074 D5.1)\n\
+         Write at least these five axes for every WorkUnit so celeris can route it to the cheapest \
+         lane that still fits (a WorkUnit with no `features` just inherits this task's own lane, which \
+         wastes budget on mechanical WorkUnits). Each axis is `\"low\"`, `\"medium\"`, or `\"high\"`. Do \
+         not write `lane`, `tier`, `assignee`, or `model` here — celeris decides the lane from these \
+         axes plus whether `checks` is set.\n\n",
+    );
+    out.push_str(
+        "- `judgment`: how much open-ended judgment or design taste this WorkUnit needs. `low` = \
+         mechanical (rename, update a price table, apply a known fix); `high` = real design or \
+         investigation conclusions.\n\
+         - `ambiguity`: how underspecified the goal is. `low` = the objective and `done_when`/`checks` \
+         fully pin down the outcome; `high` = the WorkUnit has to make judgment calls about what \
+         \"done\" even means.\n\
+         - `verifiability`: whether the result can be checked deterministically. `high` = an executable \
+         `checks` command decides pass/fail; `low` = only a human can tell.\n\
+         - `reversibility`: how easy a mistake is to undo. `high` = changes live in this task's own \
+         worktree/branch; `low` = touches production, other people's data, or something sent externally.\n\
+         - `consequence`: how bad a mistake would be. `low` for routine internal changes; `high` for \
+         anything security-, billing-, or data-loss-adjacent.\n\n",
+    );
+    out.push_str(
+        "Example: updating a static price table with a `cargo test` check that confirms the new \
+         values is `{\"judgment\":\"low\",\"ambiguity\":\"low\",\"verifiability\":\"high\",\
+         \"reversibility\":\"high\",\"consequence\":\"low\"}` (mechanical, checkable, safe to redo — \
+         routes to the cheap lane). Designing a new routing policy with no executable check is \
+         `{\"judgment\":\"high\",\"ambiguity\":\"high\",\"verifiability\":\"low\",\
+         \"reversibility\":\"high\",\"consequence\":\"medium\"}` (routes to the frontier lane, capped by \
+         this task's own lane).\n\n",
+    );
+    out
+}
+
 /// ADR-0072 D17（Phase E4b 項目1）: replan run のプロンプトに足す節。今の計画の版・WU ごとの状態・
 /// 起こした理由・保持すべき `done` の WU の key を出す。`v2` の出力は `done` の WU を変えてはいけない、
 /// と明示する（D14 の検証がこれを拒否することも書く）。
@@ -816,9 +860,22 @@ fn replan_context_section(planner: &crate::protocol::ExecutionPlannerContext) ->
     let mut out = String::from("## You are REPLANNING an existing execution plan\n");
     out.push_str(
         "This is not the first plan for this task: a previous plan already ran, and something \
-         about it needs to change. Write a full new plan version (not a diff) that reflects the \
-         current reality below.\n\n",
+         about it needs to change.\n\n",
     );
+    let delta_schema = task_core::execution_plan::EXECUTION_PLAN_DELTA_SCHEMA;
+    let base_version = planner.current_plan_version.unwrap_or(1);
+    out.push_str(&format!(
+        "Prefer writing a DIFF instead of the full plan (ADR-0074 D5.3): write \
+         `{{\"schema\":\"{delta_schema}\",\"base_version\":{base_version},\"rationale\":\"...\",\
+         \"add\":[<new WorkUnit specs, same shape as above>],\
+         \"modify\":[{{\"key\":\"<existing key>\", ...only the fields you are changing...}}],\
+         \"remove\":[\"<key>\", ...]}}` to `{{artifacts}}/execution-plan.json`. Do NOT restate \
+         WorkUnits you are not changing — they carry over automatically, including every WorkUnit \
+         that is already done (you cannot touch a done WorkUnit's spec anyway; see below). If a \
+         diff genuinely cannot express what you need, you may instead write the full \
+         `\"schema\":\"{}\"` plan shape shown above (still subject to the done-WorkUnit rule).\n\n",
+        task_core::EXECUTION_PLAN_SCHEMA
+    ));
     if let Some(version) = planner.current_plan_version {
         out.push_str(&format!("Current (superseded) plan version: v{version}.\n"));
     }
@@ -2984,10 +3041,23 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         // 使える genre の一覧（WU の harness に使える id）。
         assert!(prompt.contains("Available genres"));
         assert!(prompt.contains("coding: write and fix code"));
-        // `assignee`/`tier`/`model` を書くなと明示している。
-        assert!(prompt.contains("Do not write `assignee`, `tier`, or `model`"));
+        // `assignee`/`tier`/`model`/`lane` を書くなと明示している。
+        assert!(prompt.contains("Do not write `assignee`, `tier`, `model`, or `lane`"));
         // ADR-0072 D17（Phase E4b 項目1）: `replan = false`（初回 planning）には replan 節が出ない。
         assert!(!prompt.contains("REPLANNING an existing execution plan"));
+        // ADR-0074 D5.1（Phase F1）: WU ごとの `features` の説明と例、5 軸の名前がすべて出る。
+        assert!(prompt.contains("per-WorkUnit routing hints"));
+        for axis in [
+            "judgment",
+            "ambiguity",
+            "verifiability",
+            "reversibility",
+            "consequence",
+        ] {
+            assert!(prompt.contains(axis), "missing axis {axis} in prompt");
+        }
+        assert!(prompt.contains("\"features\""));
+        assert!(prompt.contains("Do not write `lane`"));
 
         // `execution_planner` が無ければ従来どおりの execute プロンプト。
         let normal_prompt =

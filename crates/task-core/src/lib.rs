@@ -179,8 +179,8 @@ pub mod retry_policy;
 pub mod routing_audit;
 pub use model_policy::{
     LANE_POLICY_VERSION, LaneCeiling, LaneDecision, Level, ModelPolicy, RoutingRecord,
-    ShadowClassifier, ShadowDecision, TaskFeatureHints, TaskFeatures, decide_for_task,
-    decide_for_work_unit,
+    ShadowClassifier, ShadowDecision, TaskFeatureHints, TaskFeatures, WorkUnitLaneCap,
+    decide_for_task, decide_for_work_unit,
 };
 pub use retry_policy::{
     AttemptOutcome, AttemptRecord, BudgetState, EscalationPolicy, RetryDecision, is_budget_outcome,

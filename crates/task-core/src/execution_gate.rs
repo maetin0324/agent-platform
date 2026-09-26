@@ -365,11 +365,13 @@ impl GateMode {
     }
 }
 
-/// `[execution.planner]`（D14）。
+/// `[execution.planner]`（D14, ADR-0074 D5.3）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlannerConfig {
     pub adapter: String,
     pub permission_mode: String,
+    /// ADR-0074 D5.3（Phase F1）: planner run の lane（既定 `standard`。E3〜E6 は固定 `frontier` だった）。
+    pub tier: crate::model::Tier,
     pub max_turns: u32,
     pub max_wall_secs: u64,
 }
@@ -379,8 +381,10 @@ impl Default for PlannerConfig {
         PlannerConfig {
             adapter: "claude-code".to_string(),
             permission_mode: "plan".to_string(),
-            max_turns: 40,
-            max_wall_secs: 1200,
+            tier: crate::model::Tier::Standard,
+            // ADR-0074 D5.3（Phase F1）: 40 -> 24 turns, 1,200 -> 900 秒。
+            max_turns: 24,
+            max_wall_secs: 900,
         }
     }
 }
