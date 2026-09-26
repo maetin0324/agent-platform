@@ -475,6 +475,29 @@ export type Event =
       origin: RepairOrigin;
       type: "repair_scheduled";
       work_unit_id: string;
+    }
+  | {
+      account?: string | null;
+      calibration?: QuotaCalibration | null;
+      /**
+       * 参考の定価 USD（`Usage.cost_usd` と同じ値。不明なら `None`）。
+       */
+      list_price_usd?: number | null;
+      /**
+       * `windows` を 1 つに畳み込んだ代表値（`task_core::quota::representative_method`）。
+       */
+      method: "measured" | "apportioned" | "estimated" | "unknown" | "free";
+      run_id: string;
+      /**
+       * `"claude-oauth"` / `"codex-oauth"` / それ以外（アカウントプールを使わない provider の id。
+       * D4.2 手順 5 の `free` になりうる）。
+       */
+      source: string;
+      type: "quota_estimated";
+      weighted_tokens: number;
+      weights_version: string;
+      windows: QuotaWindowUse[];
+      work_unit_id?: string | null;
     };
 /**
  * DESIGN §5.3/§5.7 の `Check` 種別。
@@ -611,6 +634,10 @@ export type WorkUnitStatus =
  * ADR-0074 D6.2（Phase F1）: `Event::RepairScheduled.origin`（repair WU を起こした場所）。
  */
 export type RepairOrigin = "review" | "integration" | "delivery" | "planner";
+/**
+ * D4.2: 窓の種別（ADR-0024 と同じ 2 窓）。
+ */
+export type QuotaWindow = "five_hour" | "seven_day";
 /**
  * D5: `execution_plans.status`。
  */
@@ -3091,9 +3118,41 @@ export interface WorkUnitContext {
   paths?: string[];
 }
 /**
+ * D4.2 の較正値 `k_w`（同じ source の直近の `measured` run から求めた比の和）。
+ */
+export interface QuotaCalibration {
+  k: number;
+  samples: number;
+}
+/**
+ * D4.3: run 1 件・窓 1 つの消費。
+ */
+export interface QuotaWindowUse {
+  after?: number | null;
+  before?: number | null;
+  /**
+   * **ADR からの逸脱**（`docs/adr/0074-...md` の「Phase F3（quota）実装時の逸脱・明確化」参照）:
+   * D4.3 の JSON 例は窓ごとの `method` を書いていないが、5 時間 / 7 日で窓リセットの有無により
+   * 決め方が食い違いうる（例: 7 日枠だけ `resets_at` を跨ぐ）ため、窓ごとにも残す。
+   * `Event::QuotaEstimated.method` はこれらのうち最も確からしいものを 1 つに畳み込んだ値。
+   */
+  method: "measured" | "apportioned" | "estimated" | "unknown" | "free";
+  resets_at?: number | null;
+  /**
+   * 0〜100（パーセントポイント）。決められなければ `None`（`0` と混同しない。D4.2 4./unknown_is_never_zero）。
+   */
+  used_pct?: number | null;
+  window: QuotaWindow;
+}
+/**
  * `GET /metrics/execution?since=&group_by=gate_mode|genre|assignee|lane`。
  */
 export interface ExecutionMetricsSummary {
+  /**
+   * ADR-0074 D4.3（Phase F3 quota）: 今のアカウントの残量（`GET /llm/sources` と同じ値）。
+   * `[llm_proxy]` が無効なら空。
+   */
+  accounts_now?: AccountNowView[];
   group_by: string;
   groups: ExecutionMetricsGroup[];
   since?: string | null;
@@ -3101,6 +3160,18 @@ export interface ExecutionMetricsSummary {
    * `since` 以降に更新された（フィルタを満たした）タスクの総数。
    */
   total_tasks: number;
+}
+/**
+ * ADR-0074 D4.3（Phase F3 quota）: `GET /metrics/execution` の最上位に足す「今の残量」
+ * （`GET /llm/sources` の accounts と同じ値）。`source` は `sources[].id`（`claude-oauth` /
+ * `codex-oauth` / `openai-compatible:<id>`）。
+ */
+export interface AccountNowView {
+  cooldown_until?: number | null;
+  id: string;
+  remaining_long?: number | null;
+  remaining_short?: number | null;
+  source: string;
 }
 /**
  * `GET /metrics/execution` の 1 グループ（`group_by` の値ごと）。
@@ -3111,6 +3182,11 @@ export interface ExecutionMetricsGroup {
    */
   completion_rate?: number | null;
   continuations: number;
+  /**
+   * D4.3: このグループの全タスクで定価 USD が完全だったか（単価不明のモデルを使った run が
+   * 1 件でもあれば `false`）。
+   */
+  cost_usd_complete?: boolean;
   done: number;
   failed: number;
   /**
@@ -3124,9 +3200,33 @@ export interface ExecutionMetricsGroup {
    * `done`/`failed` 以外（実行中・blocked など）。
    */
   other: number;
+  /**
+   * ADR-0074 D4.3（Phase F3 quota）: このグループの (source, account, window) ごとの quota 消費の合計。
+   */
+  quota?: QuotaUse[];
   repairs: number;
   replans: number;
   tasks: number;
+}
+/**
+ * D4.3: アカウント × 窓の合計（`ExecutionMetrics.quota` / WU ごとの quota に使う集計行）。
+ */
+export interface QuotaUse {
+  account?: string | null;
+  method_counts: {
+    [k: string]: number;
+  };
+  /**
+   * この (source, account, window) にこの窓の値を持つ run の数（`unknown` も含む）。
+   */
+  runs: number;
+  source: string;
+  /**
+   * 決められた run だけの合計（`unknown` の run は寄与しない）。全部 `unknown`/`free` なら
+   * `free` は `0.0` を寄与するので `Some(0.0)`、`unknown` だけなら `None`。
+   */
+  used_pct?: number | null;
+  window: QuotaWindow;
 }
 /**
  * `POST`/`GET /tasks/{id}/execution-plan` の応答。
@@ -3173,6 +3273,11 @@ export interface WorkUnitView {
   kind: WorkUnitKind;
   last_checkpoint_run_id?: string | null;
   last_run_id?: string | null;
+  /**
+   * ADR-0074 D4.3（Phase F3 quota）: この WU の run の quota 消費の合計
+   * （`ExecutionPlanView::with_quota` が events から埋める。既定は空）。
+   */
+  quota?: QuotaUse[];
   retries: number;
   runs: number;
   seq: number;
@@ -5586,6 +5691,12 @@ export interface ExecutionMetrics {
    */
   continuations: number;
   cost_usd?: number | null;
+  /**
+   * D4.3: 定価 USD（`cost_usd`）が完全か。単価不明のモデルを使った run（token はあるのに
+   * `Usage.cost_usd` が無い run）が 1 件でもあれば `false`（`cost_usd` はその分だけ過小）。
+   * run が 1 件も無ければ `true`（欠けようがない）。
+   */
+  cost_usd_complete?: boolean;
   final_status: Status;
   /**
    * D13: Complexity Gate の最終判定（`Task.routing.execution.mode`）。gate が判定していない
@@ -5608,6 +5719,16 @@ export interface ExecutionMetrics {
    * D19: この Task の run の中で観測した context 量の最大値。
    */
   peak_context_tokens?: number | null;
+  /**
+   * ADR-0074 D4.3（Phase F3 quota）: アカウント × 窓ごとの quota 消費の合計
+   * （`Event::QuotaEstimated` から。同じ `run_id` は最後の Event が有効）。
+   */
+  quota?: QuotaUse[];
+  /**
+   * D4.3: quota が `unknown`（measured/apportioned/estimated のいずれでも決められなかった）
+   * だった run の数。
+   */
+  quota_unknown_runs?: number;
   /**
    * D16/ADR-0074 D6.2（Phase F1）: repair の class ごとの回数。`Event::RepairScheduled` から読む
    * （`"planner"` は replan が自ら書いた `kind = repair` の WU）。この Event が無い旧いタスク
