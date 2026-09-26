@@ -19413,3 +19413,84 @@ repair 化）と (b) 問題5（モデル単価欠損の費用集計への影響�
 - 設定変更（`config.toml.bak-20260926a`）: `workspace_root = /var/lib/celeris/workspaces`、`[workspace] build_cache_dir = /var/lib/celeris/build-cache`、`[memory] dir = /var/lib/celeris/memory`（langmem の SQLite は NFS に置かない）。`~/.local/celeris/memory` と生きていた workspace 1 件をコピー。デーモンは CT 起動時に旧設定で自動起動していたので in-flight 0 で再起動し、`GET /config` の `workspace_root` が `/var/lib/celeris/workspaces` になったことを確認。health ok、GUI 200。
 - `~/.rustup` は root squash で `nobody` 所有の空ディレクトリになっていた → 退避して `rustup toolchain install stable` で再構築（cargo 1.98.1）。`~/.cargo/config.toml` に `[build] target-dir = /var/lib/celeris/build-cache/cargo/agent-platform-dev`（開発ビルドの生成物をローカルへ）。ssh の ControlPath は前日に `/run/user/1001/` へ変更済み。
 - 残: 旧 loop ボリュームの終端 workspaces（成果物・checkpoint）は必要なら `/var/lib/celeris/workspaces` へ後追いコピー。クラスタ（pegasus / sirius）は未接続（人の TOTP 再接続）。`~/.local/celeris/releases`（現行 bin と gui）はホーム（NFS）のまま。数日問題なければ旧 loop イメージを削除。
+
+## Phase F0「並列 WU・途中確認・案件計画・quota 指標の設計」（完了日 2026-09-26）
+
+人の決定（2026-09-25）の 4 点と E6 の事実を設計に落とした。成果物は
+`docs/adr/0074-parallel-work-units-checkpoints-milestones-quota.md`（Status: Proposed）。コードは変更していない（docs のみ）。
+
+### 設計の要点（D 番号は ADR-0074）
+
+- **D1 WU 並列**: schema `celeris.execution-plan/2` に `phases`。同じ工程の中で依存の無い WU を並列に走らせ、同じ工程の依存は 1 つまで
+  （依存先のブランチから積み上げ）。WU ごとの worktree（`<task>/wu/<key>/`、ブランチ `celeris-wu/<task_id>/<key>`。`celeris/<task_id>/…` は
+  git の ref の D/F 衝突で作れない）。工程末尾の system WU `integrate-<phase>` が daemon の決定的な `git merge`（冪等）と検査の再実行を行い、
+  衝突は repair WU。`running` の鍵を `(TaskId, Option<WU>)`、WU の lease を `work_units` の列（migration 0027）に。Task の lease は工程の
+  保持者で WU の lease の最大値まで延ばすので、既存の `reclaim_expired_leases` → `InfraRequeue` は全部死んだときだけ効く。
+  並列数は `max_parallel_work_units`（既定 3、上限 6）と既存の provider / アカウント / 全体の枠。Ready の別 Task の 1 本目を優先。
+  最終レビューは Task 単位で 1 回のまま。v1 の計画は 1 工程・並列 1 で今と同じ。`[execution] parallel` の既定は false。
+- **D2 途中確認**: `PausePolicy`（none / each_phase / after[key か kind]）を人と CoS が書ける（planner は書けない）。停止点の統合の後で
+  `Trigger::PhaseGate`（Running → Blocked、reason `awaiting_human`、attempts 不変）。決定的な途中報告（`PhaseReported` と md）。受信箱の
+  `AttentionItem::PhaseCheckpoint`、通知は失敗通知と同じ scan の `PhaseCheckpoint`（`QuestionBlocked` からは除外）。操作は
+  `POST /tasks/{id}/execution/phase-gate {continue | replan(note 必須) | withdraw(= Cancel)}`。
+- **D3 案件計画**: マイルストーン Task = **案件直下という位置**（`project_id` あり・`parent_id` 無し・execute・対話 / support でない）。
+  既存の `milestones`（途中目標の判定の台帳。ADR-0033 / 0038 / 0044 D6）と 1:1 に結ぶ。DAG は既存の `depends_on`、依存先は `reached` で Go。
+  秘書が `celeris.project-plan/1` を出し、受信箱の `drafts` に 1 まとまりで出して人が承認（HUMAN GATE）。案件 replan は差分
+  （dispatch 前のものだけ）で同じ承認。planner の `children` → 既存の委譲で子 Task（WU の中の再帰はしない）。
+- **D4 quota**: run の前後の `RateLimitObservation` から `measured / apportioned / estimated / unknown / free` を決定的に推定
+  （重み付きトークン W と、実測の比の和による較正）。`Event::QuotaEstimated`、`ExecutionMetrics.quota` / `cost_usd_complete`、
+  `GET /metrics/execution` の `accounts_now`。**観測と記録だけで、quota で dispatch や選択を変えない**（予算管理は別プロジェクト）。
+- **D5 WU ごとの lane**: planner に WU ごとの `features`（`TaskFeatureHints`）を書かせ、読めなければ検証エラー。lane は既存の
+  `decide_for_work_unit`、WU の lane ≤ max(Task の lane, standard)。planner は standard・24 turn・900 秒、計画のサイズ上限、replan は差分
+  （`execution-plan-delta/1`）。
+- **D6**: repair に `review_timeout`（daemon が 2 倍の timeout で 1 回再実行 → だめなら repair WU）と Task 内部の `merge_base`（決定的な merge →
+  衝突なら repair WU）。`RepairScheduled` で class を残す（`unknown` を無くす）。成果物は daemon の run 後の `artifacts_dir` 走査で登録。
+
+### F1 の受け入れ条件（ADR-0074 §7 F1）
+
+- (a) planner プロンプトが WU ごとの `features` を求める（スナップショット）。
+- (b) `TaskFeatureHints` として読めない `features` は計画の検証エラー（1 回再試行 → atomic）。保存済みの v1 計画は読める。
+- (c) 機械的な WU（judgment/ambiguity low、verifiability/reversibility high、`checks` あり）が cheap。features 無しは Task の lane。
+  Task が standard なら WU の frontier は standard に丸め、`clamped_by` を残す。
+- (d) planner run は `standard`（`planner/system-standard`）、24 turn / 900 秒。人の明示 frontier の Task では frontier。
+- (e) 計画のサイズ上限の超過は拒否 → 再試行 → atomic。
+- (f) replan の差分出力が旧版に当てられ、done の WU を書かずに v(n+1) が採用される。全体形式も受け付ける。差分の件数を reason に残す。
+- (g) `command timed out after` の不合格は 2 倍の timeout で 1 回再実行、通れば attempts 不変。通らなければ `review_timeout` の repair WU。
+- (h) `merge-base --is-ancestor` の不合格は衝突なしなら決定的な merge → 再レビュー、衝突ありなら `merge_base` の repair WU。
+- (i) `RepairScheduled` が残り、`repairs_by_class` に `unknown` が出ない。
+- (j) git worktree の Task の `artifacts/report.md` が `ArtifactProduced{declared:false}` になり `GET /tasks/{id}/artifacts` に出る。
+- (k) reviewer run の `runs` 索引の欠落（E6 報告 問題 3）が直る。
+- 共通: `cargo fmt --all -- --check`、`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`。外部ネットワークに出ない。
+
+### 実行したコマンド（F0）
+
+- 読んだもの: `CLAUDE.md`、`docs/SPEC.md`、ADR-0072（全体）、E6 報告、ADR-0069 / 0053 / 0046 / 0043 / 0033 / 0038 / 0016 / 0067、PROGRESS 末尾、
+  `crates/task-core/src/{execution_plan.rs, execution_gate.rs, model_policy.rs, execution_metrics.rs, accounts.rs, org.rs}`、
+  `crates/task-dispatch/src/{execution_scheduler.rs, dispatcher.rs, undeclared_artifacts.rs, review.rs}`、`crates/task-worker/src/claude_code.rs`
+  （`build_execution_plan_prompt`）、`crates/llm-proxy/src/{selection.rs, sources_view.rs}`、`crates/task-ops/src/inbox.rs`、`crates/celeris/src/notify.rs`、
+  `gui/app/components/ExecutionSection.tsx`。
+- コードは変えていない（docs のみ。差分は `docs/PROGRESS.md` と ADR-0074 だけ）。
+- `cargo clippy --workspace -- -D warnings`: **exit 101**。既存コードの `clippy::result_large_err` 2 件
+  （`crates/task-worker/src/codex_account.rs:91`、`:130`。`AccountCheck` の Err が 128 バイト超）。NFS 移行で rustup を再構築した
+  toolchain（cargo 1.98.1）の clippy が新しく出すもので、本 Phase の差分とは無関係。
+- `cargo test --workspace`: NFS 移行後の空の cargo registry に依存を取り直すのに時間がかかり、commit の時点で終わっていない。
+  結果は F1 の開始時に取り直す。
+
+### 設計中に確かめた事実（ADR に file:line で記録）
+
+- `WorkUnitSpec.features` は既に型と読み手があり（`execution_plan.rs:118-120`、`model_policy.rs:728-745`）、planner の JSON 例に無いこと
+  （`claude_code.rs:747-758`）と読めない値を黙って捨てることが E6-1 の原因。F1 は配線ではなくプロンプトと検証の変更で済む。
+- 途中目標（`milestones`）と ADR-0038 の判定・`MilestoneReady` の通知が既にあり、直列の鎖として動いている。案件計画は新しい実体を作らず
+  これを DAG に広げる形にした。
+
+### 未解決事項
+
+- ADR-0074 §8 の U-F1〜U-F9（同じ工程の同じファイルの編集、共有 `CARGO_TARGET_DIR` のロック、アカウントの人の手での利用による
+  measured の偏り、quota の重みの仮定、codex の rate limit の頻度、CoS の案件直下の Task を draft にする影響、`auto_advance` の置き場、
+  途中報告の秘書の要約、`review_timeout` の再実行の無駄）。
+- ADR-0072 §7 の U1・U2・U7・U8・U9・U10 は本 ADR では扱わない。
+
+### 提案
+
+- F1 の最初に上記の clippy `result_large_err`（codex_account.rs。`Box` 化）を直し、`cargo test --workspace` の基準値を取り直す。
+- F1 → F2 → F3（quota は F1 の後すぐ、途中確認は F2 の schema の後に並行）→ F4 → F5（F1 の後に 1 回、F4 の後に 1 回）。
+- F5a を流すまで本番の `[execution] gate` は `shadow` のまま（E6 分析の推奨どおり）。`parallel` の既定は F5b の結果を見て人が決める。
