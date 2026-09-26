@@ -55,6 +55,7 @@ export const WORK_UNIT_KIND_LABEL: Record<WorkUnitKind, string> = {
   test: "テスト",
   release: "リリース",
   repair: "修復",
+  integrate: "統合",
   other: "その他",
 };
 
