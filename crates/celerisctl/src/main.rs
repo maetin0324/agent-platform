@@ -13,6 +13,7 @@ use task_core::SqliteStore;
 
 use commands::accept::{self, AcceptArgs};
 use commands::add::{self, AddArgs};
+use commands::build_cache::{self, BuildCacheCommand};
 use commands::cancel::{self, CancelArgs};
 use commands::config::{self as config_cmd, ConfigCommand};
 use commands::db::{self as db_cmd, DbCommand};
@@ -50,6 +51,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// 共有 Cargo ビルドキャッシュの古い repo-key を列挙・削除する（DB は開かない）。
+    BuildCache {
+        #[command(subcommand)]
+        command: BuildCacheCommand,
+    },
     /// Read-only docs audit and human-approved reconciliation.
     DocsMaintenance {
         #[command(subcommand)]
@@ -141,6 +147,7 @@ fn resolve_db_path(cli_db: Option<PathBuf>) -> PathBuf {
 fn dispatch(store: &SqliteStore, db_path: &Path, command: Command) -> Result<ExitCode, CliError> {
     match command {
         Command::DocsMaintenance { .. } => unreachable!("handled before store open"),
+        Command::BuildCache { .. } => unreachable!("handled before store open"),
         Command::Org { command } => org_cmd::run(store, db_path, command),
         // `Config` は DB を開く前に処理される（`main` を見よ）。
         Command::Config { command } => config_cmd::run(command),
@@ -175,6 +182,15 @@ fn dispatch(store: &SqliteStore, db_path: &Path, command: Command) -> Result<Exi
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::BuildCache { command } = cli.command {
+        return match build_cache::run(command) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if let Command::DocsMaintenance { command } = cli.command {
         return match commands::docs_maintenance::run(command) {
             Ok(code) => code,

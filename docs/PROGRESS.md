@@ -20114,3 +20114,10 @@ run 開始部分で、F3 の `quota_begin` を `dispatch_one` に移して解消
 
 - verify（ルート満杯の解消後に再実行）全 true（N-1 は schema 27 で想定どおり false）。in-flight 0 で停止→起動の昇格。本番は WU ごとの lane / planner standard / replan 差分 / repair 分類 / 成果物登録 / 計画 v2 schema / quota 記録が有効。`workspace_root` はローカルのまま。
 - F2b（WU 並列の本体、(c)〜(l)）を main に統合（ddd6a5d）。統合時に GUI の `WorkUnitKind::integrate` ラベルが F2b 側と私の暫定修正で重複 → 1 つに。ゲート: fmt 0 / test FAILED 0 / clippy 0 / GUI typecheck・lint・test 1099 件・gen:types 差分ゼロ・build。
+
+## Phase F5-1 dogfood: ディスクゲート・codex cache usage・API 文書（2026-09-26）
+
+- `[dispatch] min_free_disk_mb`（既定 5120）を導入。新規 worker/reviewer run の前に `/`、`workspace_root`、`build_cache_dir` の空きを確認し、不足中は新規起動を止めて Phase 116 infra の「ディスク不足」を BadNews 通知に 1 回登録する。空きが戻れば次の tick で自動再開する。既存 run の完了・lease 処理は続ける。
+- `celerisctl build-cache prune [--older-than <days>] [--dry-run]` は設定済み `build_cache_dir/cargo/*` の古い実ディレクトリだけを対象とする。既定 30 日、symlink は除外。
+- Codex CLI `turn.completed.usage.cached_input_tokens` を `Usage.cache_read_tokens` に取り込む。`ExecutionMetrics.total_cache_read_tokens` は観測値のみ合計する。詳細は ADR-0074 の Phase F5-1 節。
+- 実行・計画・再実行 API の型と既定値を `docs/celeris-api-v1.md` に追加した。

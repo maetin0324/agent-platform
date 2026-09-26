@@ -911,17 +911,13 @@ fn handle_line(
             }
         }
         "turn.completed" => {
-            // ADR-0061（Phase 104）: cache tokens のフィールド名は実機で確認していない
-            // （OpenAI Responses API の `input_tokens_details.cached_tokens` を想定した best-effort。
-            // 無ければ `None` のまま。`cost_usd` はここでは埋めない。model 文字列は呼び出し元でしか
-            // 分からない — `claude_code::terminal_from_result` と同じ構造。ADR-0008 D3）。
+            // codex exec --json の turn.completed.usage は cached_input_tokens を公開する。
+            // 古い stream で欄が無ければ None のままにする。
             let usage = value.get("usage").map(|u| Usage {
                 input_tokens: u.get("input_tokens").and_then(|v| v.as_u64()),
                 output_tokens: u.get("output_tokens").and_then(|v| v.as_u64()),
-                cache_read_tokens: u
-                    .pointer("/input_tokens_details/cached_tokens")
-                    .and_then(|v| v.as_u64()),
-                cache_creation_tokens: None,
+                cache_read_tokens: u.get("cached_input_tokens").and_then(|v| v.as_u64()),
+                cache_creation_tokens: u.get("cache_write_input_tokens").and_then(|v| v.as_u64()),
                 cost_usd: None,
             });
             *last_signal = Some(TurnSignal::Completed { usage });
@@ -1241,7 +1237,16 @@ mod tests {
         );
         // `msg` は従来どおり行そのもの。
         assert!(items[1].0.contains("command_execution"), "{}", items[1].0);
-        assert!(matches!(signal, Some(TurnSignal::Completed { .. })));
+        assert!(matches!(
+            signal,
+            Some(TurnSignal::Completed {
+                usage: Some(Usage {
+                    cache_read_tokens: Some(4),
+                    cache_creation_tokens: Some(2),
+                    ..
+                })
+            })
+        ));
         assert!(error.is_none());
     }
 
@@ -1254,7 +1259,7 @@ mod tests {
 echo '{"type":"thread.started"}'
 echo '{"type":"item.started","item":{"type":"command_execution","command":"cargo test"}}'
 printf '%s' '{"summary":"added usage example","evidence":[]}' > artifacts/result.json
-echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
+echo '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":20}}'
 "#,
         );
         let adapter = CodexAdapter::new(config);
@@ -1277,7 +1282,7 @@ echo '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}'
                     Some(Usage {
                         input_tokens: Some(10),
                         output_tokens: Some(20),
-                        cache_read_tokens: None,
+                        cache_read_tokens: Some(4),
                         cache_creation_tokens: None,
                         cost_usd: None,
                     })

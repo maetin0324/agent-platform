@@ -5,4 +5,4 @@
 {"type":"item.completed","item":{"id":"it-3","type":"command_execution","command":"cargo clippy","aggregated_output":"error: unused variable","exit_code":101,"status":"failed"}}
 {"type":"item.completed","item":{"id":"it-4","type":"agent_message","text":"テストは通りました。"}}
 {"type":"item.completed","item":{"id":"it-5","type":"todo_list","items":[{"text":"直す","completed":false}]}}
-{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":20}}
+{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"cache_write_input_tokens":2,"output_tokens":20}}

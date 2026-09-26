@@ -78,6 +78,11 @@ dir = "../memory"
 # 人が手で回すこともできる。
 # prune_after_secs = 86400
 
+# 新しい run の起動前に /、workspace_root、build_cache_dir の空きを確認する（MiB）。
+# 0 で無効。不足中は通知を 1 回出して保留し、回復すると自動で再開する。
+[dispatch]
+# min_free_disk_mb = 5120
+
 # 変更の取り込み（ADR-0043 D5、Phase 54）。タスクが作ったブランチを**人が** GUI から
 # 「main に取り込む」「PR を作る」「捨てる」する（`GET/POST /api/v1/tasks/{id}/changes...`）。
 # 押せるのは人だけで、組織の「人」＝ワーカーからこの経路には届かない（SPEC §3.6）。

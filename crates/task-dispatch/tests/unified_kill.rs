@@ -133,6 +133,7 @@ fn dispatcher(
             max_requeues: 5,
             max_reviewer_retries: 3,
             max_infra_retries: 5,
+            min_free_disk_mb: 5120,
             roles: Vec::new(),
             genres: Vec::new(),
             delegation: DelegationLimits::default(),

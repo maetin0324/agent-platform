@@ -1,5 +1,7 @@
 # celeris HTTP API v1 仕様
 
+実行・計画・再実行の追加エンドポイントは [`docs/celeris-api-v1.md`](../celeris-api-v1.md) を参照。
+
 - 状態: **Accepted**（人間の決定 H1 / H5〜H7。celeris 側の ADR-0013、GUI 側の ADR-GUI-0001）。改訂日 2026-09-14
 - 改訂: 2026-09-21 Phase 82（ADR-0056 D3 続き、skills を GUI から見る・作る・mount する）
   — **追加のみ。v1 のまま**。エンドポイント 101〜106: `GET /skills`・`GET /skills/{name}`・
@@ -1523,16 +1525,15 @@ Go か再設計」を**人の 3 つの答え**にしたもの（ADR-0038 D2）�
 無く、「古い draft を取り消して秘書に分解し直させる」という遠回りをした。SPEC §7 のアジャイル（途中目標
 ごとに判定してやり直す）には、失敗した仕事を人が一手でやり直せることが要る。
 
-要求本文 `{"accept": false}`（省略可。既定 `false`）。
+要求本文 `RetryBody`（省略可。`accept` の既定は `true`）。`workspace` を指定すると複製先の作業場所を差し替える。
 
 - `failed` または `cancelled` のタスクを**複製して新しいタスクを作る**（`Failed`/`Cancelled` を非終端に
   戻す状態機械の遷移は**足していない**。DESIGN の状態機械を壊さないため）。それ以外の状態は 409
   `invalid_transition`（`trigger: "retry"`）。無いタスクは 404 `task_not_found`。
 - 複製するもの: `title` / `objective` / `acceptance` / `inputs` / `worker_hint` / `budget` / `role` /
   `genre` / `project_id` / `milestone_id` / `assignee` / `parent_id` / `workspace`。`depends_on` は
-  **元と同じ**。`attempts` は 0 から。新しいタスクは既定で `draft`（人が Go を出す。§3.10 の
-  `POST /tasks/{id}/approve` で `draft → ready`）。`accept: true` を本文に付ければ、作成の時点で
-  `ready` から始まる（別の遷移は経由しない。`task_ops::add::create_support_task` と同じ「その場で
+  **元と同じ**。`attempts` は 0 から。新しいタスクは既定で `ready` から始まる。`accept: false`
+  を本文に付けたときだけ `draft` にする（別の遷移は経由しない。`task_ops::add::create_support_task` と同じ「その場で
   `ready` を書く」流儀）。新しいタスクに `Event::Created` + `Event::Retried{from: <元の id>}` を記録する。
 - **元のタスクに依存していた未終端のタスク**（`draft` / `ready` / `blocked`。対話タスクは
   `DependencyFailed` の対象外なので `draft`/`ready` のまま残っていることがある。P-78）と、**その依存の
@@ -1542,8 +1543,7 @@ Go か再設計」を**人の 3 つの答え**にしたもの（ADR-0038 D2）�
   reason: "retried"}` を記録）、前者は状態を変えずに `depends_on` だけ書き換える。
 - 応答は `201 {"task_id": "01J…", "rewired": ["01J…", …]}`（`Location: /api/v1/tasks/{task_id}`）。
   `rewired` は張り替えたタスクの id（順不同）。
-- `token_file` があれば通常どおりトークン必須、無ければ他の変更系と同じ（**管理系ではない**。
-  §3.10〜3.13 と同じ扱い）。
+- 管理系。`token_file` が無くてもトークン無しの操作は 401（Phase 116）。
 - `task_ops::actions(task)`（§5.4）は `failed` / `cancelled` のタスクに `Action::Retry`（`"retry"`）を足す。
   受信箱の `failed` 項目、`GET /tasks/{id}` の `failed`/`cancelled` 表示、案件の仕事の木の失敗ノードは、
   みな `actions` にこれが立つのでボタンの表示に迷わない。

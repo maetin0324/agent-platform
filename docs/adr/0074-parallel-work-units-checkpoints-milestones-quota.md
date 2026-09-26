@@ -1076,3 +1076,7 @@ F2 の (c)〜(l)（鍵 (task, WU)・WU の worktree・統合 WU・伝播・再�
 26. planner の v2 の書き方は `ExecutionPlannerContext.parallel`（`[execution] parallel = true` のときだけ `true`）の
     ときだけプロンプトに足す（v1 のプロンプトは不変）。worker への「WU のブランチに commit してよい・他の WU の
     ファイルに触らない」は `preamble::work_unit_branch_section`（`WorkUnitPromptContext.branch` があるときだけ）。
+
+## Phase F5-1 dogfood: codex cache usage（2026-09-26）
+
+E6 の fixture `crates/task-worker/tests/fixtures/codex-stream.jsonl` は従来 `turn.completed.usage` に `input_tokens` / `output_tokens` しか含まず、cache の欄は無かった。Codex CLI 0.157.0 の `codex exec --help` は `--json` stream の各 usage field を列挙しないが、[Codex の `exec_events.rs`](https://github.com/openai/codex/blob/main/codex-rs/exec/src/exec_events.rs) は `turn.completed.usage.cached_input_tokens` と `cache_write_input_tokens` を公開する。したがって fixture に両欄を追加し、codex アダプタが `Usage.cache_read_tokens` / `cache_creation_tokens` に写す試験を追加した。`WorkerFinished.usage` は既存の終端経路でその `Usage` を保存し、`ExecutionMetrics.total_cache_read_tokens` は観測できた run の cache read を合計する。欄が無い旧 stream は `None` のままとし、`input_tokens_uncached_estimate` は追加しない。

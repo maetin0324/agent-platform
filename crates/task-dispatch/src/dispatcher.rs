@@ -23,9 +23,9 @@ use task_core::plan::{PlanLimits, PlanOutput, materialize_logging};
 use task_core::report::{HEADLINE_MAX_CHARS, first_line, truncate_chars};
 use task_core::{
     AccountAdapter, ArtifactRef, Check, DelegateTask, DelegationLimits, Event, GenreSpec,
-    ListFilter, ListOrder, NodeSession, OnChildFailure, OrgKind, ProjectId, ProjectStatus,
-    RateLimitObservation, RoleSpec, RunRole, SessionKind, Status, StoreError, Task, TaskId,
-    TaskKind, TaskStore, Tier, Trigger, WorkspaceMode, WorkspaceSpec, support_kind,
+    ListFilter, ListOrder, NodeSession, NotificationKind, OnChildFailure, OrgKind, ProjectId,
+    ProjectStatus, RateLimitObservation, RoleSpec, RunRole, SessionKind, Status, StoreError, Task,
+    TaskId, TaskKind, TaskStore, Tier, Trigger, WorkspaceMode, WorkspaceSpec, support_kind,
 };
 use task_ops::daemon::{
     AccountCooldownLive, AccountLive, AccountUsageLive, ClusterLive, CooldownView, DaemonSnapshot,
@@ -84,6 +84,17 @@ fn log_slow_step(step: &'static str, started: Instant) {
             "slow dispatcher step"
         );
     }
+}
+
+/// 未作成の作業場所は最も近い既存の親 filesystem を測る。statvfs は symlink も解決する。
+fn free_disk_mb(path: &Path) -> Result<u64, String> {
+    let existing = path
+        .ancestors()
+        .find(|p| p.exists())
+        .ok_or_else(|| format!("{}: no existing ancestor", path.display()))?;
+    let stat =
+        nix::sys::statvfs::statvfs(existing).map_err(|e| format!("{}: {e}", existing.display()))?;
+    Ok(stat.blocks_available().saturating_mul(stat.fragment_size()) / (1024 * 1024))
 }
 
 /// ADR-0018: コマンドを実行するクラスタ 1 つ分の設定（`celeris::config::ClusterConfig` の写し。task-dispatch は celeris に依存しない）。
@@ -535,6 +546,8 @@ pub struct DispatchConfig {
     /// `"infra failure ×N: …"` として打ち切る（`Trigger::LeaseExpired` は使わなくなった。
     /// `reclaim_expired_leases` もこの上限を通す）。既定 5。
     pub max_infra_retries: u32,
+    /// 新規 run の開始を許す各 filesystem の最小空き容量 (MiB)。0 で無効。
+    pub min_free_disk_mb: u64,
     /// ADR-0016 D1: `[[roles]]`。run 開始時に `RunContext.role`（指示文）を載せ、委譲された子の既定に使う。
     pub roles: Vec<RoleSpec>,
     /// ADR-0027 D1: `[[genres]]`。委譲の分野解決（`default_role` の既定の穴埋め）と、委譲できる run に渡す
@@ -1658,6 +1671,8 @@ pub struct Dispatcher {
     /// 永続化しない。dispatcher の再起動で猶予は失われるが、上限判定自体は `consecutive_infra_requeues`
     /// が events から数え直すので安全側。ADR-0070 §2 D3 参照）。
     infra_backoff: HashMap<TaskId, OffsetDateTime>,
+    disk_low: bool,
+    disk_ready: bool,
     /// 「設定に合うプロバイダが無い」警告を出した（連続 tick で繰り返さない）タスク（ADR-0012 D2）。
     warned_unroutable: std::collections::HashSet<TaskId>,
     /// ADR-0062 B1（Phase 107）: 「担当が cluster:<id> を持たない」警告を出した（連続 tick で
@@ -1908,6 +1923,8 @@ impl Dispatcher {
             reviewing: HashMap::new(),
             pending_subjects: HashMap::new(),
             infra_backoff: HashMap::new(),
+            disk_low: false,
+            disk_ready: true,
             warned_unroutable: std::collections::HashSet::new(),
             warned_cluster_tool: std::collections::HashSet::new(),
             just_aborted: std::collections::HashSet::new(),
@@ -2368,6 +2385,57 @@ impl Dispatcher {
         }
     }
 
+    /// ディスク不足は Phase 116 の infra 障害として一度だけ通知し、空きが戻ると自動で解除する。
+    /// 検査不能も安全側に倒して run を開始しない。
+    fn check_disk_space(&mut self) -> bool {
+        if self.config.min_free_disk_mb == 0 {
+            self.disk_low = false;
+            return true;
+        }
+        let paths = [
+            Path::new("/"),
+            &self.config.workspace_root,
+            &self.config.build_cache_dir,
+        ];
+        let low = paths.iter().find_map(|path| match free_disk_mb(path) {
+            Ok(free) if free < self.config.min_free_disk_mb => Some(format!(
+                "{}: {free} MiB free (minimum {} MiB)",
+                path.display(),
+                self.config.min_free_disk_mb
+            )),
+            Err(error) => Some(error),
+            _ => None,
+        });
+        match low {
+            Some(reason) => {
+                if !self.disk_low {
+                    let body = format!("ディスク不足 (infra): {reason}. 新規 run を保留します。");
+                    tracing::warn!(%body, "dispatch paused for disk space");
+                    match self.store.notification_upsert_pending(
+                        NotificationKind::BadNews,
+                        &format!("dispatch:disk-low:{}", ulid::Ulid::new()),
+                        &body,
+                        None,
+                        OffsetDateTime::now_utc(),
+                    ) {
+                        Ok(_) => self.disk_low = true,
+                        Err(error) => {
+                            tracing::error!(%error, "failed to record disk shortage notification")
+                        }
+                    }
+                }
+                false
+            }
+            None => {
+                if self.disk_low {
+                    tracing::info!("disk space recovered; dispatch resumed");
+                }
+                self.disk_low = false;
+                true
+            }
+        }
+    }
+
     /// 1 tick。tokio ランタイム内から呼ぶ（ワーカーとレビューを `tokio::spawn` する）。
     pub fn tick(&mut self) -> Result<TickReport, DispatchError> {
         self.ticks += 1;
@@ -2379,6 +2447,8 @@ impl Dispatcher {
                 book.clear_expired(now);
             }
         }
+        // drain_completions からも reviewer run が起動されるため、完了処理より先に判定する。
+        self.disk_ready = !self.accepting_new_work || self.check_disk_space();
         let mut report = TickReport::default();
         // ADR-0015 D2: 遅い tick の内訳を出せるよう、段階ごとに所要時間を測る。
         let started = Instant::now();
@@ -2407,7 +2477,7 @@ impl Dispatcher {
         let prune_ms = lap(&mut at);
         // ADR-0040 D4: draining のインスタンスは新しい仕事を始めない（拾い上げも dispatch もしない）。
         // 手元の run とレビューの完了・リース更新・後処理は上の `drain_completions` 以下でそのまま動く。
-        if self.accepting_new_work {
+        if self.accepting_new_work && self.disk_ready {
             self.recover_reviews()?;
         }
         let recover_ms = lap(&mut at);
@@ -2419,7 +2489,7 @@ impl Dispatcher {
         let cluster_ms = lap(&mut at);
         run_cluster_hooks_off_async(|| self.refresh_cluster_tunnels());
         let tunnel_ms = lap(&mut at);
-        report.dispatched = if self.accepting_new_work {
+        report.dispatched = if self.accepting_new_work && self.disk_ready {
             self.dispatch_ready()?
         } else {
             0
@@ -10179,7 +10249,7 @@ impl Dispatcher {
         run_id: String,
         subject: &ReviewSubject,
     ) -> Result<bool, DispatchError> {
-        if !self.accepting_new_work {
+        if !self.accepting_new_work || !self.disk_ready {
             return Ok(false);
         }
         let Some(task) = self.store.get(task_id)? else {
@@ -12681,6 +12751,7 @@ mod tests {
                 max_requeues: 5,
                 max_reviewer_retries: 3,
                 max_infra_retries: 5,
+                min_free_disk_mb: 5120,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -12699,6 +12770,46 @@ mod tests {
                 execution: ExecutionConfig::default(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn disk_gate_notifies_once_and_recovers_without_a_run() {
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let task = new_task(
+            dir.path(),
+            Check::Command {
+                cmd: ":".into(),
+                expect_exit: 0,
+            },
+            0,
+        );
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(InstantAdapter {
+            terminal: Terminal::Done {
+                summary: String::new(),
+                evidence: vec![],
+                usage: None,
+            },
+            delay: Duration::ZERO,
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        d.config.workspace_root = dir.path().join("not-created");
+        assert!(free_disk_mb(&d.config.workspace_root).is_ok());
+        d.config.min_free_disk_mb = u64::MAX;
+        assert_eq!(d.tick().unwrap().dispatched, 0);
+        assert_eq!(d.tick().unwrap().dispatched, 0);
+        assert_eq!(store.get(task.id).unwrap().unwrap().status, Status::Ready);
+        let notifications = store.notification_recent(10).unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].kind, NotificationKind::BadNews);
+        assert!(notifications[0].body.contains("ディスク不足"));
+        d.config.min_free_disk_mb = 0;
+        assert_eq!(d.tick().unwrap().dispatched, 1);
+        assert!(!d.disk_low);
+        d.config.min_free_disk_mb = u64::MAX;
+        assert!(!d.check_disk_space());
+        assert_eq!(store.notification_recent(10).unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -13924,6 +14035,7 @@ mod tests {
                 max_requeues: 5,
                 max_reviewer_retries: 3,
                 max_infra_retries: 5,
+                min_free_disk_mb: 5120,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -14082,6 +14194,7 @@ mod tests {
                 max_requeues: 5,
                 max_reviewer_retries: 3,
                 max_infra_retries: 5,
+                min_free_disk_mb: 5120,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -14257,6 +14370,7 @@ mod tests {
                 max_requeues: 5,
                 max_reviewer_retries: 3,
                 max_infra_retries: 5,
+                min_free_disk_mb: 5120,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -18601,6 +18715,7 @@ mod tests {
                 max_requeues,
                 max_reviewer_retries: 3,
                 max_infra_retries: 5,
+                min_free_disk_mb: 5120,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),
@@ -27827,6 +27942,7 @@ mod knowledge_fallback_tests {
                 max_requeues: 5,
                 max_reviewer_retries: 3,
                 max_infra_retries: 5,
+                min_free_disk_mb: 5120,
                 roles: Vec::new(),
                 genres: Vec::new(),
                 delegation: DelegationLimits::default(),

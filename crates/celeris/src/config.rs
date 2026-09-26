@@ -1101,18 +1101,25 @@ fn default_max_reviewer_retries() -> u32 {
 pub struct DispatchTomlConfig {
     #[serde(default = "default_max_infra_retries")]
     pub max_infra_retries: u32,
+    #[serde(default = "default_min_free_disk_mb")]
+    pub min_free_disk_mb: u64,
 }
 
 impl Default for DispatchTomlConfig {
     fn default() -> Self {
         Self {
             max_infra_retries: default_max_infra_retries(),
+            min_free_disk_mb: default_min_free_disk_mb(),
         }
     }
 }
 
 fn default_max_infra_retries() -> u32 {
     5
+}
+
+fn default_min_free_disk_mb() -> u64 {
+    5120
 }
 
 /// `[execution]`（ADR-0072 D18, Phase E1）: continuation（予算切れ・yield の続き）の可否と上限。
@@ -2898,6 +2905,7 @@ impl Config {
             max_requeues: self.max_requeues,
             max_reviewer_retries: self.review.max_reviewer_retries,
             max_infra_retries: self.dispatch.max_infra_retries,
+            min_free_disk_mb: self.dispatch.min_free_disk_mb,
             reviewer_hint: WorkerHint {
                 // ADR-0069 Phase 118 D4: 他に何も分からないときの既定値（後方互換）。実際の reviewer
                 // run の lane は `Dispatcher::pick_reviewer` が `reviewer_tier_override` /
@@ -4897,6 +4905,7 @@ host = "h"
         assert_eq!(d.retry_backoff_base, Duration::from_secs(10));
         assert_eq!(d.retry_backoff_max, Duration::from_secs(300));
         assert_eq!(d.max_requeues, 5);
+        assert_eq!(d.min_free_disk_mb, 5120);
         assert_eq!(
             d.reviewer_hint,
             WorkerHint {
@@ -4931,6 +4940,15 @@ tiers = ["cheap"]
                 adapter: Some("claude-code".into())
             }
         );
+    }
+
+    #[test]
+    fn dispatch_min_free_disk_mb_can_be_configured() {
+        let cfg: Config = toml::from_str(
+            "[[providers]]\nid = \"x\"\nadapter = \"fake\"\n[dispatch]\nmin_free_disk_mb = 2048\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.dispatch_config().min_free_disk_mb, 2048);
     }
 
     /// ADR-0010 D9: Reviewer run を満たせるプロバイダが無い設定はエラー。未知キーも拒否。

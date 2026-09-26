@@ -1954,6 +1954,7 @@ name = "task-dispatch"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "nix",
  "serde",
  "serde_json",
  "task-core",

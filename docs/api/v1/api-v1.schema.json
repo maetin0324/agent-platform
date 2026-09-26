@@ -5521,6 +5521,15 @@
           "description": "role ごとの run 数（`\"worker\"` / `\"reviewer\"` / `\"planner\"`）。",
           "type": "object"
         },
+        "total_cache_read_tokens": {
+          "description": "観測できた cached input tokens の合計。未報告の run は 0 と見なさず、全 run で未報告なら None。",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "total_input_tokens": {
           "format": "uint64",
           "minimum": 0,

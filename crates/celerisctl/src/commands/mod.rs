@@ -1,6 +1,7 @@
 /// ADR-0070 D2 追記（Phase 116）: `celerisctl accept <task_id>`。`draft` を `ready` にする専用の道具。
 pub mod accept;
 pub mod add;
+pub mod build_cache;
 pub mod cancel;
 /// ADR-0046 D3（Phase 59）: `celerisctl config to-harnesses`。
 pub mod config;

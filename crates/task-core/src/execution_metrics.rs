@@ -67,6 +67,9 @@ pub struct ExecutionMetrics {
     pub peak_context_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_input_tokens: Option<u64>,
+    /// 観測できた cached input tokens の合計。未報告の run は 0 と見なさず、全 run で未報告なら None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_cache_read_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -179,6 +182,7 @@ pub fn summarize(task: &Task, events: &[Event]) -> ExecutionMetrics {
     let mut budget_exhausted_by_kind: BTreeMap<String, u32> = BTreeMap::new();
     let mut peak_context_tokens: Option<u64> = None;
     let mut total_input_tokens: Option<u64> = None;
+    let mut total_cache_read_tokens: Option<u64> = None;
     let mut total_output_tokens: Option<u64> = None;
     let mut cost_usd: Option<f64> = None;
     // ADR-0074 D4.3（Phase F3 quota）: token を持つのに `cost_usd` が無い run が 1 件でもあれば false。
@@ -242,6 +246,9 @@ pub fn summarize(task: &Task, events: &[Event]) -> ExecutionMetrics {
                 if let Some(u) = usage {
                     if let Some(v) = u.input_tokens {
                         total_input_tokens = Some(total_input_tokens.unwrap_or(0) + v);
+                    }
+                    if let Some(v) = u.cache_read_tokens {
+                        total_cache_read_tokens = Some(total_cache_read_tokens.unwrap_or(0) + v);
                     }
                     if let Some(v) = u.output_tokens {
                         total_output_tokens = Some(total_output_tokens.unwrap_or(0) + v);
@@ -337,6 +344,7 @@ pub fn summarize(task: &Task, events: &[Event]) -> ExecutionMetrics {
         replans,
         peak_context_tokens,
         total_input_tokens,
+        total_cache_read_tokens,
         total_output_tokens,
         cost_usd,
         wall_ms,
@@ -638,7 +646,7 @@ mod tests {
             usage: Some(Usage {
                 input_tokens: Some(input),
                 output_tokens: Some(output),
-                cache_read_tokens: None,
+                cache_read_tokens: Some(input / 2),
                 cache_creation_tokens: None,
                 cost_usd: Some(cost),
             }),
@@ -654,6 +662,7 @@ mod tests {
         let events = vec![fin(100, 20, 0.5, 500), fin(200, 40, 0.25, 900)];
         let m = summarize(&task, &events);
         assert_eq!(m.total_input_tokens, Some(300));
+        assert_eq!(m.total_cache_read_tokens, Some(150));
         assert_eq!(m.total_output_tokens, Some(60));
         assert_eq!(m.cost_usd, Some(0.75));
         assert_eq!(m.peak_context_tokens, Some(900));
