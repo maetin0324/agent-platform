@@ -57,7 +57,6 @@ export const WORK_UNIT_KIND_LABEL: Record<WorkUnitKind, string> = {
   repair: "修復",
   integrate: "統合",
   other: "その他",
-  integrate: "統合",
 };
 
 const RUN_END_LABEL: Record<RunEnd["type"], string> = {

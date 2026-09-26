@@ -20109,3 +20109,8 @@ run 開始部分で、F3 の `quota_begin` を `dispatch_one` に移して解消
 - F3 途中確認（D2）への申し送り: 工程の統合の成功（`finish_phase_integration`）が `Continue{advance}` / `WorkerDone`
   を選ぶ場所に `pause_after` の判定を差し込む。`PhaseIntegrated` は途中報告の材料になる。
 - F4 への申し送り: `ExecutionPlanSpec.children` は空のまま。並列の既定は `[execution] parallel = false`（F5 で人が切り替える）。
+
+## release a770bcb5b7b5 の昇格（F1 + F2 前半 + F3-quota、schema 27）と F2b の統合（2026-09-26 08:27Z）
+
+- verify（ルート満杯の解消後に再実行）全 true（N-1 は schema 27 で想定どおり false）。in-flight 0 で停止→起動の昇格。本番は WU ごとの lane / planner standard / replan 差分 / repair 分類 / 成果物登録 / 計画 v2 schema / quota 記録が有効。`workspace_root` はローカルのまま。
+- F2b（WU 並列の本体、(c)〜(l)）を main に統合（ddd6a5d）。統合時に GUI の `WorkUnitKind::integrate` ラベルが F2b 側と私の暫定修正で重複 → 1 つに。ゲート: fmt 0 / test FAILED 0 / clippy 0 / GUI typecheck・lint・test 1099 件・gen:types 差分ゼロ・build。
