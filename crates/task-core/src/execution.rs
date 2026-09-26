@@ -567,10 +567,11 @@ impl ReviewerRepairKind {
     }
 }
 
-/// D16 の分類表: `format` / `lint` / `test_small` / `reviewer_local` / `merge_base`。この 5 つが
-/// `repairs` の「同じ class」カウンタ（既定 2 回まで）のバケットにもなる。**`merge_base` はこの
-/// 関数からは返らない**（配送〈`crates/celeris/src/delivery.rs`〉自身の技術的な失敗から直接組み立てる。
-/// D16 の表の条件が review の verdict ではなく配送の失敗そのものを指しているため）。
+/// D16 の分類表: `format` / `lint` / `test_small` / `reviewer_local` / `merge_base`。ADR-0074 D6.1/D6.2
+/// （Phase F1）で `review_timeout` を足し、`merge_base` を Task 内部の最終レビュー（`Check::Command`
+/// の `cmd` が `merge-base --is-ancestor` を含む場合）でも返せるようにした。配送
+/// （`crates/celeris/src/delivery.rs`）自身の技術的な失敗は今までどおり、この関数を経由せず直接
+/// `RepairClass::MergeBase`/`Format` を組み立てる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepairClass {
     Format,
@@ -578,6 +579,9 @@ pub enum RepairClass {
     TestSmall,
     ReviewerLocal(ReviewerRepairKind),
     MergeBase,
+    /// ADR-0074 D6.1（Phase F1）: 決定的な検査が `command timed out after` で不合格になり、
+    /// daemon が 2 倍の timeout で 1 回再実行してもなお timeout だった。
+    ReviewTimeout,
 }
 
 impl RepairClass {
@@ -590,6 +594,7 @@ impl RepairClass {
             RepairClass::TestSmall => "test_small",
             RepairClass::ReviewerLocal(_) => "reviewer_local",
             RepairClass::MergeBase => "merge_base",
+            RepairClass::ReviewTimeout => "review_timeout",
         }
     }
 
@@ -604,6 +609,44 @@ impl RepairClass {
                 ReviewerRepairKind::Lint => (20, 1200),
                 ReviewerRepairKind::Test | ReviewerRepairKind::Other => (30, 1800),
             },
+            // ADR-0074 D6.1: max_turns 20、wall 1200（lane は cheap。呼び出し側が features で決める）。
+            RepairClass::ReviewTimeout => (20, 1200),
+        }
+    }
+}
+
+/// ADR-0074 D6.2（Phase F1）: `Event::RepairScheduled.origin`（repair WU を起こした場所）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RepairOrigin {
+    /// Task 内部の最終レビュー不合格（`try_review_repair`。D16）。
+    Review,
+    /// 工程末尾の統合後の検査不合格（F2 の並列 WU。F1 では発生しない）。
+    Integration,
+    /// 配送前の準備ゲート・取り込みの技術的失敗（`crates/celeris/src/delivery.rs`）。
+    Delivery,
+    /// planner が replan で自ら `kind = repair` の WU を書いた（class は復元できないので
+    /// `"planner"` 固定。E6 の `repairs_by_class: unknown` の解消）。
+    Planner,
+}
+
+impl RepairOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RepairOrigin::Review => "review",
+            RepairOrigin::Integration => "integration",
+            RepairOrigin::Delivery => "delivery",
+            RepairOrigin::Planner => "planner",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "review" => Some(RepairOrigin::Review),
+            "integration" => Some(RepairOrigin::Integration),
+            "delivery" => Some(RepairOrigin::Delivery),
+            "planner" => Some(RepairOrigin::Planner),
+            _ => None,
         }
     }
 }
@@ -663,8 +706,25 @@ fn failed_test_count(reason: &str) -> Option<u32> {
     best
 }
 
+/// D6.1（Phase F1）: `crate::dispatch`（呼び出し側）が同じコマンドを 2 倍の timeout で 1 回だけ
+/// 再実行してもなお付ける固定文言（`review.rs:295, 407, 531` と同じ字句）。
+const COMMAND_TIMEOUT_PREFIX: &str = "command timed out after";
+/// D6.2（Phase F1）: Task 内部の最終レビューでの merge-base 不成立（E6 の criterion 5 の形）。
+const MERGE_BASE_ANCESTOR_WORDS: [&str; 2] = ["merge-base", "--is-ancestor"];
+
 fn classify_command(cmd: &str, reason: &str) -> Option<RepairClass> {
+    // ADR-0074 D6.1: reason（daemon が既に 2 倍の timeout で再試行した後の結果）が timeout を
+    // 示していれば、cmd の中身に関わらず review_timeout（fmt/lint/test のコマンドが遅いだけの
+    // 環境要因を、コードの再実装ではなく検査環境の再現で直す性質のものとして別扱いする）。
+    if reason.starts_with(COMMAND_TIMEOUT_PREFIX) {
+        return Some(RepairClass::ReviewTimeout);
+    }
     let c = cmd.to_lowercase();
+    // ADR-0074 D6.2: `merge-base --is-ancestor` の不成立（Task 内部の最終レビュー段階。配送段階の
+    // `[delivery-repair]` は別経路のまま）。
+    if MERGE_BASE_ANCESTOR_WORDS.iter().all(|w| c.contains(w)) {
+        return Some(RepairClass::MergeBase);
+    }
     if FMT_COMMAND_WORDS.iter().any(|w| c.contains(w)) {
         return Some(RepairClass::Format);
     }

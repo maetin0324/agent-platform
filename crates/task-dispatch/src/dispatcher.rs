@@ -790,10 +790,16 @@ fn describe_run_end(end: task_core::RunEnd) -> String {
 
 /// ADR-0072 D5（E2b の指摘、Phase E3 で配線）: reviewer run の `runs` 索引の finish。`completed_review_run`
 /// が `None`（Reviewer run を起動しなかった判定）なら何もしない。失敗しても run は壊さない（警告のみ）。
+///
+/// ADR-0074 §6 F1 (k)（Phase F1 で直した逸脱）: 以前はここで `usage` を常に `None` に固定しており、
+/// reviewer run の `runs` 索引の行が（`WorkerFinished` に実際の usage があっても）`usage_json` を
+/// 持たないまま確定していた（E6 report 問題 3、`celerisctl replay --check` で
+/// `rebuild_work_units_and_runs` の usage と食い違う）。`usage` を引数で受け取り、そのまま渡す。
 fn finish_reviewer_run_index(
     store: &dyn TaskStore,
     completed_review_run: &Option<String>,
     status: task_core::RunIndexStatus,
+    usage: Option<task_core::Usage>,
     metrics: Option<task_core::RunMetrics>,
 ) {
     let Some(run_id) = completed_review_run else {
@@ -803,11 +809,30 @@ fn finish_reviewer_run_index(
         run_id,
         status,
         None,
-        None,
+        usage,
         metrics,
         OffsetDateTime::now_utc(),
     ) {
         tracing::warn!(%run_id, error = %e, "failed to finish the reviewer run in the runs index");
+    }
+}
+
+/// (k): `reviewer_finished`（`Some(Event::WorkerFinished{..})` なら）が運ぶ `usage` を取り出す
+/// （`finish_reviewer_run_index` に渡すため。move で消費する前に呼ぶ）。
+fn worker_finished_usage(event: &Option<Event>) -> Option<task_core::Usage> {
+    match event {
+        Some(Event::WorkerFinished { usage, .. }) => *usage,
+        _ => None,
+    }
+}
+
+/// ADR-0074 §6 F1 (k)（Phase F1 で直した逸脱）: reviewer run の `WorkerFinished.end` は今まで常に
+/// `None` だった（`task_ops::replay::rebuild_work_units_and_runs` はこれを `HarnessError` として
+/// 復元するので、`celerisctl replay --check` は reviewer run のたびに `status` の食い違いを報告して
+/// いた）。この関数が最終的に決めた `RunIndexStatus` と同じ `RunEnd` を event 自身にも書き戻す。
+fn set_worker_finished_end(event: &mut Option<Event>, end: task_core::RunEnd) {
+    if let Some(Event::WorkerFinished { end: slot, .. }) = event.as_mut() {
+        *slot = Some(end);
     }
 }
 
@@ -4700,6 +4725,7 @@ impl Dispatcher {
         }
         if task.status != Status::Reviewing {
             tracing::warn!(%task_id, status = ?task.status, "review result discarded (task no longer reviewing)");
+            set_worker_finished_end(&mut reviewer_finished, task_core::RunEnd::Cancelled);
             if let Some(ev) = &reviewer_finished {
                 self.store.append_event(task_id, ev)?;
             }
@@ -4707,6 +4733,7 @@ impl Dispatcher {
                 self.store.as_ref(),
                 &completed_review_run,
                 task_core::RunIndexStatus::Cancelled,
+                worker_finished_usage(&reviewer_finished),
                 review_metrics,
             );
             return Ok(());
@@ -4775,6 +4802,18 @@ impl Dispatcher {
                     task_id,
                     &Event::worker_progress(run_id.clone(), format!("{prefix}{}", pf.message)),
                 )?;
+                // (k): event 自身の `end` も `HarnessError` に揃える（供給側 = Supply、reviewer run
+                // 自身のインフラ都合 = Infra）。
+                set_worker_finished_end(
+                    &mut reviewer_finished,
+                    task_core::RunEnd::HarnessError {
+                        class: if is_infra_failure {
+                            task_core::HarnessErrorClass::Infra
+                        } else {
+                            task_core::HarnessErrorClass::Supply
+                        },
+                    },
+                );
                 if let Some(ev) = &reviewer_finished {
                     self.store.append_event(task_id, ev)?;
                 }
@@ -4785,6 +4824,7 @@ impl Dispatcher {
                     self.store.as_ref(),
                     &completed_review_run,
                     task_core::RunIndexStatus::HarnessError,
+                    worker_finished_usage(&reviewer_finished),
                     review_metrics,
                 );
                 if let Some(entry) = entry {
@@ -4878,10 +4918,20 @@ impl Dispatcher {
             }
             _ => task_core::RunIndexStatus::Completed,
         };
+        // ADR-0074 §6 F1 (k): event 自身の `end` も同じ判定に揃える（`replay --check` が
+        // `rebuild_work_units_and_runs` で正しく `status` を復元できるように）。
+        set_worker_finished_end(
+            &mut reviewer_finished,
+            match reviewer_index_status {
+                task_core::RunIndexStatus::Failed => task_core::RunEnd::Failed { retryable: false },
+                _ => task_core::RunEnd::Completed,
+            },
+        );
         finish_reviewer_run_index(
             self.store.as_ref(),
             &completed_review_run,
             reviewer_index_status,
+            worker_finished_usage(&reviewer_finished),
             review_metrics,
         );
         let mut events: Vec<Event> = reviewer_finished
@@ -5169,7 +5219,16 @@ impl Dispatcher {
                     reason: "review_repair".to_string(),
                     run_id: None,
                 };
-                (None, vec![row], vec![ev])
+                // ADR-0074 D6.2（Phase F1）: この repair WU の class を events に残す
+                // （`execution_metrics::summarize` が `repairs_by_class` を組み立てる材料。
+                // `unknown` を無くす）。
+                let scheduled = Event::RepairScheduled {
+                    work_unit_id: row.id.clone(),
+                    key: row.key.clone(),
+                    class: class.bucket().to_string(),
+                    origin: task_core::execution::RepairOrigin::Review,
+                };
+                (None, vec![row], vec![ev, scheduled])
             }
             None => {
                 // D5: atomic な Task は、初めての WorkUnit で暗黙の WU を `main`（done）として実体化する。
@@ -5230,7 +5289,17 @@ impl Dispatcher {
                     reason: Some("review_repair".to_string()),
                     plan: Box::new(plan_spec),
                 };
-                (Some(plan_row), vec![main_row, repair_row], vec![ev])
+                let scheduled = Event::RepairScheduled {
+                    work_unit_id: repair_row.id.clone(),
+                    key: repair_row.key.clone(),
+                    class: class.bucket().to_string(),
+                    origin: task_core::execution::RepairOrigin::Review,
+                };
+                (
+                    Some(plan_row),
+                    vec![main_row, repair_row],
+                    vec![ev, scheduled],
+                )
             }
         };
 
@@ -10167,11 +10236,13 @@ async fn run_worker(
         session_key,
     };
     let outcome = adapter.run(req, run_id, limits, &sink).await;
-    // ADR-0067 D3: run が成功したら、git worktree ではない local の作業場所（`remote`/`worktree` どちらも
-    // 無い）に限り、`artifacts_dir` の外に書かれた `*.md` を「未申告の成果物」として登録する
-    // （取りこぼし防止。取りに行くのは登録済みの結果ではなく、result.json が触れない場所に人向けの
-    // 決定材料を残す run に対する保険）。
-    if outcome.is_ok() && remote.is_none() && worktree.is_none() {
+    // ADR-0067 D3 / ADR-0074 D6.3（Phase F1 (j)）: run が成功したら未申告の成果物を登録する。
+    // - git worktree ではない local の作業場所（`remote`/`worktree` どちらも無い）はリポジトリ全体
+    //   （`artifacts_dir` の外を含む）から `*.md` を拾う（従来どおり。取りこぼし防止）。
+    // - git worktree の Task（`worktree` が `Some`）は、そのリポジトリの全体を走査すると無関係な
+    //   コードまで拾ってしまうので、その run の `artifacts_dir` の**中だけ**を、人が読む拡張子
+    //   （md/html/pdf/csv/png）で走査する。
+    if outcome.is_ok() && remote.is_none() {
         let existing_paths: std::collections::HashSet<String> = events
             .iter()
             .filter_map(|(_, ev)| match ev {
@@ -10179,18 +10250,26 @@ async fn run_worker(
                 _ => None,
             })
             .collect();
-        let found = crate::undeclared_artifacts::scan_undeclared_markdown_artifacts(
-            &workspace_for_undeclared_scan,
-            &artifacts_dir_for_undeclared_scan,
-            &existing_paths,
-        );
+        let found = if worktree.is_none() {
+            crate::undeclared_artifacts::scan_undeclared_markdown_artifacts(
+                &workspace_for_undeclared_scan,
+                &artifacts_dir_for_undeclared_scan,
+                &existing_paths,
+            )
+        } else {
+            crate::undeclared_artifacts::scan_undeclared_artifacts_in_dir(
+                &workspace_for_undeclared_scan,
+                &artifacts_dir_for_undeclared_scan,
+                &existing_paths,
+            )
+        };
         for artifact in found {
             let ev = Event::ArtifactProduced {
                 run_id: run_id.to_string(),
                 artifact,
             };
             if let Err(e) = store_for_undeclared_scan.append_event(task_id, &ev) {
-                tracing::warn!(task_id = %task_id, error = %e, "failed to record an undeclared artifact (ADR-0067 D3)");
+                tracing::warn!(task_id = %task_id, error = %e, "failed to record an undeclared artifact (ADR-0067 D3 / ADR-0074 D6.3)");
             }
         }
     }
@@ -11353,6 +11432,114 @@ mod tests {
             store.events_for(c.id).unwrap()
         );
         assert!(store.events_for(c.id).unwrap().iter().any(|(_, e)| matches!(e, Event::ReviewVerdict { pass: false, reason, .. } if reason.contains("review.json"))));
+    }
+
+    /// (k) の偽アダプタ: Reviewer run にだけ `usage` を付ける（`FileAdapter` は常に `usage: None`）。
+    struct ReviewerUsageAdapter {
+        review_json: String,
+    }
+
+    #[async_trait]
+    impl WorkerAdapter for ReviewerUsageAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            std::fs::create_dir_all(&req.artifacts_dir).unwrap();
+            let usage = match req.task.kind {
+                TaskKind::Review => {
+                    std::fs::write(req.artifacts_dir.join("review.json"), &self.review_json)
+                        .unwrap();
+                    Some(task_core::Usage {
+                        input_tokens: Some(1000),
+                        output_tokens: Some(200),
+                        cache_read_tokens: None,
+                        cache_creation_tokens: None,
+                        cost_usd: Some(0.03),
+                    })
+                }
+                _ => {
+                    std::fs::write(req.workspace.join("touched"), "1").unwrap();
+                    None
+                }
+            };
+            sink.progress("working");
+            Ok(RunOutcome {
+                terminal: Terminal::Done {
+                    summary: format!("{:?}", req.task.kind),
+                    evidence: vec![],
+                    usage,
+                },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// ADR-0074 §6 F1 (k): reviewer run の `runs` 索引の `usage` が欠けない（以前は
+    /// `finish_reviewer_run_index` が常に `usage: None` を書いていた）。`celerisctl replay --check`
+    /// と同じ突き合わせ（events から再構築した `runs` と、store に確定した `runs` の diff）で
+    /// 食い違いが無いことを確かめる（E6 report 問題 3 の fixture）。
+    #[tokio::test]
+    async fn reviewer_run_usage_is_recorded_in_the_runs_index_and_survives_replay_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = new_task(dir.path(), Check::Reviewer, 0);
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        let adapter = Arc::new(ReviewerUsageAdapter {
+            review_json: r#"{"verdicts":[{"criterion":0,"pass":true,"reason":"ok"}]}"#.into(),
+        });
+        let mut d = dispatcher(store.clone(), adapter, 1);
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+        assert_eq!(store.get(task_id).unwrap().unwrap().status, Status::Done);
+
+        let stored_runs = store.runs_for_task(task_id).unwrap();
+        let reviewer_row = stored_runs
+            .iter()
+            .find(|r| r.role == task_core::RunIndexRole::Reviewer)
+            .expect("a reviewer run in the runs index");
+        assert!(
+            reviewer_row.usage.is_some(),
+            "reviewer run usage must not be dropped: {reviewer_row:?}"
+        );
+        assert_eq!(
+            reviewer_row.usage.as_ref().unwrap().input_tokens,
+            Some(1000)
+        );
+        assert!(reviewer_row.finished_at.is_some());
+
+        // `replay --check` と同じ突き合わせ（`task_ops::replay::diff_execution`）: events だけから
+        // 再構築した runs と、store に確定した runs が reviewer run について食い違わない。
+        // （WU の無いこの atomic Task では `work_units` は両方とも空でよい。worker run 自身の
+        // `seq` は本 Phase の対象外の別の既知のずれ〈E2b の run_index_start が
+        // `current_run_seq` を二重に +1 している〉があるため、ここでは reviewer run だけを見る。
+        // PROGRESS.md に申し送り済み）。
+        let event_rows = store.event_rows_for(task_id, None, usize::MAX).unwrap();
+        let (_, replayed_runs) =
+            task_ops::replay::rebuild_work_units_and_runs(task_id, &event_rows);
+        let stored_units = store.work_units_for(task_id).unwrap();
+        let reviewer_only = |runs: &[task_core::RunRow]| -> Vec<task_core::RunRow> {
+            runs.iter()
+                .filter(|r| r.role == task_core::RunIndexRole::Reviewer)
+                .cloned()
+                .collect()
+        };
+        let (wu_mismatches, run_mismatches) = task_ops::replay::diff_execution(
+            task_id,
+            &stored_units,
+            &stored_units,
+            &reviewer_only(&replayed_runs),
+            &reviewer_only(&stored_runs),
+        );
+        assert!(wu_mismatches.is_empty(), "{wu_mismatches:?}");
+        assert!(run_mismatches.is_empty(), "{run_mismatches:?}");
     }
 
     #[tokio::test]
@@ -19642,6 +19829,79 @@ mod tests {
         assert!(!note.contains("CARGO_TARGET_DIR"), "{note}");
     }
 
+    /// run の `artifacts_dir` に `report.md` を書くだけの偽アダプタ（`Event::ArtifactProduced` は
+    /// 出さない。claude-code/codex と同じく、成果物の申告をしないハーネスを模す）。
+    struct WritesReportAdapter;
+
+    #[async_trait]
+    impl WorkerAdapter for WritesReportAdapter {
+        fn id(&self) -> &str {
+            "instant"
+        }
+        async fn run(
+            &self,
+            req: RunRequest,
+            _run_id: &str,
+            _limits: RunLimits,
+            _sink: &dyn EventSink,
+        ) -> Result<RunOutcome, AdapterError> {
+            std::fs::create_dir_all(&req.artifacts_dir).unwrap();
+            std::fs::write(req.artifacts_dir.join("report.md"), "# report\n").unwrap();
+            Ok(RunOutcome {
+                terminal: Terminal::Done {
+                    summary: "ok".into(),
+                    evidence: vec![],
+                    usage: None,
+                },
+                exit_code: Some(0),
+            })
+        }
+    }
+
+    /// ADR-0074 §6 F1 (j): git worktree の Task で run 後に `artifacts/` を走査し、`report.md` を
+    /// `ArtifactProduced{declared:false}` として登録する（`GET /tasks/{id}/artifacts` の材料）。
+    #[tokio::test]
+    async fn git_worktree_task_registers_report_md_as_an_artifact() {
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_test_repo(repo_dir.path());
+        let root = tempfile::tempdir().unwrap();
+        let store: Arc<dyn TaskStore> = Arc::new(SqliteStore::open_in_memory().unwrap());
+        let task = git_task(
+            repo_dir.path(),
+            None,
+            Check::Command {
+                cmd: "true".into(),
+                expect_exit: 0,
+            },
+        );
+        let task_id = task.id;
+        store.insert(&task).unwrap();
+        let mut d = worktree_dispatcher(
+            store.clone(),
+            Arc::new(WritesReportAdapter),
+            root.path(),
+            None,
+        );
+        let report = run_until_idle(&mut d, 400).await;
+        assert!(report.idle, "{report:?}");
+        assert_eq!(store.get(task_id).unwrap().unwrap().status, Status::Done);
+
+        let events = store.events_for(task_id).unwrap();
+        let produced: Vec<&task_core::ArtifactRef> = events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                Event::ArtifactProduced { artifact, .. } => Some(artifact),
+                _ => None,
+            })
+            .collect();
+        let report_artifact = produced
+            .iter()
+            .find(|a| a.path.ends_with("report.md"))
+            .unwrap_or_else(|| panic!("no report.md artifact: {produced:?}"));
+        assert!(!report_artifact.declared, "{report_artifact:?}");
+        assert_eq!(report_artifact.kind, "md");
+    }
+
     /// `[workspace] shared_build_cache`（既定 true）が有効なローカルの git worktree のホスト実行に、
     /// `CARGO_TARGET_DIR=<build_cache_dir>/cargo/<repo-key>` が渡る。
     #[tokio::test]
@@ -22672,6 +22932,29 @@ mod tests {
                 }
             )),
             "{events:?}"
+        );
+        // ADR-0074 §6 F1 (i): `RepairScheduled` を残し、`execution_metrics` の `repairs_by_class` に
+        // `unknown` が出ない（title の接頭辞に頼らない）。
+        assert!(
+            events.iter().any(|(_, e)| matches!(
+                e,
+                Event::RepairScheduled { key, class, origin, .. }
+                    if key == "repair-1"
+                        && class == "format"
+                        && *origin == task_core::execution::RepairOrigin::Review
+            )),
+            "{events:?}"
+        );
+        let event_list: Vec<Event> = events.iter().map(|(_, e)| e.clone()).collect();
+        let metrics = task_core::execution_metrics::summarize(&stored, &event_list);
+        assert_eq!(
+            metrics.repairs_by_class.get("format"),
+            Some(&1),
+            "{metrics:?}"
+        );
+        assert!(
+            !metrics.repairs_by_class.contains_key("unknown"),
+            "{metrics:?}"
         );
     }
 

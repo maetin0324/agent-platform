@@ -105,6 +105,114 @@ pub fn scan_undeclared_markdown_artifacts(
     found
 }
 
+/// ADR-0074 D6.3（Phase F1 (j)）: 人が読む成果物の拡張子（git worktree の Task の走査対象）。
+pub const HUMAN_ARTIFACT_EXTENSIONS: &[&str] = &["md", "html", "pdf", "csv", "png"];
+
+/// ADR-0074 D6.3: 機械的なファイル（celeris 自身が書く、成果物ではないもの）。走査対象から外す
+/// （`execution-plan*.json`/`project-plan*.json` は前方一致、`phase-reports/` はディレクトリごと除く）。
+const EXCLUDED_ARTIFACT_FILENAMES: &[&str] = &[
+    "checkpoint.json",
+    "result.json",
+    "request.json",
+    "prompt.txt",
+];
+
+fn is_excluded_artifact_filename(name: &str) -> bool {
+    EXCLUDED_ARTIFACT_FILENAMES.contains(&name)
+        || (name.starts_with("execution-plan") && name.ends_with(".json"))
+        || (name.starts_with("project-plan") && name.ends_with(".json"))
+}
+
+/// ADR-0074 D6.3（Phase F1 (j)）: git worktree の Task に未申告成果物の走査を広げる。ADR-0067 D3 の
+/// 走査（[`scan_undeclared_markdown_artifacts`]）はリポジトリ全体を見るので worktree では使えない
+/// （無関係なファイルまで拾ってしまう）。ここでは run の**成果物ディレクトリの中だけ**を見て、
+/// `HUMAN_ARTIFACT_EXTENSIONS` のうち未登録のものを返す（`path` は `workspace_dir` からの相対）。
+pub fn scan_undeclared_artifacts_in_dir(
+    workspace_dir: &Path,
+    artifacts_dir: &Path,
+    existing_paths: &HashSet<String>,
+) -> Vec<ArtifactRef> {
+    let mut found = Vec::new();
+    let mut stack: Vec<PathBuf> = vec![PathBuf::new()];
+    while let Some(rel_dir) = stack.pop() {
+        if found.len() >= MAX_FILES {
+            break;
+        }
+        // D2.3（将来の phase-reports/。今はまだ発生しないが、あらかじめ除く）。
+        if rel_dir.file_name().and_then(|n| n.to_str()) == Some("phase-reports") {
+            continue;
+        }
+        let abs_dir = artifacts_dir.join(&rel_dir);
+        let Ok(entries) = std::fs::read_dir(&abs_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if found.len() >= MAX_FILES {
+                break;
+            }
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            let rel_path = rel_dir.join(&name);
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if EXCLUDED_DIRS.contains(&name_str.as_ref()) || name_str == "phase-reports" {
+                    continue;
+                }
+                stack.push(rel_path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            if is_excluded_artifact_filename(&name_str) {
+                continue;
+            }
+            let ext_ok = rel_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| HUMAN_ARTIFACT_EXTENSIONS.contains(&e));
+            if !ext_ok {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.len() == 0 || metadata.len() > MAX_BYTES {
+                continue;
+            }
+            let abs_path = artifacts_dir.join(&rel_path);
+            let path_str = abs_path
+                .strip_prefix(workspace_dir)
+                .unwrap_or(&abs_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if existing_paths.contains(&path_str) {
+                continue;
+            }
+            let Ok(sha256) = task_worker::artifact::sha256_file(&abs_path) else {
+                continue;
+            };
+            let kind = rel_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string();
+            found.push(ArtifactRef {
+                name: name_str.into_owned(),
+                path: path_str,
+                sha256,
+                kind,
+                declared: false,
+            });
+        }
+    }
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    found.truncate(MAX_FILES);
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,5 +265,56 @@ mod tests {
         let found = scan_undeclared_markdown_artifacts(ws, &ws.join("artifacts"), &HashSet::new());
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].path, "small.md");
+    }
+
+    // ---- ADR-0074 D6.3（Phase F1 (j)）: git worktree の Task の走査 ----
+
+    /// git worktree の Task で `artifacts/report.md` が未申告成果物として拾われる。リポジトリ全体
+    /// （worktree のコード）は走査しない（成果物ディレクトリの外は見ない）。
+    #[test]
+    fn git_worktree_task_registers_report_md_as_an_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        write(ws, "artifacts/report.md", "# report\n");
+        write(ws, "artifacts/result.json", "{}"); // 機械的なファイル、拾わない
+        write(ws, "artifacts/checkpoint.json", "{}");
+        write(ws, "src/lib.rs", "fn main() {}"); // worktree のコード、拾わない（成果物置き場の外）
+        write(ws, "README.md", "repo readme, not an artifact"); // 同上
+
+        let found = scan_undeclared_artifacts_in_dir(ws, &ws.join("artifacts"), &HashSet::new());
+        let paths: Vec<&str> = found.iter().map(|a| a.path.as_str()).collect();
+        assert_eq!(paths, vec!["artifacts/report.md"], "{found:?}");
+        assert!(!found[0].declared);
+        assert_eq!(found[0].kind, "md");
+    }
+
+    /// md 以外の人が読む拡張子（html/pdf/csv/png）も拾う。
+    #[test]
+    fn git_worktree_task_registers_other_human_readable_extensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        write(ws, "artifacts/dashboard.html", "<html></html>");
+        write(ws, "artifacts/data.csv", "a,b\n1,2\n");
+        write(ws, "artifacts/notes.txt", "not a tracked extension");
+
+        let found = scan_undeclared_artifacts_in_dir(ws, &ws.join("artifacts"), &HashSet::new());
+        let paths: Vec<&str> = found.iter().map(|a| a.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["artifacts/dashboard.html", "artifacts/data.csv"],
+            "{found:?}"
+        );
+    }
+
+    /// 既に `Event::ArtifactProduced` で登録済みのパスは拾わない。
+    #[test]
+    fn git_worktree_task_skips_already_declared_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws = tmp.path();
+        write(ws, "artifacts/report.md", "# report\n");
+        let mut existing = HashSet::new();
+        existing.insert("artifacts/report.md".to_string());
+        let found = scan_undeclared_artifacts_in_dir(ws, &ws.join("artifacts"), &existing);
+        assert!(found.is_empty(), "{found:?}");
     }
 }

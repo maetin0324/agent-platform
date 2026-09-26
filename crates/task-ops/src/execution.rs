@@ -260,7 +260,8 @@ pub fn replan(
             }
             None => {
                 diff.added.push(wu_spec.key.clone());
-                new_work_units.push(WorkUnitRow::new(
+                let is_repair = wu_spec.kind == task_core::WorkUnitKind::Repair;
+                let row = WorkUnitRow::new(
                     new_id(),
                     task_id.to_string(),
                     new_plan_id.clone(),
@@ -268,7 +269,20 @@ pub fn replan(
                     wu_spec,
                     status,
                     created_at.clone(),
-                ));
+                );
+                // ADR-0074 D6.2（Phase F1）: replan（LLM/人）が自ら `kind = repair` の WU を書いたら、
+                // class を `"planner"` として残す（`execution_metrics` の `unknown` を無くす）。
+                // daemon の決定的な repair（`try_review_repair`）はこの経路を通らない
+                // （`store.review_repair_apply` を直接使う）ので二重に記録しない。
+                if is_repair {
+                    extra_events.push(Event::RepairScheduled {
+                        work_unit_id: row.id.clone(),
+                        key: row.key.clone(),
+                        class: "planner".to_string(),
+                        origin: task_core::execution::RepairOrigin::Planner,
+                    });
+                }
+                new_work_units.push(row);
             }
         }
     }
@@ -743,5 +757,46 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, OpsError::Validation(_)), "{err:?}");
+    }
+
+    /// ADR-0074 D6.2/§6 F1 (i)（Phase F1）: replan（planner）が新しい `kind = repair` の WU を書いたら
+    /// `Event::RepairScheduled{class: "planner"}` が残る（`execution_metrics` の `unknown` を無くす）。
+    #[test]
+    fn replan_records_repair_scheduled_for_a_planner_authored_repair_unit() {
+        let store = SqliteStore::open_in_memory().unwrap();
+        let task = sample_task();
+        store.insert(&task).unwrap();
+        adopt(&store, task.id);
+        mark_done(&store, task.id, "a");
+
+        let mut v2_spec = spec();
+        let mut repair = wu("repair-1", &[]);
+        repair.kind = task_core::WorkUnitKind::Repair;
+        v2_spec.work_units.push(repair);
+        let (_, diff) = replan(
+            &store,
+            task.id,
+            v2_spec,
+            "add a repair unit".to_string(),
+            PlanOrigin::Planner,
+            None,
+            ExecutionLimits::default(),
+            OffsetDateTime::now_utc(),
+        )
+        .unwrap();
+        assert_eq!(diff.added, vec!["repair-1".to_string()]);
+
+        let events = store.events_for(task.id).unwrap();
+        let scheduled = events
+            .iter()
+            .find_map(|(_, e)| match e {
+                Event::RepairScheduled {
+                    key, class, origin, ..
+                } if key == "repair-1" => Some((class.clone(), *origin)),
+                _ => None,
+            })
+            .expect("a RepairScheduled event for repair-1");
+        assert_eq!(scheduled.0, "planner");
+        assert_eq!(scheduled.1, task_core::execution::RepairOrigin::Planner);
     }
 }

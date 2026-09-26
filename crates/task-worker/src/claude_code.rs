@@ -3065,6 +3065,47 @@ echo '{"type":"result","subtype":"success","is_error":false}'
         assert!(!normal_prompt.contains("artifacts/execution-plan.json"));
     }
 
+    /// ADR-0074 §6 F1 (a): planner プロンプトが WU ごとの `features`（`TaskFeatureHints` の 5 軸）を
+    /// 求める（説明・例・JSON 例のスナップショット）。上のテストの一部と重なるが、ADR の受け入れ
+    /// 条件そのものを指す独立したテストとして残す。
+    #[test]
+    fn execution_plan_prompt_asks_for_per_unit_features() {
+        let task = crate::protocol::tests::sample_task();
+        let planner_ctx = crate::protocol::ExecutionPlannerContext {
+            gate_rule_id: "compound/score".to_string(),
+            gate_score: 6,
+            gate_signals: Vec::new(),
+            max_work_units: 8,
+            work_unit_max_turns: 80,
+            work_unit_max_wall_secs: 3600,
+            default_max_turns: 30,
+            default_max_wall_secs: 1800,
+            replan: false,
+            replan_reason: String::new(),
+            current_plan_version: None,
+            work_unit_summaries: Vec::new(),
+            preserve_done_keys: Vec::new(),
+        };
+        let context = RunContext {
+            execution_planner: Some(planner_ctx),
+            ..RunContext::default()
+        };
+        let prompt = build_prompt(&task, &context, "run-planner-features", "artifacts");
+        assert!(prompt.contains("### `features`"));
+        assert!(prompt.contains("per-WorkUnit routing hints"));
+        for axis in [
+            "judgment",
+            "ambiguity",
+            "verifiability",
+            "reversibility",
+            "consequence",
+        ] {
+            assert!(prompt.contains(axis), "missing axis {axis} in prompt");
+        }
+        // JSON 例に `features` の欄がある。
+        assert!(prompt.contains("\"features\":{"));
+    }
+
     /// ADR-0072 D17（Phase E4b 項目1）: replan のときは「今の計画（版・WU の状態・完了/失敗の要約）」
     /// 「起こした理由」「保持すべき done の WU の key」が文面に載り、v2 は done の WU を変えてはならない
     /// と明示する。初回 planning（`replan = false`）のプロンプトは、この節を出さない限り 1 バイトも

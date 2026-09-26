@@ -1122,6 +1122,36 @@
             "decision"
           ],
           "type": "object"
+        },
+        {
+          "description": "ADR-0074 D6.2（Phase F1）: repair WU を起こしたこと（class・起こした場所）を残す。\n`execution_metrics::summarize` はこの Event から `repairs_by_class` を組み立てる\n（title の接頭辞の復元に頼らない。`unknown` を無くす。D16/D17）。状態は変えない\n（`replay` の attempts 計算は無視する）。",
+          "properties": {
+            "class": {
+              "description": "`RepairClass::bucket()`（`format`/`lint`/`test_small`/`reviewer_local`/`merge_base`/\n`review_timeout`）、または planner が replan で自ら書いた repair WU の `\"planner\"`。",
+              "type": "string"
+            },
+            "key": {
+              "type": "string"
+            },
+            "origin": {
+              "$ref": "#/$defs/RepairOrigin"
+            },
+            "type": {
+              "const": "repair_scheduled",
+              "type": "string"
+            },
+            "work_unit_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "work_unit_id",
+            "key",
+            "class",
+            "origin"
+          ],
+          "type": "object"
         }
       ]
     },
@@ -1451,6 +1481,31 @@
     "ProjectId": {
       "description": "案件の一意識別子（ULID）。`TaskId` と同じ形。",
       "type": "string"
+    },
+    "RepairOrigin": {
+      "description": "ADR-0074 D6.2（Phase F1）: `Event::RepairScheduled.origin`（repair WU を起こした場所）。",
+      "oneOf": [
+        {
+          "const": "review",
+          "description": "Task 内部の最終レビュー不合格（`try_review_repair`。D16）。",
+          "type": "string"
+        },
+        {
+          "const": "integration",
+          "description": "工程末尾の統合後の検査不合格（F2 の並列 WU。F1 では発生しない）。",
+          "type": "string"
+        },
+        {
+          "const": "delivery",
+          "description": "配送前の準備ゲート・取り込みの技術的失敗（`crates/celeris/src/delivery.rs`）。",
+          "type": "string"
+        },
+        {
+          "const": "planner",
+          "description": "planner が replan で自ら `kind = repair` の WU を書いた（class は復元できないので\n`\"planner\"` 固定。E6 の `repairs_by_class: unknown` の解消）。",
+          "type": "string"
+        }
+      ]
     },
     "RepoId": {
       "description": "リポジトリの一意識別子（ULID）。`TaskId` / `ProjectId` と同じ形。",

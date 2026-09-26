@@ -49,9 +49,12 @@ pub struct ExecutionMetrics {
     /// D11: retry（atomic の `Trigger::WorkerError{retryable:true}` の再試行 + WU の
     /// `work_unit_retry`）の回数。
     pub retries: u32,
-    /// D16: repair の class ごとの回数。`"unknown"` は、計画に既存だった repair WU
-    /// （`ExecutionPlanned` に載らない）で class が復元できなかったもの（events だけからの
-    /// 復元の既知の限界。ADR の逸脱節を参照）。
+    /// D16/ADR-0074 D6.2（Phase F1）: repair の class ごとの回数。`Event::RepairScheduled` から読む
+    /// （`"planner"` は replan が自ら書いた `kind = repair` の WU）。この Event が無い旧いタスク
+    /// （F1 より前に起きた repair）だけ、`ExecutionPlanned` の title の接頭辞から復元する
+    /// フォールバックに倒れ、それでも復元できなければ `"unknown"`（events だけからの復元の
+    /// 既知の限界。ADR-0072 の逸脱節を参照）。F1 以降に起きた repair はすべて `RepairScheduled` を
+    /// 持つので `unknown` は出ない。
     #[serde(default)]
     pub repairs_by_class: BTreeMap<String, u32>,
     /// repair の総数。
@@ -136,6 +139,12 @@ pub fn summarize(task: &Task, events: &[Event]) -> ExecutionMetrics {
                 if reason == "review_repair" {
                     repair_keys.insert(key.clone());
                 }
+            }
+            // ADR-0074 D6.2/§6 F1 (i)（Phase F1）: repair の class はこの Event から読む
+            // （title の接頭辞の復元より優先。`unknown` を無くす）。
+            Event::RepairScheduled { key, class, .. } => {
+                repair_keys.insert(key.clone());
+                repair_bucket_by_key.insert(key.clone(), class.clone());
             }
             Event::WorkerStarted { role, .. } => {
                 let name = match role {
@@ -444,6 +453,68 @@ mod tests {
         let m = summarize(&task, &events);
         assert_eq!(m.repairs_total, 1);
         assert_eq!(m.repairs_by_class.get("unknown"), Some(&1));
+    }
+
+    /// ADR-0074 D6.2/§6 F1 (i)（Phase F1）: `RepairScheduled` があれば、title の接頭辞を復元しなくても
+    /// class が分かる（`unknown` にならない）。
+    #[test]
+    fn repair_scheduled_event_names_the_class() {
+        let task = sample_task("x", vec![]);
+        let events = vec![
+            Event::WorkUnitTransitioned {
+                work_unit_id: "wu-repair-1".to_string(),
+                key: "repair-1".to_string(),
+                from: WorkUnitStatus::Pending,
+                to: WorkUnitStatus::Ready,
+                reason: "review_repair".to_string(),
+                run_id: None,
+            },
+            Event::RepairScheduled {
+                work_unit_id: "wu-repair-1".to_string(),
+                key: "repair-1".to_string(),
+                class: "review_timeout".to_string(),
+                origin: crate::execution::RepairOrigin::Review,
+            },
+        ];
+        let m = summarize(&task, &events);
+        assert_eq!(m.repairs_total, 1);
+        assert_eq!(m.repairs_by_class.get("review_timeout"), Some(&1));
+        assert!(!m.repairs_by_class.contains_key("unknown"), "{m:?}");
+    }
+
+    /// planner が replan で自ら書いた repair WU は class `"planner"`（`unknown` にならない）。
+    #[test]
+    fn planner_authored_repair_work_units_are_classified_as_planner() {
+        let task = sample_task("x", vec![]);
+        let plan = ExecutionPlanSpec {
+            schema: EXECUTION_PLAN_SCHEMA.to_string(),
+            rationale: "r".to_string(),
+            work_units: vec![wu(
+                "repair-1",
+                WorkUnitKind::Repair,
+                "fix the thing directly (no title convention)",
+                &[],
+            )],
+        };
+        let events = vec![
+            Event::ExecutionPlanned {
+                plan_id: "p1".to_string(),
+                version: 2,
+                origin: PlanOrigin::Planner,
+                supersedes: Some("p0".to_string()),
+                reason: Some("replan (planner run)".to_string()),
+                plan: Box::new(plan),
+            },
+            Event::RepairScheduled {
+                work_unit_id: "wu-repair-1".to_string(),
+                key: "repair-1".to_string(),
+                class: "planner".to_string(),
+                origin: crate::execution::RepairOrigin::Planner,
+            },
+        ];
+        let m = summarize(&task, &events);
+        assert_eq!(m.repairs_by_class.get("planner"), Some(&1), "{m:?}");
+        assert!(!m.repairs_by_class.contains_key("unknown"), "{m:?}");
     }
 
     #[test]

@@ -257,6 +257,108 @@ fn non_empty_array_len(value: &serde_json::Value, key: &str) -> Option<usize> {
     }
 }
 
+/// ADR-0074 D6.1（Phase F1）: 2 倍の timeout の上限（1,800 秒。無限ループの検査で無駄になる時間を
+/// 抑える。U-F9）。
+const REVIEW_TIMEOUT_RETRY_CAP_SECS: u64 = 1800;
+
+/// D6.2: `git merge-base --is-ancestor <ref> HEAD` の `<ref>`（決定的な字句解析。cmd に
+/// `merge-base` と `--is-ancestor` の両方を含むときだけ、`--is-ancestor` の次のトークンを返す）。
+fn merge_base_ancestor_ref(cmd: &str) -> Option<String> {
+    let lower = cmd.to_lowercase();
+    if !lower.contains("merge-base") || !lower.contains("--is-ancestor") {
+        return None;
+    }
+    let tokens: Vec<&str> = cmd.split_whitespace().collect();
+    let idx = tokens.iter().position(|&t| t == "--is-ancestor")?;
+    tokens.get(idx + 1).map(|s| s.trim_matches('"').to_string())
+}
+
+/// 1 回だけ command を実行して判定する（`review_task`/`run_work_unit_checks` の元の判定ロジック）。
+/// `label` は理由の頭に付ける接頭辞（`workspace.toml` の check だけ `"workspace.toml check: "`。
+/// それ以外は空文字で、既存の文面と 1 バイトも変わらない）。
+async fn exec_check_once(
+    workspace: &dyn Workspace,
+    cmd: &str,
+    expect_exit: i32,
+    timeout: Duration,
+    label: &str,
+) -> (bool, String) {
+    match workspace.exec(cmd, timeout).await {
+        Err(e) => (false, format!("exec failed: {e}")),
+        Ok(r) if r.timed_out => (
+            false,
+            format!("command timed out after {}s: {cmd}", timeout.as_secs()),
+        ),
+        Ok(r) => {
+            let pass = r.exit == Some(expect_exit);
+            (
+                pass,
+                format!(
+                    "{label}cmd={cmd:?} exit={:?} expected={expect_exit} stdout_tail={:?} stderr_tail={:?}",
+                    r.exit,
+                    tail(&r.stdout_tail, REASON_TAIL),
+                    tail(&r.stderr_tail, REASON_TAIL)
+                ),
+            )
+        }
+    }
+}
+
+/// ADR-0074 D6.1/D6.2（Phase F1）: 決定的な検査を実行し、2 種類の技術的な不合格を daemon が
+/// その場で直してから最終判定する（LLM は使わない）。
+///
+/// - **timeout**（`command timed out after` で不合格）: 同じコマンドを 1 回だけ、timeout を 2 倍
+///   （上限 [`REVIEW_TIMEOUT_RETRY_CAP_SECS`]）にして再実行する。通れば判定を差し替える。それでも
+///   timeout なら、2 倍の timeout を含む理由文言をそのまま返す（`execution::classify_review_failure`
+///   が `review_timeout` の repair に倒す）。
+/// - **`merge-base --is-ancestor <ref> HEAD` の不成立**: `git merge --no-edit <ref>` を 1 回試す。
+///   衝突なく合流できれば同じ検査を再実行して判定を差し替える。衝突（または merge 自体の失敗）なら
+///   `git merge --abort` して元の不合格のまま返す（`classify_review_failure` が `merge_base` の
+///   repair に倒す）。
+async fn exec_check_with_repair_retries(
+    workspace: &dyn Workspace,
+    cmd: &str,
+    expect_exit: i32,
+    timeout: Duration,
+    label: &str,
+) -> (bool, String) {
+    let (pass, reason) = exec_check_once(workspace, cmd, expect_exit, timeout, label).await;
+    if pass {
+        return (pass, reason);
+    }
+    if reason.starts_with("command timed out after") {
+        let doubled_secs = timeout
+            .as_secs()
+            .saturating_mul(2)
+            .min(REVIEW_TIMEOUT_RETRY_CAP_SECS);
+        if doubled_secs > timeout.as_secs() {
+            return exec_check_once(
+                workspace,
+                cmd,
+                expect_exit,
+                Duration::from_secs(doubled_secs),
+                label,
+            )
+            .await;
+        }
+        return (pass, reason);
+    }
+    if let Some(ancestor_ref) = merge_base_ancestor_ref(cmd) {
+        let merge_cmd = format!("git merge --no-edit {ancestor_ref}");
+        let merged_cleanly = matches!(
+            workspace.exec(&merge_cmd, timeout).await,
+            Ok(r) if r.exit == Some(0)
+        );
+        if merged_cleanly {
+            return exec_check_once(workspace, cmd, expect_exit, timeout, label).await;
+        }
+        // 衝突、または merge 自体が失敗した: 作業ツリーを元に戻し、元の不合格を返す
+        // （repair WU に任せる。ここでは設計判断をしない）。
+        let _ = workspace.exec("git merge --abort", timeout).await;
+    }
+    (pass, reason)
+}
+
 pub const SUMMARY_FILE_NAME: &str = "summary.md";
 
 /// `task.acceptance` を順に判定する。`produced` はその run の `ArtifactProduced`（名前の照合に使う）。
@@ -287,28 +389,8 @@ pub async fn review_task(
     for (idx, criterion) in task.acceptance.iter().enumerate() {
         let (pass, reason) = match &criterion.check {
             Check::Command { cmd, expect_exit } => {
-                match workspace.exec(cmd, command_timeout).await {
-                    Err(e) => (false, format!("exec failed: {e}")),
-                    Ok(r) if r.timed_out => (
-                        false,
-                        format!(
-                            "command timed out after {}s: {cmd}",
-                            command_timeout.as_secs()
-                        ),
-                    ),
-                    Ok(r) => {
-                        let pass = r.exit == Some(*expect_exit);
-                        (
-                            pass,
-                            format!(
-                                "cmd={cmd:?} exit={:?} expected={expect_exit} stdout_tail={:?} stderr_tail={:?}",
-                                r.exit,
-                                tail(&r.stdout_tail, REASON_TAIL),
-                                tail(&r.stderr_tail, REASON_TAIL)
-                            ),
-                        )
-                    }
-                }
+                exec_check_with_repair_retries(workspace, cmd, *expect_exit, command_timeout, "")
+                    .await
             }
             Check::ArtifactExists { name } => {
                 let rel = produced
@@ -399,25 +481,14 @@ pub async fn review_task(
     if !repo_checks.is_empty() && !task_has_command {
         let base = task.acceptance.len() + usize::from(plan.is_some()) + usize::from(aggregate);
         for (n, cmd) in repo_checks.iter().enumerate() {
-            let (pass, reason) = match workspace.exec(cmd, command_timeout).await {
-                Err(e) => (false, format!("exec failed: {e}")),
-                Ok(r) if r.timed_out => (
-                    false,
-                    format!(
-                        "command timed out after {}s: {cmd}",
-                        command_timeout.as_secs()
-                    ),
-                ),
-                Ok(r) => (
-                    r.exit == Some(0),
-                    format!(
-                        "workspace.toml check: cmd={cmd:?} exit={:?} expected=0 stdout_tail={:?} stderr_tail={:?}",
-                        r.exit,
-                        tail(&r.stdout_tail, REASON_TAIL),
-                        tail(&r.stderr_tail, REASON_TAIL)
-                    ),
-                ),
-            };
+            let (pass, reason) = exec_check_with_repair_retries(
+                workspace,
+                cmd,
+                0,
+                command_timeout,
+                "workspace.toml check: ",
+            )
+            .await;
             verdicts.push(Verdict {
                 criterion_idx: base + n,
                 pass,
@@ -523,31 +594,9 @@ pub async fn run_work_unit_checks(
 ) -> Vec<(bool, String)> {
     let mut out = Vec::with_capacity(checks.len());
     for c in checks {
-        let (pass, reason) = match workspace.exec(&c.cmd, command_timeout).await {
-            Err(e) => (false, format!("exec failed: {e}")),
-            Ok(r) if r.timed_out => (
-                false,
-                format!(
-                    "command timed out after {}s: {}",
-                    command_timeout.as_secs(),
-                    c.cmd
-                ),
-            ),
-            Ok(r) => {
-                let pass = r.exit == Some(c.expect_exit);
-                (
-                    pass,
-                    format!(
-                        "cmd={:?} exit={:?} expected={} stdout_tail={:?} stderr_tail={:?}",
-                        c.cmd,
-                        r.exit,
-                        c.expect_exit,
-                        tail(&r.stdout_tail, REASON_TAIL),
-                        tail(&r.stderr_tail, REASON_TAIL)
-                    ),
-                )
-            }
-        };
+        let (pass, reason) =
+            exec_check_with_repair_retries(workspace, &c.cmd, c.expect_exit, command_timeout, "")
+                .await;
         out.push((pass, reason));
     }
     out
@@ -862,7 +911,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Mutex;
     use task_core::*;
-    use task_worker::{AdapterError, LocalWorkspace, RunOutcome};
+    use task_worker::{AdapterError, ExecResult, LocalWorkspace, RunOutcome, WorkspaceError};
 
     fn task_with(checks: Vec<Check>, dir: &Path) -> Task {
         let now = time::OffsetDateTime::now_utc();
@@ -1029,6 +1078,185 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert!(!results[0].0);
         assert!(results[0].1.contains("timed out"));
+    }
+
+    // ---- ADR-0074 §6 F1 (g)(h): 決定的な検査の技術的な不合格を daemon がその場で直す ----
+
+    /// `cmd` ごとに決め打ちの結果を順番に返す偽の `Workspace`（呼ばれた `cmd`/`timeout` の記録も取る）。
+    #[derive(Default)]
+    struct ScriptedWorkspace {
+        responses: Mutex<HashMap<String, std::collections::VecDeque<Result<ExecResult, String>>>>,
+        calls: Mutex<Vec<(String, Duration)>>,
+    }
+
+    impl ScriptedWorkspace {
+        fn push(&self, cmd: &str, result: Result<ExecResult, String>) {
+            self.responses
+                .lock()
+                .unwrap()
+                .entry(cmd.to_string())
+                .or_default()
+                .push_back(result);
+        }
+    }
+
+    fn exec_ok(exit: i32) -> Result<ExecResult, String> {
+        Ok(ExecResult {
+            exit: Some(exit),
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            timed_out: false,
+        })
+    }
+
+    fn exec_timeout() -> Result<ExecResult, String> {
+        Ok(ExecResult {
+            exit: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+            timed_out: true,
+        })
+    }
+
+    #[async_trait]
+    impl Workspace for ScriptedWorkspace {
+        async fn prepare(&self, _task: &Task) -> Result<PathBuf, WorkspaceError> {
+            Ok(PathBuf::new())
+        }
+        async fn exec(&self, cmd: &str, timeout: Duration) -> Result<ExecResult, WorkspaceError> {
+            self.calls.lock().unwrap().push((cmd.to_string(), timeout));
+            let mut map = self.responses.lock().unwrap();
+            let queue = map
+                .get_mut(cmd)
+                .unwrap_or_else(|| panic!("no scripted response for {cmd:?}"));
+            match queue
+                .pop_front()
+                .unwrap_or_else(|| panic!("scripted responses for {cmd:?} exhausted"))
+            {
+                Ok(r) => Ok(r),
+                Err(e) => Err(WorkspaceError::Io(std::io::Error::other(e))),
+            }
+        }
+        async fn collect(&self, _task: &Task) -> Result<Vec<ArtifactRef>, WorkspaceError> {
+            Ok(vec![])
+        }
+    }
+
+    /// (g): 1 回目が timeout でも、2 倍の timeout で再実行して通れば判定が差し替わる（attempts は
+    /// 変えない。呼び出し側の話なのでここでは検査しない）。
+    #[tokio::test]
+    async fn review_timeout_reruns_once_with_double_timeout_before_repair() {
+        let ws = ScriptedWorkspace::default();
+        ws.push("cargo test", exec_timeout());
+        ws.push("cargo test", exec_ok(0));
+        let (pass, reason) =
+            exec_check_with_repair_retries(&ws, "cargo test", 0, Duration::from_secs(60), "").await;
+        assert!(pass, "{reason}");
+        let calls = ws.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "{calls:?}");
+        assert_eq!(
+            calls[0],
+            ("cargo test".to_string(), Duration::from_secs(60))
+        );
+        assert_eq!(
+            calls[1],
+            ("cargo test".to_string(), Duration::from_secs(120))
+        );
+    }
+
+    /// (g): 2 倍の timeout でもなお timeout なら、`review_timeout` の repair に倒せるよう、
+    /// 理由の文言に `command timed out after` が残る（`execution::classify_review_failure` が読む）。
+    #[tokio::test]
+    async fn review_timeout_still_times_out_after_the_retry_keeps_the_timeout_reason() {
+        let ws = ScriptedWorkspace::default();
+        ws.push("cargo test", exec_timeout());
+        ws.push("cargo test", exec_timeout());
+        let (pass, reason) =
+            exec_check_with_repair_retries(&ws, "cargo test", 0, Duration::from_secs(60), "").await;
+        assert!(!pass);
+        assert!(
+            reason.starts_with("command timed out after 120s"),
+            "{reason:?}"
+        );
+        assert_eq!(ws.calls.lock().unwrap().len(), 2);
+        assert_eq!(
+            task_core::execution::classify_review_failure(&[task_core::execution::FailedCheck {
+                check: task_core::Check::Command {
+                    cmd: "cargo test".to_string(),
+                    expect_exit: 0,
+                },
+                reason,
+                repair_hint: None,
+            }]),
+            task_core::execution::RepairDecision::Repairable(
+                task_core::execution::RepairClass::ReviewTimeout
+            )
+        );
+    }
+
+    /// (g): timeout の上限（1,800 秒）を超えて 2 倍にはしない（すでに 1,800 秒以上なら再実行しない）。
+    #[tokio::test]
+    async fn review_timeout_retry_is_capped_at_1800_seconds() {
+        let ws = ScriptedWorkspace::default();
+        ws.push("slow", exec_timeout());
+        let (pass, _reason) =
+            exec_check_with_repair_retries(&ws, "slow", 0, Duration::from_secs(1800), "").await;
+        assert!(!pass);
+        assert_eq!(
+            ws.calls.lock().unwrap().len(),
+            1,
+            "no retry once already at the cap"
+        );
+    }
+
+    /// (h): `merge-base --is-ancestor` が不成立でも、衝突なく merge できれば daemon が決定的に
+    /// 直し、同じ検査を再実行して合格に差し替える。
+    #[tokio::test]
+    async fn merge_base_failure_merges_base_deterministically() {
+        let ws = ScriptedWorkspace::default();
+        let check_cmd = "git merge-base --is-ancestor main HEAD";
+        ws.push(check_cmd, exec_ok(1)); // 不成立（main が先行している）
+        ws.push("git merge --no-edit main", exec_ok(0)); // 衝突なく merge できた
+        ws.push(check_cmd, exec_ok(0)); // 再実行したら成立
+        let (pass, reason) =
+            exec_check_with_repair_retries(&ws, check_cmd, 0, Duration::from_secs(60), "").await;
+        assert!(pass, "{reason}");
+        let calls = ws.calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(),
+            vec![check_cmd, "git merge --no-edit main", check_cmd]
+        );
+    }
+
+    /// (h): 衝突があれば merge を中断し、元の不合格のまま返す（`merge_base` の repair WU に倒れる）。
+    #[tokio::test]
+    async fn merge_base_conflict_aborts_the_merge_and_keeps_the_failure() {
+        let ws = ScriptedWorkspace::default();
+        let check_cmd = "git merge-base --is-ancestor main HEAD";
+        ws.push(check_cmd, exec_ok(1));
+        ws.push("git merge --no-edit main", exec_ok(1)); // 衝突
+        ws.push("git merge --abort", exec_ok(0));
+        let (pass, reason) =
+            exec_check_with_repair_retries(&ws, check_cmd, 0, Duration::from_secs(60), "").await;
+        assert!(!pass);
+        assert_eq!(
+            task_core::execution::classify_review_failure(&[task_core::execution::FailedCheck {
+                check: task_core::Check::Command {
+                    cmd: check_cmd.to_string(),
+                    expect_exit: 0,
+                },
+                reason,
+                repair_hint: None,
+            }]),
+            task_core::execution::RepairDecision::Repairable(
+                task_core::execution::RepairClass::MergeBase
+            )
+        );
+        let calls = ws.calls.lock().unwrap();
+        assert_eq!(
+            calls.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>(),
+            vec![check_cmd, "git merge --no-edit main", "git merge --abort"]
+        );
     }
 
     #[tokio::test]

@@ -2530,9 +2530,10 @@ mod tests {
         assert_eq!(plan.versions[0].status, task_core::PlanStatus::Superseded);
         assert_eq!(plan.versions[1].version, 2);
         assert_eq!(plan.versions[1].status, task_core::PlanStatus::Active);
+        // ADR-0074 D5.3（Phase F1）: reason の後ろに差分の件数（added/changed/removed）が付く。
         assert_eq!(
             plan.versions[1].reason.as_deref(),
-            Some("add a follow-up step")
+            Some("add a follow-up step (added=1, changed=0, removed=0)")
         );
     }
 

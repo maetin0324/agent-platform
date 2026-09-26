@@ -149,7 +149,7 @@ pub(crate) fn parse_snake<T: DeserializeOwned>(what: &str, value: &str) -> Resul
 }
 
 /// `Event` の serde の `type` 名（`types` クエリの語彙）。
-pub(crate) const EVENT_TYPES: [&str; 25] = [
+pub(crate) const EVENT_TYPES: [&str; 26] = [
     "created",
     "transitioned",
     "worker_started",
@@ -184,6 +184,8 @@ pub(crate) const EVENT_TYPES: [&str; 25] = [
     "work_unit_transitioned",
     // ADR-0072 D5/D13（Phase E3）: Complexity Gate の判定。
     "execution_gated",
+    // ADR-0074 D6.2（Phase F1）: repair WU を起こしたこと（class・起こした場所）。
+    "repair_scheduled",
 ];
 
 pub(crate) fn event_type_name(event: &Event) -> &'static str {
@@ -213,6 +215,7 @@ pub(crate) fn event_type_name(event: &Event) -> &'static str {
         Event::ExecutionPlanned { .. } => "execution_planned",
         Event::WorkUnitTransitioned { .. } => "work_unit_transitioned",
         Event::ExecutionGated { .. } => "execution_gated",
+        Event::RepairScheduled { .. } => "repair_scheduled",
     }
 }
 

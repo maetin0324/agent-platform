@@ -1083,6 +1083,18 @@ pub enum Event {
     ExecutionGated {
         decision: Box<crate::execution_gate::ExecutionGateDecision>,
     },
+    /// ADR-0074 D6.2（Phase F1）: repair WU を起こしたこと（class・起こした場所）を残す。
+    /// `execution_metrics::summarize` はこの Event から `repairs_by_class` を組み立てる
+    /// （title の接頭辞の復元に頼らない。`unknown` を無くす。D16/D17）。状態は変えない
+    /// （`replay` の attempts 計算は無視する）。
+    RepairScheduled {
+        work_unit_id: String,
+        key: String,
+        /// `RepairClass::bucket()`（`format`/`lint`/`test_small`/`reviewer_local`/`merge_base`/
+        /// `review_timeout`）、または planner が replan で自ら書いた repair WU の `"planner"`。
+        class: String,
+        origin: crate::execution::RepairOrigin,
+    },
 }
 
 impl Event {
