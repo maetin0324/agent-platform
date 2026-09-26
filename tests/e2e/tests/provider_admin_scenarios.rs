@@ -593,6 +593,10 @@ echo '{"type":"error","message":"429 rate limited","retryable":true,"provider_fa
         env.get("/providers").body
     );
 
+    // Provider failure is requeued independently of max_retries. Stop the task so it
+    // cannot immediately put the freshly reloaded policy back into cooldown.
+    env.celerisctl(&["cancel", &task]);
+
     let reloaded = env.post_empty("/reload");
     assert_eq!(reloaded.status, 200, "{}", reloaded.body);
 
