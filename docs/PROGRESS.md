@@ -19405,3 +19405,11 @@ repair 化）と (b) 問題5（モデル単価欠損の費用集計への影響�
   「15:03Z に昇格済み」という前提と食い違うため、事実として記録する（本番の実際の昇格状況は
   このエージェントの環境からは確認できない。人による確認を推奨）。
 - 訂正（Fable、2026-09-25 15:0xZ）: E6 分析の入力 `releases.json` は昇格前のスナップショットだったため「5cc1610938f5 は未昇格」と記されているが、実際には 15:03Z にライブ昇格済み（`GET /health` release=5cc1610938f5）。分析の推奨に従い、本番設定の `[execution] gate` は `"on"` → `"shadow"` に戻す（`config.toml.bak-20260925b`。次回の昇格で有効）。
+
+## ホームディレクトリを TrueNAS NFS へ直接載せ替え（2026-09-26 00:47〜00:54Z、手順書 docs/ops/home-nfs-migration-2026-09-25.md）
+
+- 人が Proxmox ホストで実施: 既存の PVE ストレージ `/mnt/pve/truenas`（`192.168.1.4:/mnt/tank/share_home`）の `rmaeda/` を `mp0` で `/home/rmaeda` に bind、`lxc.idmap` で uid/gid 1001 をホストの 1001 に写す。初回 rsync は小ファイルで終わらず途中で止め、停止後の差分 rsync（workspaces / worktrees / rustup / cargo registry / cache を除外）で切替。
+- CT 内で確認（Fable）: `df` が `192.168.1.4:/mnt/tank/share_home/rmaeda`（6.4T、使用 550G）。所有者は 1001:1001（ホーム、`~/.config/celeris`、`~/.local/celeris`、`/var/lib/celeris`）。fsync 4 KiB × 100 = 2.5 s（25 ms/回。loop 時は 69 ms）。ローカル LVM は 9 ms。`git status` 0.2 s。
+- 設定変更（`config.toml.bak-20260926a`）: `workspace_root = /var/lib/celeris/workspaces`、`[workspace] build_cache_dir = /var/lib/celeris/build-cache`、`[memory] dir = /var/lib/celeris/memory`（langmem の SQLite は NFS に置かない）。`~/.local/celeris/memory` と生きていた workspace 1 件をコピー。デーモンは CT 起動時に旧設定で自動起動していたので in-flight 0 で再起動し、`GET /config` の `workspace_root` が `/var/lib/celeris/workspaces` になったことを確認。health ok、GUI 200。
+- `~/.rustup` は root squash で `nobody` 所有の空ディレクトリになっていた → 退避して `rustup toolchain install stable` で再構築（cargo 1.98.1）。`~/.cargo/config.toml` に `[build] target-dir = /var/lib/celeris/build-cache/cargo/agent-platform-dev`（開発ビルドの生成物をローカルへ）。ssh の ControlPath は前日に `/run/user/1001/` へ変更済み。
+- 残: 旧 loop ボリュームの終端 workspaces（成果物・checkpoint）は必要なら `/var/lib/celeris/workspaces` へ後追いコピー。クラスタ（pegasus / sirius）は未接続（人の TOTP 再接続）。`~/.local/celeris/releases`（現行 bin と gui）はホーム（NFS）のまま。数日問題なければ旧 loop イメージを削除。
