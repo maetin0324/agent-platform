@@ -19788,6 +19788,33 @@ merge commit は fast-forward、`aeed716`(F0) → `744744f`(F1 最終) の 5 コ
 5. `apply_delta` は `phases`/`children` を base のまま持ち越す（replan は work_units の差分だけ）。
 6. migration 0027 は SQL 列の追加のみで、Rust 側の読み書きは (c) 以降に送った。
 
+### checkpoint 2: (c) の下ごしらえ — `runnable_work_units`（純粋関数）
+
+`dispatcher.rs` への配線（`RunKey`・WU の worktree・lease 取得）はまだだが、D1.3 が指す
+`next_work_unit(&[WorkUnitRow]) -> NextStep` の一般化 `runnable_work_units(&[WorkUnitRow],
+in_flight: usize, limit: usize) -> Vec<String>` を `crates/task-core/src/execution_plan.rs` に
+先に実装した（`next_work_unit` は置き換えず並存。`dispatcher.rs` の呼び出し側を切り替えるのは
+次の checkpoint）。
+
+- 「現在の工程」は `spec.phase`（WorkUnitSpec に保持済み。専用の `WorkUnitRow.phase` 列はまだ
+  追加していない）と `seq` から求める: 有効（`!is_terminal()`）な WU のうち `seq` 最小のものの
+  `phase` が「現在の工程」（(a) の `topo_sort` が工程順を保証するため、`seq` の最小値で工程の
+  順序が引ける。専用の phase 列を待たずに実装できた）。
+- `needs_continuation` を先に、`ready` を `seq` 順で選ぶ。`limit.saturating_sub(in_flight)` 件まで。
+- 兄弟に `failed`/`blocked` があれば `ready`（新規）は選ばないが `needs_continuation`（続き）は
+  選ぶ（D1.6 の表「走っている WU とその continuation だけは続ける」に合わせた）。
+- コマンド: `cargo test -p task-core --lib execution_plan::tests::runnable_work_units`
+- 結果: **6 passed**（`runnable_work_units_matches_next_work_unit_for_v1_with_limit_one`
+  〈v1 が `next_work_unit` と同じ 1 件を返すことの確認〉、
+  `runnable_work_units_respects_the_parallel_limit`（ADR §6 F2 のテスト表の名前どおり）、
+  `runnable_work_units_prefers_needs_continuation_over_ready`、
+  `runnable_work_units_only_considers_the_current_phase`、
+  `runnable_work_units_does_not_start_new_ones_when_a_sibling_failed_but_continues_in_flight`、
+  `runnable_work_units_returns_empty_when_everything_is_terminal`）。
+- ゲート: `cargo fmt --all -- --check` 差分なし、
+  `cargo clippy --workspace --all-targets -- -D warnings` warning 0、
+  `cargo test --workspace --no-fail-fast` **FAILED 0**（2,434 個の `test ...` 行、exit code 0）。
+
 ### 未解決事項・次の checkpoint（(c) 以降）への申し送り
 
 - (c) 独立 WU の並列実行、(d) 積み上げ、(e) 衝突と repair、(f) 統合後検査、(g) 兄弟 in-flight、

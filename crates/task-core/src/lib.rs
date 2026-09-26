@@ -161,7 +161,7 @@ pub use execution_plan::{
     ExecutionPlanSpec, NextStep, PhaseSpec, PlanOrigin, PlanStatus, PlanValidationError,
     RunIndexRole, RunIndexStatus, RunRow, ValidatedPlan, WorkUnitBlockedReason, WorkUnitBudget,
     WorkUnitCheck, WorkUnitContext, WorkUnitKind, WorkUnitRow, WorkUnitSpec, WorkUnitStatus,
-    dependents_to_block, new_id, newly_ready, next_work_unit, validate,
+    dependents_to_block, new_id, newly_ready, next_work_unit, runnable_work_units, validate,
 };
 // ---- ADR-0072 D13（Phase E3）: Complexity Gate ----
 pub use execution_gate::{

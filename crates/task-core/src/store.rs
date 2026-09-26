@@ -8954,8 +8954,8 @@ mod tests {
         }
 
         // 旧い行は新しい列が NULL のまま読める。
-        let (phase, lease_run_id, branch): (Option<String>, Option<String>, Option<String>) =
-            conn.query_row(
+        let (phase, lease_run_id, branch): (Option<String>, Option<String>, Option<String>) = conn
+            .query_row(
                 "SELECT phase, lease_run_id, branch FROM work_units WHERE id = 'wu-legacy'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

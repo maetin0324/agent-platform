@@ -1470,6 +1470,61 @@ pub fn next_work_unit(units: &[WorkUnitRow]) -> NextStep {
     )
 }
 
+/// ADR-0074 D1.3（Phase F2）: `next_work_unit` の一般化。工程の中で並列に何本まで起こせるかを
+/// 決める（純粋関数。実際に走らせる・lease を取るのは呼び出し側の責務）。
+///
+/// - 対象は**現在の工程**（有効〈`!is_terminal()`〉な WorkUnit が残っている工程のうち、
+///   `seq` が最も小さいもの）だけ。v1（`spec.phase` が常に `None`）は工程が実質 1 つなので
+///   全部が対象になる（`limit = 1` と組み合わせると `next_work_unit` と同じ 1 件を返す）。
+/// - `needs_continuation` を先に、次に `ready` を `seq` 順で選ぶ（`next_work_unit` と同じ順序）。
+/// - `limit` から `in_flight`（呼び出し側がこの Task について現在走らせている run の数）を引いた
+///   件数まで。
+/// - 現在の工程に `failed`/`blocked` の WorkUnit があれば、**新しい**（`ready` の）WorkUnit は
+///   起こさない。ただし既に走ったことのある `needs_continuation` の WorkUnit は続ける
+///   （D1.6「走っている WU とその continuation だけは続ける」）。
+pub fn runnable_work_units(units: &[WorkUnitRow], in_flight: usize, limit: usize) -> Vec<String> {
+    let slots = limit.saturating_sub(in_flight);
+    if slots == 0 {
+        return Vec::new();
+    }
+    let in_play: Vec<&WorkUnitRow> = units.iter().filter(|u| !u.status.is_terminal()).collect();
+    let Some(current) = in_play.iter().min_by_key(|u| u.seq) else {
+        return Vec::new();
+    };
+    let current_phase = current.spec.phase.as_deref();
+    let in_phase: Vec<&WorkUnitRow> = in_play
+        .into_iter()
+        .filter(|u| u.spec.phase.as_deref() == current_phase)
+        .collect();
+
+    let has_failed_or_blocked = in_phase
+        .iter()
+        .any(|u| matches!(u.status, WorkUnitStatus::Failed | WorkUnitStatus::Blocked));
+
+    let mut candidates: Vec<&WorkUnitRow> = in_phase
+        .iter()
+        .copied()
+        .filter(|u| u.status == WorkUnitStatus::NeedsContinuation)
+        .collect();
+    candidates.sort_by_key(|u| u.seq);
+
+    if !has_failed_or_blocked {
+        let mut ready: Vec<&WorkUnitRow> = in_phase
+            .iter()
+            .copied()
+            .filter(|u| u.status == WorkUnitStatus::Ready)
+            .collect();
+        ready.sort_by_key(|u| u.seq);
+        candidates.extend(ready);
+    }
+
+    candidates
+        .into_iter()
+        .take(slots)
+        .map(|u| u.id.clone())
+        .collect()
+}
+
 /// D15: 依存の解決。`depends_on` が全て `done` になった `pending` の WU を `ready` にする（`id` の集合を返す。
 /// 呼び出し側が状態を書き換える）。
 pub fn newly_ready(units: &[WorkUnitRow]) -> Vec<String> {
@@ -1835,6 +1890,123 @@ mod tests {
             row("b", 1, WorkUnitStatus::Superseded, &[]),
         ];
         assert_eq!(next_work_unit(&units), NextStep::AllDone);
+    }
+
+    // ---- ADR-0074 D1.3（Phase F2）: `runnable_work_units` ----
+
+    fn row_v2(
+        key: &str,
+        wu_phase: &str,
+        seq: u32,
+        status: WorkUnitStatus,
+        depends_on: &[&str],
+    ) -> WorkUnitRow {
+        WorkUnitRow::new(
+            format!("wu-{key}"),
+            "task".to_string(),
+            "plan".to_string(),
+            seq,
+            spec_v2(key, wu_phase, depends_on),
+            status,
+            "2026-09-24T00:00:00Z".to_string(),
+        )
+    }
+
+    /// v1（`phase` が常に `None`）で `limit = 1` なら `next_work_unit` と同じ 1 件を返す。
+    #[test]
+    fn runnable_work_units_matches_next_work_unit_for_v1_with_limit_one() {
+        let units = vec![
+            row("a", 0, WorkUnitStatus::Done, &[]),
+            row("c", 2, WorkUnitStatus::Ready, &[]),
+            row("b", 1, WorkUnitStatus::NeedsContinuation, &[]),
+        ];
+        assert_eq!(runnable_work_units(&units, 0, 1), vec!["wu-b".to_string()]);
+    }
+
+    #[test]
+    fn runnable_work_units_respects_the_parallel_limit() {
+        let units = vec![
+            row_v2("a", "build", 0, WorkUnitStatus::Ready, &[]),
+            row_v2("b", "build", 1, WorkUnitStatus::Ready, &[]),
+            row_v2("c", "build", 2, WorkUnitStatus::Ready, &[]),
+        ];
+        assert_eq!(
+            runnable_work_units(&units, 0, 2),
+            vec!["wu-a".to_string(), "wu-b".to_string()],
+            "2 本まで、seq 順"
+        );
+        assert_eq!(
+            runnable_work_units(&units, 0, 3),
+            vec!["wu-a".to_string(), "wu-b".to_string(), "wu-c".to_string()]
+        );
+        assert!(
+            runnable_work_units(&units, 3, 3).is_empty(),
+            "in_flight が limit に達していれば何も起こさない"
+        );
+        assert_eq!(
+            runnable_work_units(&units, 1, 3).len(),
+            2,
+            "in_flight の分だけ枠が減る"
+        );
+    }
+
+    #[test]
+    fn runnable_work_units_prefers_needs_continuation_over_ready() {
+        let units = vec![
+            row_v2("a", "build", 0, WorkUnitStatus::Ready, &[]),
+            row_v2("b", "build", 1, WorkUnitStatus::NeedsContinuation, &[]),
+        ];
+        assert_eq!(
+            runnable_work_units(&units, 0, 1),
+            vec!["wu-b".to_string()],
+            "needs_continuation を先に選ぶ"
+        );
+    }
+
+    /// D1.3: 対象は現在の工程だけ（前の工程がまだ終わっていなければ、後の工程の ready な WU は
+    /// 対象にしない）。
+    #[test]
+    fn runnable_work_units_only_considers_the_current_phase() {
+        let units = vec![
+            row_v2("a", "build", 0, WorkUnitStatus::Ready, &[]),
+            // `verify` 工程は `build` に依存していないが、工程の境が障壁になる。
+            row_v2("z", "verify", 1, WorkUnitStatus::Ready, &[]),
+        ];
+        assert_eq!(
+            runnable_work_units(&units, 0, 5),
+            vec!["wu-a".to_string()],
+            "build 工程がまだ終わっていないので verify の WU は対象外"
+        );
+
+        // build がすべて終われば（is_terminal）、verify が「現在の工程」になる。
+        let mut done = units.clone();
+        done[0].status = WorkUnitStatus::Done;
+        assert_eq!(runnable_work_units(&done, 0, 5), vec!["wu-z".to_string()]);
+    }
+
+    /// D1.6: 兄弟が failed/blocked のとき、新しい（ready の）WU は起こさないが、既に走ったことの
+    /// ある needs_continuation の WU は続ける。
+    #[test]
+    fn runnable_work_units_does_not_start_new_ones_when_a_sibling_failed_but_continues_in_flight() {
+        let units = vec![
+            row_v2("a", "build", 0, WorkUnitStatus::Failed, &[]),
+            row_v2("b", "build", 1, WorkUnitStatus::Ready, &[]),
+            row_v2("c", "build", 2, WorkUnitStatus::NeedsContinuation, &[]),
+        ];
+        assert_eq!(
+            runnable_work_units(&units, 0, 5),
+            vec!["wu-c".to_string()],
+            "ready の b は起こさないが、needs_continuation の c は続ける"
+        );
+    }
+
+    #[test]
+    fn runnable_work_units_returns_empty_when_everything_is_terminal() {
+        let units = vec![
+            row("a", 0, WorkUnitStatus::Done, &[]),
+            row("b", 1, WorkUnitStatus::Superseded, &[]),
+        ];
+        assert!(runnable_work_units(&units, 0, 3).is_empty());
     }
 
     #[test]
