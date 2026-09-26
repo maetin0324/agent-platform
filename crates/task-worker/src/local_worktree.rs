@@ -94,7 +94,8 @@ impl LocalWorktree {
             .map_err(|e| WorkspaceError::Io(std::io::Error::other(format!("worktree task: {e}"))))?
     }
 
-    fn ensure_blocking(&self) -> Result<(), WorkspaceError> {
+    /// `ensure` の同期版（ADR-0074 D1.2: daemon が WU の worktree を dispatch の時点で切るのに使う）。
+    pub fn ensure_blocking(&self) -> Result<(), WorkspaceError> {
         std::fs::create_dir_all(&self.task_dir)?;
         if self.dir.join(".git").exists() {
             return Ok(());
