@@ -2340,6 +2340,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         }
     }
 
@@ -2348,6 +2349,8 @@ mod tests {
             schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
             rationale: "investigate then implement".to_string(),
             work_units,
+            phases: Vec::new(),
+            children: Vec::new(),
         }
     }
 

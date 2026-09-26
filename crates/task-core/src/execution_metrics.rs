@@ -269,6 +269,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         }
     }
 
@@ -363,6 +364,8 @@ mod tests {
                 wu("a", WorkUnitKind::Implement, "a", &[]),
                 wu("b", WorkUnitKind::Implement, "b", &["a"]),
             ],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         let plan2 = ExecutionPlanSpec {
             schema: EXECUTION_PLAN_SCHEMA.to_string(),
@@ -372,6 +375,8 @@ mod tests {
                 wu("b", WorkUnitKind::Implement, "b", &["a"]),
                 wu("c", WorkUnitKind::Implement, "c", &["b"]),
             ],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         let events = vec![
             Event::ExecutionPlanned {
@@ -423,6 +428,8 @@ mod tests {
                     &[],
                 ),
             ],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         let events = vec![Event::ExecutionPlanned {
             plan_id: "p1".to_string(),
@@ -495,6 +502,8 @@ mod tests {
                 "fix the thing directly (no title convention)",
                 &[],
             )],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         let events = vec![
             Event::ExecutionPlanned {

@@ -1111,6 +1111,7 @@ pub(crate) mod tests {
             features,
             budget: None,
             outputs: vec![],
+            phase: None,
         };
         crate::WorkUnitRow::new(
             "wu-a".to_string(),

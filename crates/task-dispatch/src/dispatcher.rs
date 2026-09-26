@@ -5194,6 +5194,7 @@ impl Dispatcher {
                 max_wall_secs: Some(max_wall_secs),
             }),
             outputs: vec![],
+            phase: None,
         };
 
         let now = rfc3339(OffsetDateTime::now_utc());
@@ -5246,6 +5247,7 @@ impl Dispatcher {
                     features: None,
                     budget: None,
                     outputs: vec![],
+                    phase: None,
                 };
                 let main_row = task_core::WorkUnitRow::new(
                     task_core::new_id(),
@@ -5269,6 +5271,8 @@ impl Dispatcher {
                     schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
                     rationale: "reviewer repair: 暗黙の WorkUnit を実体化".to_string(),
                     work_units: vec![main_spec, spec],
+                    phases: Vec::new(),
+                    children: Vec::new(),
                 };
                 let plan_row = task_core::ExecutionPlanRow {
                     id: plan_id.clone(),
@@ -22389,6 +22393,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         }
     }
 
@@ -22404,6 +22409,8 @@ mod tests {
                 wu_spec("b", &["a"]),
                 wu_spec("c", &["b"]),
             ],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         task_ops::execution::adopt_plan(
             store.as_ref(),
@@ -22562,6 +22569,8 @@ mod tests {
             schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
             rationale: "test plan".to_string(),
             work_units,
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         serde_json::to_string(&spec).unwrap()
     }
@@ -22993,6 +23002,8 @@ mod tests {
                 schema: task_core::EXECUTION_PLAN_SCHEMA.into(),
                 rationale: "initial implementation".into(),
                 work_units: vec![main_spec],
+                phases: Vec::new(),
+                children: Vec::new(),
             },
             task_core::PlanOrigin::Fixture,
             None,
@@ -23341,6 +23352,8 @@ mod tests {
             schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
             rationale: "single WU with a deterministic check".to_string(),
             work_units: vec![a],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         task_ops::execution::adopt_plan(
             store.as_ref(),

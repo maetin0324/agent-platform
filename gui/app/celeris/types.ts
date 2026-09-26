@@ -604,7 +604,8 @@ export type PlanOrigin = "planner" | "human" | "repair" | "fixture";
 /**
  * D14: WorkUnit の種類。
  */
-export type WorkUnitKind = "investigate" | "design" | "implement" | "test" | "release" | "repair" | "other";
+export type WorkUnitKind =
+  ("investigate" | "design" | "implement" | "test" | "release" | "repair" | "other") | "integrate";
 export type WorkUnitStatus =
   "pending" | "ready" | "needs_continuation" | "running" | "done" | "failed" | "blocked" | "superseded" | "cancelled";
 /**
@@ -3032,11 +3033,35 @@ export interface CheckpointTestRun {
 }
 /**
  * D14: Planner の出力（または人が `PUT`/`POST` で書く計画）そのもの。
+ *
+ * ADR-0074 D1.1（Phase F2）: `schema` の値で v1 / v2 を分ける（`validate` が判定する）。
+ * `phases` / `children` は v1 では常に空（`serde(default)` で省略も読める。v1 の JSON を
+ * 1 バイトも変えないため、この 2 欄自体は型として増えるが v1 の出力・検証は変わらない）。
  */
 export interface ExecutionPlanSpec {
+  /**
+   * D3.7: 子 Task の提案。F4 まで空だけを許す（`validate`）。F2 の時点では中身の schema を
+   * 決めていないので、素の JSON 値のまま持つ（今回のPhaseの先回りをしない）。
+   */
+  children?: unknown[];
+  /**
+   * v2 のみ。v1 では空でなければならない（`validate`）。
+   */
+  phases?: PhaseSpec[];
   rationale: string;
   schema: string;
   work_units: WorkUnitSpec[];
+}
+/**
+ * ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/2` の工程。配列の順が実行順（D1.1）。
+ */
+export interface PhaseSpec {
+  /**
+   * `[a-z0-9-]{1,32}`。計画の中で一意。
+   */
+  key: string;
+  kind: WorkUnitKind;
+  title: string;
 }
 /**
  * D14: 計画の中の 1 WorkUnit の spec。**`assignee` / `tier` / `model` の欄は持たない**
@@ -3066,6 +3091,12 @@ export interface WorkUnitSpec {
   kind: WorkUnitKind;
   objective: string;
   outputs?: string[];
+  /**
+   * ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/2` では必須（`phases` にある key の
+   * いずれか）。`celeris.execution-plan/1` では無い（`Some` なら検証エラー。v1 の計画・
+   * プロンプトを 1 バイトも変えないため、この欄自体は常に存在するが v1 は `None` のまま）。
+   */
+  phase?: string | null;
   title: string;
 }
 /**

@@ -313,6 +313,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         };
         WorkUnitRow::new(
             format!("id-{key}"),

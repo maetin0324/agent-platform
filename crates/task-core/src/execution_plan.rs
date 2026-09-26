@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 /// D14: 計画 JSON の schema 版（`docs/protocol/execution-plan.schema.json`）。
 pub const EXECUTION_PLAN_SCHEMA: &str = "celeris.execution-plan/1";
 
+/// ADR-0074 D1.1（Phase F2）: `phases`（工程ごとの並列）を持つ計画の schema 版。v1 と同じ
+/// `ExecutionPlanSpec` 型を使うが、`phases` が 1 つ以上、各 WorkUnit に `phase` が要る点が違う
+/// （`validate` が schema の値で分ける。D1.1）。
+pub const EXECUTION_PLAN_SCHEMA_V2: &str = "celeris.execution-plan/2";
+
 /// `execution_plans.id` / `work_units.id` に使う ULID の発行（`TaskId` 等と同じ ULID 系を使う。
 /// 型付きの id にしていないのは、この 2 表が対応する Event の中に既に `plan_id` / `work_unit_id` が
 /// 文字列で入っているため。I/O は無い純粋な採番）。
@@ -34,6 +39,10 @@ pub enum WorkUnitKind {
     Release,
     Repair,
     Other,
+    /// ADR-0074 D1.4（Phase F2）: 工程末尾の統合 WU（daemon が計画の採用時に足す system WU。
+    /// `runs = 0`、LLM run を起こさない）。planner の出力に書かれていれば検証で拒否する
+    /// （`validate` の `ReservedKind`。system WU 専用の予約語）。
+    Integrate,
 }
 
 impl WorkUnitKind {
@@ -46,6 +55,7 @@ impl WorkUnitKind {
             WorkUnitKind::Release => "release",
             WorkUnitKind::Repair => "repair",
             WorkUnitKind::Other => "other",
+            WorkUnitKind::Integrate => "integrate",
         }
     }
 
@@ -58,6 +68,7 @@ impl WorkUnitKind {
             "release" => Some(WorkUnitKind::Release),
             "repair" => Some(WorkUnitKind::Repair),
             "other" => Some(WorkUnitKind::Other),
+            "integrate" => Some(WorkUnitKind::Integrate),
             _ => None,
         }
     }
@@ -123,15 +134,41 @@ pub struct WorkUnitSpec {
     pub budget: Option<WorkUnitBudget>,
     #[serde(default)]
     pub outputs: Vec<String>,
+    /// ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/2` では必須（`phases` にある key の
+    /// いずれか）。`celeris.execution-plan/1` では無い（`Some` なら検証エラー。v1 の計画・
+    /// プロンプトを 1 バイトも変えないため、この欄自体は常に存在するが v1 は `None` のまま）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+}
+
+/// ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/2` の工程。配列の順が実行順（D1.1）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PhaseSpec {
+    /// `[a-z0-9-]{1,32}`。計画の中で一意。
+    pub key: String,
+    pub kind: WorkUnitKind,
+    pub title: String,
 }
 
 /// D14: Planner の出力（または人が `PUT`/`POST` で書く計画）そのもの。
+///
+/// ADR-0074 D1.1（Phase F2）: `schema` の値で v1 / v2 を分ける（`validate` が判定する）。
+/// `phases` / `children` は v1 では常に空（`serde(default)` で省略も読める。v1 の JSON を
+/// 1 バイトも変えないため、この 2 欄自体は型として増えるが v1 の出力・検証は変わらない）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionPlanSpec {
     pub schema: String,
     pub rationale: String,
+    /// v2 のみ。v1 では空でなければならない（`validate`）。
+    #[serde(default)]
+    pub phases: Vec<PhaseSpec>,
     pub work_units: Vec<WorkUnitSpec>,
+    /// D3.7: 子 Task の提案。F4 まで空だけを許す（`validate`）。F2 の時点では中身の schema を
+    /// 決めていないので、素の JSON 値のまま持つ（今回のPhaseの先回りをしない）。
+    #[serde(default)]
+    pub children: Vec<serde_json::Value>,
 }
 
 /// 生成したスキーマ（`docs/protocol/execution-plan.schema.json`。`UPDATE_SCHEMA=1` で再生成）。
@@ -273,6 +310,11 @@ pub fn apply_delta(
         schema: base.schema.clone(),
         rationale: delta.rationale.clone(),
         work_units: units,
+        // ADR-0074 D5.3 は work_units の差分だけを扱う（phases の再構成は扱わない）。F2 で
+        // schema v2 が増えたので、差分は phases/children を base のまま持ち越す（replan で
+        // 工程構成自体を作り直すことは無い。Phase F2 実装時の逸脱・明確化）。
+        phases: base.phases.clone(),
+        children: base.children.clone(),
     })
 }
 
@@ -301,6 +343,11 @@ pub struct ExecutionLimits {
     pub max_checks: usize,
     /// 計画の JSON 全体の大きさの上限（バイト、既定 24 KiB）。
     pub max_plan_json_bytes: usize,
+    /// ADR-0074 §4（Phase F2）: `celeris.execution-plan/2` の `work_units` の件数上限（既定 10。
+    /// 統合 WU・repair は数えない）。`max_work_units` は v1 専用のまま（既定 8。§4 の表）。
+    pub max_work_units_v2: usize,
+    /// ADR-0074 §4（Phase F2）: `phases` の件数上限（既定 5）。
+    pub max_phases: usize,
 }
 
 impl Default for ExecutionLimits {
@@ -316,6 +363,8 @@ impl Default for ExecutionLimits {
             max_done_when_chars: 300,
             max_checks: 6,
             max_plan_json_bytes: 24 * 1024,
+            max_work_units_v2: 10,
+            max_phases: 5,
         }
     }
 }
@@ -323,7 +372,7 @@ impl Default for ExecutionLimits {
 /// D14: 検証エラー（すべて拒否理由。1 回だけ再試行し、それでも駄目なら atomic に倒す。呼び出し側の責務）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanValidationError {
-    /// `schema` 欄が `celeris.execution-plan/1` ではない。
+    /// `schema` 欄が `celeris.execution-plan/1` でも `/2`（ADR-0074 D1.1、Phase F2）でもない。
     WrongSchema {
         found: String,
     },
@@ -403,13 +452,65 @@ pub enum PlanValidationError {
         bytes: usize,
         max: usize,
     },
+    /// ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/1` に `phases` が書かれている
+    /// （v1 は工程を持たない。1 バイトも変えない）。
+    PhasesNotAllowedInV1,
+    /// ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/2` に `phases` が 1 つも無い。
+    NoPhases,
+    /// ADR-0074 §4（Phase F2）: `phases` の件数が上限を超える。
+    TooManyPhases {
+        count: usize,
+        max: usize,
+    },
+    /// ADR-0074 D1.1（Phase F2）: 工程の `key` が `[a-z0-9-]{1,32}` に合わない。
+    InvalidPhaseKey {
+        key: String,
+    },
+    /// ADR-0074 D1.1（Phase F2）: 工程の `key` が重複している。
+    DuplicatePhaseKey {
+        key: String,
+    },
+    /// ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/1` の WorkUnit に `phase` が書かれている
+    /// （v1 は工程を持たない）。
+    WorkUnitPhaseNotAllowedInV1 {
+        key: String,
+    },
+    /// ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/2` の WorkUnit に `phase` が無い（必須）。
+    WorkUnitMissingPhase {
+        key: String,
+    },
+    /// ADR-0074 D1.1（Phase F2）: WorkUnit の `phase` が `phases` に無い key を指している。
+    UnknownWorkUnitPhase {
+        key: String,
+        phase: String,
+    },
+    /// ADR-0074 D1.1（Phase F2）: 依存先が自分より後の工程にある（拒否。D1.1 の規則 1）。
+    DependencyInLaterPhase {
+        key: String,
+        depends_on: String,
+    },
+    /// ADR-0074 D1.1（Phase F2）: 同じ工程の中の依存が 2 つ以上ある（規則 2。鎖か木のみ許す）。
+    TooManyIntraPhaseDependencies {
+        key: String,
+        phase: String,
+    },
+    /// ADR-0074 D3.7（Phase F2）: `children` が空でない（F4 まで空だけを許す）。
+    NonEmptyChildren,
+    /// ADR-0074 D1.4（Phase F2）: `kind = integrate` は daemon が足す system WU 専用の予約語で、
+    /// 計画（planner・人）が自分の WorkUnit にこの kind を書くことはできない。
+    ReservedKind {
+        key: String,
+    },
 }
 
 impl std::fmt::Display for PlanValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlanValidationError::WrongSchema { found } => {
-                write!(f, "schema must be {EXECUTION_PLAN_SCHEMA}, found {found}")
+                write!(
+                    f,
+                    "schema must be {EXECUTION_PLAN_SCHEMA} or {EXECUTION_PLAN_SCHEMA_V2}, found {found}"
+                )
             }
             PlanValidationError::NoWorkUnits => write!(f, "work_units must not be empty"),
             PlanValidationError::TooManyWorkUnits { count, max } => {
@@ -480,6 +581,61 @@ impl std::fmt::Display for PlanValidationError {
             PlanValidationError::PlanTooLarge { bytes, max } => {
                 write!(f, "execution plan JSON is too large: {bytes} > {max} bytes")
             }
+            PlanValidationError::PhasesNotAllowedInV1 => {
+                write!(f, "phases must be empty in {EXECUTION_PLAN_SCHEMA}")
+            }
+            PlanValidationError::NoPhases => {
+                write!(f, "phases must not be empty in {EXECUTION_PLAN_SCHEMA_V2}")
+            }
+            PlanValidationError::TooManyPhases { count, max } => {
+                write!(f, "too many phases: {count} > {max}")
+            }
+            PlanValidationError::InvalidPhaseKey { key } => {
+                write!(
+                    f,
+                    "invalid phase key: {key:?} (must match [a-z0-9-]{{1,32}})"
+                )
+            }
+            PlanValidationError::DuplicatePhaseKey { key } => {
+                write!(f, "duplicate phase key: {key}")
+            }
+            PlanValidationError::WorkUnitPhaseNotAllowedInV1 { key } => {
+                write!(
+                    f,
+                    "work unit {key}: phase must not be set in {EXECUTION_PLAN_SCHEMA}"
+                )
+            }
+            PlanValidationError::WorkUnitMissingPhase { key } => {
+                write!(
+                    f,
+                    "work unit {key}: phase is required in {EXECUTION_PLAN_SCHEMA_V2}"
+                )
+            }
+            PlanValidationError::UnknownWorkUnitPhase { key, phase } => {
+                write!(f, "work unit {key}: unknown phase {phase:?}")
+            }
+            PlanValidationError::DependencyInLaterPhase { key, depends_on } => {
+                write!(
+                    f,
+                    "work unit {key}: depends on {depends_on}, which is in a later phase"
+                )
+            }
+            PlanValidationError::TooManyIntraPhaseDependencies { key, phase } => {
+                write!(
+                    f,
+                    "work unit {key}: depends on more than one work unit within phase {phase} \
+                     (at most one intra-phase dependency is allowed)"
+                )
+            }
+            PlanValidationError::NonEmptyChildren => {
+                write!(f, "children must be empty (not implemented until Phase F4)")
+            }
+            PlanValidationError::ReservedKind { key } => {
+                write!(
+                    f,
+                    "work unit {key}: kind \"integrate\" is reserved for daemon-created integration work units"
+                )
+            }
         }
     }
 }
@@ -543,7 +699,11 @@ pub fn validate(
 ) -> Result<ValidatedPlan, Vec<PlanValidationError>> {
     let mut errors = Vec::new();
 
-    if spec.schema != EXECUTION_PLAN_SCHEMA {
+    // ADR-0074 D1.1（Phase F2）: `schema` の値で v1 / v2 を分ける。どちらでもなければ
+    // `WrongSchema` を出すが、それ以外の検査（v1 の形として）は続けて行う（複数のエラーを
+    // 一度に返す既存の流儀。E2 のまま）。
+    let is_v2 = spec.schema == EXECUTION_PLAN_SCHEMA_V2;
+    if spec.schema != EXECUTION_PLAN_SCHEMA && !is_v2 {
         errors.push(PlanValidationError::WrongSchema {
             found: spec.schema.clone(),
         });
@@ -551,11 +711,83 @@ pub fn validate(
     if spec.work_units.is_empty() {
         errors.push(PlanValidationError::NoWorkUnits);
     }
-    if spec.work_units.len() > limits.max_work_units {
+    let max_work_units = if is_v2 {
+        limits.max_work_units_v2
+    } else {
+        limits.max_work_units
+    };
+    if spec.work_units.len() > max_work_units {
         errors.push(PlanValidationError::TooManyWorkUnits {
             count: spec.work_units.len(),
-            max: limits.max_work_units,
+            max: max_work_units,
         });
+    }
+
+    // ADR-0074 D3.7（Phase F2）: `children` は F4 まで空だけを許す（v1/v2 共通）。
+    if !spec.children.is_empty() {
+        errors.push(PlanValidationError::NonEmptyChildren);
+    }
+
+    // ADR-0074 D1.1（Phase F2）: `phases`（v2 のみ）。
+    if is_v2 {
+        if spec.phases.is_empty() {
+            errors.push(PlanValidationError::NoPhases);
+        }
+        if spec.phases.len() > limits.max_phases {
+            errors.push(PlanValidationError::TooManyPhases {
+                count: spec.phases.len(),
+                max: limits.max_phases,
+            });
+        }
+        let mut seen_phase_keys: BTreeSet<&str> = BTreeSet::new();
+        for p in &spec.phases {
+            if !valid_key(&p.key) {
+                errors.push(PlanValidationError::InvalidPhaseKey { key: p.key.clone() });
+                continue;
+            }
+            if !seen_phase_keys.insert(p.key.as_str()) {
+                errors.push(PlanValidationError::DuplicatePhaseKey { key: p.key.clone() });
+            }
+        }
+    } else if !spec.phases.is_empty() {
+        errors.push(PlanValidationError::PhasesNotAllowedInV1);
+    }
+
+    // ADR-0074 D1.4（Phase F2）: `kind = integrate` は system WU 専用の予約語。
+    for wu in &spec.work_units {
+        if wu.kind == WorkUnitKind::Integrate {
+            errors.push(PlanValidationError::ReservedKind {
+                key: wu.key.clone(),
+            });
+        }
+    }
+
+    // ADR-0074 D1.1（Phase F2）: WorkUnit の `phase` は v2 で必須・既知の工程を指す、v1 で禁止。
+    let phase_index: BTreeMap<&str, usize> = spec
+        .phases
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.key.as_str(), i))
+        .collect();
+    for wu in &spec.work_units {
+        if is_v2 {
+            match &wu.phase {
+                None => errors.push(PlanValidationError::WorkUnitMissingPhase {
+                    key: wu.key.clone(),
+                }),
+                Some(phase) if !phase_index.contains_key(phase.as_str()) => {
+                    errors.push(PlanValidationError::UnknownWorkUnitPhase {
+                        key: wu.key.clone(),
+                        phase: phase.clone(),
+                    });
+                }
+                Some(_) => {}
+            }
+        } else if wu.phase.is_some() {
+            errors.push(PlanValidationError::WorkUnitPhaseNotAllowedInV1 {
+                key: wu.key.clone(),
+            });
+        }
     }
 
     let mut seen_keys: BTreeSet<&str> = BTreeSet::new();
@@ -580,6 +812,49 @@ pub fn validate(
                 errors.push(PlanValidationError::UnknownDependency {
                     key: wu.key.clone(),
                     depends_on: dep.clone(),
+                });
+            }
+        }
+    }
+
+    // ADR-0074 D1.1（Phase F2）: v2 の依存の規則 1・2（既知の key・既知の phase を持つ WU 同士に
+    // 限る。上の 2 つの検査で既にエラーが出ている key/phase は静かに飛ばす。二重にエラーを
+    // 積まないため）。
+    if is_v2 {
+        let wu_phase_of: BTreeMap<&str, usize> = spec
+            .work_units
+            .iter()
+            .filter_map(|w| {
+                w.phase
+                    .as_deref()
+                    .and_then(|p| phase_index.get(p))
+                    .map(|&idx| (w.key.as_str(), idx))
+            })
+            .collect();
+        for wu in &spec.work_units {
+            let Some(&own_phase_idx) = wu_phase_of.get(wu.key.as_str()) else {
+                continue;
+            };
+            let mut intra_phase_deps = 0usize;
+            for dep in &wu.depends_on {
+                let Some(&dep_phase_idx) = wu_phase_of.get(dep.as_str()) else {
+                    continue;
+                };
+                match dep_phase_idx.cmp(&own_phase_idx) {
+                    std::cmp::Ordering::Greater => {
+                        errors.push(PlanValidationError::DependencyInLaterPhase {
+                            key: wu.key.clone(),
+                            depends_on: dep.clone(),
+                        });
+                    }
+                    std::cmp::Ordering::Equal => intra_phase_deps += 1,
+                    std::cmp::Ordering::Less => {}
+                }
+            }
+            if intra_phase_deps > 1 {
+                errors.push(PlanValidationError::TooManyIntraPhaseDependencies {
+                    key: wu.key.clone(),
+                    phase: wu.phase.clone().unwrap_or_default(),
                 });
             }
         }
@@ -658,10 +933,11 @@ pub fn validate(
         });
     }
 
-    // トポロジカルソート（循環の検出も兼ねる。Kahn's algorithm、決定的に `key` 昇順で tie-break）。
+    // トポロジカルソート（循環の検出も兼ねる。Kahn's algorithm、決定的に `(phase, key)` 昇順で
+    // tie-break。D1.1）。
     let mut topological_order = Vec::new();
     if errors.is_empty() {
-        match topo_sort(&spec.work_units) {
+        match topo_sort(&spec.work_units, &phase_index) {
             Ok(order) => topological_order = order,
             Err(cycle) => errors.push(PlanValidationError::CyclicDependency { cycle }),
         }
@@ -741,9 +1017,18 @@ pub fn validate(
     })
 }
 
-/// Kahn's algorithm。`Ok` はトポロジカル順（`work_units` の index。同順位は `key` 昇順）、
-/// `Err` は見つかった循環（key の列）。
-fn topo_sort(work_units: &[WorkUnitSpec]) -> Result<Vec<usize>, Vec<String>> {
+/// Kahn's algorithm。`Ok` はトポロジカル順（`work_units` の index。同順位は
+/// `(phase_rank, key)` 昇順で tie-break）、`Err` は見つかった循環（key の列）。
+///
+/// ADR-0074 D1.1（Phase F2）: `phase_rank` は工程の key → `phases` での出現順（v2）。v1 は
+/// 常に空の map を渡す（すべて rank 0 のまま。挙動は従来と 1 バイトも変わらない）。v2 では
+/// 工程をまたぐ依存は必ず前の工程 → 後の工程（`validate` が別途保証する）なので、この
+/// tie-break は「依存の無い WU 同士がどちらの工程にいても後の工程が先に選ばれない」ことだけを
+/// 保証する（表示・`seq` の並びのため。scheduler 自体は `phase` 列で絞り込む。D1.3）。
+fn topo_sort(
+    work_units: &[WorkUnitSpec],
+    phase_rank: &BTreeMap<&str, usize>,
+) -> Result<Vec<usize>, Vec<String>> {
     let index_of: BTreeMap<&str, usize> = work_units
         .iter()
         .enumerate()
@@ -759,21 +1044,27 @@ fn topo_sort(work_units: &[WorkUnitSpec]) -> Result<Vec<usize>, Vec<String>> {
             }
         }
     }
-    // 決定的に key 昇順で並べた候補集合を都度取り出す。
-    let mut ready: BTreeSet<(&str, usize)> = work_units
+    let rank_of = |wu: &WorkUnitSpec| -> usize {
+        wu.phase
+            .as_deref()
+            .and_then(|p| phase_rank.get(p).copied())
+            .unwrap_or(0)
+    };
+    // 決定的に (phase_rank, key) 昇順で並べた候補集合を都度取り出す。
+    let mut ready: BTreeSet<(usize, &str, usize)> = work_units
         .iter()
         .enumerate()
         .filter(|(i, _)| in_degree[*i] == 0)
-        .map(|(i, w)| (w.key.as_str(), i))
+        .map(|(i, w)| (rank_of(w), w.key.as_str(), i))
         .collect();
     let mut order = Vec::new();
-    while let Some((_, i)) = ready.iter().next().copied() {
-        ready.remove(&(work_units[i].key.as_str(), i));
+    while let Some((_, _, i)) = ready.iter().next().copied() {
+        ready.remove(&(rank_of(&work_units[i]), work_units[i].key.as_str(), i));
         order.push(i);
         for &dep in &dependents[i] {
             in_degree[dep] -= 1;
             if in_degree[dep] == 0 {
-                ready.insert((work_units[dep].key.as_str(), dep));
+                ready.insert((rank_of(&work_units[dep]), work_units[dep].key.as_str(), dep));
             }
         }
     }
@@ -1243,6 +1534,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         }
     }
 
@@ -1251,6 +1543,34 @@ mod tests {
             schema: EXECUTION_PLAN_SCHEMA.to_string(),
             rationale: "test".to_string(),
             work_units,
+            phases: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    // ---- ADR-0074 D1.1（Phase F2）: v2（`phases`）のテスト用ヘルパー ----
+
+    fn phase(key: &str) -> PhaseSpec {
+        PhaseSpec {
+            key: key.to_string(),
+            kind: WorkUnitKind::Implement,
+            title: format!("phase {key}"),
+        }
+    }
+
+    fn spec_v2(key: &str, wu_phase: &str, depends_on: &[&str]) -> WorkUnitSpec {
+        let mut s = spec(key, depends_on);
+        s.phase = Some(wu_phase.to_string());
+        s
+    }
+
+    fn plan_v2(phases: Vec<PhaseSpec>, work_units: Vec<WorkUnitSpec>) -> ExecutionPlanSpec {
+        ExecutionPlanSpec {
+            schema: EXECUTION_PLAN_SCHEMA_V2.to_string(),
+            rationale: "test v2".to_string(),
+            work_units,
+            phases,
+            children: Vec::new(),
         }
     }
 
@@ -1652,5 +1972,260 @@ mod tests {
         let base = plan(vec![spec("a", &[])]);
         let d = delta(1, vec![spec("a", &[])], vec![], vec![]);
         assert!(apply_delta(&base, &d).is_err());
+    }
+
+    // -------------------------------------------------------------------
+    // ADR-0074 D1.1（Phase F2 (a)）: `celeris.execution-plan/2` の検証
+    // -------------------------------------------------------------------
+
+    /// v1 の計画は 1 バイトも挙動が変わらない（`phases`/`work_units[].phase` を書かない、
+    /// 既定の `ExecutionLimits` で通る）。既存の `valid_three_step_plan_passes_and_orders_topologically`
+    /// と合わせて、v1 の後方互換を確かめる。
+    #[test]
+    fn v1_plan_without_phases_still_validates_exactly_as_before() {
+        let p = plan(vec![spec("a", &[]), spec("b", &["a"])]);
+        assert!(p.phases.is_empty());
+        assert!(p.children.is_empty());
+        let validated = validate(&p, ExecutionLimits::default(), &[]).expect("valid");
+        assert_eq!(validated.spec.work_units[0].phase, None);
+    }
+
+    #[test]
+    fn v1_rejects_phases_being_set() {
+        let mut p = plan(vec![spec("a", &[])]);
+        p.phases = vec![phase("build")];
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::PhasesNotAllowedInV1)),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn v1_rejects_a_work_unit_with_a_phase_set() {
+        let p = plan(vec![spec_v2("a", "build", &[])]);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                PlanValidationError::WorkUnitPhaseNotAllowedInV1 { key } if key == "a"
+            )),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn v2_valid_plan_with_parallel_and_stacked_units_passes() {
+        let p = plan_v2(
+            vec![phase("build"), phase("verify")],
+            vec![
+                spec_v2("a", "build", &[]),
+                spec_v2("b", "build", &[]),
+                // 積み上げ（D1.2）: 同じ工程で a に依存。
+                spec_v2("c", "build", &["a"]),
+                // 前の工程への依存はいくつでもよい（規則 3）。
+                spec_v2("d", "verify", &["a", "b", "c"]),
+            ],
+        );
+        let validated = validate(&p, ExecutionLimits::default(), &[]).expect("valid v2 plan");
+        assert_eq!(validated.spec.work_units.len(), 4);
+    }
+
+    #[test]
+    fn v2_rejects_no_phases() {
+        let p = plan_v2(vec![], vec![]);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::NoPhases)),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn v2_rejects_too_many_phases() {
+        let phases: Vec<PhaseSpec> = (0..6).map(|i| phase(&format!("p{i}"))).collect();
+        let p = plan_v2(phases, vec![spec_v2("a", "p0", &[])]);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::TooManyPhases { count, max } if *count == 6 && *max == 5)),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn v2_rejects_duplicate_phase_keys() {
+        let p = plan_v2(
+            vec![phase("build"), phase("build")],
+            vec![spec_v2("a", "build", &[])],
+        );
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(
+                |e| matches!(e, PlanValidationError::DuplicatePhaseKey { key } if key == "build")
+            ),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn v2_rejects_a_work_unit_missing_its_phase() {
+        let p = plan_v2(vec![phase("build")], vec![spec("a", &[])]);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(
+                |e| matches!(e, PlanValidationError::WorkUnitMissingPhase { key } if key == "a")
+            ),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn v2_rejects_a_work_unit_with_an_unknown_phase() {
+        let p = plan_v2(vec![phase("build")], vec![spec_v2("a", "ghost-phase", &[])]);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                PlanValidationError::UnknownWorkUnitPhase { key, phase } if key == "a" && phase == "ghost-phase"
+            )),
+            "{errs:?}"
+        );
+    }
+
+    /// ADR-0074 D1.1 の依存の規則 1: 後の工程への依存は拒否する。
+    #[test]
+    fn v2_rejects_a_dependency_on_a_later_phase() {
+        let p = plan_v2(
+            vec![phase("build"), phase("verify")],
+            vec![spec_v2("a", "build", &["b"]), spec_v2("b", "verify", &[])],
+        );
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                PlanValidationError::DependencyInLaterPhase { key, depends_on }
+                    if key == "a" && depends_on == "b"
+            )),
+            "{errs:?}"
+        );
+    }
+
+    /// ADR-0074 D1.1 の依存の規則 2: 同じ工程の中の依存は高々 1 つ（鎖か木のみ）。
+    #[test]
+    fn v2_rejects_two_intra_phase_dependencies() {
+        let p = plan_v2(
+            vec![phase("build")],
+            vec![
+                spec_v2("a", "build", &[]),
+                spec_v2("b", "build", &[]),
+                spec_v2("c", "build", &["a", "b"]),
+            ],
+        );
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                PlanValidationError::TooManyIntraPhaseDependencies { key, phase }
+                    if key == "c" && phase == "build"
+            )),
+            "{errs:?}"
+        );
+    }
+
+    /// 同じ工程で 1 つの WU に複数の WU が依存する「木」は許す（規則 2 は「自分の依存の数」を
+    /// 数えるのであって、依存されている側の数ではない）。
+    #[test]
+    fn v2_allows_a_tree_of_intra_phase_dependencies() {
+        let p = plan_v2(
+            vec![phase("build")],
+            vec![
+                spec_v2("a", "build", &[]),
+                spec_v2("b", "build", &["a"]),
+                spec_v2("c", "build", &["a"]),
+            ],
+        );
+        validate(&p, ExecutionLimits::default(), &[]).expect("tree of dependencies is valid");
+    }
+
+    #[test]
+    fn v2_uses_the_v2_work_unit_limit_not_the_v1_one() {
+        let limits = ExecutionLimits::default();
+        assert_eq!(limits.max_work_units, 8);
+        assert_eq!(limits.max_work_units_v2, 10);
+        let units: Vec<WorkUnitSpec> = (0..9)
+            .map(|i| spec_v2(&format!("wu{i}"), "build", &[]))
+            .collect();
+        let p = plan_v2(vec![phase("build")], units);
+        validate(&p, limits, &[]).expect("9 work units fit under the v2 limit of 10");
+    }
+
+    #[test]
+    fn rejects_children_being_non_empty_in_either_version() {
+        let mut v1 = plan(vec![spec("a", &[])]);
+        v1.children = vec![serde_json::json!({"key": "child"})];
+        let errs = validate(&v1, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::NonEmptyChildren)),
+            "{errs:?}"
+        );
+
+        let mut v2 = plan_v2(vec![phase("build")], vec![spec_v2("a", "build", &[])]);
+        v2.children = vec![serde_json::json!({"key": "child"})];
+        let errs = validate(&v2, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::NonEmptyChildren)),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_work_unit_with_the_reserved_integrate_kind() {
+        let mut a = spec("a", &[]);
+        a.kind = WorkUnitKind::Integrate;
+        let p = plan(vec![a]);
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::ReservedKind { key } if key == "a")),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_schema_that_is_neither_v1_nor_v2() {
+        let mut p = plan(vec![spec("a", &[])]);
+        p.schema = "celeris.execution-plan/99".to_string();
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                PlanValidationError::WrongSchema { found } if found == "celeris.execution-plan/99"
+            )),
+            "{errs:?}"
+        );
+    }
+
+    /// v2 の topological order は工程順を tie-break にする（依存の無い WU 同士が工程をまたいでも、
+    /// 後の工程が先に選ばれない）。
+    #[test]
+    fn v2_topological_order_respects_phase_order_for_independent_units() {
+        // `z`（verify 工程、依存なし）と `a`（build 工程、依存なし）は互いに依存が無いが、
+        // key の昇順だけで tie-break すると `a` より `z` が先に来てしまう対象にした。
+        let p = plan_v2(
+            vec![phase("build"), phase("verify")],
+            vec![spec_v2("z", "verify", &[]), spec_v2("a", "build", &[])],
+        );
+        let validated = validate(&p, ExecutionLimits::default(), &[]).expect("valid");
+        let order: Vec<&str> = validated
+            .topological_order
+            .iter()
+            .map(|&i| validated.spec.work_units[i].key.as_str())
+            .collect();
+        assert_eq!(order, vec!["a", "z"], "{order:?}");
     }
 }

@@ -77,10 +77,12 @@ const MIGRATION_0025: &str = include_str!("../migrations/0025_cluster_settings.s
 /// ADR-0072 D5/D23（Phase E2）: `execution_plans` / `work_units` / `runs`（Task 下の内部実行層の
 /// 派生索引。正本は events。`CREATE TABLE IF NOT EXISTS` だけで既存の表には触れない）。
 const MIGRATION_0026: &str = include_str!("../migrations/0026_execution.sql");
+/// ADR-0074 D1/§5.2（Phase F2）: `work_units` に v2（並列実行）の phase/lease/branch/commit 列を足す。
+const MIGRATION_0027: &str = include_str!("../migrations/0027_parallel_work_units.sql");
 
 /// このバイナリが知っている最新のスキーマ版数（ADR-0013 D5）。DB の版数がこれより大きければ
 /// `SqliteStore::open`/`open_with` は `StoreError::SchemaTooNew` で失敗する。
-pub const SCHEMA_VERSION: u32 = 26;
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// `SqliteStore::open_with` に渡す接続オプション（ADR-0013 D5、ADR-0064 D1/D4/D5）。
 #[derive(Debug, Clone, Copy)]
@@ -1512,6 +1514,7 @@ impl SqliteStore {
             24 => Ok(MIGRATION_0024),
             25 => Ok(MIGRATION_0025),
             26 => Ok(MIGRATION_0026),
+            27 => Ok(MIGRATION_0027),
             other => Err(StoreError::Invalid(format!(
                 "unknown migration version: {other}"
             ))),
@@ -7190,7 +7193,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
         let now = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
         assert!(
             store
@@ -7731,7 +7734,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
         // 導入前の案件は「作業場所なし」= 従来どおり。
         assert_eq!(store.project_get(legacy).unwrap().unwrap().workspace, None);
         let spec = WorkspaceSpec::Local {
@@ -8222,7 +8225,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
 
         let project = store.project_get(project_id).unwrap().expect("project");
         assert_eq!(project.status, ProjectStatus::Active);
@@ -8288,7 +8291,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
 
         // 導入前の行は `metadata = None` として読める。
         let messages = store.message_list("secretary", None, 10).unwrap();
@@ -8381,7 +8384,7 @@ mod tests {
 
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
         {
             let conn = store.lock().unwrap();
             let (labels, category): (String, String) = conn
@@ -8771,6 +8774,7 @@ mod tests {
                     features: None,
                     budget: None,
                     outputs: vec![],
+                    phase: None,
                 },
                 WorkUnitSpec {
                     key: "b".into(),
@@ -8785,8 +8789,11 @@ mod tests {
                     features: None,
                     budget: None,
                     outputs: vec![],
+                    phase: None,
                 },
             ],
+            phases: Vec::new(),
+            children: Vec::new(),
         }
     }
 
@@ -8833,7 +8840,7 @@ mod tests {
         }
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 26);
+        assert_eq!(SCHEMA_VERSION, 27);
 
         // 新しい表が使える（round trip）。
         let task = sample_task(Status::Draft);
@@ -8883,6 +8890,117 @@ mod tests {
         assert_eq!(units.len(), 2);
         assert_eq!(units[0].key, "a");
         assert_eq!(units[1].key, "b");
+    }
+
+    /// ADR-0074 D1/§5.2（Phase F2 (b)）: 版数 26 の DB（migration 0027 の前）を開くと、`work_units`
+    /// に v2（並列実行）の phase/lease_run_id/lease_expires_at/branch/base_commit/head_commit/
+    /// integrated_commit の列が足される（`ALTER TABLE ADD COLUMN` のみ）。旧い行は新しい列が
+    /// NULL のまま読め、新しい列は書き込める（`idx_work_units_lease` の部分索引も使える）。
+    /// これらの列は Rust の `WorkUnitRow` にはまだ無い（Phase F2 (c)〜(h) で使う。ADR-0074 §5.2）。
+    #[test]
+    fn migration_27_adds_work_unit_lease_columns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("schema26.sqlite3");
+        let task_id = TaskId::new();
+        let now = "2026-09-26T00:00:00Z".to_string();
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            SqliteStore::configure_pragmas(&conn, &StoreOptions::default()).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
+            )
+            .unwrap();
+            for version in 1..=26 {
+                SqliteStore::apply_migration_version(&mut conn, version).unwrap();
+            }
+            // 版数 26 の列だけで work_units に 1 行書く（旧いデータが保たれることの確認。
+            // `foreign_keys` は既定で off なので `tasks` に対応する行が無くても挿入できる）。
+            conn.execute(
+                "INSERT INTO work_units (id, task_id, plan_id, key, seq, kind, status, \
+                 depends_on_json, runs, continuations, retries, json, created_at, updated_at) \
+                 VALUES ('wu-legacy', ?1, 'plan-legacy', 'a', 0, 'implement', 'ready', '[]', \
+                 0, 0, 0, '{}', ?2, ?2)",
+                params![task_id.to_string(), now],
+            )
+            .unwrap();
+        }
+
+        let store = SqliteStore::open(&path).unwrap();
+        assert_eq!(store.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 27);
+
+        let conn = Connection::open(&path).unwrap();
+        let mut columns: Vec<String> = Vec::new();
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(work_units)").unwrap();
+            let rows = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+            for r in rows {
+                columns.push(r.unwrap());
+            }
+        }
+        for expected in [
+            "phase",
+            "lease_run_id",
+            "lease_expires_at",
+            "branch",
+            "base_commit",
+            "head_commit",
+            "integrated_commit",
+        ] {
+            assert!(
+                columns.contains(&expected.to_string()),
+                "missing column {expected}: {columns:?}"
+            );
+        }
+
+        // 旧い行は新しい列が NULL のまま読める。
+        let (phase, lease_run_id, branch): (Option<String>, Option<String>, Option<String>) =
+            conn.query_row(
+                "SELECT phase, lease_run_id, branch FROM work_units WHERE id = 'wu-legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(phase, None);
+        assert_eq!(lease_run_id, None);
+        assert_eq!(branch, None);
+
+        // 新しい列は書き込める（round trip）。
+        conn.execute(
+            "UPDATE work_units SET phase = 'build', lease_run_id = 'run-1', \
+             lease_expires_at = '2026-09-26T01:00:00Z', branch = 'celeris-wu/t/a', \
+             base_commit = 'abc123', head_commit = 'def456' WHERE id = 'wu-legacy'",
+            [],
+        )
+        .unwrap();
+        let (phase, lease_run_id, base_commit): (Option<String>, Option<String>, Option<String>) =
+            conn.query_row(
+                "SELECT phase, lease_run_id, base_commit FROM work_units WHERE id = 'wu-legacy'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(phase.as_deref(), Some("build"));
+        assert_eq!(lease_run_id.as_deref(), Some("run-1"));
+        assert_eq!(base_commit.as_deref(), Some("abc123"));
+
+        // `idx_work_units_lease`（`lease_run_id IS NOT NULL` の部分索引）が使える。`INDEXED BY` は
+        // クエリの WHERE がその部分索引の条件を含んでいないと `no query solution` になるため、
+        // 索引の条件（`lease_run_id IS NOT NULL`）も明示する。
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM work_units INDEXED BY idx_work_units_lease \
+                 WHERE lease_run_id IS NOT NULL AND lease_expires_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // 版数 27 を再度開いても冪等（idempotent）。
+        drop(store);
+        let store2 = SqliteStore::open(&path).unwrap();
+        assert_eq!(store2.schema_version().unwrap(), SCHEMA_VERSION);
     }
 
     /// D14: 既に active な計画がある Task へ 2 個目を採用しようとすると拒否される（E2 は新規のみ、
@@ -9315,6 +9433,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         }
     }
 
@@ -9343,6 +9462,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         };
         let main_row = WorkUnitRow::new(
             "wu-main".into(),
@@ -9373,6 +9493,8 @@ mod tests {
                 schema: crate::execution_plan::EXECUTION_PLAN_SCHEMA.to_string(),
                 rationale: "repair materialization".to_string(),
                 work_units: vec![main_spec, repair_spec(&task)],
+                phases: Vec::new(),
+                children: Vec::new(),
             },
             created_at: now.clone(),
             superseded_at: None,
@@ -9451,12 +9573,15 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         };
         let repair = repair_spec(&task);
         let spec = ExecutionPlanSpec {
             schema: crate::execution_plan::EXECUTION_PLAN_SCHEMA.into(),
             rationale: "delivery repair".into(),
             work_units: vec![main.clone(), repair.clone()],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         let plan = ExecutionPlanRow {
             id: plan_id.clone(),
@@ -9638,6 +9763,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         });
         new_spec.work_units[1].depends_on = vec!["a".into(), "c".into()];
 

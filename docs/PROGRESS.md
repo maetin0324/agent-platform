@@ -19703,3 +19703,107 @@ ADR-0074 の Status を `Proposed` → `Accepted` に変更した。
   celerisctl/e2e の全クレート。以前 1 度だけ観測した `provider_admin_scenarios::reload_clears_provider_cooldown`
   の高負荷時のタイミング依存の flake（既知。単体では常に pass）は今回の実行では発生しなかった）。
 - `cargo clippy --workspace --all-targets -- -D warnings`: warning 0。
+
+## Phase F2「WU の並列実行: schema v2、WU ごとの worktree、統合 WU、鍵 (task, WU)」（進行中、checkpoint 1）
+
+ADR-0074 §6 F2 の受け入れ条件 (a)〜(l) のうち、本 checkpoint では **(a) と (b)** を実装した。
+branch `worktree-agent-a5ad8285d9e9540a2`（着手前に `git merge main` で F1 の統合を取り込み済み。
+merge commit は fast-forward、`aeed716`(F0) → `744744f`(F1 最終) の 5 コミットを取り込んだ）。
+(c)〜(l) は次の checkpoint に持ち越す（下記「未解決・次への申し送り」）。
+
+### (a) execution-plan/2 の検証
+
+- 実装: `crates/task-core/src/execution_plan.rs`。
+  - `EXECUTION_PLAN_SCHEMA_V2 = "celeris.execution-plan/2"` を新設。
+  - `WorkUnitKind::Integrate`（system WU 専用の予約 kind）を追加。
+  - `PhaseSpec { key, kind, title }` を新設。
+  - `ExecutionPlanSpec` に `phases: Vec<PhaseSpec>`（既定空）・`children: Vec<serde_json::Value>`
+    （既定空。F4 まで空だけ許す）を追加。`WorkUnitSpec` に `phase: Option<String>`
+    （v1 は常に `None`、v2 は必須）を追加。
+  - `validate()` を `spec.schema` で v1/v2 に分岐: v2 は `phases` 1..=`max_phases`（既定 5）、
+    工程 key の形式・重複、WU の `phase` が必須かつ既知の工程を指す、依存が「同じ工程か前の工程」
+    （後の工程への依存は `DependencyInLaterPhase` で拒否）、同じ工程内の依存は高々 1 つ
+    （`TooManyIntraPhaseDependencies`。鎖・木は許すが 2 つ以上の直接の親は拒否）。`children`
+    は v1/v2 共通で空以外を拒否（`NonEmptyChildren`）。`kind = integrate` は v1/v2 共通で拒否
+    （`ReservedKind`）。v1 は `phases`/`work_units[].phase` が非空・`Some` なら拒否
+    （`PhasesNotAllowedInV1`/`WorkUnitPhaseNotAllowedInV1`）。
+  - `max_work_units` は v1 専用のまま既定 8、新設 `max_work_units_v2`（既定 10）を v2 に使う。
+  - `topo_sort` に `phase_rank`（工程の key → 出現順。v1 は空 map）を足し、`(phase_rank, key)`
+    の順で tie-break（v1 は常に rank 0 なので挙動は 1 バイトも変わらない）。
+  - `apply_delta`（Phase F1 の差分適用）は `base.phases`/`base.children` をそのまま持ち越す。
+- 後方互換の確認: 既存の v1 のテスト・`dispatcher.rs`/`claude_code.rs` の v1 planner プロンプト・
+  `celeris/src/delivery.rs` の暗黙 WU 生成は無変更（`WorkUnitSpec`/`ExecutionPlanSpec` の struct
+  リテラルへ `phase: None`/`phases: Vec::new()`/`children: Vec::new()` を機械的に追加しただけ）。
+- コマンドと結果:
+  - `cargo test -p task-core --lib execution_plan::` → **37 passed; 0 failed**
+    （既存 17 件 + 新規 20 件。新規テストの一覧: `v1_plan_without_phases_still_validates_exactly_as_before`、
+    `v1_rejects_phases_being_set`、`v1_rejects_a_work_unit_with_a_phase_set`、
+    `v2_valid_plan_with_parallel_and_stacked_units_passes`、`v2_rejects_no_phases`、
+    `v2_rejects_too_many_phases`、`v2_rejects_duplicate_phase_keys`、
+    `v2_rejects_a_work_unit_missing_its_phase`、`v2_rejects_a_work_unit_with_an_unknown_phase`、
+    `v2_rejects_a_dependency_on_a_later_phase`、`v2_rejects_two_intra_phase_dependencies`
+    （ADR §6 F2 のテスト表が指す名前どおり）、`v2_allows_a_tree_of_intra_phase_dependencies`、
+    `v2_uses_the_v2_work_unit_limit_not_the_v1_one`、`rejects_children_being_non_empty_in_either_version`、
+    `rejects_a_work_unit_with_the_reserved_integrate_kind`、`rejects_a_schema_that_is_neither_v1_nor_v2`、
+    `v2_topological_order_respects_phase_order_for_independent_units`）。
+  - `UPDATE_SCHEMA=1 cargo test -p task-core --lib event_row_schema_matches_committed` と
+    `UPDATE_SCHEMA=1 cargo test --workspace committed_schema_matches_generated` → 全 pass。
+    差分: `docs/api/v1/api-v1.schema.json`・`docs/api/v1/event.schema.json`・
+    `docs/protocol/execution-plan.schema.json`・`docs/protocol/execution-plan-delta.schema.json`
+    （`ExecutionPlanSpec`/`WorkUnitSpec`/`PhaseSpec`/`WorkUnitKind` の新しい形。
+    `worker-protocol.schema.json` は変化なし）。
+
+### (b) migration 0027 と旧い DB からの移行テスト
+
+- 実装: `crates/task-core/migrations/0027_parallel_work_units.sql`（ADR §5.2 のとおり、
+  `work_units` に `phase`/`lease_run_id`/`lease_expires_at`/`branch`/`base_commit`/`head_commit`/
+  `integrated_commit` の 7 列と `idx_work_units_lease`（部分索引）を追加）。
+  `crates/task-core/src/store.rs`: `SCHEMA_VERSION` を 26 → 27、`MIGRATION_0027` 定数と
+  `migration_sql()` への登録、既存の 6 箇所の `assert_eq!(SCHEMA_VERSION, 26)` を 27 に更新。
+  この checkpoint では **Rust の `WorkUnitRow` / 読み書きロジックは変えていない**（(c) 以降で
+  `WorkUnitCommitted`/`PhaseIntegrated`/lease 取得の実装と合わせて追加する。ADR への追記参照）。
+- コマンド: `cargo test -p task-core --lib migration_27_adds_work_unit_lease_columns`
+- 結果: 1 passed（版数 26 の DB を fixture で作り、`SqliteStore::open` で 27 まで migrate → 新しい
+  7 列が `PRAGMA table_info` に現れる、旧い行は新しい列が NULL のまま読める、新しい列は
+  round-trip で書き込める、`idx_work_units_lease` の部分索引が実際に使える、再度 open しても
+  冪等であることを確認）。`cargo test -p task-core --lib migration` → 既存 10 件 + 新規 1 件、
+  **11 passed; 0 failed**。
+
+### 最終ゲート（本 checkpoint）
+
+- `cargo fmt --all -- --check`: 差分なし（`cargo fmt --all` を 1 度実行して整形）。
+- `cargo test --workspace --no-fail-fast`: **FAILED 0**（exit code 0。task-core の新規 21 テスト
+  〈v2 検証 20 + migration 1〉を含め全クレートで failed 0）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: warning 0。
+
+### ADR-0074 からの逸脱・明確化
+
+詳細は ADR 本文の「Phase F2 実装時の逸脱・明確化」節（進行中、区切りごとに追記）。要点:
+1. `max_work_units` を v1/v2 で分離する専用フィールド `max_work_units_v2` を新設（config 経由の
+   上書きはまだ無い。既存の他のサイズ上限フィールドと同じ扱い）。`max_phases` も同様に新設。
+2. `children` は F4 の型を先取りせず `Vec<serde_json::Value>`（空だけ許す）にした。
+3. `kind = integrate` を検証で拒否する `ReservedKind` を新設（ADR に明示は無いが D1.4 の
+   「system WU 専用」という設計意図を検証で保証する）。
+4. `topo_sort` に工程順の tie-break を追加（v1 の挙動は不変）。
+5. `apply_delta` は `phases`/`children` を base のまま持ち越す（replan は work_units の差分だけ）。
+6. migration 0027 は SQL 列の追加のみで、Rust 側の読み書きは (c) 以降に送った。
+
+### 未解決事項・次の checkpoint（(c) 以降）への申し送り
+
+- (c) 独立 WU の並列実行、(d) 積み上げ、(e) 衝突と repair、(f) 統合後検査、(g) 兄弟 in-flight、
+  (h) 再起動照合、(i) Cancel カスケード、(j) 公平性、(k) remote/dir/Shared のフォールバック、
+  (l) GUI（工程列・同時 run・ブランチ、`gen:types`/`mobile-audit`）はいずれも未着手。
+  ADR §6 F2 の「触るファイル」表のうち `crates/task-dispatch/src/{dispatcher.rs,
+  execution_scheduler.rs, checkpoint.rs}`、新規 `crates/task-dispatch/src/integration.rs`、
+  `crates/task-worker/src/{protocol.rs, preamble.rs}`、`crates/task-ops/src/{execution.rs,
+  replay.rs, view.rs}` のうち WU の worktree・lease・統合に関わる変更、`gui/app/components/
+  ExecutionSection.tsx`・`gui/app/lib/task-execution.ts` は本 checkpoint では未着手。
+- `WorkUnitRow`（Rust）に `phase`/`lease_run_id`/`lease_expires_at`/`branch`/`base_commit`/
+  `head_commit`/`integrated_commit` を足し、`store.rs` の insert/update/select と
+  `replay::rebuild_work_units_and_runs` の復元ロジックを実装するのが (c)/(d)/(h) の最初の一歩。
+- `RunKey { task, work_unit: Option<String> }`（D1.5）への `dispatcher.rs` の `running:
+  HashMap` の切り替えが (c) の中心的な変更になる（現状は `TaskId` が鍵）。範囲が広いため、
+  (c) 自体をさらに小さい区切りに分けることを推奨する。
+- planner のプロンプトへの v2 `phases` の書き方の追加（`claude_code.rs`）は、v2 を実際に
+  planner に出させる `[execution] parallel` の config・dispatcher 側の分岐と合わせて (c)/(d) の
+  範囲で行う（今回は v1 のプロンプト・挙動を 1 バイトも変えないことを優先し、着手していない）。

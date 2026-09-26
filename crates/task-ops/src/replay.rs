@@ -171,6 +171,8 @@ fn topological_order(spec: &ExecutionPlanSpec) -> Vec<usize> {
         max_done_when_chars: usize::MAX,
         max_checks: usize::MAX,
         max_plan_json_bytes: usize::MAX,
+        max_work_units_v2: usize::MAX,
+        max_phases: usize::MAX,
     };
     match validate(spec, permissive, &[]) {
         Ok(v) => v.topological_order,
@@ -1032,6 +1034,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         }
     }
 
@@ -1146,6 +1149,8 @@ mod tests {
                 wu_spec("b", &["a"]),
                 wu_spec("c", &["b"]),
             ],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         crate::execution::adopt_plan(
             &store,
@@ -1533,6 +1538,8 @@ mod tests {
             schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
             rationale: "A only".to_string(),
             work_units: vec![wu_spec("a", &[])],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         crate::execution::adopt_plan(
             &store,
@@ -1673,6 +1680,8 @@ mod tests {
             schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
             rationale: "v1".to_string(),
             work_units: vec![wu_spec("a", &[])],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         let v1 = crate::execution::adopt_plan(
             &store,
@@ -1689,6 +1698,8 @@ mod tests {
             schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
             rationale: "v2".to_string(),
             work_units: vec![wu_spec("a", &[]), wu_spec("b", &["a"])],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         let (v2, _diff) = crate::execution::replan(
             &store,

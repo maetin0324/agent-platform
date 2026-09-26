@@ -5508,8 +5508,22 @@
     },
     "ExecutionPlanSpec": {
       "additionalProperties": false,
-      "description": "D14: Planner の出力（または人が `PUT`/`POST` で書く計画）そのもの。",
+      "description": "D14: Planner の出力（または人が `PUT`/`POST` で書く計画）そのもの。\n\nADR-0074 D1.1（Phase F2）: `schema` の値で v1 / v2 を分ける（`validate` が判定する）。\n`phases` / `children` は v1 では常に空（`serde(default)` で省略も読める。v1 の JSON を\n1 バイトも変えないため、この 2 欄自体は型として増えるが v1 の出力・検証は変わらない）。",
       "properties": {
+        "children": {
+          "default": [],
+          "description": "D3.7: 子 Task の提案。F4 まで空だけを許す（`validate`）。F2 の時点では中身の schema を\n決めていないので、素の JSON 値のまま持つ（今回のPhaseの先回りをしない）。",
+          "items": true,
+          "type": "array"
+        },
+        "phases": {
+          "default": [],
+          "description": "v2 のみ。v1 では空でなければならない（`validate`）。",
+          "items": {
+            "$ref": "#/$defs/PhaseSpec"
+          },
+          "type": "array"
+        },
         "rationale": {
           "type": "string"
         },
@@ -8734,6 +8748,28 @@
           "type": "array"
         }
       },
+      "type": "object"
+    },
+    "PhaseSpec": {
+      "additionalProperties": false,
+      "description": "ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/2` の工程。配列の順が実行順（D1.1）。",
+      "properties": {
+        "key": {
+          "description": "`[a-z0-9-]{1,32}`。計画の中で一意。",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/WorkUnitKind"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "kind",
+        "title"
+      ],
       "type": "object"
     },
     "PlanOrigin": {
@@ -14061,16 +14097,25 @@
     },
     "WorkUnitKind": {
       "description": "D14: WorkUnit の種類。",
-      "enum": [
-        "investigate",
-        "design",
-        "implement",
-        "test",
-        "release",
-        "repair",
-        "other"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "investigate",
+            "design",
+            "implement",
+            "test",
+            "release",
+            "repair",
+            "other"
+          ],
+          "type": "string"
+        },
+        {
+          "const": "integrate",
+          "description": "ADR-0074 D1.4（Phase F2）: 工程末尾の統合 WU（daemon が計画の採用時に足す system WU。\n`runs = 0`、LLM run を起こさない）。planner の出力に書かれていれば検証で拒否する\n（`validate` の `ReservedKind`。system WU 専用の予約語）。",
+          "type": "string"
+        }
+      ]
     },
     "WorkUnitSpec": {
       "additionalProperties": false,
@@ -14141,6 +14186,13 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "phase": {
+          "description": "ADR-0074 D1.1（Phase F2）: `celeris.execution-plan/2` では必須（`phases` にある key の\nいずれか）。`celeris.execution-plan/1` では無い（`Some` なら検証エラー。v1 の計画・\nプロンプトを 1 バイトも変えないため、この欄自体は常に存在するが v1 は `None` のまま）。",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "title": {
           "type": "string"

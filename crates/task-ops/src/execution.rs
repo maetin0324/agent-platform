@@ -368,6 +368,7 @@ mod tests {
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         }
     }
 
@@ -376,6 +377,8 @@ mod tests {
             schema: task_core::EXECUTION_PLAN_SCHEMA.to_string(),
             rationale: "A -> B -> C".to_string(),
             work_units: vec![wu("a", &[]), wu("b", &["a"]), wu("c", &["b"])],
+            phases: Vec::new(),
+            children: Vec::new(),
         }
     }
 

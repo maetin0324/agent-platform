@@ -263,6 +263,7 @@ fn make_repair(
             max_wall_secs: Some(max_wall_secs),
         }),
         outputs: vec![],
+        phase: None,
     };
     let stamp = now
         .format(&time::format_description::well_known::Rfc3339)
@@ -305,6 +306,7 @@ fn make_repair(
             features: None,
             budget: None,
             outputs: vec![],
+            phase: None,
         };
         let main_row = task_core::WorkUnitRow::new(
             task_core::new_id(),
@@ -328,6 +330,8 @@ fn make_repair(
             schema: task_core::EXECUTION_PLAN_SCHEMA.into(),
             rationale: "delivery repair: 暗黙の WorkUnit を実体化".into(),
             work_units: vec![main, spec],
+            phases: Vec::new(),
+            children: Vec::new(),
         };
         let plan = task_core::ExecutionPlanRow {
             id: plan_id.clone(),

@@ -853,3 +853,51 @@ GUI を触る Phase では `pnpm typecheck` / `lint` / `test` / `gen:types` の�
   ADR-0072 Phase E2b 由来の別の欠陥のため、本 Phase では直さず、`docs/PROGRESS.md` の
   「提案」に記録する（`reviewer_run_usage_is_recorded_in_the_runs_index_and_survives_replay_check`
   テストは worker run の `seq` を比較対象から意図的に外している）。
+
+## Phase F2 実装時の逸脱・明確化（2026-09-26、進行中）
+
+実装しながら見つかった、D1・§4・§5.2 の記述とコードの食い違い・簡略化・明確化。区切り
+（(a) → (b) → …）ごとに追記する（黙って逸脱しない）。branch は `docs/PROGRESS.md` の
+「Phase F2」節を参照。
+
+- **(a) `max_work_units` の v1/v2 分離**: ADR §4 は「`max_work_units` 8 → 10（v2 のみ。v1 は
+  8 のまま）」とだけ書いていたが、既存の `ExecutionLimits` は 1 つの `max_work_units` しか
+  持たない。celeris の設定（`[execution]`）がこの値を上書きする経路は F1 の時点でまだ無く
+  （`dispatcher.rs` は常に `ExecutionLimits::default()` を渡す）、config 側の分岐を今つくると
+  「今回の Phase だけをやる」から外れるため、`ExecutionLimits` に **`max_work_units_v2`**
+  （既定 10）を新設し、`validate()` が `spec.schema` で参照するフィールドを切り替える形にした
+  （`max_work_units` は v1 用のまま既定 8 で不変）。`max_phases`（既定 5）も同様に新設フィールド
+  として追加した（config 経由の上書きは無し。他のサイズ上限フィールドと同じ扱い）。
+- **(a) `children` の型**: D3.7 は `children: [{key, title, objective, acceptance, genre, skills,
+  repos, features, depends_on}]`（F4 で使う形）を示しているが、F4 の schema をこの Phase で
+  先取りしない（CLAUDE.md「次のPhaseの準備を先回りしない」）ため、`ExecutionPlanSpec.children`
+  は **`Vec<serde_json::Value>`**（素の JSON 値の配列）にした。F2 の検証は「空の配列であること」
+  だけを見る（`PlanValidationError::NonEmptyChildren`）。F4 で実際の型に差し替える。
+- **(a) `kind = integrate` の予約**: ADR は「daemon が計画の採用時に足す system WU」とだけ書き、
+  planner がこの kind を書いた場合の扱いを明示していなかった。`WorkUnitKind::Integrate` を
+  型として追加したうえで、`validate()` に `PlanValidationError::ReservedKind`（v1/v2 共通）を足し、
+  計画（planner・人）がこの kind を自分の WorkUnit に書くことを拒否するようにした（system WU
+  専用の予約語という設計意図を検証で保証する）。
+- **(a) `topo_sort` の tie-break**: D1.1 は「`phases` の配列の順が実行順」とだけ書いている。
+  既存の `topo_sort`（トポロジカル順 = `work_units.seq`）は key 昇順だけで tie-break していたため、
+  v2 で工程をまたいで依存の無い WU 同士がいると、後の工程の WU が `seq` の上で前の工程の WU より
+  先に来てしまう場合があった（scheduler 自体は D1.3 で `phase` 列を見て絞り込むので実行順は
+  壊れないが、`seq`・GUI の表示・監査が紛らわしくなる）。`topo_sort` に `phase_rank`
+  （工程の key → `phases` の出現順。v1 は空 map で常に rank 0）を足し、`(phase_rank, key)` の
+  順で tie-break するようにした。v1 は `phase_rank` が常に空なので挙動は 1 バイトも変わらない
+  （`v2_topological_order_respects_phase_order_for_independent_units` で確認）。
+- **(a) `apply_delta` と `phases`/`children`**: D5.3（Phase F1）の差分は `work_units` の
+  add/modify/remove だけを扱う契約だったが、`ExecutionPlanSpec` に `phases`/`children` が
+  増えたことで `apply_delta` の戻り値を組み立てる際にこの 2 欄を決める必要が生じた。
+  replan は「工程構成そのものを作り直す」ことを D1 のどこにも要求していないため、
+  **`base.phases`/`base.children` をそのまま持ち越す**（delta はまだ工程の再構成を表現できない）
+  という最小の選択をした。v2 の replan で工程自体を変えたい場合の経路は F2 (e)/(f) 以降、
+  または将来の課題として残る。
+- **(b) migration 0027 は SQL 列の追加のみ、Rust の `WorkUnitRow` はまだ変えない**: ADR §5.2 は
+  列の追加だけを migration の範囲として書いており、`WorkUnitRow`（Rust 型）・`store.rs` の
+  読み書き・`replay::rebuild_work_units_and_runs` での復元は D1.2/D1.4/D1.5/D1.7 の実装
+（(c)〜(h)）で使われる。migration 0027 の時点ではこれらの列を書く経路が daemon にまだ無い
+  （`WorkUnitCommitted`/`PhaseIntegrated`/`acquire_work_unit_lease` はいずれも (c) 以降で実装）
+  ため、`WorkUnitRow` に対応するフィールドを足すのは (c) 以降の区切りに送る、という意図的な
+  順序（CLAUDE.md「巨大 1 セッションにしない」の区切りに合わせた）。(b) の受け入れ条件
+  「migration 0027 と旧い DB からの移行テスト」はこの範囲で満たしている。
