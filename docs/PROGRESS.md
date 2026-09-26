@@ -19695,6 +19695,193 @@ ADR-0074 の Status を `Proposed` → `Accepted` に変更した。
   `parse_planner_output` の delta スキーマ判定はそのまま両立する（`ExecutionPlanSpec` の
   schema 判定と独立している）。
 
+## Phase F3（quota）「quota 消費の推定と記録」（完了日 2026-09-26）
+
+ADR-0074 D4・§6 F3 の quota 側（(g)〜(k)）を実装した。**途中確認（(a)〜(f)）は対象外**（別の担当）。
+branch `worktree-agent-aecde37d6476fb05a`。commit:
+`36ee4be`（(g)-(h) 推定式と `Event::QuotaEstimated`）→
+`da95565`（dispatcher 配線・(i) metrics/API・(k) 不変性テスト）→
+`2924e1a`（(j) GUI）→ 本コミット（ADR/PROGRESS 更新）。
+
+着手前に main（Phase F1 統合済み）を worktree の branch へ fast-forward merge した
+（着手時点の branch が Phase F1 の統合より前から分岐していたため。ADR-0074 D4.1/§6 F3 が指す
+`sources_view.rs`/`accounts.rs` 等が最新であることを確認してから着手）。
+
+### 環境: shared `CARGO_TARGET_DIR` の衝突
+
+`~/.cargo/config.toml` の `[build] target-dir` はこのマシンの全 worktree で共有される単一の
+ディレクトリ（`/var/lib/celeris/build-cache/cargo/agent-platform-dev`）を指しており、並行して
+別の worktree（F2 担当と思われる）が同じ target-dir へ `cargo test --workspace` を走らせていたため、
+`task-dispatch` のビルドが別 worktree の `task-core`（`WorkUnitSpec.phase` 等、F2 の未着手フィールドを
+含む版）と不整合を起こし、`missing field 'phase'` のエラーが再現性を持って発生した
+（コード自体に問題は無い。同じソースを再ビルドすると解消する類の一時的な事象ではなく、
+2 回連続で同じ失敗が出たことで確認した）。**対処**: 本 Phase の作業中だけ
+`CARGO_TARGET_DIR=/var/lib/celeris/build-cache/cargo/agent-platform-f3-quota`
+（同じローカル LVM 配下、`/tmp` ではない）を明示して cargo を呼んだ。ADR-0066 の
+「repo-key ごとに target-dir を分ける」という発想を、並行するエージェント worktree にも
+一時的に適用した形。恒久対応（複数 worktree が同時に動く前提で `~/.cargo/config.toml` の
+target-dir を repo-key 化する等）は本 Phase の範囲外として提案に残す。
+
+### (g) run の前後の観測から `Event::QuotaEstimated` を決定的に出す
+
+- 実装: 新規 `crates/task-core/src/quota.rs`。`decide_window`（`measured_used_pct` →
+  `apportioned_used_pct` → `estimated_used_pct` → unknown の優先順位。`free_window` は呼び出し側が
+  供給元の種別で先に判定）、`weighted_tokens`（`W = in + 0.1·cache_read + 1.25·cache_creation +
+  r_out·output`）、`calibrate`（`k = Σq / ΣW`）。`Event::QuotaEstimated` を `model.rs` に追加。
+- コマンド: `cargo test -p task-core --lib quota::`
+- 結果: **21 passed; 0 failed**。表のテストの主なもの:
+  `measured_when_exclusive_and_fresh`、`apportioned_by_weighted_tokens_when_runs_overlap`
+  （按分の合計が Δ と一致することも確認）、`estimated_uses_ratio_of_sums_calibration`、
+  `unknown_is_never_zero`、`priority_order_prefers_measured_over_apportioned_over_estimated_over_unknown`
+  （5 通りの優先順位を 1 つの表で確認）。
+
+### (h) `before` 観測の有効性
+
+- 実装: `quota::before_is_valid(observed_at, now, other_consumption_since)`
+  （観測が未来なら常に無効、消費が無ければ古くても有効）。「他の消費」の判定自体は
+  `crates/task-dispatch/src/accounts.rs::QuotaActivity`（run の重なりを追跡する状態機械。
+  ADR からの逸脱 2 参照）が担う。
+- コマンド:
+  - `cargo test -p task-core --lib quota::tests::before_is_valid_table` → 1 passed。
+  - `cargo test -p task-dispatch --lib accounts::quota_activity_tests:: accounts::quota_calibration_tests::`
+    → **9 passed; 0 failed**（単独 run は排他、重なった 2 run はグループを作り最後の run で閉じる、
+    グループが閉じた後の新しい run は改めて排他になる、別アカウントはグループを共有しない、
+    `begin` を呼んでいない run の `end` は観測なしの排他として安全に扱う、較正のリングバッファが
+    件数の上限で古いものを捨てる、等）。
+
+### (i) `ExecutionMetrics.quota`・`cost_usd_complete`・`GET /metrics/execution` の `quota`/`accounts_now`
+
+- 実装:
+  - `crates/task-core/src/execution_metrics.rs`: `ExecutionMetrics` に `quota: Vec<QuotaUse>`・
+    `quota_unknown_runs: u32`・`cost_usd_complete: bool` を追加。`summarize` は
+    `Event::QuotaEstimated` を run_id ごとに「最後の Event が有効」で畳み込んでから集計する
+    （apportioned の再送を正しく扱う）。`cost_usd_complete` は token を持つのに `cost_usd` が
+    無い run（単価不明のモデル）が 1 件でもあれば `false`。
+  - `crates/task-core/src/store.rs`: `ExecutionMetricsTaskRow.has_quota_events`
+    を追加（ADR からの逸脱 7）。
+  - `crates/task-api/src/stats.rs`: `execution_metrics_summary`/`_from_events` がグループごとに
+    `quota_rows`/`cost_usd_complete` を集め、`task_core::merge_quota_use` で合計する。
+  - `crates/task-api/src/types.rs`: `ExecutionMetricsGroup.{quota, cost_usd_complete}`、
+    `ExecutionMetricsSummary.accounts_now`（新規 `AccountNowView`）、`WorkUnitView.quota`、
+    `ExecutionPlanView::with_quota`。
+  - `crates/task-api/src/execution.rs`: `GET /metrics/execution` が `LlmSourcesReader`（設定されて
+    いれば）から `accounts_now` を埋める。`GET /tasks/{id}/execution` が
+    `task_core::group_quota_by_work_unit` で WU ごとの quota を差し込む。
+- コマンド:
+  - `cargo test -p task-core --lib execution_metrics::` → **18 passed; 0 failed**（
+    `cost_usd_complete_is_false_with_an_unpriced_model`、
+    `quota_is_aggregated_by_source_account_and_window`、
+    `quota_estimated_reemission_for_the_same_run_id_keeps_only_the_last_event`、
+    `quota_unknown_runs_counts_runs_that_never_resolved`、
+    `group_quota_by_work_unit_splits_atomic_and_work_unit_runs` を含む）。
+  - `cargo test -p task-core --lib quota::tests::merge_quota_use_` → 2 passed。
+  - `cargo test -p task-api --no-fail-fast` → **353 passed; 0 failed**（既存の `stats`/`execution` のテストが
+    型追加後も通ることを確認。この Phase では stats.rs/execution.rs に専用の新規テストは
+    追加していない — 集計ロジック自体は `task_core::{summarize_execution_metrics, merge_quota_use}`
+    の純粋関数に委ね、task-api 側は配線のみのため）。
+
+### (j) GUI: quota が主、定価 USD は参考
+
+- 実装: `gui/app/lib/task-execution.ts::{quotaSummaryLines, costReferenceLabel}`
+  （unknown は「不明」であって `0` ではない。`cost_usd_complete === false` なら「一部のモデルの
+  単価が不明なため過小」を明示）。`gui/app/components/ExecutionSection.tsx` の「実行」節に
+  quota 消費のブロックを追加（gate の下、WU 表の上。**WU 表の列は変更していない**、F2 の担当）。
+- コマンド・結果:
+  - `pnpm gen:types && git diff --exit-code app/celeris/types.ts` → 1 回目は差分あり
+    （`QuotaUse`/`QuotaWindow`/`QuotaWindowUse`/`AccountNowView`/`ExecutionMetrics.quota` 等を反映）、
+    コミット後に**再実行して差分ゼロを確認**。
+  - `pnpm typecheck` → exit 0。
+  - `pnpm lint` → exit 0（info 2 件、いずれも本 Phase と無関係な既存スクリプトの提案）。
+  - `pnpm test` → **1096 passed（72 files）**（`test-execution.test.ts` に quota/cost の表の
+    テストを追加）。
+  - `pnpm build` → exit 0。
+  - `pnpm exec playwright install chromium` の後 `pnpm mobile-audit` →
+    `{"ok": true, "total": 0, "by_rule": {}}`、`routes=27 schemes=2 violations=0`
+    （`task-overview`/`task-artifacts` 等、Execution 節を含む画面を含む）。
+
+### (k) quota の値で dispatch・lane・アカウント選択が変わらないこと
+
+- 実装: `Dispatcher` に `quota_activity`/`quota_calibration` を追加。run の spawn で
+  `quota_begin`（before 観測の記録。`is_planner_dispatch` は対象外）、`finish_worker_result` で
+  `resolve_quota_estimate`（after 観測 + 5 通りの決定 + `Event::QuotaEstimated` を
+  `WorkerFinished` と同じトランザクションで記録。apportioned でグループが閉じたら他タスクへ
+  `store.append_event` で直接書く）。永続化しない早期 return（unknown task・stale な結果の破棄）
+  でも `release_quota_if_tracked`（`is_tracked` で `quota_begin` を呼んでいない run — planner run —
+  を誤って巻き込まない）で bookkeeping だけ閉じる。
+- コマンド: `cargo test -p task-dispatch --lib dispatcher::tests::quota_bookkeeping_does_not_change_account_or_lane_selection`
+- 結果: 1 passed（同じ観測値・同じ設定で 2 回走らせ、片方だけ事前に「無関係な別 run がまだ重なって
+  いる」quota の状態と較正材料を仕込んでも、選ばれるアカウント（`WorkerStarted.account`）と
+  lane（`routing_audit` の最後の判定）が一致することを確認。sanity として、残量の多い方の
+  アカウントが選ばれることも確認）。
+- 実装上の裏付け: `select_provider`・`decide_lane_for_work_unit`・`accounts::evaluate`/`select_account`
+  はどれも `self.quota_activity`/`self.quota_calibration` を読まない（grep で確認）。quota の読み書きは
+  `quota_begin`/`resolve_quota_estimate`/`release_quota_if_tracked` の 3 箇所に閉じている。
+
+### schema 再生成
+
+- `UPDATE_SCHEMA=1 cargo test -p task-core -p task-api committed_schema_matches_generated
+  store::tests::event_row_schema_matches_committed` → 全 pass。
+- 差分: `docs/api/v1/event.schema.json`（`Event::QuotaEstimated`、`QuotaWindow`/`QuotaMethod`/
+  `QuotaWindowUse`/`QuotaCalibration`）、`docs/api/v1/api-v1.schema.json`（同上に加え
+  `QuotaUse`/`AccountNowView`/`ExecutionMetrics.{quota,quota_unknown_runs,cost_usd_complete}`/
+  `ExecutionMetricsGroup.{quota,cost_usd_complete}`/`ExecutionMetricsSummary.accounts_now`/
+  `WorkUnitView.quota`）。`docs/protocol/execution-plan.schema.json` /
+  `docs/protocol/execution-plan-delta.schema.json` / `docs/protocol/worker-protocol.schema.json` は
+  変更なし（この Phase では `WorkUnitSpec`/`ExecutionPlanSpec` を触っていない）。
+
+### ADR-0074 からの逸脱・明確化（詳細は ADR 本文の「Phase F3（quota）実装時の逸脱・明確化」節）
+
+1. `Event::QuotaEstimated.windows` の各要素に窓ごとの `method` を残した（事象全体の代表 `method`
+   は別に持つ。5h/7d で判定が食い違いうるため）。
+2. `before_is_valid` の「他の消費」判定は、履歴を新設せず `QuotaActivity`（run の重なりの追跡）に
+   委ねた。celeris の外の消費（U-F3）は引き続き区別できない。
+3. quota の bookkeeping（`QuotaActivity`/`QuotaCalibrationBook`）はプロセス内メモリのみ
+   （events を横断する store の問い合わせは新設していない。再起動でやり直しになる）。
+4. quota は worker/WU run だけ（planner・reviewer run は対象外。ADR §6 F3 の「触るファイル」の
+   絞り込みと、reviewer の完了経路の複雑さを踏まえた判断）。
+5. アカウントプールを使わない run は一律 `free`（`account_adapter.is_none()`）。
+6. apportioned のグループ境界は「そのアカウントの busy period」（重なりのペアごとではなく、
+   連鎖的な重なりを 1 グループとして扱う）。
+7. `ExecutionMetricsTaskRow.has_quota_events` を追加（ADR §6 F3 の「触るファイル」一覧に `store.rs`
+   は無いが、D4.3 の記述をそのまま実装するのに必要だった。性能への影響は「未解決事項」参照）。
+
+### 未解決事項・提案
+
+- **性能**: worker/WU run のたびに `Event::QuotaEstimated` を出すため、run のあるタスクは
+  ほぼ確実に `has_quota_events = true` になり、`GET /metrics/execution` の「索引だけで足りる」
+  最適化（ADR-0072 E6）の効きが弱まる。実データでの再計測は行っていない。次の一手として、
+  グループ集計の `quota` を `execution_metrics_task_rows` 側にも部分的に持たせる（例えば
+  `has_quota_events` だけでなく `quota` 自体を索引化する）ことを検討する。
+- **calibration の永続化**: `QuotaCalibrationBook` はプロセス内メモリのみ。dispatcher の再起動が
+  頻繁な運用では `estimated` に必要な 3 件の `measured` サンプルが溜まる前に消え、しばらく
+  `unknown` に倒れ続ける可能性がある。events から `measured` の履歴を再構築して起動時に温める、
+  という改善を提案する（U-F4 の較正の妥当性そのものの検証と合わせて、F5 の実機で判断材料を
+  集めてから決める）。
+- **planner/reviewer run の quota**: 本 Phase では対象外（逸脱 4）。次の一手として、reviewer の
+  完了経路（`on_review_finished`/`finish_reviewer_run_index`）に同じ `quota_begin`/
+  `resolve_quota_estimate` の形を配線することを提案する（Phase F1 の逸脱節が挙げた reviewer 側の
+  `usage`/`end` の欠落バグの周辺なので、合わせて調査するとよい）。
+- **`docs/celeris-api-v1.md` は編集していない**: `GET /tasks/{id}/execution`/
+  `GET /metrics/execution` 自体がこの契約ドキュメントに元々未記載（Phase E5/F1 由来の既存の
+  ギャップ、本 Phase が作ったものではない）。gui/CLAUDE.md の禁止（`docs/celeris-api-v1.md` の
+  書き換え）に従い、本 Phase では追記していない。GUI 側の Phase で
+  `GET /tasks/{id}/execution`・`GET /metrics/execution`（quota・accounts_now を含む）の節を
+  追加することを提案する。
+- **F4（案件計画）との関係**: `accounts_now` は Task 単位ではなく系全体の値なので、案件の DAG
+  （F4 D3.5）の各ノードに quota を出すときは `TaskExecutionView.metrics.quota`
+  （Task 単位の合計）をそのまま使えばよい。
+
+### コマンド・出力の要点（本チェックポイントの最終ゲート）
+
+- `cargo fmt --all -- --check`: 差分なし。
+- `cargo test --workspace --no-fail-fast`（`CARGO_TARGET_DIR` を専用ディレクトリに分離。上記
+  「環境」節参照）: **FAILED 0**（`test result:` の合計で 2,365 tests passed。task-core lib 371 /
+  task-dispatch lib 315 / task-ops lib 325 / task-worker lib 522 / task-api 全体（lib + 統合テスト）
+  353 / llm-proxy・celeris・celerisctl・e2e を含む全クレート）。
+- `cargo clippy --workspace --all-targets -- -D warnings`: warning 0。
+- GUI: 上記 (j) の各コマンドの結果のとおり（`typecheck`/`lint`/`test`/`build`/`mobile-audit`
+  すべて exit 0、違反 0）。
+
 ### コマンド・出力の要点（本チェックポイントの最終ゲート）
 
 - `cargo fmt --all -- --check`: 差分なし。
