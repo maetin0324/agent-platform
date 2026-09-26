@@ -1537,9 +1537,11 @@ pub fn runnable_work_units(units: &[WorkUnitRow], in_flight: usize, limit: usize
         return Vec::new();
     };
     let current_phase = current.spec.phase.as_deref();
+    // ADR-0074 D1.4（Phase F2b）: 統合 WU は LLM run を起こさない（scheduler が直接走らせる）。
     let in_phase: Vec<&WorkUnitRow> = in_play
         .into_iter()
         .filter(|u| u.spec.phase.as_deref() == current_phase)
+        .filter(|u| u.kind != WorkUnitKind::Integrate)
         .collect();
 
     let has_failed_or_blocked = in_phase
@@ -2408,6 +2410,130 @@ mod tests {
                 e,
                 PlanValidationError::WorkUnitPhaseNotAllowedInV1 { key } if key == "a"
             )),
+            "{errs:?}"
+        );
+    }
+
+    /// ADR-0074 D1.4（Phase F2b）: v2 の採用は工程ごとに統合 WU（`integrate-<phase>`、依存はその工程の
+    /// すべての WU）を末尾に足し、工程の障壁つきで ready を決める（最初の工程の依存の無い WU だけ）。
+    #[test]
+    fn materialize_adds_integration_units_and_only_the_first_phase_is_ready() {
+        let p = plan_v2(
+            vec![phase("build"), phase("verify")],
+            vec![
+                spec_v2("a", "build", &[]),
+                spec_v2("b", "build", &[]),
+                spec_v2("c", "build", &["a"]),
+                spec_v2("d", "verify", &[]),
+                spec_v2("e", "verify", &["a", "b"]),
+            ],
+        );
+        let validated = validate(&p, ExecutionLimits::default(), &[]).expect("valid");
+        let rows = materialize_work_units(
+            "t",
+            "p",
+            &validated.spec,
+            &validated.topological_order,
+            "2026-09-26T00:00:00Z",
+            &mut |w| format!("id-{}", w.key),
+        );
+        let keys: Vec<(&str, u32, WorkUnitStatus)> = rows
+            .iter()
+            .map(|r| (r.key.as_str(), r.seq, r.status))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("a", 0, WorkUnitStatus::Ready),
+                ("b", 1, WorkUnitStatus::Ready),
+                ("c", 2, WorkUnitStatus::Pending),
+                ("integrate-build", 3, WorkUnitStatus::Pending),
+                ("d", 4, WorkUnitStatus::Pending),
+                ("e", 5, WorkUnitStatus::Pending),
+                ("integrate-verify", 6, WorkUnitStatus::Pending),
+            ],
+            "後の工程の依存の無い WU（d）も、前の工程の統合が済むまで pending"
+        );
+        let integ = rows.iter().find(|r| r.key == "integrate-build").unwrap();
+        assert_eq!(integ.kind, WorkUnitKind::Integrate);
+        assert_eq!(integ.phase.as_deref(), Some("build"));
+        assert_eq!(integ.depends_on, vec!["a", "b", "c"]);
+        // 統合 WU は `ready` にならない（scheduler が直接走らせる）・runnable にも出ない。
+        let mut all_done: Vec<WorkUnitRow> = rows.clone();
+        for r in all_done
+            .iter_mut()
+            .filter(|r| r.phase.as_deref() == Some("build"))
+        {
+            if r.kind != WorkUnitKind::Integrate {
+                r.status = WorkUnitStatus::Done;
+            }
+        }
+        assert!(
+            newly_ready(&all_done).is_empty(),
+            "統合が済むまで次の工程は上がらない"
+        );
+        assert!(runnable_work_units(&all_done, 0, 3).is_empty());
+        // 統合が done になれば次の工程が上がる（依存が done の d と e）。
+        for r in all_done.iter_mut() {
+            if r.key == "integrate-build" {
+                r.status = WorkUnitStatus::Done;
+            }
+        }
+        let mut up = newly_ready(&all_done);
+        up.sort();
+        assert_eq!(up, vec!["id-d".to_string(), "id-e".to_string()]);
+        // v1 は従来どおり（統合 WU なし、依存が無ければ ready）。
+        let v1 = plan(vec![spec("a", &[]), spec("b", &["a"])]);
+        let v1v = validate(&v1, ExecutionLimits::default(), &[]).unwrap();
+        let v1_rows = materialize_work_units(
+            "t",
+            "p",
+            &v1v.spec,
+            &v1v.topological_order,
+            "2026-09-26T00:00:00Z",
+            &mut |w| w.key.clone(),
+        );
+        assert_eq!(
+            v1_rows
+                .iter()
+                .map(|r| (r.key.as_str(), r.status))
+                .collect::<Vec<_>>(),
+            vec![("a", WorkUnitStatus::Ready), ("b", WorkUnitStatus::Pending)]
+        );
+    }
+
+    #[test]
+    fn phase_leaves_are_the_units_nobody_in_the_phase_depends_on() {
+        let mut rows = vec![
+            row_v2("a", "build", 0, WorkUnitStatus::Done, &[]),
+            row_v2("b", "build", 1, WorkUnitStatus::Done, &["a"]),
+            row_v2("c", "build", 2, WorkUnitStatus::Done, &[]),
+            row_v2("d", "verify", 3, WorkUnitStatus::Pending, &["c"]),
+        ];
+        for r in rows.iter_mut() {
+            r.branch = Some(format!("celeris-wu/t/{}", r.key));
+        }
+        let leaves: Vec<&str> = phase_leaves(&rows, "build")
+            .iter()
+            .map(|r| r.key.as_str())
+            .collect();
+        assert_eq!(
+            leaves,
+            vec!["b", "c"],
+            "a は b に積み上げられている（b に含まれる）"
+        );
+    }
+
+    #[test]
+    fn v2_rejects_a_key_reserved_for_integration_units() {
+        let p = plan_v2(
+            vec![phase("build")],
+            vec![spec_v2("integrate-build", "build", &[])],
+        );
+        let errs = validate(&p, ExecutionLimits::default(), &[]).unwrap_err();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, PlanValidationError::ReservedKey { .. })),
             "{errs:?}"
         );
     }

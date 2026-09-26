@@ -1008,6 +1008,17 @@ pub trait TaskStore:
         base_commit: Option<String>,
     ) -> Result<bool, StoreError>;
 
+    /// ADR-0074 D1.4（Phase F2b）: WU の行の追加（`inserted`）と書き換え（`updated`）と `events` を
+    /// 1 トランザクションで書く（統合の repair WU を足し、統合 WU の依存を付け足す、など）。
+    /// Task の状態は変えない。
+    fn work_units_apply(
+        &self,
+        task_id: TaskId,
+        inserted: Vec<WorkUnitRow>,
+        updated: Vec<WorkUnitRow>,
+        events: Vec<Event>,
+    ) -> Result<(), StoreError>;
+
     /// ADR-0074 D1.4（Phase F2）: Task の lease（工程の保持者）の期限を `ttl` 先まで延ばす
     /// （短くはしない）。`Running` でなければ `Ok(false)`。統合の間の延長に使う。
     fn extend_task_lease(&self, task_id: TaskId, ttl: StdDuration) -> Result<bool, StoreError>;
@@ -4877,6 +4888,28 @@ impl TaskStore for SqliteStore {
         Ok(true)
     }
 
+    fn work_units_apply(
+        &self,
+        task_id: TaskId,
+        inserted: Vec<WorkUnitRow>,
+        updated: Vec<WorkUnitRow>,
+        events: Vec<Event>,
+    ) -> Result<(), StoreError> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for wu in &inserted {
+            Self::insert_work_unit_tx(&tx, wu)?;
+        }
+        for wu in &updated {
+            Self::update_work_unit_tx(&tx, wu)?;
+        }
+        for ev in &events {
+            Self::append_event_tx(&tx, task_id, ev)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn extend_task_lease(&self, task_id: TaskId, ttl: StdDuration) -> Result<bool, StoreError> {
         let mut conn = self.lock()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -4914,7 +4947,7 @@ impl TaskStore for SqliteStore {
             let mut stmt = conn.prepare(
                 "SELECT t.json FROM tasks t WHERE t.status = ?1 AND EXISTS ( \
                  SELECT 1 FROM work_units w WHERE w.task_id = t.id AND w.phase IS NOT NULL \
-                 AND w.status IN ('ready', 'needs_continuation')) \
+                 AND w.kind != 'integrate' AND w.status IN ('ready', 'needs_continuation')) \
                  ORDER BY t.created_at ASC LIMIT ?2",
             )?;
             let rows = stmt.query_map(

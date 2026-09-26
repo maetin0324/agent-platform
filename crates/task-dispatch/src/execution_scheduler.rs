@@ -370,7 +370,8 @@ pub fn settle_phase(units: &[WorkUnitRow]) -> PhaseSettle {
         .all(|u| u.status == WorkUnitStatus::Done);
     if phase_done
         && let Some(integ) = in_phase.iter().find(|u| {
-            u.kind == task_core::WorkUnitKind::Integrate && u.status == WorkUnitStatus::Pending
+            u.kind == task_core::WorkUnitKind::Integrate
+                && matches!(u.status, WorkUnitStatus::Pending | WorkUnitStatus::Ready)
         })
     {
         return PhaseSettle::Integrate(integ.id.clone());

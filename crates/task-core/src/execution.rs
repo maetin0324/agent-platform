@@ -582,6 +582,9 @@ pub enum RepairClass {
     /// ADR-0074 D6.1（Phase F1）: 決定的な検査が `command timed out after` で不合格になり、
     /// daemon が 2 倍の timeout で 1 回再実行してもなお timeout だった。
     ReviewTimeout,
+    /// ADR-0074 D1.4（Phase F2b）: 工程の統合で WU のブランチの merge が衝突した（repair WU
+    /// `merge-<phase>-<key>` が Task の worktree で merge し、衝突だけを解消する）。
+    MergeConflict,
 }
 
 impl RepairClass {
@@ -595,6 +598,7 @@ impl RepairClass {
             RepairClass::ReviewerLocal(_) => "reviewer_local",
             RepairClass::MergeBase => "merge_base",
             RepairClass::ReviewTimeout => "review_timeout",
+            RepairClass::MergeConflict => "merge_conflict",
         }
     }
 
@@ -603,7 +607,9 @@ impl RepairClass {
         match self {
             RepairClass::Format => (12, 600),
             RepairClass::Lint => (20, 1200),
-            RepairClass::TestSmall | RepairClass::MergeBase => (30, 1800),
+            RepairClass::TestSmall | RepairClass::MergeBase | RepairClass::MergeConflict => {
+                (30, 1800)
+            }
             RepairClass::ReviewerLocal(kind) => match kind {
                 ReviewerRepairKind::Format => (12, 600),
                 ReviewerRepairKind::Lint => (20, 1200),

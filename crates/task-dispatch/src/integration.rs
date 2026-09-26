@@ -294,6 +294,10 @@ pub fn remove_wu_worktree(worktree: &LocalWorktree) -> Result<(), String> {
         }
         let _ = git(&worktree.repo, &["worktree", "prune"]);
     }
+    // 空になった `<task_dir>/wu/<key>/repos` も片付ける（`artifacts/` は残す）。
+    if let Some(parent) = worktree.dir.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
     Ok(())
 }
 
